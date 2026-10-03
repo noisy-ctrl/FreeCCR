@@ -18,7 +18,8 @@ from core.ccr_processor import (adjust_image, adjust_image_opencl,
                                 _DUST_PLAN_LONG,
                                 _apply_working_space_recovery,
                                 compute_auto_gain_offset,
-                                renders_monochrome)
+                                renders_monochrome,
+                                positive_base_curve_points)
 from core import color_management
 
 # Import optional libraries with fallbacks
@@ -28,6 +29,94 @@ try:
 except ImportError:
     TIFFFILE_AVAILABLE = False
     logging.warning("tifffile not available, TIFF reading may be limited")
+
+
+# --- Positive-mode base render curve ---------------------------------------- #
+# Strength (percent) of the base render curve baked into every positive decode.
+# 100 = the full curve fitted to the camera's own JPEG rendering; 0 = none, the
+# previous flat decode exactly. See ccr_processor.POSITIVE_BASE_CURVE and
+# spec/positive-base-curve.md.
+POSITIVE_BASE_CURVE_STRENGTH = 100
+
+
+def _positive_base_curve_strength() -> int:
+    """How much of the base render curve a positive decode starts from.
+    FREECCR_POSITIVE_CURVE overrides it while the shape is being evaluated
+    (e.g. 70 for a gentler render); 0 disables it entirely."""
+    raw = os.environ.get("FREECCR_POSITIVE_CURVE")
+    if raw is None:
+        return POSITIVE_BASE_CURVE_STRENGTH
+    try:
+        return max(0, min(100, int(round(float(raw)))))
+    except ValueError:
+        logging.warning(f"FREECCR_POSITIVE_CURVE={raw!r} is not a number; "
+                        f"using {POSITIVE_BASE_CURVE_STRENGTH}")
+        return POSITIVE_BASE_CURVE_STRENGTH
+
+
+# Baseline EXPOSURE for a monochrome positive, in stops, applied in LINEAR light
+# just before the sRGB encode.
+#
+# A gain is the right tool for "the whole thing is too dark" and a curve is not:
+# a curve with both endpoints pinned can only brighten the midtones by steepening
+# (measured max slope 2.63 -> 3.5 at +15 -> 4.3 at +20 -> 13.3 at +30, in BOTH a
+# pivot-shifted and a pre-gamma parameterisation — it is structural, since the
+# area under the curve rises while the ends are fixed). A gain lifts without
+# steepening anything, so the validated curve shape stays intact.
+#
+# An earlier +2 EV experiment was rejected because it clipped 48-60% of pixels —
+# but that was measured on the COLOUR decode, whose magenta cast (R/G ~ 2.9) was
+# already driving channels into the ceiling. On the neutral monochrome decode a
+# gain is cheap: across 16 frames, +0.5 EV moves the mean median 0.45 -> 0.55
+# while mean clipping goes 0.4% -> 1.4%.
+#
+# FREECCR_POSITIVE_EV tunes it in BOTH directions (the curve-strength knob can
+# only go darker); 0 disables it. See spec/mono-positive-render.md.
+POSITIVE_BASE_EV = 0.5
+
+
+# Baked BRIGHTNESS baseline for a positive decode, in Brightness-SLIDER units so
+# it reads as the number you would dial in by hand. Positives opened too dark to
+# use without pushing this every time; 15 is the value that lands a natural
+# baseline across a real set.
+#
+# NOTE the unit conversion: apply_adjustments computes 0.5*slider + base, i.e.
+# the slider is HALF strength while the base is full weight, so the stored base
+# is half the slider number it reproduces. brightness_base is an INTEGER, so an
+# odd slider value cannot be hit exactly: 15 -> 7.5 -> stored as 7, i.e. the
+# slider-14 equivalent, half a step darker than asked (measured difference 0.02
+# at its largest, well below visible). Even values are exact: 20 -> 10.
+POSITIVE_BASE_BRIGHTNESS = 15
+
+
+def _positive_base_brightness() -> int:
+    """brightness_base for a positive decode, converted from slider units.
+    FREECCR_POSITIVE_BRIGHTNESS overrides it (also in slider units)."""
+    value = POSITIVE_BASE_BRIGHTNESS
+    raw = os.environ.get("FREECCR_POSITIVE_BRIGHTNESS")
+    if raw is not None:
+        try:
+            value = float(raw)
+        except ValueError:
+            logging.warning(f"FREECCR_POSITIVE_BRIGHTNESS={raw!r} is not a "
+                            f"number; using {POSITIVE_BASE_BRIGHTNESS}")
+    # Truncate rather than round: an odd slider value cannot be hit exactly by an
+    # integer base, and erring half a step DARKER is the right direction for a
+    # baseline (rounding 15 up would quietly hand back a slider-16 render).
+    return int(0.5 * value)
+
+
+def _positive_base_ev() -> float:
+    """Baseline exposure (stops) for a monochrome positive decode."""
+    raw = os.environ.get("FREECCR_POSITIVE_EV")
+    if raw is None:
+        return POSITIVE_BASE_EV
+    try:
+        return float(raw)
+    except ValueError:
+        logging.warning(f"FREECCR_POSITIVE_EV={raw!r} is not a number; "
+                        f"using {POSITIVE_BASE_EV}")
+        return POSITIVE_BASE_EV
 
 try:
     from PIL import Image as PILImage
@@ -243,7 +332,28 @@ class CCRImage:
         # Non-destructive base brightness offset (slider shows 0). The -8 is part
         # of the film-NEGATIVE look; positives go straight to user adjustments
         # from a neutral baseline (no darkening), so 0 there. See spec/positive-mode.md.
-        self.brightness_base: int = 0 if self._positive_mode_active() else -8
+        # Positives carry a baked brightness baseline so a fresh one opens at a
+        # natural level instead of needing the slider pushed on every image.
+        # Negatives keep their -8 film-look offset. See _positive_base_brightness.
+        self.brightness_base: int = (_positive_base_brightness()
+                                     if self._positive_mode_active() else -8)
+        # Positive-mode BASE RENDER CURVE — the stage that makes a raw developer's
+        # default look "normal" (Adobe's ProfileToneCurve, darktable's base
+        # curve). A transfer function alone is not a rendering, which is exactly
+        # why a positive opens flat and dark here while Lightroom does not.
+        # Non-destructive and invisible in the sliders, like brightness_base.
+        #
+        # Why a CURVE and not a gain: the positive decode maps SENSOR SATURATION
+        # to white, so a well-exposed frame already has its white point placed —
+        # often with 1-6% of pixels clipped — while the MIDTONES sit low. A gain
+        # multiplies everything, driving those already-clipped highlights further
+        # into the ceiling (a measured +2 EV on a real roll clipped 48-60% of all
+        # pixels). Why an S and not a single gamma: measured against the camera's
+        # own JPEG, the render DEEPENS the deep shadows while lifting the mids,
+        # which no single gamma does. 0 for negatives: their look is owned by the
+        # conversion and Auto Gain. See spec/positive-base-curve.md.
+        self.base_curve: int = (_positive_base_curve_strength()
+                                if self._positive_mode_active() else 0)
         # Non-destructive auto-exposure (default-slope mode). Rides the Gain/
         # Exposure argument (NOT ch_input_gain, despite what this comment used
         # to say) → applied as a uniform gain. See spec/auto-exposure-default-slope.md.
@@ -323,7 +433,12 @@ class CCRImage:
         self.temperature_base = 0
         # -8 is the negative-look baseline; positives reset to a neutral 0 so the
         # decode goes straight to user adjustments (no darkening / shadow crush).
-        self.brightness_base = 0 if self._positive_mode_active() else -8
+        self.brightness_base = (_positive_base_brightness()
+                                if self._positive_mode_active() else -8)
+        # Re-derived from the live mode, like brightness_base above: a reload
+        # after toggling Positive mode must pick up (or drop) the base curve.
+        self.base_curve = (_positive_base_curve_strength()
+                           if self._positive_mode_active() else 0)
         self.exposure_base = 0.0    # Clear auto-exposure when reverting to original scan
         self._ws_windowed = False   # raw scan is full-range, not a windowed base
         self.conversion_inputs = None
@@ -560,6 +675,11 @@ class CCRImage:
         except Exception:
             black_levels = None
         plane = ccr_merge.mono_plane_from_mosaic(mosaic, colors, black_levels)
+        # Flatten the residual per-phase sensitivity a mono-CONVERTED sensor
+        # leaves behind, BEFORE any binning: bin2x2 averages the four phases and
+        # so hides the checkerboard in previews while it survives at full
+        # resolution, where zoom and export would show it.
+        plane = ccr_merge.normalize_cfa_phases(plane)
         full = (int(plane.shape[0]), int(plane.shape[1]))
         if preview:
             plane = ccr_merge.bin2x2(plane)
@@ -788,6 +908,16 @@ class CCRImage:
                     # Global Positive mode decodes color RAWs as normal sRGB
                     # photos (monochrome sensors are left on their own path).
                     positive_decode = positive_mode and not is_monochrome
+                    # A monochrome frame in Positive mode still has to end up
+                    # DISPLAY-REFERRED — it is an ordinary photo, just colourless.
+                    # Deliberately a SEPARATE flag rather than folding it into
+                    # positive_decode: that flag also gates the white-level
+                    # scaling (which this path still needs), the field
+                    # correction's encoded= hint, and the camera-profile skip,
+                    # all of which stay correct as they are. The encode happens
+                    # after the scaling below, where the data is still linear.
+                    # See spec/mono-positive-render.md.
+                    mono_positive = positive_mode and is_monochrome
 
                     # Set in the colour branch below; pre-seeded so the
                     # white-level-scaling guard is valid on the monochrome path.
@@ -804,9 +934,15 @@ class CCRImage:
                         # adjustments, histogram, QImage) expects (H, W, 3). The
                         # collapse to one channel happens only at the export
                         # writer. See spec/monochrome-raw-mode.md §4.3.
-                        rgb = np.repeat(
-                            np.clip(plane, 0, 65535).astype(np.uint16)[..., None],
-                            3, axis=2)
+                        # ROUND, don't truncate. Before per-phase normalisation
+                        # this plane was integral (mosaic minus an integer black
+                        # pedestal), so the cast was lossless; the normalisation
+                        # makes it fractional, and the white-level scaling below
+                        # multiplies any error by 65535/white_level (~4x on a
+                        # 14-bit sensor). Truncating here cost up to 4 counts.
+                        plane_u16 = np.rint(
+                            np.clip(plane, 0, 65535)).astype(np.uint16)
+                        rgb = np.repeat(plane_u16[..., None], 3, axis=2)
                         # raw.sizes describes the POSTPROCESS output, which this
                         # branch never produced; the mosaic's own unbinned shape
                         # is the canonical full size. Getting this wrong would
@@ -899,6 +1035,27 @@ class CCRImage:
                             rgb.astype(np.float32) * (65535.0 / white_level),
                             0, 65535
                         ).astype(np.uint16)
+
+                    # Monochrome + Positive mode: the plane above is SCENE-LINEAR
+                    # (the mono read bypasses libraw's gamma entirely), but
+                    # positive mode owns display-referred pixels — every stage
+                    # below assumes them, and the base render curve is calibrated
+                    # for them. Without this the curve lands on linear data and
+                    # DARKENS it instead of lifting (measured 0.079 -> 0.059
+                    # against a 0.537 target). Encoding here, after the
+                    # white-level scaling, is the one point where the buffer is
+                    # both full-range and still linear.
+                    if mono_positive:
+                        lin = rgb.astype(np.float32) / np.float32(65535.0)
+                        # Baseline exposure FIRST, in linear light — that is what
+                        # a gain means physically, and it is the stage that can
+                        # brighten without steepening the tone curve downstream.
+                        ev = _positive_base_ev()
+                        if ev:
+                            lin = lin * np.float32(2.0 ** ev)
+                        rgb = np.clip(
+                            color_management.srgb_encode(np.clip(lin, 0.0, None))
+                            * 65535.0, 0, 65535).astype(np.uint16)
                 
                 elapsed_time = time.time() - start_time
                 print(f"RAW processing completed in {elapsed_time:.3f} seconds")
@@ -1526,7 +1683,8 @@ class CCRImage:
                           temperature_base=None, brightness_base=None,
                           color_profile=None, areas_override=None,
                           exposure_base=None, ws_windowed=None,
-                          auto_gain_override=None, skip_dust=False) -> np.ndarray:
+                          auto_gain_override=None, skip_dust=False,
+                          base_curve=None) -> np.ndarray:
         """Apply the slider adjustments. The optional overrides let the zoom
         hi-res worker render from a snapshot taken at request time instead of
         live state the GUI thread may be mutating concurrently — and let the
@@ -1552,6 +1710,8 @@ class CCRImage:
         tb = self.temperature_base if temperature_base is None else temperature_base
         bb = self.brightness_base if brightness_base is None else brightness_base
         eb = self.exposure_base if exposure_base is None else exposure_base
+        bc = (getattr(self, "base_curve", 0) if base_curve is None
+              else base_curve)
         profile = self.color_profile if color_profile is None else color_profile
         # A monochrome DECODE renders grey whatever the Color Profile says, by
         # reusing the Black & White collapse below (both call sites) — so no
@@ -1581,7 +1741,7 @@ class CCRImage:
             ag = compute_auto_gain_offset(image, ws) if auto_on else 0.0
         eb_eff = 0.0 if auto_on else eb        # suppress-overlap with the baked eb
         if (not s and cb == 0 and tb == 0 and bb == 0 and eb_eff == 0 and ag == 0
-                and not has_areas):
+                and bc == 0 and not has_areas):
             # No slider/base/area adjustments. A windowed working-space base still
             # has to be de-windowed + window-clamped to a normal full-range image
             # before display/export (the base itself is not directly renderable).
@@ -1656,6 +1816,14 @@ class CCRImage:
         # diagonally from center). Applied before the user's manual curves so the
         # two compose predictably. No-op at 0. Per-channel by default; the global
         # gamma_luminance flag switches it to hue-preserving (luminance) mode.
+        # Positive-mode BASE RENDER CURVE first: it is the rendering transform
+        # that turns the decode into a normal-looking image, so the user's Gamma
+        # and Curves below then operate on display-referred data, which is what
+        # they expect. Runs through the same monotone-cubic path as the Curves
+        # editor. See spec/positive-base-curve.md.
+        if bc:
+            adjusted = apply_curves(
+                adjusted, {"rgb": positive_base_curve_points(bc)})
         gamma = s.get('gamma', 0)
         if gamma:
             adjusted = apply_gamma_curve(adjusted, gamma,
