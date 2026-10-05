@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Tests for the "Orientation" setting group — the coarse 90-degree rotation
-and the mirror flags carried by Sync to All and Ctrl/Cmd+C's Copy Settings.
+and the mirror flags carried by Sync to All.
 See spec/orientation-sync-group.md."""
 
 import os
@@ -66,24 +66,6 @@ def _panel():
     return panel
 
 
-def _stub_dialog(monkeypatch, selection, accepted=True):
-    """Replace the modal group picker with a canned answer. `selection` is a
-    partial {gid: bool}; unlisted groups count as unchecked."""
-    full = {gid: bool(selection.get(gid)) for gid, _l, _k in SYNC_GROUPS}
-
-    def _exec(self):
-        return QDialog.Accepted if accepted else QDialog.Rejected
-
-    monkeypatch.setattr(SyncSettingsDialog, "exec_", _exec, raising=False)
-    monkeypatch.setattr(SyncSettingsDialog, "selection", lambda self: dict(full))
-    return full
-
-
-def _copy(panel, monkeypatch, selection, accepted=True):
-    _stub_dialog(monkeypatch, selection, accepted)
-    panel.copy_adjustment_settings()
-
-
 def _set(panel, key, value):
     panel.sliders[panel.adjustment_keys.index(key)].setValue(value)
 
@@ -120,113 +102,15 @@ class TestGroupRegistration:
         keys = dict((gid, k) for gid, _l, k in SYNC_GROUPS)["orientation"]
         assert keys == ()
 
-    def test_offered_by_both_dialogs(self):
-        for kwargs in ({}, {"title": "Copy Settings", "action_label": "Copy"}):
-            dlg = SyncSettingsDialog(None, None, **kwargs)
-            assert "orientation" in dlg._checkboxes
-            assert dlg.selection()["orientation"] is True   # checked by default
+    def test_offered_by_sync_dialog(self):
+        dlg = SyncSettingsDialog(None, None)
+        assert "orientation" in dlg._checkboxes
+        assert dlg.selection()["orientation"] is True   # checked by default
 
 
-# --- copy ---------------------------------------------------------------------
+# (Copy/Paste of rotation, flips and fine rotation is covered by
+# tests/test_paste_settings_dialog.py — spec/paste-settings-dialog.md.)
 
-class TestCopy:
-    def test_copy_stores_the_orientation_triple(self, tmp_path, monkeypatch):
-        img = _ccr_image(tmp_path)
-        _set_orient(img, 90, hflip=True)
-        ccr_backend.images = [img]
-        ccr_backend.file_paths = [img.file_path]
-        panel = _panel()
-        panel.current_idx = 0
-
-        _copy(panel, monkeypatch, {"orientation": True})
-
-        assert panel.copied_orientation == (90, True, False)
-        assert panel.copied_adjustment == {}      # no adjustment keys ride along
-
-    def test_unselected_group_copies_nothing(self, tmp_path, monkeypatch):
-        img = _ccr_image(tmp_path)
-        _set_orient(img, 180)
-        ccr_backend.images = [img]
-        ccr_backend.file_paths = [img.file_path]
-        panel = _panel()
-        panel.current_idx = 0
-
-        _copy(panel, monkeypatch, {"wb": True})
-
-        assert panel.copied_orientation is None
-
-
-# --- paste --------------------------------------------------------------------
-
-class TestPaste:
-    def test_paste_applies_rotation_and_mirrors(self, tmp_path, monkeypatch):
-        src, tgt = _two_images(tmp_path)
-        _set_orient(src, 270, hflip=True, vflip=True)
-        panel = _panel()
-
-        panel.current_idx = 0
-        _copy(panel, monkeypatch, {"orientation": True})
-
-        panel.current_idx = 1
-        panel.paste_adjustment_settings()
-
-        assert _orient(tgt) == (270, True, True)
-        assert len(tgt.undo_stack) == 1
-
-    def test_paste_restores_the_default_orientation(self, tmp_path, monkeypatch):
-        """An upright source is a real value: pasting it un-rotates the target,
-        the same way a copied 'no crop' clears the target's crop."""
-        src, tgt = _two_images(tmp_path)
-        _set_orient(tgt, 90, vflip=True)
-        panel = _panel()
-
-        panel.current_idx = 0
-        _copy(panel, monkeypatch, {"orientation": True})
-
-        panel.current_idx = 1
-        panel.paste_adjustment_settings()
-
-        assert _orient(tgt) == (0, False, False)
-
-    def test_uncopied_group_leaves_target_orientation_alone(self, tmp_path, monkeypatch):
-        src, tgt = _two_images(tmp_path)
-        _set_orient(src, 180, hflip=True)
-        _set_orient(tgt, 90, vflip=True)
-        panel = _panel()
-
-        panel.current_idx = 0
-        _set(panel, "temperature", 40)
-        _copy(panel, monkeypatch, {"wb": True})
-
-        panel.current_idx = 1
-        panel.paste_adjustment_settings()
-
-        assert _orient(tgt) == (90, False, True)
-        assert tgt.adjustment_settings["temperature"] == 40  # the copied group did land
-
-    def test_paste_resets_the_zoom_when_the_view_re_orients(self, tmp_path, monkeypatch):
-        """The paste target IS the displayed image, so a kept zoom would strand
-        the viewport — same reason rotate_left/right and undo reset it."""
-        src, tgt = _two_images(tmp_path)
-        _set_orient(src, 90)
-        panel = _panel()
-        preview = panel.parent().parent().image_preview
-        calls = []
-        preview._reset_zoom = lambda: calls.append(True)
-
-        panel.current_idx = 0
-        _copy(panel, monkeypatch, {"orientation": True})
-        panel.current_idx = 1
-        panel.paste_adjustment_settings()
-        assert calls == [True]
-
-        # Pasting the same orientation onto an already-matching target is not a
-        # re-orientation — the viewport stays put.
-        panel.paste_adjustment_settings()
-        assert calls == [True]
-
-
-# --- sync to all --------------------------------------------------------------
 
 class TestSyncToAll:
     def test_orientation_lands_on_every_image(self, tmp_path):
@@ -311,18 +195,3 @@ class TestSyncToAll:
         panel._perform_sync_to_all()
 
         assert tgt.fine_rotation_angle == -45
-
-    def test_fine_rotation_is_never_copied(self, tmp_path, monkeypatch):
-        src, tgt = _two_images(tmp_path)
-        _set_orient(src, 90)
-        src.fine_rotation_angle = 123
-        tgt.fine_rotation_angle = -45
-
-        panel = _panel()
-        panel.current_idx = 0
-        _copy(panel, monkeypatch, {"orientation": True})
-        panel.current_idx = 1
-        panel.paste_adjustment_settings()
-
-        assert tgt.fine_rotation_angle == -45
-        assert tgt.rotation_angle == 90
