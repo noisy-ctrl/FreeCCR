@@ -103,6 +103,7 @@ def _initialize_opencl():
             float ch_b_gain       = params[21];
             float ch_b_blackpoint = params[22];
             float sub_saturation  = params[23];
+            float vibrance        = params[25];
 
             int idx = gid * 3;
             float r = img[idx];
@@ -408,6 +409,37 @@ def _initialize_opencl():
                 b = img_norm_b * 65535.0f;
             }
 
+            // Vibrance (spec/vibrance.md): saturation weighted towards muted
+            // colours, with skin-tone hues partly protected. Mirrors
+            // _apply_vibrance in numpy exactly.
+            if (vibrance != 0.0f) {
+                float vr = clamp(r / 65535.0f, 0.0f, 1.0f);
+                float vg = clamp(g / 65535.0f, 0.0f, 1.0f);
+                float vb = clamp(b / 65535.0f, 0.0f, 1.0f);
+                float vmx = fmax(vr, fmax(vg, vb));
+                float vmn = fmin(vr, fmin(vg, vb));
+                float vc = vmx - vmn;
+                float vsat = (vmx > 1e-6f) ? vc / fmax(vmx, 1e-6f) : 0.0f;
+                float sc = fmax(vc, 1e-6f);
+                float hue;
+                if (vmx == vr)      hue = 60.0f * fmod(fmod((vg - vb) / sc, 6.0f) + 6.0f, 6.0f);
+                else if (vmx == vg) hue = 60.0f * ((vb - vr) / sc + 2.0f);
+                else                hue = 60.0f * ((vr - vg) / sc + 4.0f);
+                float hd = fabs(hue - VIBRANCE_SKIN_HUE);
+                hd = fmin(hd, 360.0f - hd);
+                float hn = hd / VIBRANCE_SKIN_WIDTH;
+                float protect = 1.0f - VIBRANCE_SKIN_PROTECT * exp(-hn * hn);
+                float weight = (1.0f - vsat) * protect;
+                float vscale = 1.0f + (vibrance / 100.0f) * VIBRANCE_STRENGTH * weight;
+                float vgray = vr * 0.299f + vg * 0.587f + vb * 0.114f;
+                vr = clamp(vgray + vscale * (vr - vgray), 0.0f, 1.0f);
+                vg = clamp(vgray + vscale * (vg - vgray), 0.0f, 1.0f);
+                vb = clamp(vgray + vscale * (vb - vgray), 0.0f, 1.0f);
+                r = vr * 65535.0f;
+                g = vg * 65535.0f;
+                b = vb * 65535.0f;
+            }
+
             // Subtractive (film-density) saturation: scale each pixel's
             // chromaticity ratios by a power while pinning the dominant
             // channel, so saturation is gained by absorbing light in the
@@ -535,7 +567,11 @@ def _initialize_opencl():
         kernel_code = (kernel_code
                        .replace("CH_INPUT_GAIN_DIV", f"{CH_INPUT_GAIN_DIV:.6f}f")
                        .replace("CH_SLIDER_DIV", f"{CH_SLIDER_DIV:.6f}f")
-                       .replace("CH_MIN_RANGE", f"{CH_MIN_RANGE:.6f}f"))
+                       .replace("CH_MIN_RANGE", f"{CH_MIN_RANGE:.6f}f")
+                       .replace("VIBRANCE_STRENGTH", f"{VIBRANCE_STRENGTH:.6f}f")
+                       .replace("VIBRANCE_SKIN_HUE", f"{VIBRANCE_SKIN_HUE:.6f}f")
+                       .replace("VIBRANCE_SKIN_WIDTH", f"{VIBRANCE_SKIN_WIDTH:.6f}f")
+                       .replace("VIBRANCE_SKIN_PROTECT", f"{VIBRANCE_SKIN_PROTECT:.6f}f"))
 
         # Compile the program
         program = cl.Program(ctx, kernel_code).build()
@@ -2821,6 +2857,47 @@ def compute_neutral_temp_tint(r: float, g: float, b: float,
     return int(round(temp_slider)), int(round(tint_slider))
 
 
+# --- Vibrance (spec/vibrance.md) ---
+# A saturation control weighted by how saturated each pixel ALREADY is: muted
+# colours move the most, strongly saturated ones barely move, neutrals never
+# move (their chroma is zero). Skin-like hues (orange, around 25 degrees) are
+# partly protected so faces don't turn orange at high settings. Same luma axis
+# as the Saturation slider (Rec.601 weights), so the two compose predictably.
+# The OpenCL kernel substitutes these constants textually, like CH_SLIDER_DIV.
+VIBRANCE_STRENGTH = 1.0        # +100 on a fully muted colour -> 2x chroma
+VIBRANCE_SKIN_HUE = 25.0       # degrees; centre of the protected skin band
+VIBRANCE_SKIN_WIDTH = 20.0     # degrees; Gaussian width of that band
+VIBRANCE_SKIN_PROTECT = 0.5    # fraction of the effect removed at the centre
+
+
+def _apply_vibrance(img_norm: np.ndarray, vibrance: float) -> np.ndarray:
+    """Vibrance on a normalised [0,1] float RGB image. Returns a new array,
+    clipped to [0,1]. Mirrors the OpenCL kernel block exactly."""
+    x = np.clip(img_norm, 0.0, 1.0).astype(np.float32)
+    r, g, b = x[..., 0], x[..., 1], x[..., 2]
+    mx = np.max(x, axis=-1)
+    mn = np.min(x, axis=-1)
+    c = mx - mn
+    safe_mx = np.maximum(mx, np.float32(1e-6))
+    safe_c = np.maximum(c, np.float32(1e-6))
+    sat = np.where(mx > 1e-6, c / safe_mx, 0.0).astype(np.float32)
+
+    # HSV hue in degrees (only meaningful where c > 0; elsewhere the pixel is
+    # neutral and the blend below leaves it untouched regardless).
+    hue = np.where(mx == r, 60.0 * np.mod((g - b) / safe_c, 6.0),
+          np.where(mx == g, 60.0 * ((b - r) / safe_c + 2.0),
+                            60.0 * ((r - g) / safe_c + 4.0))).astype(np.float32)
+    d = np.abs(hue - np.float32(VIBRANCE_SKIN_HUE))
+    d = np.minimum(d, 360.0 - d)
+    protect = 1.0 - VIBRANCE_SKIN_PROTECT * np.exp(-(d / VIBRANCE_SKIN_WIDTH) ** 2)
+
+    weight = (1.0 - sat) * protect
+    scale = 1.0 + (vibrance / 100.0) * VIBRANCE_STRENGTH * weight
+    gray = r * 0.299 + g * 0.587 + b * 0.114
+    out = gray[..., None] + scale[..., None] * (x - gray[..., None])
+    return np.clip(out, 0.0, 1.0).astype(np.float32)
+
+
 def adjust_image(
     img16: np.ndarray,
     kelvin_shift: float = 0.0,
@@ -2860,6 +2937,9 @@ def adjust_image(
     # Cineon log -> workspace, applied right after Master Gain. Appended for the
     # same positional-compatibility reason as balance_*.
     cineon_log: bool = False,
+    # Vibrance (spec/vibrance.md) — appended last for the same reason. Runs
+    # right after Saturation, before Subtracted Sat.
+    vibrance: float = 0.0,
 ) -> np.ndarray:
     """
     Apply temperature, tint, exposure, brightness, blackpoint, whitepoint, highlights, shadows,
@@ -3037,6 +3117,11 @@ def adjust_image(
         img_norm = gray_expanded + dynamic_saturation_scale * (img_norm - gray_expanded)
         img_norm = np.clip(img_norm, 0, 1)
         img = img_norm * 65535.0
+
+    # Vibrance: saturation weighted towards muted colours, with skin-tone
+    # protection. After Saturation so the two compose like Lightroom's pair.
+    if vibrance != 0.0:
+        img = _apply_vibrance(img / 65535.0, vibrance) * 65535.0
 
     # Subtractive (film-density) saturation: scale each pixel's chromaticity
     # ratios by a power while pinning the dominant channel, so saturation is
@@ -3332,6 +3417,8 @@ def adjust_image_opencl(
     balance_g: float = 0.0,
     balance_b: float = 0.0,
     cineon_log: bool = False,
+    # Vibrance — appended last, see adjust_image.
+    vibrance: float = 0.0,
 ) -> np.ndarray:
     """
     GPU-accelerated (OpenCL) version of adjust_image.
@@ -3452,7 +3539,8 @@ def adjust_image_opencl(
                           # Consumed in numpy above (zeroed); passed explicitly
                           # so the fallback stays correct if that block moves.
                           balance_r=balance_r, balance_g=balance_g,
-                          balance_b=balance_b, cineon_log=cineon_log)
+                          balance_b=balance_b, cineon_log=cineon_log,
+                          vibrance=vibrance)
 
     try:
       # Serialize GPU submissions: the hi-res zoom worker may run this
@@ -3483,7 +3571,8 @@ def adjust_image_opencl(
 
         # Prepare parameters as numpy array (params[0..10] existing,
         # params[11..22] channel levels, params[23] subtractive saturation,
-        # params[24] per-color-band enable flag)
+        # params[24] per-color-band enable flag, params[25] vibrance — kept
+        # after the band flag so no existing index moves)
         params = np.array([
             kelvin_shift, tint_shift, exposure, brightness,
             blackpoint, whitepoint, contrast, saturation, balance_factor,
@@ -3494,6 +3583,7 @@ def adjust_image_opencl(
             ch_b_shift, ch_b_gain, ch_b_blackpoint,
             sub_saturation,
             band_active,
+            vibrance,
         ], dtype=np.float32)
 
         params_buf = cl_array.to_device(queue, params)
@@ -3522,7 +3612,8 @@ def adjust_image_opencl(
                           # Consumed in numpy above (zeroed); passed explicitly
                           # so the fallback stays correct if that block moves.
                           balance_r=balance_r, balance_g=balance_g,
-                          balance_b=balance_b, cineon_log=cineon_log)
+                          balance_b=balance_b, cineon_log=cineon_log,
+                          vibrance=vibrance)
 
 
 

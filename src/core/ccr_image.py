@@ -1749,6 +1749,7 @@ class CCRImage:
                      ch_b_gain=s.get('ch_b_gain', 0),
                      ch_b_blackpoint=s.get('ch_b_blackpoint', 0),
                      sub_saturation=s.get('sub_saturation', 0),
+                     vibrance=s.get('vibrance', 0),
                      # Per-color-band sliders ride the same GPU pass (or the
                      # CPU fallback); None keeps the inactive case free.
                      band_settings=(s if any(s.get(k, 0)
@@ -1837,6 +1838,7 @@ class CCRImage:
                      ch_b_gain=s.get('ch_b_gain', 0),
                      ch_b_blackpoint=s.get('ch_b_blackpoint', 0),
                      sub_saturation=s.get('sub_saturation', 0),
+                     vibrance=s.get('vibrance', 0),
                      balance_r=s.get('balance_r', 0),
                      balance_g=s.get('balance_g', 0),
                      balance_b=s.get('balance_b', 0),
