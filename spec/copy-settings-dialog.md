@@ -1,5 +1,8 @@
 # Selective Copy/Paste of Settings
 
+> **Superseded** by `spec/paste-settings-dialog.md`: the dialog moved from copy
+> to paste and now lists individual settings.
+
 Give `Ctrl/Cmd+C` the same "pick what you mean" dialog that **Sync to All**
 already has, so a copy/paste between two images can carry just the white
 balance, just the crop, just the curves — instead of the whole slider set.

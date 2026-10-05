@@ -86,11 +86,10 @@ def _apply_orientation(img, orientation):
 
 
 class SyncSettingsDialog(QDialog):
-    """Pick which setting groups an apply-to-many action covers.
-
-    Used by both 'Sync to All' (its defaults) and Ctrl/Cmd+C's 'Copy
-    Settings' — same layout and group list, only the wording differs, so the
-    two share one visual language for "choose what to apply"."""
+    """Pick which setting groups 'Sync to All' covers. (Copy/Paste uses the
+    finer-grained PasteSettingsDialog instead — see
+    spec/paste-settings-dialog.md.) The title/prompt/label parameters are kept
+    so the dialog stays reusable."""
 
     def __init__(self, parent=None, selection=None, title="Sync to All",
                  prompt="Sync these settings to all images:",
@@ -144,6 +143,178 @@ class SyncSettingsDialog(QDialog):
 
     def selection(self) -> dict:
         return {gid: checkbox.isChecked() for gid, checkbox in self._checkboxes.items()}
+
+# --- Copy / Paste Settings (spec/paste-settings-dialog.md) -------------------
+# Copy grabs everything; the PASTE dialog lists only what differs from default
+# on the copied image, one tick per slider plus single ticks for curves, the
+# Subtractive Saturations bands, crop, 90° rotation, each flip and the fine
+# rotation.
+
+_BASIC_LABELS = {
+    "temperature": "Temperature", "tint": "Tint", "brightness": "Brightness",
+    "gamma": "Gamma", "highlights": "Highlights", "white_point": "White Point",
+    "shadows": "Shadows", "black_point": "Black Point", "contrast": "Contrast",
+    "saturation": "Saturation", "vibrance": "Vibrance",
+    "sub_saturation": "Subtracted Sat", "exposure": "Exposure",
+    "ch_input_gain": "Input Gain", "ch_master_shift": "Master Shift",
+    "ch_master_gain": "Master Gain",
+}
+_CHANNEL_NAMES = {"r": "Red", "g": "Green", "b": "Blue"}
+_BAND_KEYS = frozenset(BAND_ADJUSTMENT_KEYS) | {"band_feather"}
+
+# Dialog section order (top to bottom).
+PASTE_SECTIONS = ("Adjustments", "Channel Levels", "Channel Balance",
+                  "Colour", "Geometry")
+
+
+def adjustment_label(key):
+    """Human-readable name for an adjustment key, e.g. 'ch_r_gain' -> 'Red Gain'."""
+    if key in _BASIC_LABELS:
+        return _BASIC_LABELS[key]
+    parts = key.split("_")
+    if len(parts) == 3 and parts[0] == "ch" and parts[1] in _CHANNEL_NAMES:
+        return f"{_CHANNEL_NAMES[parts[1]]} {parts[2].capitalize()}"
+    if len(parts) == 2 and parts[0] == "balance" and parts[1] in _CHANNEL_NAMES:
+        return f"Balance {_CHANNEL_NAMES[parts[1]]}"
+    return key.replace("_", " ").capitalize()
+
+
+def _fmt_value(v):
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return str(v)
+    return f"{int(f):+d}" if f.is_integer() else f"{f:+.1f}"
+
+
+def paste_options(clip, default_for):
+    """The paste dialog's rows for a clipboard: [(section, item_id, label)],
+    in PASTE_SECTIONS order. Only settings that differ from default on the
+    copied image are offered. Pure (no Qt), so it is unit-testable."""
+    if not clip:
+        return []
+    rows = []
+    adj = clip.get("adjustments") or {}
+    for key, val in adj.items():
+        if key in _BAND_KEYS or val == default_for(key):
+            continue
+        section = ("Channel Levels" if key.startswith("ch_")
+                   else "Channel Balance" if key.startswith("balance_")
+                   else "Adjustments")
+        rows.append((section, f"adj:{key}",
+                     f"{adjustment_label(key)}  ({_fmt_value(val)})"))
+    if clip.get("cineon_log"):
+        rows.append(("Channel Levels", "cineon_log", "Cineon Log → Workspace"))
+    if clip.get("profile", "color") != "color":
+        rows.append(("Colour", "profile", "Colour Profile: Black & White"))
+    if clip.get("curves"):
+        rows.append(("Colour", "curves", "Curves"))
+    if any(adj.get(k, default_for(k)) != default_for(k) for k in _BAND_KEYS):
+        rows.append(("Colour", "bands", "Subtractive Saturations (all colours)"))
+    crop_rect, crop_angle = clip.get("crop") or (None, 0.0)
+    if crop_rect is not None:
+        w = (crop_rect[2] - crop_rect[0]) * 100.0
+        h = (crop_rect[3] - crop_rect[1]) * 100.0
+        ang = f", {crop_angle:+.1f}°" if crop_angle else ""
+        rows.append(("Geometry", "crop", f"Crop  ({w:.0f}% × {h:.0f}%{ang})"))
+    rot = int(clip.get("rotation", 0) or 0) % 360
+    if rot:
+        rows.append(("Geometry", "rotation", f"Rotation  ({rot}°)"))
+    if clip.get("flip_h"):
+        rows.append(("Geometry", "flip_h", "Flip horizontal"))
+    if clip.get("flip_v"):
+        rows.append(("Geometry", "flip_v", "Flip vertical"))
+    fine = clip.get("fine_rotation", 0) or 0
+    if fine:
+        rows.append(("Geometry", "fine_rotation",
+                     f"Fine rotation  ({fine / 100.0:+.2f}°)"))
+    order = {name: i for i, name in enumerate(PASTE_SECTIONS)}
+    rows.sort(key=lambda r: order.get(r[0], len(order)))   # stable within a section
+    return rows
+
+
+class PasteSettingsDialog(QDialog):
+    """Pick which of the copied settings to paste. One checkbox per row from
+    paste_options(), grouped under section headings, scrollable when long."""
+
+    MAX_LIST_H = 460
+
+    def __init__(self, parent=None, options=(), unticked=(), target_count=1):
+        super().__init__(parent)
+        self.setWindowTitle("Paste Settings")
+        self.setMinimumWidth(theme.DIALOG_W_SM)
+        layout = QVBoxLayout(self)
+        theme.apply_panel_spacing(layout)
+        prompt = ("Paste these settings:" if target_count <= 1
+                  else f"Paste these settings to {target_count} images:")
+        layout.addWidget(QLabel(prompt))
+
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(2)
+        self._checkboxes = {}
+        unticked = set(unticked or ())
+        section = None
+        for sec, item_id, label in options:
+            if sec != section:
+                if section is not None:
+                    content_layout.addSpacing(theme.GAP_ROW)
+                section = sec
+                head = QLabel(sec)
+                head.setStyleSheet(theme.section_header_qss())
+                content_layout.addWidget(head)
+            cb = QCheckBox(label)
+            cb.setChecked(item_id not in unticked)
+            if item_id == "fine_rotation":
+                cb.setToolTip("Skipped on images that have a crop: their "
+                              "straighten angle lives in the crop instead.")
+            content_layout.addWidget(cb)
+            self._checkboxes[item_id] = cb
+        content_layout.addStretch(1)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setWidget(content)
+        scroll.setFixedHeight(min(content.sizeHint().height() + 4, self.MAX_LIST_H))
+        layout.addWidget(scroll)
+
+        select_row = theme.apply_button_row(QHBoxLayout())
+        select_all_btn = QPushButton("☑  Select All")
+        deselect_all_btn = QPushButton("☐  Deselect All")
+        theme.style_button(select_all_btn, "secondary")
+        theme.style_button(deselect_all_btn, "secondary")
+        select_all_btn.clicked.connect(lambda: self._set_all(True))
+        deselect_all_btn.clicked.connect(lambda: self._set_all(False))
+        select_row.addWidget(select_all_btn)
+        select_row.addStretch(1)
+        select_row.addWidget(deselect_all_btn)
+        layout.addLayout(select_row)
+
+        layout.addWidget(theme.section_separator())
+
+        button_row = theme.apply_button_row(QHBoxLayout())
+        paste_btn = QPushButton("Paste")
+        cancel_btn = QPushButton("Cancel")
+        theme.style_button(paste_btn, "primary", default=True)
+        theme.style_button(cancel_btn, "secondary")
+        paste_btn.clicked.connect(self.accept)
+        cancel_btn.clicked.connect(self.reject)
+        button_row.addStretch(1)
+        button_row.addWidget(cancel_btn)
+        button_row.addWidget(paste_btn)
+        layout.addLayout(button_row)
+
+    def _set_all(self, checked: bool):
+        for cb in self._checkboxes.values():
+            cb.setChecked(checked)
+
+    def selection(self) -> set:
+        """Item ids that are ticked."""
+        return {item_id for item_id, cb in self._checkboxes.items() if cb.isChecked()}
+
 
 class CollapsibleSection(QWidget):
     """A toggle-button header that shows/hides its content widget. Default: collapsed."""
@@ -361,18 +532,12 @@ class SlidersPanel(QWidget):
         self._layers_sig = None  # cheap signature to avoid needless rebuilds
         self.adjustment_keys = list(self.ADJUSTMENT_KEYS)
         self._sync_group_selection = None  # remembered while the app is open
-        self._copy_group_selection = None  # Ctrl+C's own remembered choice
-        # Ctrl+C clipboard — a PARTIAL adjustment dict (only the copied
-        # groups' keys) plus the whole-image groups that live outside it.
-        # paste_adjustment_settings is the only consumer. See
-        # spec/copy-settings-dialog.md.
-        self.copied_adjustment = None
-        self.copied_selection = None   # {gid: bool} used for this clipboard
-        self.copied_profile = None     # "color"/"bw" when the profile group was copied
-        self.copied_crop = None        # (crop_rect, crop_angle) when crop was copied
-        # (rotation_angle, horizontal_mirrored, vertical_mirrored) when the
-        # orientation group was copied. See spec/orientation-sync-group.md.
-        self.copied_orientation = None
+        # Copy/Paste Settings clipboard: a full snapshot of the copied image
+        # (see copy_settings_from_index), or None. The paste dialog decides
+        # what lands. Item ids unticked at the last paste are remembered while
+        # the app is open. See spec/paste-settings-dialog.md.
+        self.clipboard = None
+        self._paste_unticked = set()
         self._hint_timer = QTimer(self)  # Timer for temporary hints
         self._hint_timer.setSingleShot(True)
         
@@ -942,6 +1107,8 @@ class SlidersPanel(QWidget):
         """Feed the histogram widget raw per-channel counts ((3, 256) array) or
         None to clear. The widget handles all scaling/painting."""
         self.histogram.set_data(data)
+        if data is None:
+            self.histogram.set_caption("")
 
     def create_slider(self, label_text, min_value=-100, max_value=100,
                       default_value=0, gradient=None):
@@ -2147,158 +2314,220 @@ class SlidersPanel(QWidget):
         ccr_backend.save_catalog()
         self.set_temporary_hint("B/W Point conversion complete!", duration=3000)
 
-    @staticmethod
-    def _group_count_phrase(verb: str, selection: dict) -> str:
-        """'Copied all settings.' / 'Pasted 2 of 8 setting groups.' — the
-        group LABELS are too long to list, so report the count."""
-        n = sum(1 for gid, _l, _k in SYNC_GROUPS if selection.get(gid))
-        total = len(SYNC_GROUPS)
-        if n == total:
-            return f"{verb} all settings."
-        return f"{verb} {n} of {total} setting group{'' if n == 1 else 's'}."
+    # --- Copy / Paste Settings -------------------------------------------
+    # Copy takes a full snapshot; Paste opens PasteSettingsDialog listing what
+    # differs from default on the copied image. Reached from Cmd/Ctrl+C/V and
+    # the thumbnail right-click menu. See spec/paste-settings-dialog.md.
 
     def copy_adjustment_settings(self):
-        """
-        Copy the current image's settings to the in-panel clipboard. A dialog
-        picks which setting groups to copy (the same groups Sync to All
-        offers); the choice is remembered while the app is open.
-        """
+        """Cmd/Ctrl+C: copy the current image's settings."""
         if self.current_idx is None:
-            print("No image selected to copy adjustment settings from.")
             self.set_temporary_hint("No image selected to copy from", duration=4000)
             return
+        self.copy_settings_from_index(self.current_idx)
 
-        dialog = SyncSettingsDialog(
-            self, self._copy_group_selection, title="Copy Settings",
-            prompt="Copy these settings:", action_label="Copy")
-        if dialog.exec_() != QDialog.Accepted:
-            return  # cancelled — leave any previously copied settings alone
-        selection = dialog.selection()
-        self._copy_group_selection = selection
-        if not any(selection.values()):
-            self.set_temporary_hint("Nothing selected to copy.", duration=3000)
+    def copy_settings_from_index(self, idx):
+        """Snapshot every setting of image `idx` onto the clipboard. The
+        current image is read from the LIVE UI (its active layer, global or
+        area, as before); any other image from its global layer."""
+        img = ccr_backend.get_image_by_index(idx)
+        if img is None:
+            self.set_temporary_hint("No image selected to copy from", duration=4000)
             return
-
-        keys = [k for gid, _label, group_keys in SYNC_GROUPS
-                if selection.get(gid) for k in group_keys]
-        # Adjustment keys and curves come from the LIVE UI, i.e. the active
-        # layer (global or area) — that keeps area→area copying useful. The
-        # whole-image groups below have no per-area meaning, so they're read
-        # off the image itself.
-        live = {key: slider.value()
-                for key, slider in zip(self.adjustment_keys, self.sliders)}
-        self._attach_curves(live)
-        self._attach_cineon(live)
-        self.copied_adjustment = {k: live[k] for k in keys if k in live}
-        if selection.get("curves") and live.get("curves"):
-            self.copied_adjustment["curves"] = copy.deepcopy(live["curves"])
-
-        img = ccr_backend.get_image_by_index(self.current_idx)
-        self.copied_profile = (getattr(img, "color_profile", "color")
-                               if selection.get("profile") and img is not None else None)
-        self.copied_crop = ((img.crop_rect, getattr(img, "crop_angle", 0.0))
-                            if selection.get("crop") and img is not None else None)
-        self.copied_orientation = (_orientation_of(img)
-                                   if selection.get("orientation") and img is not None
-                                   else None)
-        self.copied_selection = selection
-        print(f"Copied groups {sorted(g for g, on in selection.items() if on)}: "
-              f"{self.copied_adjustment}")
-        self.set_temporary_hint(
-            self._group_count_phrase("Copied", selection), duration=4000)
+        if idx == self.current_idx:
+            live = {key: slider.value()
+                    for key, slider in zip(self.adjustment_keys, self.sliders)}
+            self._attach_curves(live)
+            self._attach_cineon(live)
+        else:
+            g = img.adjustment_settings or {}
+            live = {k: g.get(k, self._default_for(k)) for k in self.adjustment_keys}
+            if g.get("curves"):
+                live["curves"] = g["curves"]
+            if g.get("cineon_log"):
+                live["cineon_log"] = True
+        self.clipboard = {
+            "adjustments": {k: live[k] for k in self.adjustment_keys},
+            "curves": copy.deepcopy(live.get("curves")) or None,
+            "cineon_log": bool(live.get("cineon_log")),
+            "profile": getattr(img, "color_profile", "color") or "color",
+            "crop": (img.crop_rect, getattr(img, "crop_angle", 0.0) or 0.0),
+            "rotation": int(getattr(img, "rotation_angle", 0) or 0),
+            "flip_h": bool(getattr(img, "horizontal_mirrored", False)),
+            "flip_v": bool(getattr(img, "vertical_mirrored", False)),
+            "fine_rotation": getattr(img, "fine_rotation_angle", 0) or 0,
+        }
+        n = len(paste_options(self.clipboard, self._default_for))
+        if n:
+            self.set_temporary_hint(
+                f"Copied settings ({n} change{'' if n == 1 else 's'} from default).",
+                duration=4000)
+        else:
+            self.set_temporary_hint(
+                "Copied, but this image has no changes from default.", duration=4000)
 
     def paste_adjustment_settings(self):
-        """
-        Apply the copied setting groups to the current image, leaving every
-        setting that was NOT copied untouched.
-        """
-        if self.copied_selection is None:
-            print("No settings to paste. Copy settings first with Cmd+C (or Ctrl+C).")
-            self.set_temporary_hint("No settings to paste. Copy first with Cmd+C", duration=3000)
-            return
+        """Cmd/Ctrl+V: paste onto the current image (via the dialog)."""
         if self.current_idx is None:
-            print("No image selected to paste adjustment settings to.")
+            if self.clipboard is None:
+                self._hint_nothing_copied()
+            else:
+                self.set_temporary_hint("No image selected to paste to", duration=2000)
+            return
+        self.paste_settings_to_indices([self.current_idx])
+
+    def _hint_nothing_copied(self):
+        self.set_temporary_hint(
+            "No settings to paste. Copy first (Cmd/Ctrl+C or right-click → "
+            "Copy Settings).", duration=3000)
+
+    def paste_settings_to_indices(self, indices):
+        """Open the paste dialog and apply the ticked settings to each image
+        in `indices`, leaving everything un-ticked untouched. Each image gets
+        one undo step."""
+        if self.clipboard is None:
+            self._hint_nothing_copied()
+            return
+        indices = [i for i in (indices or [])
+                   if ccr_backend.get_image_by_index(i) is not None]
+        if not indices:
             self.set_temporary_hint("No image selected to paste to", duration=2000)
             return
+        options = paste_options(self.clipboard, self._default_for)
+        if not options:
+            self.set_temporary_hint(
+                "The copied image has no changes from default to paste.",
+                duration=3000)
+            return
+        dialog = PasteSettingsDialog(self, options, self._paste_unticked,
+                                     target_count=len(indices))
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        chosen = dialog.selection()
+        self._paste_unticked = {oid for _s, oid, _l in options if oid not in chosen}
+        if not chosen:
+            self.set_temporary_hint("Nothing selected to paste.", duration=3000)
+            return
 
-        selection = self.copied_selection
-        print(f"Pasting groups {sorted(g for g, on in selection.items() if on)}: "
-              f"{self.copied_adjustment}")
         self.end_undo_burst()
-        img = ccr_backend.get_image_by_index(self.current_idx)
-        if img is not None:
-            img.push_undo_state()
+        skipped_fine = 0
+        reoriented_current = False
+        for idx in indices:
+            result = self._apply_paste(idx, chosen)
+            skipped_fine += result["skipped_fine"]
+            if idx == self.current_idx and result["reoriented"]:
+                reoriented_current = True
 
-        # Build a COMPLETE dict from the TARGET's active layer (missing keys
-        # filled with their defaults) and overwrite only the copied keys, so
-        # un-copied settings survive and the app-wide "a non-empty adjustment
-        # dict carries every key" invariant holds. Same shape as
-        # _perform_sync_to_all's merge.
-        target = self._read_active_settings(self.current_idx)
-        merged = {k: target.get(k, self._default_for(k)) for k in self.adjustment_keys}
-        for k, v in self.copied_adjustment.items():
-            if k in merged:
-                merged[k] = v
-        # Curves and the Cineon flag live outside adjustment_keys: follow the
-        # clipboard when their group was copied, else carry the target's own
-        # value across the slider-only rebuild.
-        if selection.get("curves"):
-            src_curves = self.copied_adjustment.get("curves")
-            if src_curves:
-                merged["curves"] = copy.deepcopy(src_curves)
-        elif target.get("curves") is not None:
-            merged["curves"] = target["curves"]
-        if selection.get("channels"):
-            if self.copied_adjustment.get("cineon_log"):
-                merged["cineon_log"] = True
-        elif target.get("cineon_log"):
-            merged["cineon_log"] = True
-        if img is not None and img.active_area_id is not None:
-            # The Cineon display conversion is whole-image only — never
-            # paste it into an area layer's dict.
-            merged.pop("cineon_log", None)
-
-        # Mirror the result into the UI (from the MERGE, not the clipboard, so
-        # un-copied sliders keep showing the target's values).
-        for i, key in enumerate(self.adjustment_keys):
-            if i < len(self.sliders):
-                self.sliders[i].blockSignals(True)
-                self.sliders[i].setValue(merged[key])
-                self.sliders[i].blockSignals(False)
-                self.slider_value_labels[i].setText(str(merged[key]))
-        # set_curves does not emit, so it won't re-trigger a save.
-        self.curve_editor.set_curves(merged.get("curves"))
-
-        if img is not None:
-            if selection.get("profile") and self.copied_profile is not None:
-                img.color_profile = self.copied_profile
-                self._sync_color_profile_combo(self.current_idx)
-            if selection.get("crop") and self.copied_crop is not None:
-                # A copied "no crop" is a real value — pasting it clears the
-                # target's crop. The reprocess below refreshes the crop-aware
-                # histogram.
-                img.crop_rect, img.crop_angle = self.copied_crop
-            if (selection.get("orientation") and self.copied_orientation is not None
-                    and _orientation_of(img) != self.copied_orientation):
-                # Unlike Sync to All (whose source IS the displayed image), a
-                # paste re-orients what's on screen — a kept zoom would strand
-                # the viewport, exactly as for rotate_left/right and undo.
-                _apply_orientation(img, self.copied_orientation)
-                reset_zoom = getattr(self.parent().parent().image_preview,
-                                     "_reset_zoom", None)
-                if callable(reset_zoom):
-                    reset_zoom()
-
-        ccr_backend.set_active_settings_by_index(
-            self.current_idx, merged, reprocess=True)
         mw = self.parent().parent()
-        try:
-            mw.thumbnail_list.update_thumbnail(self.current_idx)
-        except AttributeError:
-            pass
-        mw.image_preview.update_preview(self.current_idx)
-        self.set_temporary_hint(
-            self._group_count_phrase("Pasted", selection), duration=2000)
+        if reoriented_current:
+            # Pasting a new orientation re-orients what's on screen; a kept
+            # zoom would strand the viewport (as for rotate/undo).
+            reset_zoom = getattr(getattr(mw, "image_preview", None), "_reset_zoom", None)
+            if callable(reset_zoom):
+                reset_zoom()
+        for idx in indices:
+            try:
+                mw.thumbnail_list.update_thumbnail(idx)
+            except AttributeError:
+                pass
+        if self.current_idx is not None:
+            mw.image_preview.update_preview(self.current_idx)
+
+        n = len(chosen)
+        msg = f"Pasted {n} setting{'' if n == 1 else 's'}"
+        if len(indices) > 1:
+            msg += f" to {len(indices)} images"
+        msg += "."
+        if skipped_fine:
+            msg += (" Fine rotation skipped on cropped image"
+                    f"{'' if skipped_fine == 1 else 's'}.")
+        self.set_temporary_hint(msg, duration=3000)
+
+    def _apply_paste(self, idx, chosen):
+        """Apply the ticked clipboard items to one image. Returns
+        {'reoriented': bool, 'skipped_fine': 0|1}."""
+        img = ccr_backend.get_image_by_index(idx)
+        clip = self.clipboard
+        is_current = idx == self.current_idx
+        img.push_undo_state()
+
+        adj_keys = [k for k in self.adjustment_keys if f"adj:{k}" in chosen]
+        if "bands" in chosen:
+            adj_keys += [k for k in self.adjustment_keys if k in _BAND_KEYS]
+        touch_adj = bool(adj_keys) or "curves" in chosen or "cineon_log" in chosen
+        merged = None
+        if touch_adj:
+            # Build a COMPLETE dict from the target (missing keys filled with
+            # defaults) and overwrite only the ticked keys, so un-ticked
+            # settings survive and the "a non-empty adjustment dict carries
+            # every key" invariant holds. The current image's ACTIVE layer is
+            # the target (area editing); other images take their global layer.
+            target = (self._read_active_settings(idx) if is_current
+                      else dict(img.adjustment_settings or {}))
+            merged = {k: target.get(k, self._default_for(k)) for k in self.adjustment_keys}
+            for k in adj_keys:
+                merged[k] = clip["adjustments"].get(k, self._default_for(k))
+            if "curves" in chosen and clip.get("curves"):
+                merged["curves"] = copy.deepcopy(clip["curves"])
+            elif target.get("curves") is not None:
+                merged["curves"] = target["curves"]
+            if "cineon_log" in chosen or target.get("cineon_log"):
+                merged["cineon_log"] = True
+            if is_current and img.active_area_id is not None:
+                # Cineon is whole-image only — never into an area layer.
+                merged.pop("cineon_log", None)
+            if is_current:
+                for i, key in enumerate(self.adjustment_keys):
+                    if i < len(self.sliders):
+                        self.sliders[i].blockSignals(True)
+                        self.sliders[i].setValue(merged[key])
+                        self.sliders[i].blockSignals(False)
+                        self.slider_value_labels[i].setText(str(merged[key]))
+                self.curve_editor.set_curves(merged.get("curves"))
+
+        pixels = touch_adj
+        if "profile" in chosen:
+            img.color_profile = clip["profile"]
+            if is_current:
+                self._sync_color_profile_combo(idx)
+            pixels = True
+        if "crop" in chosen:
+            img.crop_rect, img.crop_angle = clip["crop"]
+            pixels = True     # the histogram samples only the cropped region
+
+        reoriented = False
+        if "rotation" in chosen and img.rotation_angle != clip["rotation"]:
+            img.rotation_angle = clip["rotation"]
+            reoriented = True
+        if "flip_h" in chosen and not img.horizontal_mirrored:
+            img.horizontal_mirrored = True
+            reoriented = True
+        if "flip_v" in chosen and not img.vertical_mirrored:
+            img.vertical_mirrored = True
+            reoriented = True
+        skipped_fine = 0
+        if "fine_rotation" in chosen:
+            if img.crop_rect is not None:
+                # A cropped image keeps its straighten in the crop angle; a fine
+                # rotation on top would stack the two (spec/crop-panel.md §5.4).
+                skipped_fine = 1
+            elif img.fine_rotation_angle != clip["fine_rotation"]:
+                img.fine_rotation_angle = clip["fine_rotation"]
+                reoriented = True
+
+        if merged is not None and is_current:
+            ccr_backend.set_active_settings_by_index(idx, merged, reprocess=pixels)
+        else:
+            if merged is not None:
+                img.adjustment_settings = merged
+            if pixels:
+                try:
+                    img.update_thumbnail_and_preview()
+                except Exception as e:
+                    print(f"Failed to paste settings to {img.file_path}: {e}")
+        # Orientation and fine rotation are display-level: the thumbnail
+        # refresh and update_preview re-apply them from the attributes.
+        return {"reoriented": reoriented, "skipped_fine": skipped_fine}
 
     # --- Dynamic Hint Management Methods ---
     def set_hint(self, message, temporary=False, duration=3000):

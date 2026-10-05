@@ -331,11 +331,16 @@ class ScopesPanel(QWidget):
     handle for resizing the body height."""
 
     expanded_changed = Signal(bool)
+    # Whole image (False) vs. the red reference frame (True). The histogram in
+    # the sliders panel follows the same choice. See spec/scope-sample-area.md.
+    sample_reference_changed = Signal(bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._settings = QSettings("FreeCCR", "FreeCCR")
         expanded = self._settings.value("scopes/expanded", False, type=bool)
+        sample_ref = self._settings.value("scopes/sample_reference", False, type=bool)
+        self._sampling_note = ""
 
         self._toggle_btn = QPushButton()
         self._toggle_btn.setCheckable(True)
@@ -363,10 +368,30 @@ class ScopesPanel(QWidget):
             self._readout.fontMetrics().horizontalAdvance("R 888 G 888 B 888") + 12)
         self._readout.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
 
+        # Sample-area toggle. Read-only use of the reference frame: it never
+        # writes the frame or touches any conversion input.
+        self._sample_btn = QPushButton("Ref frame")
+        self._sample_btn.setCheckable(True)
+        self._sample_btn.setChecked(sample_ref)
+        self._sample_btn.setToolTip(
+            "Sample the scopes and histogram from the red reference frame "
+            "(right-drag on the image) instead of the whole image. Only reads "
+            "the frame; it does not affect conversion. With no frame drawn, "
+            "the whole image is used.")
+        self._sample_btn.setStyleSheet(
+            "QPushButton { padding: 2px 8px; "
+            f"background: {theme.SURFACE}; border: 1px solid {theme.BORDER}; "
+            f"border-radius: {theme.RADIUS_SM}px; color: {theme.TEXT_MUTED}; "
+            "font-size: 11px; }"
+            f"QPushButton:checked {{ background: {theme.SURFACE_ACTIVE}; "
+            f"color: {theme.TEXT}; }}")
+        self._sample_btn.toggled.connect(self._on_sample_toggled)
+
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
         header.setSpacing(theme.GAP_BTN)
         header.addWidget(self._toggle_btn, 1)
+        header.addWidget(self._sample_btn)
         header.addWidget(self._swatch)
         header.addWidget(self._readout)
 
@@ -403,8 +428,25 @@ class ScopesPanel(QWidget):
         return self._toggle_btn.isChecked()
 
     def _sync_toggle_text(self):
+        note = f"  ·  {self._sampling_note}" if self._sampling_note else ""
         self._toggle_btn.setText(
-            f"{'-' if self.is_expanded() else '+'} Scopes")
+            f"{'-' if self.is_expanded() else '+'} Scopes{note}")
+
+    # -- sample area ------------------------------------------------------
+    def samples_reference(self):
+        """True when the user asked to sample the reference frame."""
+        return self._sample_btn.isChecked()
+
+    def set_sampling_note(self, text):
+        """Short status shown after the title, e.g. 'reference frame' or
+        'whole image (no frame)'. Empty string clears it."""
+        if text != self._sampling_note:
+            self._sampling_note = text
+            self._sync_toggle_text()
+
+    def _on_sample_toggled(self, checked):
+        self._settings.setValue("scopes/sample_reference", bool(checked))
+        self.sample_reference_changed.emit(bool(checked))
 
     def _on_toggle(self, checked):
         self._body.setVisible(checked)
@@ -441,10 +483,16 @@ class ScopesPanel(QWidget):
         self.clear_probe()
 
     # -- hover probe --------------------------------------------------------
-    def set_probe(self, r, g, b, x_frac):
-        """Cursor is over an image pixel: readout + marker circles."""
+    def set_probe(self, r, g, b, x_frac, markers=True):
+        """Cursor is over an image pixel: readout + marker circles. With
+        markers=False (cursor outside the sampled area) only the readout
+        updates, since the scopes don't contain that pixel."""
         self._readout.setText(f"R {r:3d} G {g:3d} B {b:3d}")
         self._set_swatch(QColor(r, g, b))
+        if not markers:
+            self.parade.set_probe(None)
+            self.vectorscope.set_probe(None)
+            return
         probe = (int(r), int(g), int(b), float(x_frac))
         self.parade.set_probe(probe)
         self.vectorscope.set_probe(probe)
