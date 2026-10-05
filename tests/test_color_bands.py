@@ -272,7 +272,8 @@ class TestUIWiring:
         # The global band feather follows the per-band keys (which appear in
         # order immediately before it); only the Chroma NR keys come after.
         fi = keys.index("band_feather")
-        assert keys[fi + 1:] == ["chroma_nr", "chroma_nr_radius"]
+        assert keys[fi + 1:] == ["chroma_nr", "chroma_nr_radius", "sharpen_amount",
+                                 "sharpen_radius", "sharpen_threshold"]
         assert keys[fi - len(BAND_ADJUSTMENT_KEYS):fi] == list(BAND_ADJUSTMENT_KEYS)
         assert len(BAND_ADJUSTMENT_KEYS) == len(COLOR_BANDS) * len(BAND_PARAMS)
 

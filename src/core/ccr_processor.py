@@ -987,7 +987,8 @@ def ccr_normalize_with_reference(ccr_image,output_path=None,jpg_out=False,jpg_qu
     # --- apply user adjustments --- only when outputting
     step_start = time.time()
     if output_path is not None:  # this is for processing
-        rgb_brightness_normalized=ccr_image.apply_adjustments(rgb_brightness_normalized)
+        rgb_brightness_normalized=ccr_image.apply_adjustments(
+            rgb_brightness_normalized, for_export=True)
     print(f"User adjustments: {time.time() - step_start:.3f}s")
 
     # --- End of user adjustments ---
@@ -2023,7 +2024,8 @@ def ccr_normalize_with_bwpoint(ccr_image, black_point_bgr=None, white_point_bgr=
         # so a never-converted image's live state stays untouched.
         rgb_result = ccr_image.apply_adjustments(rgb_result, contrast_base=0,
                                                  temperature_base=0,
-                                                 ws_windowed=ws)
+                                                 ws_windowed=ws,
+                                                 for_export=True)
         # White the sprocket holes / clear film as the last look step — after all
         # adjustments, before the geometric block (same un-rotated space as the
         # preview overlay, so it is WYSIWYG). Gated on the live toggle; deferred
@@ -2080,7 +2082,7 @@ def ccr_export_positive(ccr_image, output_path=None, jpg_out=False,
     if output_path is None:
         return ccr_image.apply_adjustments(img)
 
-    rgb_result = ccr_image.apply_adjustments(img)
+    rgb_result = ccr_image.apply_adjustments(img, for_export=True)
 
     # User crop (normalized rect in un-rotated/un-flipped space) — applied
     # before flips/rotation so it matches the cropped preview orientation.
@@ -2122,7 +2124,7 @@ def ccr_normalize_with_refparams(ccr_image, p_lo, p_hi, od_factors,
         return rgb_result
 
     # --- Export path: adjustments, crop, flips, rotation, write ---
-    rgb_result = ccr_image.apply_adjustments(rgb_result)
+    rgb_result = ccr_image.apply_adjustments(rgb_result, for_export=True)
     rgb_result = apply_crop_to_image(rgb_result, getattr(ccr_image, 'crop_rect', None),
                                      getattr(ccr_image, 'crop_angle', 0.0))
 
@@ -2972,6 +2974,66 @@ def apply_chroma_denoise(img16: np.ndarray, amount: float,
     np.clip(out, 0.0, 65535.0, out=out)
     out += np.float32(0.5)
     result = out.astype(np.uint16)
+    if extra is not None:
+        result = np.concatenate([result, extra], axis=-1)
+    return result
+
+
+# --- Sharpening: luma unsharp mask (spec/sharpening.md) ---
+# Detail = Y − GaussianBlur(Y); the SAME luma delta is added to R, G and B, so
+# colour differences are untouched (no colour fringes / halos of hue). Radius
+# is a fraction of the long side for preview/zoom/export parity, like Chroma
+# NR; below SHARPEN_MIN_SIGMA px it is skipped (no meaningful detail scale).
+SHARPEN_RADIUS_MIN = 0.00005    # radius 0   -> sigma as fraction of long side
+SHARPEN_RADIUS_MAX = 0.0006     # radius 100 -> (~3.6 px on a 6000 px scan)
+SHARPEN_RADIUS_DEFAULT = 25     # ~1.1 px sigma on a 6000 px scan
+SHARPEN_AMOUNT_MAX = 2.0        # amount 100 -> 200 %
+SHARPEN_THRESHOLD_MAX = 0.04    # threshold 100 -> detail of 4 % of full scale
+SHARPEN_MIN_SIGMA = 0.3
+
+
+def sharpen_sigma_px(radius_slider: float, long_side: int) -> float:
+    t = min(max(float(radius_slider), 0.0), 100.0) / 100.0
+    return (SHARPEN_RADIUS_MIN + (SHARPEN_RADIUS_MAX - SHARPEN_RADIUS_MIN) * t) * float(long_side)
+
+
+def apply_unsharp_mask(img16: np.ndarray, amount: float,
+                       radius: float = SHARPEN_RADIUS_DEFAULT,
+                       threshold: float = 0.0) -> np.ndarray:
+    """Luma-only unsharp mask on a uint16 RGB image. `amount` 0..100 (0 =
+    identity, input returned), `radius` 0..100 (size, relative to the image),
+    `threshold` 0..100 (soft-knee: detail smaller than this is left alone, so
+    film grain and noise aren't boosted). Returns uint16."""
+    amount = float(amount or 0.0)
+    if amount <= 0.0 or img16 is None or img16.ndim != 3 or img16.shape[2] < 3:
+        return img16
+    h, w = img16.shape[:2]
+    sigma = sharpen_sigma_px(radius, max(h, w))
+    if sigma < SHARPEN_MIN_SIGMA:
+        return img16
+    extra = img16[..., 3:] if img16.shape[2] > 3 else None
+    rgb = img16[..., :3].astype(np.float32)
+    Y = cv2.transform(rgb, np.array([[0.299, 0.587, 0.114]], np.float32))
+    detail = cv2.subtract(Y, cv2.GaussianBlur(Y, (0, 0), sigma,
+                                              borderType=cv2.BORDER_REFLECT))
+    del Y
+    thr = min(max(float(threshold or 0.0), 0.0), 100.0) / 100.0 \
+        * SHARPEN_THRESHOLD_MAX * 65535.0
+    if thr > 0:
+        # smoothstep from thr/2 to 3thr/2 on |detail|
+        wgt = np.abs(detail)
+        wgt -= np.float32(0.5 * thr)
+        wgt *= np.float32(1.0 / thr)
+        np.clip(wgt, 0.0, 1.0, out=wgt)
+        wgt = wgt * wgt * (np.float32(3.0) - np.float32(2.0) * wgt)
+        detail *= wgt
+        del wgt
+    detail *= np.float32(min(amount, 100.0) / 100.0 * SHARPEN_AMOUNT_MAX)
+    rgb += detail[..., None]
+    del detail
+    np.clip(rgb, 0.0, 65535.0, out=rgb)
+    rgb += np.float32(0.5)
+    result = rgb.astype(np.uint16)
     if extra is not None:
         result = np.concatenate([result, extra], axis=-1)
     return result

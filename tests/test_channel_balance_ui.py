@@ -124,8 +124,9 @@ def test_sync_groups_still_partition_adjustment_keys():
     """The invariant SYNC_GROUPS documents: the adjustment-key groups partition
     ADJUSTMENT_KEYS exactly. Adding a key without a group would leave it
     unsyncable and unnoticed."""
+    from widgets.sliders_panel import GLOBAL_FLAG_KEYS
     grouped = [k for _gid, _label, keys in SYNC_GROUPS for k in keys]
-    grouped = [k for k in grouped if k != "cineon_log"]   # a flag, not a slider
+    grouped = [k for k in grouped if k not in GLOBAL_FLAG_KEYS]   # flags, not sliders
     assert sorted(grouped) == sorted(SlidersPanel.ADJUSTMENT_KEYS)
 
 
