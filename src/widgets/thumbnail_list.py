@@ -390,6 +390,16 @@ class ThumbnailList(QWidget):
             return
         suffix = f" ({len(indices)})" if len(indices) > 1 else ""
         menu = QMenu(self)
+        # Copy reads the right-clicked image; Paste goes to the whole
+        # selection via the paste dialog. See spec/paste-settings-dialog.md.
+        sliders = getattr(self._main_window(), "sliders_panel", None)
+        copy_row = self.thumbnail_list.row(item)
+        copy_action = menu.addAction("Copy Settings")
+        paste_action = menu.addAction(f"Paste Settings{suffix}…")
+        paste_action.setEnabled(sliders is not None
+                                and getattr(sliders, "clipboard", None) is not None)
+        copy_action.setEnabled(sliders is not None)
+        menu.addSeparator()
         duplicate_action = menu.addAction(f"Duplicate{suffix}")
         remove_action = menu.addAction(f"Remove from list{suffix}")
         menu.addSeparator()
@@ -415,7 +425,11 @@ class ThumbnailList(QWidget):
             replace_action = menu.addAction(
                 f"Replace with current camera profile{rsuffix}")
         action = menu.exec_(self.thumbnail_list.mapToGlobal(pos))
-        if action == duplicate_action:
+        if action == copy_action:
+            sliders.copy_settings_from_index(copy_row)
+        elif action == paste_action:
+            sliders.paste_settings_to_indices(indices)
+        elif action == duplicate_action:
             self.duplicate_images(indices)
         elif action == remove_action:
             self.remove_images(indices)

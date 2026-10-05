@@ -60,6 +60,7 @@ class HistogramWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._data = None          # np.ndarray (3, 256) float32, R/G/B, or None
+        self._caption = ""         # small top-left label, e.g. "Ref frame"
         self.setMinimumHeight(120)
         self.setAttribute(Qt.WA_OpaquePaintEvent, False)
 
@@ -75,6 +76,14 @@ class HistogramWidget(QWidget):
 
     def clear_data(self):
         self.set_data(None)
+
+    def set_caption(self, text):
+        """Small muted label in the top-left corner ('' for none) — used to
+        flag that the histogram is sampling the reference frame."""
+        text = text or ""
+        if text != self._caption:
+            self._caption = text
+            self.update()
 
     # -- paint -----------------------------------------------------------
     def paintEvent(self, event):
@@ -95,6 +104,14 @@ class HistogramWidget(QWidget):
         if self._data is not None and float(self._data.sum()) > 0.0:
             self._draw_channels(p, plot)
             self._draw_clip_markers(p, plot)
+
+        if self._caption:
+            p.setPen(QColor(theme.TEXT_MUTED))
+            f = p.font()
+            f.setPixelSize(10)
+            p.setFont(f)
+            p.drawText(plot.adjusted(2, 0, 0, 0), Qt.AlignLeft | Qt.AlignTop,
+                       self._caption)
 
         # Subtle defining border on top of everything.
         p.setClipping(False)
