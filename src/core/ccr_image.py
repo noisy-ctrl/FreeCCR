@@ -12,6 +12,7 @@ from PySide6.QtGui import QImage, QPixmap  # or from PySide6.QtGui import QImage
 #import lensfunpy  # Make sure lensfunpy is installed
 from core.ccr_processor import (adjust_image, adjust_image_opencl,
                                 BAND_ADJUSTMENT_KEYS, apply_curves,
+                                apply_chroma_denoise, CHROMA_NR_RADIUS_DEFAULT,
                                 apply_gamma_curve,
                                 apply_area_layers, apply_crop_to_image,
                                 apply_dust_removal, DUST_FEATHER_DEFAULT,
@@ -1795,6 +1796,15 @@ class CCRImage:
         curves = s.get('curves')
         if curves:
             adjusted = apply_curves(adjusted, curves)
+        # Chroma noise reduction: last colour step of the global look, so it
+        # cleans whatever Saturation/Vibrance/bands amplified, and BEFORE area
+        # layers so they grade the cleaned base. Spatial — skipped with dust for
+        # the neutral solves' detached sample patches — and pointless in Black &
+        # White (it never changes luma). See spec/chroma-noise-reduction.md.
+        if not skip_dust and profile != "bw" and s.get('chroma_nr', 0):
+            adjusted = apply_chroma_denoise(
+                adjusted, s.get('chroma_nr', 0),
+                s.get('chroma_nr_radius', CHROMA_NR_RADIUS_DEFAULT))
         # Area editing: composite each enabled local layer additively on top of
         # the globally-adjusted ("whole image") result. Runs before the B&W
         # collapse so per-area color adjustments apply in RGB, like curves.
@@ -1853,6 +1863,12 @@ class CCRImage:
         curves = s.get('curves')
         if curves:
             adjusted = apply_curves(adjusted, curves)
+        # An area's own Chroma NR: extra colour smoothing inside its mask, on
+        # top of the global amount (area renders are always whole images).
+        if s.get('chroma_nr', 0):
+            adjusted = apply_chroma_denoise(
+                adjusted, s.get('chroma_nr', 0),
+                s.get('chroma_nr_radius', CHROMA_NR_RADIUS_DEFAULT))
         return adjusted
 
     def _honours_half_size(self) -> bool:

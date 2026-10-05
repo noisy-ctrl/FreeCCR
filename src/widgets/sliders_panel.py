@@ -7,7 +7,7 @@ from PySide6.QtGui import (QKeySequence, QShortcut, QPainter, QColor,
                            QLinearGradient, QPen)
 from core.ccr_backend import ccr_backend
 from core.ccr_processor import (COLOR_BANDS, BAND_PARAMS, BAND_ADJUSTMENT_KEYS,
-                                compute_density_slopes)
+                                compute_density_slopes, CHROMA_NR_RADIUS_DEFAULT)
 from core.film_stocks import (decode_film_stocks, encode_film_stocks,
                               find_film_stock, upsert_film_stock,
                               remove_film_stock)
@@ -57,6 +57,7 @@ SYNC_GROUPS = [
     ("balance", "Channel Balance (R/G/B)", ("balance_r", "balance_g", "balance_b")),
     ("bands", "Subtractive Saturations (per color)",
      tuple(BAND_ADJUSTMENT_KEYS) + ("band_feather",)),
+    ("noise", "Chroma Noise Reduction", ("chroma_nr", "chroma_nr_radius")),
     # "curves" lives outside ADJUSTMENT_KEYS (it's a nested structure, not a
     # slider), so it's synced specially in _perform_sync_to_all, like crop.
     ("curves", "Curves", ()),
@@ -152,13 +153,15 @@ _BASIC_LABELS = {
     "sub_saturation": "Subtracted Sat", "exposure": "Exposure",
     "ch_input_gain": "Input Gain", "ch_master_shift": "Master Shift",
     "ch_master_gain": "Master Gain",
+    "chroma_nr": "Chroma NR Amount", "chroma_nr_radius": "Chroma NR Radius",
 }
 _CHANNEL_NAMES = {"r": "Red", "g": "Green", "b": "Blue"}
 _BAND_KEYS = frozenset(BAND_ADJUSTMENT_KEYS) | {"band_feather"}
+_NOISE_KEYS = ("chroma_nr", "chroma_nr_radius")
 
 # Dialog section order (top to bottom).
 PASTE_SECTIONS = ("Adjustments", "Channel Levels", "Channel Balance",
-                  "Colour", "Geometry")
+                  "Colour", "Noise Reduction", "Geometry")
 
 
 def adjustment_label(key):
@@ -190,7 +193,7 @@ def paste_options(clip, default_for):
     rows = []
     adj = clip.get("adjustments") or {}
     for key, val in adj.items():
-        if key in _BAND_KEYS or val == default_for(key):
+        if key in _BAND_KEYS or key in _NOISE_KEYS or val == default_for(key):
             continue
         section = ("Channel Levels" if key.startswith("ch_")
                    else "Channel Balance" if key.startswith("balance_")
@@ -205,6 +208,13 @@ def paste_options(clip, default_for):
         rows.append(("Colour", "curves", "Curves"))
     if any(adj.get(k, default_for(k)) != default_for(k) for k in _BAND_KEYS):
         rows.append(("Colour", "bands", "Subtractive Saturations (all colours)"))
+    nr = adj.get("chroma_nr", default_for("chroma_nr"))
+    if nr != default_for("chroma_nr"):
+        # Amount and Radius travel together: a radius alone does nothing.
+        rad = adj.get("chroma_nr_radius", default_for("chroma_nr_radius"))
+        rows.append(("Noise Reduction", "noise",
+                     f"Chroma Noise Reduction  (amount {_fmt_value(nr).lstrip('+')}, "
+                     f"radius {_fmt_value(rad).lstrip('+')})"))
     crop_rect, crop_angle = clip.get("crop") or (None, 0.0)
     if crop_rect is not None:
         w = (crop_rect[2] - crop_rect[0]) * 100.0
@@ -367,19 +377,21 @@ class ResettableSlider(QSlider):
             event.ignore()
 
     def mouseDoubleClickEvent(self, event):
-        # Reset to 0 and trigger adjustment update
+        # Reset to this slider's default (0 for most; create_slider records
+        # non-zero ones such as Feather or Radius) and trigger an update.
+        default = getattr(self, "reset_value", 0)
         old_value = self.value()
-        self.setValue(0)
+        self.setValue(default)
         
         # Find the parent SlidersPanel and trigger adjustment update
         parent_widget = self.parent()
         while parent_widget and not isinstance(parent_widget, SlidersPanel):
             parent_widget = parent_widget.parent()
         
-        if parent_widget and old_value != 0:
+        if parent_widget and old_value != default:
             for i, slider in enumerate(parent_widget.sliders):
                 if slider is self:
-                    parent_widget.slider_value_labels[i].setText("0")
+                    parent_widget.slider_value_labels[i].setText(str(default))
                     parent_widget.on_slider_changed()
                     break
         
@@ -489,8 +501,11 @@ class SlidersPanel(QWidget):
         # last): band_<color>_<param> for the color bands × 4 params
     ] + list(BAND_ADJUSTMENT_KEYS) + [
         # Global spatial-feather amount for the band effect (created after the
-        # per-band sliders, so it stays last in the positional zip).
+        # per-band sliders).
         "band_feather",
+        # Chroma Noise Reduction section, created after the band feather so
+        # these stay last in the positional zip. spec/chroma-noise-reduction.md.
+        "chroma_nr", "chroma_nr_radius",
     ]
 
     # Non-zero default values for specific adjustment keys. Keys not listed
@@ -498,7 +513,9 @@ class SlidersPanel(QWidget):
     # edge-softening out of the box (matches _BAND_FEATHER_DEFAULT in
     # ccr_processor). Used everywhere a slider is populated from a (possibly
     # partial) adjustment dict, so UI and render agree on the default.
-    SLIDER_DEFAULTS = {"band_feather": 10}
+    SLIDER_DEFAULTS = {"band_feather": 10,
+                       # mid-range radius; Amount (chroma_nr) 0 = off
+                       "chroma_nr_radius": CHROMA_NR_RADIUS_DEFAULT}
 
     def _default_for(self, key):
         return self.SLIDER_DEFAULTS.get(key, 0)
@@ -879,6 +896,10 @@ class SlidersPanel(QWidget):
         self.band_section = CollapsibleSection("Subtractive Saturations")
         scroll_layout.addWidget(self.band_section)
 
+        scroll_layout.addWidget(_section_separator())
+        self.noise_section = CollapsibleSection("Chroma Noise Reduction")
+        scroll_layout.addWidget(self.noise_section)
+
         # --- Populate Channel Levels (the section widget itself is placed far
         # above, just under the Convert row) ---
         # MUST be created before the band sliders to keep the ADJUSTMENT_KEYS
@@ -1009,6 +1030,20 @@ class SlidersPanel(QWidget):
                                default_value=self._default_for("band_feather")))
         self._show_band_page("red")
 
+        # --- Populate Chroma Noise Reduction --- (created after the band
+        # feather: maps to the trailing "chroma_nr", "chroma_nr_radius" keys)
+        self.noise_section.add_layout(
+            self.create_slider("Amount", min_value=0, max_value=100,
+                               default_value=self._default_for("chroma_nr")))
+        self.noise_section.add_layout(
+            self.create_slider("Radius", min_value=0, max_value=100,
+                               default_value=self._default_for("chroma_nr_radius")))
+        nr_hint = QLabel("Smooths colour blotches only; sharpness and grain "
+                         "are untouched. Zoom in to 100% to judge it.")
+        nr_hint.setWordWrap(True)
+        nr_hint.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 11px;")
+        self.noise_section.add_widget(nr_hint)
+
         # --- Populate Curves ---
         self.curve_editor = CurveEditor()
         self.curves_section.add_widget(self.curve_editor)
@@ -1079,6 +1114,7 @@ class SlidersPanel(QWidget):
         slider.setMinimum(min_value)
         slider.setMaximum(max_value)
         slider.setValue(default_value)
+        slider.reset_value = default_value     # double-click target
         slider.setOrientation(Qt.Horizontal)
         slider.setTickInterval(10)
         slider.setFixedHeight(theme.CONTROL_H)
@@ -2380,6 +2416,8 @@ class SlidersPanel(QWidget):
         adj_keys = [k for k in self.adjustment_keys if f"adj:{k}" in chosen]
         if "bands" in chosen:
             adj_keys += [k for k in self.adjustment_keys if k in _BAND_KEYS]
+        if "noise" in chosen:
+            adj_keys += [k for k in self.adjustment_keys if k in _NOISE_KEYS]
         touch_adj = bool(adj_keys) or "curves" in chosen or "cineon_log" in chosen
         merged = None
         if touch_adj:
