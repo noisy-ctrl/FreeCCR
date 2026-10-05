@@ -34,7 +34,7 @@ SYNC_GROUPS = [
     ("tone", "Tone (brightness, contrast, ...)",
      ("brightness", "gamma", "highlights", "white_point",
       "shadows", "black_point", "contrast")),
-    ("sat", "Saturation", ("saturation", "sub_saturation")),
+    ("sat", "Saturation", ("saturation", "vibrance", "sub_saturation")),
     ("crop", "Crop", ()),
     # Coarse 90-degree rotation + the mirror flags, synced like crop (whole-image
     # properties, not adjustment keys). fine_rotation_angle is deliberately NOT
@@ -300,6 +300,9 @@ class SlidersPanel(QWidget):
         # auto-exposure and for area layers — it just has no slider to zip to.
         "temperature", "tint", "brightness", "gamma", "highlights",
         "white_point", "shadows", "black_point", "contrast", "saturation",
+        # Vibrance sits directly under Saturation; its create_slider() call is
+        # right after Saturation's to keep the positional zip. spec/vibrance.md.
+        "vibrance",
         "sub_saturation",
         # Per-channel levels controls (collapsible section)
         "ch_input_gain", "ch_master_shift", "ch_master_gain",
@@ -409,7 +412,7 @@ class SlidersPanel(QWidget):
         self.slider_labels = [
             "Temperature", "Tint", "Brightness", "Gamma",
             "Highlights", "White Point", "Shadows", "Black Point", "Contrast", "Saturation",
-            "Subtracted Sat"
+            "Vibrance", "Subtracted Sat"
         ]
 
         self.current_idx = None
@@ -654,6 +657,9 @@ class SlidersPanel(QWidget):
         self.black_point_slider_layout = self.create_slider("Black Point")
         self.contrast_slider_layout = self.create_slider("Contrast")
         self.saturation_slider_layout = self.create_slider("Saturation")
+        # Vibrance: saturation weighted towards muted colours, skin tones partly
+        # protected. Created right after Saturation (ADJUSTMENT_KEYS zip).
+        self.vibrance_slider_layout = self.create_slider("Vibrance")
         self.sub_saturation_slider_layout = self.create_slider("Subtracted Sat")
 
         scroll_layout.addLayout(self.color_profile_row)
@@ -667,6 +673,7 @@ class SlidersPanel(QWidget):
         scroll_layout.addLayout(self.black_point_slider_layout)
         scroll_layout.addLayout(self.contrast_slider_layout)
         scroll_layout.addLayout(self.saturation_slider_layout)
+        scroll_layout.addLayout(self.vibrance_slider_layout)
         scroll_layout.addLayout(self.sub_saturation_slider_layout)
 
         # --- Reset / Compare / Sync buttons ---
