@@ -247,7 +247,9 @@ class GraphicsImageView(QGraphicsView):
                 self.parent_widget.dust_right_press(self.mapToScene(event.pos()))
             return
         if self.parent_widget.crop_mode and self.parent_widget.pixmap_item is not None:
-            if event.button() == Qt.LeftButton:
+            if event.button() == Qt.LeftButton and self.parent_widget._horizon_tool:
+                self.parent_widget.horizon_press(self.mapToScene(event.pos()))
+            elif event.button() == Qt.LeftButton:
                 self.parent_widget.begin_crop_drag(self.mapToScene(event.pos()))
             elif event.button() == Qt.RightButton:
                 self.parent_widget.clear_crop()
@@ -319,6 +321,9 @@ class GraphicsImageView(QGraphicsView):
             return
         if self.parent_widget.crop_mode:
             scene_pos = self.mapToScene(event.pos())
+            if self.parent_widget._horizon_tool:
+                self.parent_widget.horizon_move(scene_pos)
+                return
             if self.parent_widget._crop_drag is not None:
                 self.parent_widget.update_crop_drag(scene_pos)
             else:
@@ -445,7 +450,9 @@ class GraphicsImageView(QGraphicsView):
                 self.parent_widget.dust_right_release()
             return
         if self.parent_widget.crop_mode:
-            if event.button() == Qt.LeftButton:
+            if event.button() == Qt.LeftButton and self.parent_widget._horizon_tool:
+                self.parent_widget.horizon_release(self.mapToScene(event.pos()))
+            elif event.button() == Qt.LeftButton:
                 self.parent_widget.end_crop_drag(self.mapToScene(event.pos()))
             return
         if self.parent_widget.area_mode:
@@ -907,6 +914,11 @@ class ImagePreview(QWidget):
         self._crop_box_is_seed = False       # is the pending box an auto-seed (vs a user crop)?
         self._crop_panel = None              # set by MainWindow (aspect ratio + straighten sync)
         self._crop_drag = None               # in-progress handle/new-rect drag state
+        # Horizon tool (crop mode): draw a line along something that should be
+        # level; the crop box straightens to it. spec/horizon-tool.md.
+        self._horizon_tool = False
+        self._horizon_start = None           # local (pixmap) start point
+        self._horizon_line_item = None
         self._crop_overlay_item = None
         self._crop_handle_items = []
         # Maps displayed-pixmap coords -> full-image coords while a confirmed
@@ -3412,6 +3424,81 @@ class ImagePreview(QWidget):
         return True
 
     # ---- Crop panel hooks: aspect ratio + straighten --------------------
+    # --- Horizon tool ------------------------------------------------------
+    HORIZON_MIN_LEN = 8.0      # local px; shorter lines are ignored as clicks
+
+    @staticmethod
+    def horizon_angle(p0, p1):
+        """Crop-box angle (degrees, the box's own convention: QTransform
+        rotate, y down) that makes the line p0→p1 level. Snaps to whichever
+        of horizontal / vertical the line is closer to, so a drawn vertical
+        (a building edge) works as well as a horizon. Result in [-45, 45]."""
+        ang = math.degrees(math.atan2(p1.y() - p0.y(), p1.x() - p0.x()))
+        ang = (ang + 90.0) % 180.0 - 90.0          # line direction is irrelevant
+        if ang > 45.0:
+            ang -= 90.0
+        elif ang < -45.0:
+            ang += 90.0
+        return ang
+
+    def set_horizon_tool(self, active):
+        """Arm / disarm the horizon tool (crop panel's Draw Horizon button)."""
+        active = bool(active) and self.crop_mode
+        self._horizon_tool = active
+        self._horizon_start = None
+        self._remove_horizon_line()
+        if self.crop_mode:
+            self.view.setCursor(Qt.CrossCursor)
+        panel = self._crop_panel
+        if panel is not None and hasattr(panel, "set_horizon_armed"):
+            panel.set_horizon_armed(active)
+
+    def _remove_horizon_line(self):
+        item = self._horizon_line_item
+        self._horizon_line_item = None
+        if item is not None:
+            try:
+                if item.scene() is not None:
+                    item.scene().removeItem(item)
+            except RuntimeError:
+                pass
+
+    def horizon_press(self, scene_pos):
+        base = self._base_transform()
+        if base is None:
+            return
+        self._horizon_start = (QPointF(scene_pos), base.inverted()[0].map(scene_pos))
+        self._remove_horizon_line()
+        pen = QPen(QColor(255, 210, 0), 2, Qt.DashLine)
+        pen.setCosmetic(True)
+        self._horizon_line_item = self.scene.addLine(
+            scene_pos.x(), scene_pos.y(), scene_pos.x(), scene_pos.y(), pen)
+        self._horizon_line_item.setZValue(1e6)
+
+    def horizon_move(self, scene_pos):
+        if self._horizon_start is None or self._horizon_line_item is None:
+            return
+        s0 = self._horizon_start[0]
+        self._horizon_line_item.setLine(s0.x(), s0.y(), scene_pos.x(), scene_pos.y())
+
+    def horizon_release(self, scene_pos):
+        start = self._horizon_start
+        self._horizon_start = None
+        self._remove_horizon_line()
+        base = self._base_transform()
+        if start is None or base is None:
+            return
+        # Measured in the un-rotated pixmap space the crop box lives in, so
+        # coarse rotation and flips are accounted for automatically.
+        p0 = start[1]
+        p1 = base.inverted()[0].map(scene_pos)
+        if math.hypot(p1.x() - p0.x(), p1.y() - p0.y()) < self.HORIZON_MIN_LEN:
+            return                      # a click, not a line: stay armed
+        self._crop_box_is_seed = False
+        self.set_pending_straighten(self.horizon_angle(p0, p1))
+        self._sync_crop_panel()
+        self.set_horizon_tool(False)    # one-shot, like Lightroom's tool
+
     def set_crop_panel(self, panel):
         """MainWindow wires the CropPanel here so the crop tool can read the
         active aspect ratio and keep the straighten slider in sync."""
@@ -3990,6 +4077,7 @@ class ImagePreview(QWidget):
         self.update_preview(self.current_idx)
 
     def _exit_crop_mode(self):
+        self.set_horizon_tool(False)
         self.crop_mode = False
         self._pending_crop_local = None
         self._pending_crop_angle = 0.0

@@ -1,4 +1,5 @@
 from typing import Any, Dict, Optional, List
+import functools
 import numpy as np
 import os
 import copy
@@ -13,6 +14,7 @@ from PySide6.QtGui import QImage, QPixmap  # or from PySide6.QtGui import QImage
 from core.ccr_processor import (adjust_image, adjust_image_opencl,
                                 BAND_ADJUSTMENT_KEYS, apply_curves,
                                 apply_chroma_denoise, CHROMA_NR_RADIUS_DEFAULT,
+                                apply_unsharp_mask, SHARPEN_RADIUS_DEFAULT,
                                 apply_gamma_curve,
                                 apply_area_layers, apply_crop_to_image,
                                 apply_dust_removal, DUST_FEATHER_DEFAULT,
@@ -1646,7 +1648,7 @@ class CCRImage:
                           color_profile=None, areas_override=None,
                           exposure_base=None, ws_windowed=None,
                           auto_gain_override=None, skip_dust=False,
-                          base_curve=None) -> np.ndarray:
+                          base_curve=None, for_export=False) -> np.ndarray:
         """Apply the slider adjustments. The optional overrides let the zoom
         hi-res worker render from a snapshot taken at request time instead of
         live state the GUI thread may be mutating concurrently — and let the
@@ -1658,7 +1660,12 @@ class CCRImage:
         measured from whatever buffer it is handed, so a patch would compute its
         own (wrong) gain — the caller passes the value measured from the full
         base instead. Dust healing is spatial and meaningless on a detached
-        patch, so it is skipped there."""
+        patch, so it is skipped there (as are Chroma NR and Sharpening).
+
+        `for_export` is True only for the export pipeline's renders: Chroma NR
+        and Sharpening honour their "Bypass until export" flags
+        (chroma_nr_export_only / sharpen_export_only), skipping themselves in
+        the preview, thumbnails and zoom renders but never in an export."""
         # Dust removal runs FIRST so the inpainted positive flows through the
         # rest of the adjustment stage (and so a dust-only image is still
         # cleaned even when the early-return guard below would otherwise skip).
@@ -1801,7 +1808,10 @@ class CCRImage:
         # layers so they grade the cleaned base. Spatial — skipped with dust for
         # the neutral solves' detached sample patches — and pointless in Black &
         # White (it never changes luma). See spec/chroma-noise-reduction.md.
-        if not skip_dust and profile != "bw" and s.get('chroma_nr', 0):
+        nr_live = for_export or not s.get('chroma_nr_export_only')
+        sharpen_live = for_export or not s.get('sharpen_export_only')
+        if (nr_live and not skip_dust and profile != "bw"
+                and s.get('chroma_nr', 0)):
             adjusted = apply_chroma_denoise(
                 adjusted, s.get('chroma_nr', 0),
                 s.get('chroma_nr_radius', CHROMA_NR_RADIUS_DEFAULT))
@@ -1809,12 +1819,24 @@ class CCRImage:
         # the globally-adjusted ("whole image") result. Runs before the B&W
         # collapse so per-area color adjustments apply in RGB, like curves.
         if has_areas:
-            adjusted = apply_area_layers(adjusted, areas, self._adjust_for_area)
+            adjusted = apply_area_layers(
+                adjusted, areas,
+                functools.partial(self._adjust_for_area, nr_live=nr_live,
+                                  sharpen_live=sharpen_live))
         if profile == "bw":
             adjusted = self._to_grayscale(adjusted)
+        # Sharpening: the very last step (output sharpening), luma only, so it
+        # works the same on colour and Black & White. Spatial — skipped for the
+        # neutral solves' sample patches. See spec/sharpening.md.
+        if sharpen_live and not skip_dust and s.get('sharpen_amount', 0):
+            adjusted = apply_unsharp_mask(
+                adjusted, s.get('sharpen_amount', 0),
+                s.get('sharpen_radius', SHARPEN_RADIUS_DEFAULT),
+                s.get('sharpen_threshold', 0))
         return adjusted
 
-    def _adjust_for_area(self, base_u16: np.ndarray, settings: dict) -> np.ndarray:
+    def _adjust_for_area(self, base_u16: np.ndarray, settings: dict,
+                         nr_live: bool = True, sharpen_live: bool = True) -> np.ndarray:
         """One area's full per-pixel adjustment layer, computed against the
         globally-adjusted base. Reuses the exact slider + curve math, but with
         ZEROED base offsets (contrast_base/temperature_base/brightness_base):
@@ -1863,12 +1885,18 @@ class CCRImage:
         curves = s.get('curves')
         if curves:
             adjusted = apply_curves(adjusted, curves)
-        # An area's own Chroma NR: extra colour smoothing inside its mask, on
-        # top of the global amount (area renders are always whole images).
-        if s.get('chroma_nr', 0):
+        # An area's own Chroma NR / Sharpening: extra, inside its mask, on top
+        # of the global amounts (area renders are always whole images). The
+        # global "Bypass until export" flags govern them too.
+        if nr_live and s.get('chroma_nr', 0):
             adjusted = apply_chroma_denoise(
                 adjusted, s.get('chroma_nr', 0),
                 s.get('chroma_nr_radius', CHROMA_NR_RADIUS_DEFAULT))
+        if sharpen_live and s.get('sharpen_amount', 0):
+            adjusted = apply_unsharp_mask(
+                adjusted, s.get('sharpen_amount', 0),
+                s.get('sharpen_radius', SHARPEN_RADIUS_DEFAULT),
+                s.get('sharpen_threshold', 0))
         return adjusted
 
     def _honours_half_size(self) -> bool:

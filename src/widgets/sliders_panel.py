@@ -7,7 +7,8 @@ from PySide6.QtGui import (QKeySequence, QShortcut, QPainter, QColor,
                            QLinearGradient, QPen)
 from core.ccr_backend import ccr_backend
 from core.ccr_processor import (COLOR_BANDS, BAND_PARAMS, BAND_ADJUSTMENT_KEYS,
-                                compute_density_slopes, CHROMA_NR_RADIUS_DEFAULT)
+                                compute_density_slopes, CHROMA_NR_RADIUS_DEFAULT,
+                                SHARPEN_RADIUS_DEFAULT)
 from core.film_stocks import (decode_film_stocks, encode_film_stocks,
                               find_film_stock, upsert_film_stock,
                               remove_film_stock)
@@ -57,7 +58,10 @@ SYNC_GROUPS = [
     ("balance", "Channel Balance (R/G/B)", ("balance_r", "balance_g", "balance_b")),
     ("bands", "Subtractive Saturations (per color)",
      tuple(BAND_ADJUSTMENT_KEYS) + ("band_feather",)),
-    ("noise", "Chroma Noise Reduction", ("chroma_nr", "chroma_nr_radius")),
+    ("noise", "Chroma Noise Reduction",
+     ("chroma_nr", "chroma_nr_radius", "chroma_nr_export_only")),
+    ("sharpen", "Sharpening",
+     ("sharpen_amount", "sharpen_radius", "sharpen_threshold", "sharpen_export_only")),
     # "curves" lives outside ADJUSTMENT_KEYS (it's a nested structure, not a
     # slider), so it's synced specially in _perform_sync_to_all, like crop.
     ("curves", "Curves", ()),
@@ -154,14 +158,22 @@ _BASIC_LABELS = {
     "ch_input_gain": "Input Gain", "ch_master_shift": "Master Shift",
     "ch_master_gain": "Master Gain",
     "chroma_nr": "Chroma NR Amount", "chroma_nr_radius": "Chroma NR Radius",
+    "sharpen_amount": "Sharpen Amount", "sharpen_radius": "Sharpen Radius",
+    "sharpen_threshold": "Sharpen Threshold",
 }
 _CHANNEL_NAMES = {"r": "Red", "g": "Green", "b": "Blue"}
 _BAND_KEYS = frozenset(BAND_ADJUSTMENT_KEYS) | {"band_feather"}
 _NOISE_KEYS = ("chroma_nr", "chroma_nr_radius")
+_SHARPEN_KEYS = ("sharpen_amount", "sharpen_radius", "sharpen_threshold")
+# Whole-image, non-slider boolean flags stored in the GLOBAL adjustment dict.
+# A slider edit rebuilds that dict from the sliders, so every one of these must
+# be re-attached (_attach_cineon) and preserved by Sync / Paste when its own
+# group isn't being applied. Area layers never carry them.
+GLOBAL_FLAG_KEYS = ("cineon_log", "chroma_nr_export_only", "sharpen_export_only")
 
 # Dialog section order (top to bottom).
 PASTE_SECTIONS = ("Adjustments", "Channel Levels", "Channel Balance",
-                  "Colour", "Noise Reduction", "Geometry")
+                  "Colour", "Detail", "Geometry")
 
 
 def adjustment_label(key):
@@ -193,7 +205,8 @@ def paste_options(clip, default_for):
     rows = []
     adj = clip.get("adjustments") or {}
     for key, val in adj.items():
-        if key in _BAND_KEYS or key in _NOISE_KEYS or val == default_for(key):
+        if (key in _BAND_KEYS or key in _NOISE_KEYS or key in _SHARPEN_KEYS
+                or val == default_for(key)):
             continue
         section = ("Channel Levels" if key.startswith("ch_")
                    else "Channel Balance" if key.startswith("balance_")
@@ -208,13 +221,26 @@ def paste_options(clip, default_for):
         rows.append(("Colour", "curves", "Curves"))
     if any(adj.get(k, default_for(k)) != default_for(k) for k in _BAND_KEYS):
         rows.append(("Colour", "bands", "Subtractive Saturations (all colours)"))
+    flags = clip.get("flags") or {}
+
+    def _n(v):
+        return _fmt_value(v).lstrip("+")
+
     nr = adj.get("chroma_nr", default_for("chroma_nr"))
     if nr != default_for("chroma_nr"):
-        # Amount and Radius travel together: a radius alone does nothing.
+        # Amount, Radius and the bypass flag travel together.
         rad = adj.get("chroma_nr_radius", default_for("chroma_nr_radius"))
-        rows.append(("Noise Reduction", "noise",
-                     f"Chroma Noise Reduction  (amount {_fmt_value(nr).lstrip('+')}, "
-                     f"radius {_fmt_value(rad).lstrip('+')})"))
+        bypass = ", bypass until export" if flags.get("chroma_nr_export_only") else ""
+        rows.append(("Detail", "noise",
+                     f"Chroma Noise Reduction  (amount {_n(nr)}, radius {_n(rad)}{bypass})"))
+    sh = adj.get("sharpen_amount", default_for("sharpen_amount"))
+    if sh != default_for("sharpen_amount"):
+        rad = adj.get("sharpen_radius", default_for("sharpen_radius"))
+        thr = adj.get("sharpen_threshold", default_for("sharpen_threshold"))
+        bypass = ", bypass until export" if flags.get("sharpen_export_only") else ""
+        rows.append(("Detail", "sharpen",
+                     f"Sharpening  (amount {_n(sh)}, radius {_n(rad)}, "
+                     f"threshold {_n(thr)}{bypass})"))
     crop_rect, crop_angle = clip.get("crop") or (None, 0.0)
     if crop_rect is not None:
         w = (crop_rect[2] - crop_rect[0]) * 100.0
@@ -362,6 +388,10 @@ class CollapsibleSection(QWidget):
 
 
 class ResettableSlider(QSlider):
+    # Hold Shift while dragging for fine control: the handle moves this much
+    # slower than the mouse, so single-unit steps are easy to hit.
+    FINE_DRAG_FACTOR = 0.1
+
     def mousePressEvent(self, event):
         option = QStyleOptionSlider()
         self.initStyleOption(option)
@@ -373,8 +403,46 @@ class ResettableSlider(QSlider):
         )
         if handle_rect.contains(event.pos()):
             super().mousePressEvent(event)
+            # Relative drag state: the handle follows mouse MOVEMENT, not the
+            # absolute position, so pressing or releasing Shift mid-drag never
+            # makes it jump.
+            self._drag_x = self._event_x(event)
+            self._drag_value = float(self.value())
         else:
             event.ignore()
+
+    @staticmethod
+    def _event_x(event):
+        pos = event.position() if hasattr(event, "position") else event.pos()
+        return float(pos.x())
+
+    def _units_per_px(self):
+        option = QStyleOptionSlider()
+        self.initStyleOption(option)
+        groove = self.style().subControlRect(
+            QStyle.CC_Slider, option, QStyle.SC_SliderGroove, self)
+        handle = self.style().subControlRect(
+            QStyle.CC_Slider, option, QStyle.SC_SliderHandle, self)
+        span = max(1.0, float(groove.width() - handle.width()))
+        return (self.maximum() - self.minimum()) / span
+
+    def mouseMoveEvent(self, event):
+        if (self.orientation() != Qt.Horizontal or not self.isSliderDown()
+                or getattr(self, "_drag_x", None) is None):
+            super().mouseMoveEvent(event)
+            return
+        x = self._event_x(event)
+        factor = (self.FINE_DRAG_FACTOR
+                  if event.modifiers() & Qt.ShiftModifier else 1.0)
+        self._drag_value += (x - self._drag_x) * self._units_per_px() * factor
+        self._drag_value = min(max(self._drag_value, self.minimum()), self.maximum())
+        self._drag_x = x
+        self.setSliderPosition(int(round(self._drag_value)))
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        self._drag_x = None
+        super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event):
         # Reset to this slider's default (0 for most; create_slider records
@@ -506,6 +574,8 @@ class SlidersPanel(QWidget):
         # Chroma Noise Reduction section, created after the band feather so
         # these stay last in the positional zip. spec/chroma-noise-reduction.md.
         "chroma_nr", "chroma_nr_radius",
+        # Sharpening section (spec/sharpening.md), created last.
+        "sharpen_amount", "sharpen_radius", "sharpen_threshold",
     ]
 
     # Non-zero default values for specific adjustment keys. Keys not listed
@@ -515,7 +585,8 @@ class SlidersPanel(QWidget):
     # partial) adjustment dict, so UI and render agree on the default.
     SLIDER_DEFAULTS = {"band_feather": 10,
                        # mid-range radius; Amount (chroma_nr) 0 = off
-                       "chroma_nr_radius": CHROMA_NR_RADIUS_DEFAULT}
+                       "chroma_nr_radius": CHROMA_NR_RADIUS_DEFAULT,
+                       "sharpen_radius": SHARPEN_RADIUS_DEFAULT}
 
     def _default_for(self, key):
         return self.SLIDER_DEFAULTS.get(key, 0)
@@ -900,6 +971,10 @@ class SlidersPanel(QWidget):
         self.noise_section = CollapsibleSection("Chroma Noise Reduction")
         scroll_layout.addWidget(self.noise_section)
 
+        scroll_layout.addWidget(_section_separator())
+        self.sharpen_section = CollapsibleSection("Sharpening")
+        scroll_layout.addWidget(self.sharpen_section)
+
         # --- Populate Channel Levels (the section widget itself is placed far
         # above, just under the Convert row) ---
         # MUST be created before the band sliders to keep the ADJUSTMENT_KEYS
@@ -1038,11 +1113,34 @@ class SlidersPanel(QWidget):
         self.noise_section.add_layout(
             self.create_slider("Radius", min_value=0, max_value=100,
                                default_value=self._default_for("chroma_nr_radius")))
+        self.nr_bypass_checkbox = self._make_bypass_checkbox(
+            "chroma_nr_export_only", "Chroma noise reduction")
+        self.noise_section.add_widget(self.nr_bypass_checkbox)
         nr_hint = QLabel("Smooths colour blotches only; sharpness and grain "
                          "are untouched. Zoom in to 100% to judge it.")
         nr_hint.setWordWrap(True)
         nr_hint.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 11px;")
         self.noise_section.add_widget(nr_hint)
+
+        # --- Populate Sharpening --- (created last: maps to the trailing
+        # sharpen_* keys). spec/sharpening.md.
+        self.sharpen_section.add_layout(
+            self.create_slider("Amount", min_value=0, max_value=100,
+                               default_value=self._default_for("sharpen_amount")))
+        self.sharpen_section.add_layout(
+            self.create_slider("Radius", min_value=0, max_value=100,
+                               default_value=self._default_for("sharpen_radius")))
+        self.sharpen_section.add_layout(
+            self.create_slider("Threshold", min_value=0, max_value=100,
+                               default_value=self._default_for("sharpen_threshold")))
+        self.sharpen_bypass_checkbox = self._make_bypass_checkbox(
+            "sharpen_export_only", "Sharpening")
+        self.sharpen_section.add_widget(self.sharpen_bypass_checkbox)
+        sh_hint = QLabel("Sharpens brightness only, so no colour fringes. "
+                         "Threshold protects grain. Zoom in to judge it.")
+        sh_hint.setWordWrap(True)
+        sh_hint.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 11px;")
+        self.sharpen_section.add_widget(sh_hint)
 
         # --- Populate Curves ---
         self.curve_editor = CurveEditor()
@@ -1292,6 +1390,13 @@ class SlidersPanel(QWidget):
         self.cineon_checkbox.blockSignals(False)
         self.cineon_checkbox.setEnabled(
             img is not None and img.active_area_id is None)
+        # "Bypass until export" flags: global, like Cineon.
+        for cb, flag in ((self.nr_bypass_checkbox, "chroma_nr_export_only"),
+                         (self.sharpen_bypass_checkbox, "sharpen_export_only")):
+            cb.blockSignals(True)
+            cb.setChecked(bool(img is not None and img.adjustment_settings.get(flag)))
+            cb.blockSignals(False)
+            cb.setEnabled(img is not None and img.active_area_id is None)
 
     def set_current_idx(self, idx):
         # Clear any pending adjustments for the previous image
@@ -1536,9 +1641,12 @@ class SlidersPanel(QWidget):
         so area dicts never carry it."""
         img = (ccr_backend.get_image_by_index(self.current_idx)
                if self.current_idx is not None else None)
-        if (img is not None and img.active_area_id is None
-                and img.adjustment_settings.get("cineon_log")):
-            adjustment["cineon_log"] = True
+        if img is not None and img.active_area_id is None:
+            # Every whole-image flag, not just Cineon: the "Bypass until
+            # export" flags would otherwise vanish on the next slider move.
+            for flag in GLOBAL_FLAG_KEYS:
+                if img.adjustment_settings.get(flag):
+                    adjustment[flag] = True
         return adjustment
 
     def _on_cineon_toggled(self, checked):
@@ -1556,6 +1664,33 @@ class SlidersPanel(QWidget):
             img.adjustment_settings["cineon_log"] = True
         else:
             img.adjustment_settings.pop("cineon_log", None)
+        img.update_thumbnail_and_preview()
+        self.parent().parent().image_preview.update_preview(self.current_idx)
+        self._update_thumb()
+
+    def _make_bypass_checkbox(self, flag, what):
+        cb = QCheckBox("Bypass until export")
+        cb.setToolTip(
+            f"{what} is skipped in the preview, thumbnails and zoomed view, so "
+            "editing stays fast. It is still applied when you export. Copied, "
+            "pasted and synced together with this section's sliders.")
+        cb.toggled.connect(lambda checked, f=flag: self._on_global_flag_toggled(f, checked))
+        return cb
+
+    def _on_global_flag_toggled(self, flag, checked):
+        """A whole-image boolean flag (see GLOBAL_FLAG_KEYS): one undo step on
+        the GLOBAL settings, then re-render — same path as Cineon."""
+        if self.current_idx is None:
+            return
+        img = ccr_backend.get_image_by_index(self.current_idx)
+        if img is None:
+            return
+        self.end_undo_burst()
+        img.push_undo_state()
+        if checked:
+            img.adjustment_settings[flag] = True
+        else:
+            img.adjustment_settings.pop(flag, None)
         img.update_thumbnail_and_preview()
         self.parent().parent().image_preview.update_preview(self.current_idx)
         self._update_thumb()
@@ -1815,9 +1950,9 @@ class SlidersPanel(QWidget):
                 # Same for the Cineon flag when the channels group (which
                 # carries it) is NOT being synced — the rebuild from
                 # adjustment_keys would silently drop it otherwise.
-                if ("cineon_log" not in keys
-                        and img.adjustment_settings.get("cineon_log")):
-                    merged["cineon_log"] = True
+                for flag in GLOBAL_FLAG_KEYS:
+                    if flag not in keys and img.adjustment_settings.get(flag):
+                        merged[flag] = True
                 img.adjustment_settings = merged
             if curves_changes:
                 if src_curves:
@@ -2306,12 +2441,16 @@ class SlidersPanel(QWidget):
             live = {k: g.get(k, self._default_for(k)) for k in self.adjustment_keys}
             if g.get("curves"):
                 live["curves"] = g["curves"]
-            if g.get("cineon_log"):
-                live["cineon_log"] = True
+            for flag in GLOBAL_FLAG_KEYS:
+                if g.get(flag):
+                    live[flag] = True
         self.clipboard = {
             "adjustments": {k: live[k] for k in self.adjustment_keys},
             "curves": copy.deepcopy(live.get("curves")) or None,
             "cineon_log": bool(live.get("cineon_log")),
+            # Bypass-until-export flags ride with their section's paste row.
+            "flags": {f: bool(live.get(f)) for f in GLOBAL_FLAG_KEYS
+                      if f != "cineon_log"},
             "profile": getattr(img, "color_profile", "color") or "color",
             "crop": (img.crop_rect, getattr(img, "crop_angle", 0.0) or 0.0),
             "rotation": int(getattr(img, "rotation_angle", 0) or 0),
@@ -2418,7 +2557,11 @@ class SlidersPanel(QWidget):
             adj_keys += [k for k in self.adjustment_keys if k in _BAND_KEYS]
         if "noise" in chosen:
             adj_keys += [k for k in self.adjustment_keys if k in _NOISE_KEYS]
-        touch_adj = bool(adj_keys) or "curves" in chosen or "cineon_log" in chosen
+        if "sharpen" in chosen:
+            adj_keys += [k for k in self.adjustment_keys if k in _SHARPEN_KEYS]
+        # Section -> its bypass flag (pasted with the section's row).
+        flag_for = {"noise": "chroma_nr_export_only", "sharpen": "sharpen_export_only"}
+        touch_adj = (bool(adj_keys) or "curves" in chosen or "cineon_log" in chosen)
         merged = None
         if touch_adj:
             # Build a COMPLETE dict from the target (missing keys filled with
@@ -2437,9 +2580,17 @@ class SlidersPanel(QWidget):
                 merged["curves"] = target["curves"]
             if "cineon_log" in chosen or target.get("cineon_log"):
                 merged["cineon_log"] = True
+            clip_flags = clip.get("flags") or {}
+            for row, flag in flag_for.items():
+                if row in chosen:
+                    if clip_flags.get(flag):
+                        merged[flag] = True
+                elif target.get(flag):
+                    merged[flag] = True
             if is_current and img.active_area_id is not None:
-                # Cineon is whole-image only — never into an area layer.
-                merged.pop("cineon_log", None)
+                # Whole-image flags never go into an area layer.
+                for flag in GLOBAL_FLAG_KEYS:
+                    merged.pop(flag, None)
             if is_current:
                 for i, key in enumerate(self.adjustment_keys):
                     if i < len(self.sliders):

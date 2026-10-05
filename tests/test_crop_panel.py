@@ -429,3 +429,54 @@ class TestStraightenFineControls:
         assert panel.straighten_slider.value() == 44
         assert abs(panel.straighten_spin.value() - 4.4) < 1e-9
         assert sent == []
+
+
+# --------------------------------------------------------------------------
+# Horizon tool
+# --------------------------------------------------------------------------
+class TestHorizonTool:
+    def test_angle_math(self):
+        from PySide6.QtCore import QPointF as P
+        from widgets.image_preview import ImagePreview as IP
+        assert IP.horizon_angle(P(0, 0), P(100, 0)) == 0.0
+        assert abs(IP.horizon_angle(P(0, 0), P(100, 5)) - 2.862) < 0.01
+        # direction of drawing doesn't matter
+        assert abs(IP.horizon_angle(P(100, 5), P(0, 0)) - 2.862) < 0.01
+        # near-vertical lines level to vertical
+        assert abs(IP.horizon_angle(P(0, 0), P(4, 100)) - (-2.29)) < 0.01
+        assert abs(IP.horizon_angle(P(0, 0), P(-4, 100)) - 2.29) < 0.01
+
+    def _armed(self):
+        ip, host = _make_preview()
+        panel = CropPanel(host, ip)
+        ip.set_crop_panel(panel)                  # _make_preview: crop mode on
+        panel.horizon_btn.setChecked(True)
+        assert ip._horizon_tool
+        return ip, panel
+
+    def test_line_sets_the_straighten_angle_and_disarms(self):
+        ip, panel = self._armed()
+        base = ip._base_transform()
+        a = base.map(QPointF(10, 20))
+        b = base.map(QPointF(110, 25))
+        ip.horizon_press(a)
+        ip.horizon_move(b)
+        assert ip._horizon_line_item is not None
+        ip.horizon_release(b)
+        assert abs(ip._pending_crop_angle - 2.862) < 0.01
+        assert panel.straighten_slider.value() == 29
+        assert not ip._horizon_tool and not panel.horizon_btn.isChecked()
+        assert ip._horizon_line_item is None
+
+    def test_a_click_is_ignored(self):
+        ip, panel = self._armed()
+        p = ip._base_transform().map(QPointF(50, 50))
+        ip.horizon_press(p)
+        ip.horizon_release(p)
+        assert ip._pending_crop_angle == 0.0
+        assert ip._horizon_tool                      # still armed
+
+    def test_leaving_crop_mode_disarms(self):
+        ip, panel = self._armed()
+        ip._exit_crop_mode()                       # every crop exit goes here
+        assert not ip._horizon_tool and not panel.horizon_btn.isChecked()
