@@ -1000,6 +1000,7 @@ class ImagePreview(QWidget):
         self._probe_qimage = None        # cached QImage of current_pixmap
         self._probe_qimage_key = None    # its QPixmap.cacheKey()
         self.scopes_panel.expanded_changed.connect(self._on_scopes_expanded)
+        self.scopes_panel.sample_reference_changed.connect(self._on_sample_area_changed)
 
         self._update_unconvert_action_state()
 
@@ -1294,8 +1295,7 @@ class ImagePreview(QWidget):
             # Apply transformations which will handle fitting consistently
             # (it also redraws the crop/area overlay after the scene.clear()).
             self.apply_transformations()
-            histogram = ccr_backend.get_histogram_data_by_index(idx)
-            self.parent().parent().sliders_panel.set_histogram(histogram)
+            self._push_histogram(idx)
 
             # A confirmed crop magnifies the kept region even at the fitted
             # view, so — like zooming in — request crop-matched hi-res detail
@@ -2130,26 +2130,99 @@ class ImagePreview(QWidget):
 
     def _update_scopes_now(self):
         self._scopes_dirty = False
-        frame = self._capture_display_image()
+        frame = self._capture_display_image(region=self._reference_sample_region())
         if frame is None:
             self.scopes_panel.clear()
         else:
             self.scopes_panel.set_frame(*frame)
 
-    def _capture_display_image(self):
-        """Render the whole pixmap item (the displayed image: crop applied,
-        orientation as shown, hi-res prescale included — zoom/pan excluded)
-        into a small RGBA image; returns (rgb (h,w,3) uint8, mask (h,w) bool)
-        or None. Alpha stays 0 in the corner gaps a fine rotation leaves —
-        the mask excludes them (and the antialiased image edge, which is
-        blended toward transparent and would pollute the low end)."""
+    # --- Sample area (whole image / reference frame) -----------------------
+    # The Scopes header's "Ref frame" toggle points the scopes AND the
+    # histogram at the red reference frame. Strictly read-only: the frame's
+    # rectangle is only read here, never written, and nothing in this path
+    # touches conversion inputs. See spec/scope-sample-area.md.
+
+    HIST_SAMPLE_MAX_W = 512    # capture cap for the reference-frame histogram
+
+    def _reference_sample_region(self):
+        """Scene-space rectangle of the drawn reference frame when the user
+        asked to sample it, else None (= whole image). Uses what is visibly
+        inside the red box, so a fine rotation is reflected exactly as seen.
+        None also when no frame is drawn (e.g. under a rotated crop, where the
+        frame isn't displayed)."""
+        if not self.scopes_panel.samples_reference():
+            return None
+        item = self.reference_rect_item
+        if item is None or item.scene() is None or self.pixmap_item is None:
+            return None
+        region = item.mapRectToScene(item.rect())
+        img_br = self.pixmap_item.mapToScene(
+            self.pixmap_item.boundingRect()).boundingRect()
+        region = region.intersected(img_br)
+        if region.width() < 2 or region.height() < 2:
+            return None
+        return region
+
+    def _sampling_status(self):
+        """(histogram caption, scopes note) for the current sample area."""
+        if not self.scopes_panel.samples_reference():
+            return "", ""
+        if self._reference_sample_region() is not None:
+            return "Ref frame", "reference frame"
+        return "", "whole image (no frame)"
+
+    def _push_histogram(self, idx):
+        """Feed the sliders-panel histogram: the image's own (crop-aware)
+        histogram, or one sampled from the reference frame when that is on."""
+        panel = self.parent().parent().sliders_panel
+        histogram = ccr_backend.get_histogram_data_by_index(idx)
+        region = self._reference_sample_region()
+        if region is not None:
+            frame = self._capture_display_image(region=region,
+                                                max_w=self.HIST_SAMPLE_MAX_W)
+            if frame is not None:
+                rgb, mask = frame
+                px = rgb[mask]
+                if px.size:
+                    histogram = np.stack([
+                        np.bincount(px[:, c], minlength=256)[:256]
+                        for c in range(3)]).astype(np.float32)
+        panel.set_histogram(histogram)
+        caption, note = self._sampling_status()
+        hist_widget = getattr(panel, "histogram", None)
+        if hist_widget is not None and hasattr(hist_widget, "set_caption"):
+            hist_widget.set_caption(caption)
+        self.scopes_panel.set_sampling_note(note)
+
+    def _on_sample_area_changed(self, _checked=None):
+        """Toggle flipped: re-sample both without re-rendering the image."""
+        if self.current_idx is not None and self.pixmap_item is not None:
+            self._push_histogram(self.current_idx)
+        else:
+            self.scopes_panel.set_sampling_note(self._sampling_status()[1])
+        self._schedule_scope_update()
+
+    def _capture_display_image(self, region=None, max_w=None):
+        """Render the displayed image (crop applied, orientation as shown,
+        hi-res prescale included — zoom/pan excluded) into a small RGBA image;
+        returns (rgb (h,w,3) uint8, mask (h,w) bool) or None. Alpha stays 0 in
+        the corner gaps a fine rotation leaves — the mask excludes them (and
+        the antialiased image edge, which is blended toward transparent and
+        would pollute the low end).
+
+        `region` (scene QRectF) limits the capture to that rectangle — the
+        reference frame — instead of the whole item; `max_w` caps the capture
+        width (default SCOPE_CAPTURE_W)."""
         if self.pixmap_item is None or self.current_pixmap is None:
             return None
         br = self.pixmap_item.mapToScene(
             self.pixmap_item.boundingRect()).boundingRect()
+        if region is not None:
+            br = region
         if br.width() <= 0 or br.height() <= 0:
             return None
-        s = min(1.0, self.SCOPE_CAPTURE_W / br.width())
+        cap_w = self.SCOPE_CAPTURE_W if max_w is None else max_w
+        s = min(1.0, cap_w / br.width())
         w = max(1, round(br.width() * s))
         h = max(1, round(br.height() * s))
         img = QImage(w, h, QImage.Format_RGBA8888)
@@ -2189,13 +2262,17 @@ class ImagePreview(QWidget):
             self._probe_qimage = pm.toImage()
             self._probe_qimage_key = pm.cacheKey()
         c = self._probe_qimage.pixelColor(x, y)
-        # Parade x = fraction across the DISPLAYED image (its scene bounds) —
-        # the same horizontal domain the capture renders, zoom/pan-independent.
-        br = self.pixmap_item.mapToScene(
+        # Parade x = fraction across the SAMPLED area (the displayed image's
+        # scene bounds, or the reference frame when sampling it) — the same
+        # horizontal domain the capture renders, zoom/pan-independent.
+        region = self._reference_sample_region()
+        br = region if region is not None else self.pixmap_item.mapToScene(
             self.pixmap_item.boundingRect()).boundingRect()
         x_frac = ((scene_pos.x() - br.left()) / br.width()
                   if br.width() > 0 else 0.0)
-        self.scopes_panel.set_probe(c.red(), c.green(), c.blue(), x_frac)
+        inside = region is None or region.contains(scene_pos)
+        self.scopes_panel.set_probe(c.red(), c.green(), c.blue(), x_frac,
+                                    markers=inside)
 
     def clear_color_probe(self):
         self.scopes_panel.clear_probe()

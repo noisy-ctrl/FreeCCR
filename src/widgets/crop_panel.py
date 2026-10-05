@@ -17,7 +17,8 @@ only changes how they are produced interactively. See spec/crop-panel.md.
 """
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                                QPushButton, QComboBox, QRadioButton,
-                               QButtonGroup, QSpinBox)
+                               QButtonGroup, QSpinBox, QDoubleSpinBox,
+                               QAbstractSpinBox)
 from PySide6.QtCore import Qt, QSettings
 
 from core import crop_aspect
@@ -26,6 +27,9 @@ from ui import theme
 
 
 class CropPanel(QWidget):
+    # Fine straighten step (degrees) for the −/+ buttons and the typed box.
+    STRAIGHTEN_STEP = 0.1
+
     def __init__(self, main_window, image_preview, parent=None):
         super().__init__(parent)
         self.main_window = main_window
@@ -113,12 +117,43 @@ class CropPanel(QWidget):
         self.straighten_slider.setTickPosition(CenteringSlider.TicksBelow)
         self.straighten_slider.setFixedHeight(theme.CONTROL_H)
         self.straighten_slider.valueChanged.connect(self._on_straighten_changed)
-        self.straighten_value = QLabel("+0.0°")
-        self.straighten_value.setFixedWidth(theme.VALUE_COL_W)
         str_row.addWidget(str_lbl)
         str_row.addWidget(self.straighten_slider)
-        str_row.addWidget(self.straighten_value)
         layout.addLayout(str_row)
+
+        # Fine controls: the slider spans 90° over ~200px (~0.4°/px), so a
+        # mouse drag can't land on a tenth. −/+ nudge by STRAIGHTEN_STEP and
+        # the box takes a typed angle (arrow keys in it also step 0.1°).
+        fine_row = QHBoxLayout()
+        fine_row.setSpacing(theme.GAP_TIGHT)
+        fine_row.addSpacing(theme.LABEL_COL_W + theme.GAP_TIGHT)
+        self.straighten_minus_btn = QPushButton("−")
+        self.straighten_plus_btn = QPushButton("+")
+        for btn, step in ((self.straighten_minus_btn, -1),
+                          (self.straighten_plus_btn, +1)):
+            btn.setFixedSize(theme.GLYPH_W, theme.CONTROL_H)
+            btn.setAutoRepeat(True)          # hold to keep nudging
+            btn.setAutoRepeatDelay(350)
+            btn.setAutoRepeatInterval(60)
+            btn.setToolTip(f"Nudge the straighten angle by "
+                           f"{'−' if step < 0 else '+'}{self.STRAIGHTEN_STEP:.1f}°")
+            btn.clicked.connect(lambda _=False, s=step: self._nudge_straighten(s))
+        self.straighten_spin = QDoubleSpinBox()
+        self.straighten_spin.setRange(-45.0, 45.0)
+        self.straighten_spin.setDecimals(1)
+        self.straighten_spin.setSingleStep(self.STRAIGHTEN_STEP)
+        self.straighten_spin.setSuffix("°")
+        self.straighten_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
+        self.straighten_spin.setAlignment(Qt.AlignCenter)
+        self.straighten_spin.setFixedHeight(theme.CONTROL_H)
+        self.straighten_spin.setKeyboardTracking(False)   # apply on Enter / focus-out
+        self.straighten_spin.setToolTip(
+            "Type an exact angle, or use the arrow keys to step 0.1°.")
+        self.straighten_spin.valueChanged.connect(self._on_straighten_typed)
+        fine_row.addWidget(self.straighten_minus_btn)
+        fine_row.addWidget(self.straighten_spin, 1)
+        fine_row.addWidget(self.straighten_plus_btn)
+        layout.addLayout(fine_row)
 
         hint = QLabel(
             "Drag on the image to draw a box; drag handles to resize, the top "
@@ -173,7 +208,7 @@ class CropPanel(QWidget):
         v = int(round(max(-45.0, min(45.0, ang)) * 10))
         self._suppress = True
         self.straighten_slider.setValue(v)
-        self.straighten_value.setText(f"{v / 10.0:+.1f}°")
+        self._set_spin_quietly(v / 10.0)
         self._suppress = False
 
     def current_display_ratio(self, pixmap=None):
@@ -218,10 +253,27 @@ class CropPanel(QWidget):
         self._apply_ratio_now()
 
     def _on_straighten_changed(self, value):
-        self.straighten_value.setText(f"{value / 10.0:+.1f}°")
+        self._set_spin_quietly(value / 10.0)
         if self._suppress:
             return
         self.image_preview.set_pending_straighten(value / 10.0)
+
+    def _set_spin_quietly(self, degrees):
+        """Mirror the slider into the typed box without re-entering it."""
+        self.straighten_spin.blockSignals(True)
+        self.straighten_spin.setValue(degrees)
+        self.straighten_spin.blockSignals(False)
+
+    def _on_straighten_typed(self, degrees):
+        """Typed / arrow-keyed angle -> the slider (which drives the canvas)."""
+        self.straighten_slider.setValue(int(round(degrees * 10)))
+
+    def _nudge_straighten(self, direction):
+        """−/+ buttons: step the angle by STRAIGHTEN_STEP (slider units are
+        tenths of a degree, so one step is one slider unit)."""
+        step = int(round(self.STRAIGHTEN_STEP * 10)) * direction
+        s = self.straighten_slider
+        s.setValue(max(s.minimum(), min(s.maximum(), s.value() + step)))
 
     def _on_reset(self):
         self.image_preview.reset_pending_crop()

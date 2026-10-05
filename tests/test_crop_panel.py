@@ -381,3 +381,51 @@ class TestCropPanelWidget:
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# --------------------------------------------------------------------------
+# Straighten fine controls: −/+ nudge and the typed angle box
+# --------------------------------------------------------------------------
+class TestStraightenFineControls:
+    def _panel(self, monkeypatch):
+        ip, host = _make_preview()
+        panel = CropPanel(host, ip)
+        ip.set_crop_panel(panel)
+        sent = []
+        monkeypatch.setattr(ip, "set_pending_straighten", sent.append)
+        return panel, ip, sent
+
+    def test_plus_minus_step_a_tenth(self, monkeypatch):
+        panel, _ip, sent = self._panel(monkeypatch)
+        panel.straighten_plus_btn.click()
+        assert panel.straighten_slider.value() == 1
+        assert sent[-1] == 0.1
+        panel.straighten_minus_btn.click()
+        panel.straighten_minus_btn.click()
+        assert panel.straighten_slider.value() == -1
+        assert abs(panel.straighten_spin.value() - (-0.1)) < 1e-9
+
+    def test_nudge_clamps_at_the_ends(self, monkeypatch):
+        panel, _ip, _sent = self._panel(monkeypatch)
+        panel.straighten_slider.setValue(450)
+        panel.straighten_plus_btn.click()
+        assert panel.straighten_slider.value() == 450
+
+    def test_typed_angle_drives_the_slider(self, monkeypatch):
+        panel, _ip, sent = self._panel(monkeypatch)
+        panel.straighten_spin.setValue(2.3)
+        assert panel.straighten_slider.value() == 23
+        assert abs(sent[-1] - 2.3) < 1e-9
+
+    def test_slider_mirrors_into_the_box(self, monkeypatch):
+        panel, _ip, _sent = self._panel(monkeypatch)
+        panel.straighten_slider.setValue(-127)
+        assert abs(panel.straighten_spin.value() - (-12.7)) < 1e-9
+
+    def test_canvas_sync_does_not_echo_back(self, monkeypatch):
+        panel, ip, sent = self._panel(monkeypatch)
+        ip._pending_crop_angle = 4.4
+        panel.on_crop_geometry_changed()
+        assert panel.straighten_slider.value() == 44
+        assert abs(panel.straighten_spin.value() - 4.4) < 1e-9
+        assert sent == []
