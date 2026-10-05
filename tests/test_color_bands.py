@@ -269,10 +269,12 @@ class TestUIWiring:
     def test_adjustment_keys_include_bands_in_order(self):
         from widgets.sliders_panel import SlidersPanel
         keys = SlidersPanel.ADJUSTMENT_KEYS
-        # The global band feather amount is the trailing key; the per-band
-        # keys appear in order immediately before it.
-        assert keys[-1] == "band_feather"
-        assert keys[-1 - len(BAND_ADJUSTMENT_KEYS):-1] == list(BAND_ADJUSTMENT_KEYS)
+        # The global band feather follows the per-band keys (which appear in
+        # order immediately before it); only the Chroma NR keys come after.
+        fi = keys.index("band_feather")
+        assert keys[fi + 1:] == ["chroma_nr", "chroma_nr_radius", "sharpen_amount",
+                                 "sharpen_radius", "sharpen_masking"]
+        assert keys[fi - len(BAND_ADJUSTMENT_KEYS):fi] == list(BAND_ADJUSTMENT_KEYS)
         assert len(BAND_ADJUSTMENT_KEYS) == len(COLOR_BANDS) * len(BAND_PARAMS)
 
     def test_panel_slider_count_matches_keys(self):

@@ -2857,6 +2857,126 @@ def compute_neutral_temp_tint(r: float, g: float, b: float,
     return int(round(temp_slider)), int(round(tint_slider))
 
 
+# --- Chroma noise reduction (spec/chroma-noise-reduction.md) ---
+# Smooths COLOUR noise only: the image is split into luma (Y) and two colour
+# differences (B−Y, R−Y); the differences are smoothed with a guided filter that
+# uses Y as its guide, then recombined. Luma — and so all sharpness and grain
+# structure — is left bit-for-bit alone, and because the guide is luma, colour
+# stays put wherever there is a brightness edge (no colour bleeding across
+# edges). Spatial, so it runs on whole images only (never on sample patches).
+#
+# Resolution independence: the radius is a FRACTION of the image's long side,
+# so the preview, the zoom hi-res render and a full-size export all apply the
+# same physical amount of smoothing. At preview size the radius is only a few
+# pixels — like any NR, judge it zoomed in.
+CHROMA_NR_RADIUS_MIN = 0.0005   # radius slider 0   -> fraction of long side
+CHROMA_NR_RADIUS_MAX = 0.0060   # radius slider 100 -> (~36 px on a 6000 px scan)
+CHROMA_NR_EPS = 1e-3            # guided-filter regulariser (luma variance units)
+CHROMA_NR_EDGE_K = 3.0          # colour changes beyond K × the noise level are edges
+CHROMA_NR_RADIUS_DEFAULT = 50
+
+
+def chroma_nr_radius_px(radius_slider: float, long_side: int) -> float:
+    """Radius in pixels for a 0..100 radius slider on an image of `long_side`."""
+    t = min(max(float(radius_slider), 0.0), 100.0) / 100.0
+    frac = CHROMA_NR_RADIUS_MIN + (CHROMA_NR_RADIUS_MAX - CHROMA_NR_RADIUS_MIN) * t
+    return frac * float(long_side)
+
+
+# RGB (0..65535) -> [Y, B−Y, R−Y] (0..1) and back. Y uses the same Rec.601
+# weights as the Saturation slider. One cv2.transform pass each way.
+_YCC_FWD = (np.array([[0.299, 0.587, 0.114],
+                      [-0.299, -0.587, 0.886],
+                      [0.701, -0.587, -0.114]], dtype=np.float32) / 65535.0)
+_YCC_INV = (np.linalg.inv(_YCC_FWD.astype(np.float64) * 65535.0) * 65535.0
+            ).astype(np.float32)
+
+
+def apply_chroma_denoise(img16: np.ndarray, amount: float,
+                         radius: float = CHROMA_NR_RADIUS_DEFAULT) -> np.ndarray:
+    """Chroma noise reduction on a uint16 RGB image. `amount` 0..100 blends the
+    smoothed colour in (0 = identity, returned untouched); `radius` 0..100 sets
+    the smoothing size relative to the image. Luma is preserved exactly (up to
+    the final clip/quantisation). Returns uint16.
+
+    Fast guided filter (He & Sun 2015) with luma as the guide: the per-window
+    linear coefficients are solved on a subsampled grid and upsampled, so the
+    cost is ~linear in pixels whatever the radius. Colour is smooth enough that
+    subsampling by at least 2 is invisible, which keeps preview renders cheap."""
+    amount = float(amount or 0.0)
+    if amount <= 0.0 or img16 is None or img16.ndim != 3 or img16.shape[2] < 3:
+        return img16
+    h, w = img16.shape[:2]
+    r = chroma_nr_radius_px(radius, max(h, w))
+    if r < 1.0:
+        return img16        # sub-pixel at this size: nothing meaningful to do
+    t = min(amount, 100.0) / 100.0
+    extra = img16[..., 3:] if img16.shape[2] > 3 else None
+    rgb = img16[..., :3].astype(np.float32)
+    ycc = cv2.transform(rgb, _YCC_FWD)                  # HxWx3 [Y, cb, cr]
+    del rgb
+
+    s = max(2, int(r // 4))                              # low-res radius ~4 px
+    sw, sh = max(1, w // s), max(1, h // s)
+    small = cv2.resize(ycc, (sw, sh), interpolation=cv2.INTER_AREA)
+    rs = max(1, int(round(r / s)))
+    k = (2 * rs + 1, 2 * rs + 1)
+
+    def box(x):
+        return cv2.boxFilter(x, -1, k, normalize=True, borderType=cv2.BORDER_REFLECT)
+
+    g = np.ascontiguousarray(small[..., 0])
+    p = np.ascontiguousarray(small[..., 1:])            # sh x sw x 2 (cb, cr)
+    mean_g = box(g)
+    var_g = box(g * g) - mean_g * mean_g + np.float32(CHROMA_NR_EPS)
+    mean_p = box(p)
+    cov = box(p * g[..., None]) - mean_p * mean_g[..., None]
+    a = cov / var_g[..., None]
+    b = mean_p - a * mean_g[..., None]
+    coef = np.concatenate([box(a), box(b)], axis=-1)    # a_cb a_cr b_cb b_cr
+    coef = cv2.resize(coef, (w, h), interpolation=cv2.INTER_LINEAR)
+
+    Y, cb, cr = cv2.split(ycc)
+    del ycc
+    # Proposed change per colour channel: d = (aY + b) − c.
+    a_cb, a_cr, b_cb, b_cr = cv2.split(coef)
+    del coef
+    d_cb = cv2.add(cv2.multiply(a_cb, Y), b_cb)
+    d_cr = cv2.add(cv2.multiply(a_cr, Y), b_cr)
+    del a_cb, a_cr, b_cb, b_cr
+    d_cb = cv2.subtract(d_cb, cb)
+    d_cr = cv2.subtract(d_cr, cr)
+
+    # Edge protection. A colour edge with little brightness contrast (red on
+    # green of similar lightness) is invisible to a luma guide, so the filter
+    # would bleed colour across it. Noise only ever needs a change about the
+    # size of the noise itself; a change far beyond that is real colour being
+    # smeared. The noise level is measured per image (robust MAD of the change
+    # on a sparse grid, so it adapts to preview vs. full-size renders), and the
+    # change is faded out smoothly above CHROMA_NR_EDGE_K × that level.
+    mag = cv2.magnitude(d_cb, d_cr)
+    step = max(1, int(np.sqrt(mag.size / 250_000)))
+    sigma = 1.4826 * float(np.median(mag[::step, ::step]))
+    tau = max(CHROMA_NR_EDGE_K * sigma, 1e-5)
+    cv2.multiply(mag, mag, dst=mag, scale=-1.0 / (tau * tau))
+    keep = cv2.exp(mag)                                  # 1 for noise, →0 at edges
+    del mag
+    keep *= np.float32(t)
+    cb = cv2.add(cb, cv2.multiply(d_cb, keep))
+    cr = cv2.add(cr, cv2.multiply(d_cr, keep))
+    del d_cb, d_cr, keep
+    out = cv2.transform(cv2.merge([Y, cb, cr]), _YCC_INV)   # back to 0..65535
+    del Y, cb, cr
+    # np.clip, not cv2.min/max: OpenCV reads a bare scalar as (v, 0, 0, 0),
+    # which would clamp green and blue to zero.
+    np.clip(out, 0.0, 65535.0, out=out)
+    out += np.float32(0.5)
+    result = out.astype(np.uint16)
+    if extra is not None:
+        result = np.concatenate([result, extra], axis=-1)
+    return result
+
+
 # --- Vibrance (spec/vibrance.md) ---
 # A saturation control weighted by how saturated each pixel ALREADY is: muted
 # colours move the most, strongly saturated ones barely move, neutrals never
