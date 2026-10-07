@@ -155,6 +155,24 @@ class CropPanel(QWidget):
         fine_row.addWidget(self.straighten_plus_btn)
         layout.addLayout(fine_row)
 
+        # Horizon tool: arm, then drag a line along something that should be
+        # level (or vertical); the box straightens to it. One-shot.
+        hz_row = QHBoxLayout()
+        hz_row.setSpacing(theme.GAP_TIGHT)
+        hz_row.addSpacing(theme.LABEL_COL_W + theme.GAP_TIGHT)
+        self.horizon_btn = QPushButton("Draw Horizon")
+        self.horizon_btn.setCheckable(True)
+        self.horizon_btn.setFixedHeight(theme.CONTROL_H)
+        self.horizon_btn.setToolTip(
+            "Click, then drag a line on the image along something that should "
+            "be level, like the horizon (or vertical, like a building edge). "
+            "The crop straightens to match. Fine-tune with −/+ afterwards.")
+        theme.style_button(self.horizon_btn, "secondary")
+        self.horizon_btn.toggled.connect(self.image_preview.set_horizon_tool)
+        self.horizon_btn.toggled.connect(self._sync_horizon_text)
+        hz_row.addWidget(self.horizon_btn, 1)
+        layout.addLayout(hz_row)
+
         hint = QLabel(
             "Drag on the image to draw a box; drag handles to resize, the top "
             "knob (or the slider above) to straighten, the center to move. "
@@ -257,6 +275,20 @@ class CropPanel(QWidget):
         if self._suppress:
             return
         self.image_preview.set_pending_straighten(value / 10.0)
+
+    HORIZON_IDLE_TEXT = "Draw Horizon"
+    HORIZON_ARMED_TEXT = "Drag a line on the image…"
+
+    def _sync_horizon_text(self, armed):
+        self.horizon_btn.setText(self.HORIZON_ARMED_TEXT if armed
+                                 else self.HORIZON_IDLE_TEXT)
+
+    def set_horizon_armed(self, armed):
+        """Canvas -> panel: reflect the tool state without re-entering it."""
+        self.horizon_btn.blockSignals(True)
+        self.horizon_btn.setChecked(bool(armed))
+        self.horizon_btn.blockSignals(False)
+        self._sync_horizon_text(bool(armed))
 
     def _set_spin_quietly(self, degrees):
         """Mirror the slider into the typed box without re-entering it."""

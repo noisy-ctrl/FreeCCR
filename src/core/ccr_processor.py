@@ -987,7 +987,8 @@ def ccr_normalize_with_reference(ccr_image,output_path=None,jpg_out=False,jpg_qu
     # --- apply user adjustments --- only when outputting
     step_start = time.time()
     if output_path is not None:  # this is for processing
-        rgb_brightness_normalized=ccr_image.apply_adjustments(rgb_brightness_normalized)
+        rgb_brightness_normalized=ccr_image.apply_adjustments(
+            rgb_brightness_normalized, for_export=True)
     print(f"User adjustments: {time.time() - step_start:.3f}s")
 
     # --- End of user adjustments ---
@@ -2023,7 +2024,8 @@ def ccr_normalize_with_bwpoint(ccr_image, black_point_bgr=None, white_point_bgr=
         # so a never-converted image's live state stays untouched.
         rgb_result = ccr_image.apply_adjustments(rgb_result, contrast_base=0,
                                                  temperature_base=0,
-                                                 ws_windowed=ws)
+                                                 ws_windowed=ws,
+                                                 for_export=True)
         # White the sprocket holes / clear film as the last look step — after all
         # adjustments, before the geometric block (same un-rotated space as the
         # preview overlay, so it is WYSIWYG). Gated on the live toggle; deferred
@@ -2080,7 +2082,7 @@ def ccr_export_positive(ccr_image, output_path=None, jpg_out=False,
     if output_path is None:
         return ccr_image.apply_adjustments(img)
 
-    rgb_result = ccr_image.apply_adjustments(img)
+    rgb_result = ccr_image.apply_adjustments(img, for_export=True)
 
     # User crop (normalized rect in un-rotated/un-flipped space) — applied
     # before flips/rotation so it matches the cropped preview orientation.
@@ -2122,7 +2124,7 @@ def ccr_normalize_with_refparams(ccr_image, p_lo, p_hi, od_factors,
         return rgb_result
 
     # --- Export path: adjustments, crop, flips, rotation, write ---
-    rgb_result = ccr_image.apply_adjustments(rgb_result)
+    rgb_result = ccr_image.apply_adjustments(rgb_result, for_export=True)
     rgb_result = apply_crop_to_image(rgb_result, getattr(ccr_image, 'crop_rect', None),
                                      getattr(ccr_image, 'crop_angle', 0.0))
 
