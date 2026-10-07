@@ -14,7 +14,9 @@ face.
 
 ## UX
 
-- A checkable **Ref frame** button in the Scopes header, persisted in
+- A checkable **Ref frame metering** button in the Scopes header (tooltip:
+  constrains the scopes and histogram to the red dotted conversion reference
+  frame, excluding the film borders and beyond), persisted in
   QSettings (`scopes/sample_reference`, default off). It works with the scopes
   collapsed, because the histogram follows it too.
 - While sampling the frame, the header reads `Scopes · reference frame` and

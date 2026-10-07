@@ -20,8 +20,11 @@ Two lines under the Step 3 controls row, updated live with "Valid patches"
   (red, < 20 %). Low/near verdicts give the stops to the 75 % target.
 - **Light balance**: the profile's largest WB boost. <= 1.25x: "even".
   Otherwise the boosted channel, the factor, and the raw level above which
-  scans clip (1/boost); the advice turns green when Prevent channel clipping
-  is ticked.
+  scans clip (1/boost). The advice leads with the better fix (more light or
+  exposure on that channel) and offers Prevent channel clipping
+  (experimental) second; when that is ticked it turns green but still names
+  the better fix. The two lines are separate paragraphs with a 6 px gap, so a
+  wrapped Exposure line doesn't run into Light balance.
 - Tooltip: what each verdict means and what to do; for trichrome, that
   changing ONE photo's exposure changes the recorded balance (scan negatives
   with the same change), while changing all three equally keeps it.

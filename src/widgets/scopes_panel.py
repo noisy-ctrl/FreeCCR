@@ -370,14 +370,15 @@ class ScopesPanel(QWidget):
 
         # Sample-area toggle. Read-only use of the reference frame: it never
         # writes the frame or touches any conversion input.
-        self._sample_btn = QPushButton("Ref frame")
+        self._sample_btn = QPushButton("Ref frame metering")
         self._sample_btn.setCheckable(True)
         self._sample_btn.setChecked(sample_ref)
         self._sample_btn.setToolTip(
-            "Sample the scopes and histogram from the red reference frame "
-            "(right-drag on the image) instead of the whole image. Only reads "
-            "the frame; it does not affect conversion. With no frame drawn, "
-            "the whole image is used.")
+            "Constrains the scopes (waveform and vectorscope) and the histogram "
+            "to the red dotted conversion reference frame (right-drag on the "
+            "image), so the film borders and anything beyond them are left "
+            "out. Only reads the frame; it does not affect conversion. With no "
+            "frame drawn, the whole image is used.")
         self._sample_btn.setStyleSheet(
             "QPushButton { padding: 2px 8px; "
             f"background: {theme.SURFACE}; border: 1px solid {theme.BORDER}; "

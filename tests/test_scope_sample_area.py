@@ -180,3 +180,12 @@ class TestProbe:
         assert "R  10" in ip.scopes_panel._readout.text()
         ip.scopes_panel.set_probe(10, 20, 30, 0.5)
         assert ip.scopes_panel.parade._probe is not None
+
+
+class TestButton:
+    def test_label_and_tooltip(self):
+        from widgets.scopes_panel import ScopesPanel
+        btn = ScopesPanel()._sample_btn
+        assert btn.text() == "Ref frame metering"
+        tip = btn.toolTip()
+        assert "film borders" in tip and "does not affect conversion" in tip
