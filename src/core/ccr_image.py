@@ -15,6 +15,7 @@ from core.ccr_processor import (adjust_image, adjust_image_opencl,
                                 BAND_ADJUSTMENT_KEYS, apply_curves,
                                 apply_sharpening,
                                 apply_chroma_denoise, CHROMA_NR_RADIUS_DEFAULT,
+                                apply_density_crosstalk, crosstalk_applies,
                                 apply_gamma_curve,
                                 apply_area_layers, apply_crop_to_image,
                                 apply_dust_removal, DUST_FEATHER_DEFAULT,
@@ -1715,6 +1716,12 @@ class CCRImage:
         if not skip_dust:
             image = self._apply_dust_removal(image, ws_windowed=ws)
         s = self.adjustment_settings if settings is None else settings
+        # Density crosstalk (spec/density-crosstalk.md): on a density base the
+        # windowed values are optical density above the measured film base, so
+        # a rows-sum-to-1 mix here keeps the base and every neutral unchanged.
+        # First, so Auto Gain and Channel Levels see the corrected base.
+        if ws and crosstalk_applies(getattr(self, "conversion_inputs", None)):
+            image = apply_density_crosstalk(image, s)
         cb = self.contrast_base if contrast_base is None else contrast_base
         tb = self.temperature_base if temperature_base is None else temperature_base
         bb = self.brightness_base if brightness_base is None else brightness_base
