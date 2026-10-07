@@ -82,8 +82,48 @@ class TestAssess:
         assert fracs[:, 2].max() == pytest.approx(1.0) and fracs[:, 0].max() == 0.0
 
 
+class TestShutter:
+    def _ch(self, peak, status="good"):
+        return it8.ChannelExposure("Red", peak, 0, status,
+                                   float(np.log2(it8.IDEAL_PEAK / peak)))
+
+    def test_nearest_shutter(self):
+        assert it8.nearest_shutter(0.1)[1] == "1/10"
+        assert it8.nearest_shutter(0.62)[1] == "0.6"
+        assert it8.nearest_shutter(1 / 7.5)[1] == "1/8"
+
+    @pytest.mark.parametrize("peak,expected", [
+        (0.199, "0.4"), (0.52, "1/8"), (0.968, "1/13"),     # earlier chart
+        (0.12, "0.6"), (0.33, "1/4"), (0.75, "1/10"),       # today's chart
+    ])
+    def test_suggestions_from_1_10(self, peak, expected):
+        s, label = it8.suggest_shutter(0.1, self._ch(peak))
+        assert label == expected
+        assert peak * s / 0.1 <= it8.IDEAL_PEAK * 2 ** (1 / 6) + 1e-9
+
+    def test_clipped_goes_a_stop_shorter(self):
+        assert it8.suggest_shutter(0.1, self._ch(0.99, "clipped"))[1] == "1/20"
+
+    def test_predicted_boost_drops(self):
+        r = assess_capture(_samples((0.199, 0.52, 0.968)), _Ref(["GS0", "A1"]))
+        ratios = [it8.suggest_shutter(0.1, c)[0] / 0.1 for c in r.channels]
+        assert r.boost > 2.5 and it8.predicted_boost(r, ratios) < 1.3
+
+    def test_reads_raf_exif(self):
+        p = "/mnt/user-data/uploads/DSCF1517.RAF"
+        if not os.path.exists(p):
+            pytest.skip("sample RAF not available")
+        assert it8.read_shot_exposure(p) == (pytest.approx(0.1), 400)
+
+    def test_unreadable_file(self, tmp_path):
+        f = tmp_path / "x.raw"
+        f.write_bytes(b"not an image")
+        assert it8.read_shot_exposure(str(f)) == (None, None)
+        assert it8.read_shot_exposure(str(tmp_path / "missing.raf")) == (None, None)
+
+
 class TestDialog:
-    def _dlg(self, white):
+    def _dlg(self, white, shutters=(0.1, 0.1, 0.1), iso=400):
         from PySide6.QtWidgets import QApplication
         QApplication.instance() or QApplication(sys.argv[:1])
         from PySide6.QtCore import QSettings
@@ -91,6 +131,7 @@ class TestDialog:
         self._old = QSettings("FreeCCR", "FreeCCR").value("it8/no_clip", False, type=bool)
         d = IT8ProfileDialog()
         d._target_merge = ["/x/R1.RAF", "/x/G1.RAF", "/x/B1.RAF"]
+        d._exposure_cache = {p: (t, iso) for p, t in zip(d._target_merge, shutters)}
         d._capture_report = assess_capture(_samples(white), _Ref(["GS0", "A1"]))
         return d
 
@@ -99,34 +140,59 @@ class TestDialog:
         if hasattr(self, "_old"):
             QSettings("FreeCCR", "FreeCCR").setValue("it8/no_clip", self._old)
 
-    def test_lines_name_each_photo(self):
+    def test_lines_name_each_photo_with_speeds(self):
         d = self._dlg((0.199, 0.52, 0.968))
         d.no_clip_check.setChecked(False)
         d._render_capture_report()
         t = d.capture_label.text()
-        assert "Red photo (R1.RAF): 20%" in t and "underexposed (+1.9 stops)" in t
-        assert "Green photo (G1.RAF): 52%" in t and "good" in t
-        assert "Blue photo (B1.RAF): 97%" in t and "close to clipping" in t
+        assert "<b>Exposure</b> (ISO 400)" in t
+        assert "Red photo (R1.RAF): 20% at 1/10 s, underexposed. Suggested: 0.4 s." in t
+        assert "Green photo (G1.RAF): 52% at 1/10 s, good. Suggested: 1/8 s." in t
+        assert "Blue photo (B1.RAF): 97% at 1/10 s, close to clipping. Suggested: 1/13 s." in t
         assert "boosts red 2.6" in t and "above 38%" in t
-        assert "Best fix: give red more light" in t
-        assert "Prevent channel clipping (experimental)" in t
-        assert t.count("<p ") == 2 and "margin:0 0 6px 0" in t     # gap between lines
-        assert "same change" in d.capture_label.toolTip()
+        assert "With the suggested speeds that boost would be about" in t
+        assert "If you can't reshoot, Prevent channel clipping (experimental) is a fallback" in t
+        assert "same three speeds" in t
+        assert "color:" not in t                         # no traffic lights
+        assert t.count("<p ") == 2 and "margin:0 0 6px 0" in t
 
-    def test_ticking_the_box_updates_the_advice(self):
+    def test_keep_when_already_right(self):
+        d = self._dlg((0.75, 0.74, 0.76))
+        d._render_capture_report()
+        t = d.capture_label.text()
+        assert t.count("Keep 1/10 s.") == 3 and "even" in t
+
+    def test_ticked_is_a_fallback_not_a_success(self):
         d = self._dlg((0.199, 0.52, 0.968))
         d.no_clip_check.setChecked(False)
         d.no_clip_check.setChecked(True)               # toggling re-renders
         t = d.capture_label.text()
-        assert "is ticked, so scans won't clip" in t and "still the better fix" in t
+        assert "is ticked as a fallback" in t and "color:" not in t
 
-    def test_single_photo_wording(self):
-        d = self._dlg((0.6, 0.62, 0.61))
-        d._target_merge = None
+    def test_mixed_iso_shown_per_photo(self):
+        d = self._dlg((0.199, 0.52, 0.968))
+        d._exposure_cache["/x/R1.RAF"] = (0.1, 200)
         d._render_capture_report()
         t = d.capture_label.text()
-        assert "Red channel" in t and "photo (" not in t
-        assert "even" in t
+        assert "<b>Exposure</b><br>" in t and ", ISO 200." in t
+
+    def test_without_exif_falls_back_to_stops(self):
+        d = self._dlg((0.199, 0.52, 0.968), shutters=(None, None, None), iso=None)
+        d._render_capture_report()
+        t = d.capture_label.text()
+        assert "Suggested: +1.9 stops." in t
+        assert "With the suggested speeds" not in t
+
+    def test_single_photo_wording(self):
+        d = self._dlg((0.6, 0.62, 0.97))
+        d._target_merge = None
+        d._target_path = "/x/shot.RAF"
+        d._exposure_cache = {"/x/shot.RAF": (1 / 60, 100)}
+        d._render_capture_report()
+        t = d.capture_label.text()
+        assert "Red channel: 60%, good" in t and "photo (" not in t
+        assert "Whole shot (currently 1/60 s): Suggested: 1/80 s." in t
+        assert "same three speeds" not in t
 
     def test_cleared_without_an_image(self):
         d = self._dlg((0.6, 0.62, 0.61))
