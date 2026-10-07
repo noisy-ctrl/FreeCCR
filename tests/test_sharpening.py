@@ -150,7 +150,7 @@ def test_keys_are_last_so_the_positional_zip_is_unchanged():
     assert keys[-3:] == ["sharpen_amount", "sharpen_radius", "sharpen_masking"]
     # Chroma Noise Reduction's keys sit just before them (spec/chroma-noise-reduction.md).
     assert keys[-5:-3] == ["chroma_nr", "chroma_nr_radius"]
-    assert keys[-6] == "band_feather"
+    assert keys[-6] == "xt_bg"          # Crosstalk Correction (spec/density-crosstalk.md)
 
 
 def test_panel_has_one_slider_per_key_in_order():

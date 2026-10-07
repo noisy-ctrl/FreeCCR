@@ -1249,6 +1249,60 @@ def encode_window(d: np.ndarray) -> np.ndarray:
     return code.astype(np.uint16)
 
 
+# --- Density crosstalk correction (spec/density-crosstalk.md) ---------------
+# Slider key -> (output channel, source channel). Coefficient = slider / 200.
+CROSSTALK_KEYS = (("xt_rg", 0, 1), ("xt_rb", 0, 2), ("xt_gr", 1, 0),
+                  ("xt_gb", 1, 2), ("xt_br", 2, 0), ("xt_bg", 2, 1))
+CROSSTALK_DIV = 200.0
+
+
+def crosstalk_matrix(settings) -> "np.ndarray | None":
+    """The 3x3 density mix for the six crosstalk sliders, rows summing to 1
+    (so the film base and every neutral are unchanged), or None when all six
+    are 0 (identity: nothing to do)."""
+    c = np.zeros((3, 3), dtype=np.float64)
+    for key, i, j in CROSSTALK_KEYS:
+        c[i, j] = float((settings or {}).get(key, 0) or 0) / CROSSTALK_DIV
+    if not c.any():
+        return None
+    m = c.copy()
+    m[np.diag_indices(3)] = 1.0 - c.sum(axis=1)
+    return m
+
+
+def crosstalk_applies(conversion_inputs) -> bool:
+    """True when the converted base is optical density above a MEASURED film
+    base (so the base sits at 0): a B/W-point conversion with a black point and
+    either no white point (black-point-only, always density) or the Density
+    toggle on. Reference-frame (linear), two-point linear and no-anchor
+    conversions are not."""
+    ci = conversion_inputs or {}
+    if ci.get("mode") != "bw":
+        return False
+    bw = ci.get("bw") or (None, None)
+    black = bw[0] if len(bw) > 0 else None
+    white = bw[1] if len(bw) > 1 else None
+    if black is None:
+        return False
+    return white is None or bool(ci.get("density", False))
+
+
+def apply_density_crosstalk(img16: np.ndarray, settings) -> np.ndarray:
+    """Apply the crosstalk mix to a WINDOWED density base (uint16 codes).
+    Returns the input untouched when the sliders are all 0."""
+    m = crosstalk_matrix(settings)
+    if m is None or img16 is None or img16.ndim != 3 or img16.shape[2] < 3:
+        return img16
+    d = img16[..., :3].astype(np.float32)
+    d -= np.float32(WS_B)
+    d *= np.float32(_WS_INV_WIDTH)                  # display density, 0 = film base
+    d = cv2.transform(d, m.astype(np.float32))      # per pixel: m @ [r, g, b]
+    out = encode_window(d)
+    if img16.shape[2] > 3:
+        out = np.concatenate([out, img16[..., 3:]], axis=-1)
+    return out
+
+
 _WB_TEMP_STRENGTH = 0.40   # full-slider R/B scale: s = (slider/100)*0.40 (matches
                            #   the previous tone-aware WB midtone strength)
 _WB_TINT_STRENGTH = 0.26   # = 0.18 * skin(0.45): the previous tint midtone strength

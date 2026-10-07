@@ -172,7 +172,7 @@ class TestSyncGroups:
         from widgets.sliders_panel import SYNC_GROUPS
         assert [gid for gid, _l, _k in SYNC_GROUPS] == [
             "profile", "wb", "tone", "sat", "crop", "orientation",
-            "channels", "balance", "bands", "noise", "details", "curves"]
+            "crosstalk", "channels", "balance", "bands", "noise", "details", "curves"]
 
 
 def _stub_image():

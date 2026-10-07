@@ -43,6 +43,8 @@ SYNC_GROUPS = [
     # edge, and the straighten a user sets rides "crop" as the crop angle.
     # See spec/orientation-sync-group.md.
     ("orientation", "Orientation (rotate 90° / mirror)", ()),
+    ("crosstalk", "Crosstalk Correction",
+     ("xt_rg", "xt_rb", "xt_gr", "xt_gb", "xt_br", "xt_bg")),
     ("channels", "Channel Levels (incl. Master Gain)", (
         "ch_input_gain", "ch_master_shift", "ch_master_gain",
         "ch_r_shift", "ch_r_gain", "ch_r_blackpoint",
@@ -168,6 +170,7 @@ _BASIC_LABELS = {
 _CHANNEL_NAMES = {"r": "Red", "g": "Green", "b": "Blue"}
 _BAND_KEYS = frozenset(BAND_ADJUSTMENT_KEYS) | {"band_feather"}
 _NOISE_KEYS = ("chroma_nr", "chroma_nr_radius")
+_XT_KEYS = ("xt_rg", "xt_rb", "xt_gr", "xt_gb", "xt_br", "xt_bg")
 _SHARPEN_KEYS = ("sharpen_amount", "sharpen_radius", "sharpen_masking")
 # Whole-image, non-slider boolean flags stored in the GLOBAL adjustment dict.
 # A slider edit rebuilds that dict from the sliders, so every one of these must
@@ -210,7 +213,7 @@ def paste_options(clip, default_for):
     adj = clip.get("adjustments") or {}
     for key, val in adj.items():
         if (key in _BAND_KEYS or key in _NOISE_KEYS or key in _SHARPEN_KEYS
-                or val == default_for(key)):
+                or key in _XT_KEYS or val == default_for(key)):
             continue
         section = ("Channel Levels" if key.startswith("ch_")
                    else "Channel Balance" if key.startswith("balance_")
@@ -223,6 +226,12 @@ def paste_options(clip, default_for):
         rows.append(("Colour", "profile", "Colour Profile: Black & White"))
     if clip.get("curves"):
         rows.append(("Colour", "curves", "Curves"))
+    xt = [(k, adj.get(k, 0)) for k in _XT_KEYS if adj.get(k, 0)]
+    if xt:
+        arrows = {"xt_rg": "R\u2190G", "xt_rb": "R\u2190B", "xt_gr": "G\u2190R",
+                  "xt_gb": "G\u2190B", "xt_br": "B\u2190R", "xt_bg": "B\u2190G"}
+        rows.append(("Colour", "crosstalk", "Crosstalk Correction  ("
+                     + ", ".join(f"{arrows[k]} {_fmt_value(v)}" for k, v in xt) + ")"))
     if any(adj.get(k, default_for(k)) != default_for(k) for k in _BAND_KEYS):
         rows.append(("Colour", "bands", "Subtractive Saturations (all colours)"))
     flags = clip.get("flags") or {}
@@ -575,7 +584,10 @@ class SlidersPanel(QWidget):
         # Global spatial-feather amount for the band effect (created after the
         # per-band sliders).
         "band_feather",
-        # Chroma Noise Reduction section, created after the band feather.
+        # Crosstalk Correction (spec/density-crosstalk.md), created after the
+        # band feather and before Chroma NR.
+        "xt_rg", "xt_rb", "xt_gr", "xt_gb", "xt_br", "xt_bg",
+        # Chroma Noise Reduction section, created after the crosstalk sliders.
         # spec/chroma-noise-reduction.md.
         "chroma_nr", "chroma_nr_radius",
         # Details (sharpening) — created LAST of all, so these stay at the tail
@@ -598,6 +610,25 @@ class SlidersPanel(QWidget):
     SLIDER_DEFAULTS = {"band_feather": 10,
                        "chroma_nr_radius": CHROMA_NR_RADIUS_DEFAULT,
                        "sharpen_amount": 25, "sharpen_radius": 25}
+
+    CROSSTALK_HINT = ("Unmixes the film's dye layers in density, after the film "
+                      "base is removed, so the base and greys stay neutral. "
+                      "Negative values separate colours more.")
+    CROSSTALK_INACTIVE = ("Not active for this image: needs a black-point "
+                          "conversion in density mode (black point only, or "
+                          "two-point with Density on).")
+    CROSSTALK_AREA = "Applies to the whole image, not to area layers."
+
+    def _update_crosstalk_hint(self, img):
+        from core.ccr_processor import crosstalk_applies
+        if img is not None and img.active_area_id is not None:
+            text = self.CROSSTALK_AREA
+        elif (img is not None and img.converted
+              and not crosstalk_applies(getattr(img, "conversion_inputs", None))):
+            text = self.CROSSTALK_INACTIVE
+        else:
+            text = self.CROSSTALK_HINT
+        self.crosstalk_hint.setText(text)
 
     def _default_for(self, key):
         return self.SLIDER_DEFAULTS.get(key, 0)
@@ -823,6 +854,12 @@ class SlidersPanel(QWidget):
         # top-to-bottom in pipeline order. See spec/channel-levels-pre-clamp.md.
         # Created here but POPULATED further below, in the strict create_slider()
         # order that the positional ADJUSTMENT_KEYS zip requires.
+        # Crosstalk Correction sits ABOVE Channel Levels because it runs before
+        # it: on the converted density base, ahead of every other adjustment
+        # (spec/density-crosstalk.md). Collapsed by default; populated below.
+        scroll_layout.addWidget(theme.section_separator())
+        self.crosstalk_section = CollapsibleSection("Crosstalk Correction")
+        scroll_layout.addWidget(self.crosstalk_section)
         scroll_layout.addWidget(theme.section_separator())
         self.od_section = CollapsibleSection("Channel Levels")
         scroll_layout.addWidget(self.od_section)
@@ -1121,6 +1158,18 @@ class SlidersPanel(QWidget):
                                default_value=self._default_for("band_feather")))
         self._show_band_page("red")
 
+        # --- Populate Crosstalk Correction --- (created after the band
+        # feather, before Chroma NR: maps to the xt_* keys in that order).
+        # "R <- G" = how much of green's density mixes into red; negative
+        # unmixes. spec/density-crosstalk.md.
+        for label in ("R \u2190 G", "R \u2190 B", "G \u2190 R",
+                      "G \u2190 B", "B \u2190 R", "B \u2190 G"):
+            self.crosstalk_section.add_layout(self.create_slider(label))
+        self.crosstalk_hint = QLabel(self.CROSSTALK_HINT)
+        self.crosstalk_hint.setWordWrap(True)
+        self.crosstalk_hint.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 11px;")
+        self.crosstalk_section.add_widget(self.crosstalk_hint)
+
         # --- Populate Chroma Noise Reduction --- (created after the band
         # feather: maps to the trailing "chroma_nr", "chroma_nr_radius" keys)
         self.noise_section.add_layout(
@@ -1409,6 +1458,11 @@ class SlidersPanel(QWidget):
         self.cineon_checkbox.blockSignals(False)
         self.cineon_checkbox.setEnabled(
             img is not None and img.active_area_id is None)
+        # Crosstalk is a base-level correction: whole image only.
+        for i, key in enumerate(self.adjustment_keys):
+            if key.startswith("xt_") and i < len(self.sliders):
+                self.sliders[i].setEnabled(img is not None and img.active_area_id is None)
+        self._update_crosstalk_hint(img)
         # "Bypass until export" flags: global, like Cineon.
         for cb, flag in ((self.nr_bypass_checkbox, "chroma_nr_export_only"),
                          (self.sharpen_bypass_checkbox, "sharpen_export_only")):
@@ -2608,6 +2662,8 @@ class SlidersPanel(QWidget):
             adj_keys += [k for k in self.adjustment_keys if k in _BAND_KEYS]
         if "noise" in chosen:
             adj_keys += [k for k in self.adjustment_keys if k in _NOISE_KEYS]
+        if "crosstalk" in chosen:
+            adj_keys += [k for k in self.adjustment_keys if k in _XT_KEYS]
         if "sharpen" in chosen:
             adj_keys += [k for k in self.adjustment_keys if k in _SHARPEN_KEYS]
         # Section -> its bypass flag (pasted with the section's row).
