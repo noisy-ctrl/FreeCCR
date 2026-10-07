@@ -570,6 +570,9 @@ class PatchSample:
     rgb: np.ndarray                        # (3,) float, device RGB in [0, 65535]
     valid: bool                            # False if clipped / out of frame
     n_pix: int
+    # Per-channel fraction of the window's pixels at the sensor ceiling (None
+    # when unknown, e.g. merged cards). Feeds assess_capture's per-photo check.
+    clip_frac: Optional[np.ndarray] = None
 
 
 def _quad_cell_halfsize(quad: np.ndarray, frac: float,
@@ -634,7 +637,7 @@ def sample_patches(img_u16: np.ndarray, points: Dict[str, Tuple[float, float]],
         black_crushed = bool(rgb.max() <= floor)
         in_frame = (x0 >= 0 and y0 >= 0 and x1 <= w and y1 <= h)
         valid = (not highlight_clipped) and (not black_crushed) and in_frame
-        out[sid] = PatchSample(rgb, bool(valid), win.shape[0])
+        out[sid] = PatchSample(rgb, bool(valid), win.shape[0], hi_frac)
     return out
 
 
@@ -1039,3 +1042,79 @@ def _residual_monotone(base_grid: np.ndarray, table: np.ndarray,
         if np.any((db >= 0) & (dt < -tol)):
             return False
     return True
+
+
+# --------------------------------------------------------------------------- #
+# Capture check (wizard Step 3): is each channel / photo well exposed, and how
+# hard will the profile's white balance push the weakest channel?
+# See spec/it8-capture-check.md.
+# --------------------------------------------------------------------------- #
+IDEAL_PEAK = 0.75        # brightest patch target, fraction of full scale
+NEAR_CLIP_PEAK = 0.92    # above this: little margin left
+LOW_PEAK = 0.40          # below this: worth more exposure
+UNDER_PEAK = 0.20        # below this: clearly underexposed
+BALANCED_BOOST = 1.25    # largest WB boost still considered "balanced light"
+_CH_NAMES = ("Red", "Green", "Blue")
+
+
+@dataclass
+class ChannelExposure:
+    name: str                 # "Red" / "Green" / "Blue"
+    peak: float               # brightest valid patch, fraction of full scale
+    clipped: int              # patches with this channel at the ceiling
+    status: str               # "clipped" | "near" | "good" | "low" | "under"
+    stops: float              # exposure change to reach IDEAL_PEAK (+ = more)
+
+
+@dataclass
+class CaptureReport:
+    channels: List[ChannelExposure]
+    gains: Optional[np.ndarray]       # the profile's WB gains (green = 1)
+    boost_channel: Optional[int]      # index of the most boosted channel
+    boost: float                      # its gain (1.0 = nothing boosted)
+    clip_level: float                 # raw level that clips in scans (1/boost)
+
+    @property
+    def balanced(self) -> bool:
+        return self.boost <= BALANCED_BOOST
+
+
+def assess_capture(samples: Dict[str, "PatchSample"], ref: Optional["IT8Reference"] = None,
+                   ) -> Optional[CaptureReport]:
+    """Exposure verdict per channel (for a trichrome target, per PHOTO: each
+    merged channel is its own exposure) plus the white-balance boost the profile
+    will apply, from the live Step 3 samples. Pure; None when nothing usable was
+    sampled. Levels are fractions of the sensor's full scale (the profiling
+    decode is camera-native with manual white-level scaling)."""
+    usable = [ps for ps in samples.values() if ps.n_pix > 0]
+    valid = [ps for ps in usable if ps.valid]
+    if not valid:
+        return None
+    rgb = np.array([ps.rgb for ps in valid], dtype=np.float64) / 65535.0
+    chans = []
+    for c in range(3):
+        peak = float(rgb[:, c].max())
+        clipped = sum(1 for ps in usable if ps.clip_frac is not None
+                      and float(ps.clip_frac[c]) >= 0.02)
+        if clipped:
+            status = "clipped"
+        elif peak >= NEAR_CLIP_PEAK:
+            status = "near"
+        elif peak >= LOW_PEAK:
+            status = "good"
+        elif peak >= UNDER_PEAK:
+            status = "low"
+        else:
+            status = "under"
+        stops = float(np.log2(IDEAL_PEAK / max(peak, 1e-6)))
+        chans.append(ChannelExposure(_CH_NAMES[c], peak, clipped, status, stops))
+    gains, boost_ch, boost, clip_level = None, None, 1.0, 1.0
+    if ref is not None:
+        wb = _pick_wb_id(samples, ref)
+        if wb is not None:
+            n = np.clip(samples[wb].rgb / 65535.0, 1e-6, None)
+            gains = n[1] / n                         # green = 1
+            boost_ch = int(np.argmax(gains))
+            boost = float(max(gains[boost_ch], 1.0))
+            clip_level = 1.0 / boost
+    return CaptureReport(chans, gains, boost_ch, boost, clip_level)
