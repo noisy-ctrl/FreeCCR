@@ -419,6 +419,22 @@ class IT8ProfileDialog(QDialog):
             "target shot through its base). The image is flipped horizontally.")
         self.mirror_check.toggled.connect(self._on_mirror_toggled)
         ctl.addWidget(self.mirror_check)
+        # Prevent channel clipping: a property of the SAVED profile (spec/
+        # profile-no-clip.md). Remembered between runs of the wizard.
+        self.no_clip_check = QCheckBox("Prevent channel clipping")
+        self.no_clip_check.setToolTip(
+            "Saves a profile that never clips a colour channel. The profile's "
+            "white balance boosts the channel your light is weakest in; without "
+            "this, bright areas of that channel (thin parts of a negative) clip "
+            "and shift colour.\n\nWith it ticked the profiled image comes out "
+            "darker before conversion, by a fixed amount for this profile; the "
+            "negative conversion is unaffected. Recommended for strongly "
+            "coloured light such as trichrome RGB scanning.")
+        self.no_clip_check.setChecked(
+            self._settings.value("it8/no_clip", False, type=bool))
+        self.no_clip_check.toggled.connect(
+            lambda on: self._settings.setValue("it8/no_clip", bool(on)))
+        ctl.addWidget(self.no_clip_check)
         # Gray-strip nudge (classic IT8 only).
         self.gray_label = QLabel("Gray strip:")
         ctl.addWidget(self.gray_label)
@@ -991,6 +1007,7 @@ class IT8ProfileDialog(QDialog):
         # A trichrome profile describes a different device space than a normal
         # one; recording that is what keeps the two from being swapped silently.
         tri = bool(self._target_merge)
+        no_clip = self.no_clip_check.isChecked()      # spec/profile-no-clip.md
         # The Output-format selector wins: normalise the path extension to match.
         base = path[:-4] if path.lower().endswith((".icc", ".dcp")) else path
         path = base + (".dcp" if is_dcp else ".icc")
@@ -1004,13 +1021,15 @@ class IT8ProfileDialog(QDialog):
                 from core import dcp_profile
                 blob = dcp_profile.build_camera_dcp(
                     self._fit, desc, illuminant=_illuminant_enum(illum),
-                    trichrome=tri)
+                    trichrome=tri, no_clip=no_clip)
             elif clut:
                 blob = it8.build_camera_icc(
                     self._fit, desc, mode="clut", grid=17,
-                    samples=self._all_samples, ref=self._ref, trichrome=tri)
+                    samples=self._all_samples, ref=self._ref, trichrome=tri,
+                    no_clip=no_clip)
             else:
-                blob = it8.build_camera_icc(self._fit, desc, trichrome=tri)
+                blob = it8.build_camera_icc(self._fit, desc, trichrome=tri,
+                                            no_clip=no_clip)
             os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
             with open(path, "wb") as f:
                 f.write(blob)

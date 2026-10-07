@@ -1600,7 +1600,8 @@ UNANCHORED_INPUT_SCALE = 16.0    # transmission scale: 16*p == 1 is density zero
 UNANCHORED_BASE_OFFSET = 1.0     # display offset applied after the density
 
 
-def _unanchored_density_invert(img_f: np.ndarray) -> np.ndarray:
+def _unanchored_density_invert(img_f: np.ndarray,
+                               input_scale: float = 1.0) -> np.ndarray:
     """No-anchor inversion in DENSITY (log) space:
     `d = -log10(16 * p) + 1.0`, with `p = v/65535` the LINEAR scene value.
 
@@ -1622,9 +1623,15 @@ def _unanchored_density_invert(img_f: np.ndarray) -> np.ndarray:
     assumed base) goes NEGATIVE into the shadow margin, dense areas well above
     white into the highlight headroom. Both are recoverable through Channel
     Levels, which runs un-clamped ahead of the window clamp.
-    See spec/no-anchor-convert.md."""
+    See spec/no-anchor-convert.md.
+
+    `input_scale` undoes a "prevent channel clipping" camera profile's fixed
+    scale-down (CCRImage.profile_headroom), so this fixed-constant inversion —
+    the one mode that reads absolute levels — renders exactly as before; every
+    anchored mode is a ratio against points sampled on the same scan and needs
+    nothing. See spec/profile-no-clip.md."""
     d = np.maximum(img_f, _DENSITY_FLOOR)                        # copy; avoids log10(0)
-    d *= np.float32(UNANCHORED_INPUT_SCALE / 65535.0)            # scale * p
+    d *= np.float32(UNANCHORED_INPUT_SCALE * max(float(input_scale), 1.0) / 65535.0)
     np.log10(d, out=d)
     np.negative(d, out=d)                                        # density above zero
     d += np.float32(UNANCHORED_BASE_OFFSET)
@@ -1922,7 +1929,8 @@ def ccr_normalize_with_bwpoint(ccr_image, black_point_bgr=None, white_point_bgr=
     img_f = img.astype(np.float32)
     if black_point_bgr is None:
         # --- No-anchor mode: fixed-constant density inversion, nothing measured ---
-        rgb_inverted = _unanchored_density_invert(img_f)
+        rgb_inverted = _unanchored_density_invert(
+            img_f, getattr(ccr_image, "profile_headroom", 1.0))
         del img_f
         print(f"BWPN (no anchor, density invert): "
               f"{time.time() - total_start_time:.3f}s")
@@ -2368,7 +2376,7 @@ def apply_reference_normalization(img: np.ndarray, p_lo, p_hi, od_factors) -> np
 
 def apply_bwpoint_normalization(img: np.ndarray, black_point_bgr, white_point_bgr=None,
                                 density: bool = False,
-                                slopes_bgr=None) -> np.ndarray:
+                                slopes_bgr=None, input_scale: float = 1.0) -> np.ndarray:
     """B/W-point conversion at any resolution: absolute per-channel anchors +
     inversion — mirrors ccr_normalize_with_bwpoint's preview path (the anchors
     are global constants, so no rescaling is needed). Used for the zoom hi-res
@@ -2394,8 +2402,8 @@ def apply_bwpoint_normalization(img: np.ndarray, black_point_bgr, white_point_bg
     img_f = img.astype(np.float32)
     if black_point_bgr is None:
         # No anchors at all: fixed-constant density inversion
-        # (spec/no-anchor-convert.md).
-        return _unanchored_density_invert(img_f)
+        # (spec/no-anchor-convert.md). input_scale: spec/profile-no-clip.md.
+        return _unanchored_density_invert(img_f, input_scale)
     if white_point_bgr is None:
         # Default-slope mode (black point only): density-space inversion.
         return _default_slope_invert(img_f, black_point_bgr, slopes_bgr)

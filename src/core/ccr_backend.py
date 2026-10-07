@@ -2104,9 +2104,10 @@ class CCRBackend:
                     black_point, white_point = parent_ci["bw"]
                     bw_density = parent_ci.get("density", False)
                     bw_slopes = parent_ci.get("slopes")
-                    crop = apply_bwpoint_normalization(crop, black_point, white_point,
-                                                       density=bw_density,
-                                                       slopes_bgr=bw_slopes)
+                    crop = apply_bwpoint_normalization(
+                        crop, black_point, white_point, density=bw_density,
+                        slopes_bgr=bw_slopes,
+                        input_scale=getattr(img_obj, "profile_headroom", 1.0))
                     child_ci = {"mode": "bw", "bw": parent_ci["bw"], "fine_rot": 0,
                                 "density": bw_density, "slopes": bw_slopes}
 
@@ -2304,7 +2305,8 @@ class CCRBackend:
             _raw_scan = parent.resized_raw   # pre-inversion raw for the mask
             parent.resized_raw = apply_bwpoint_normalization(
                 _raw_scan, *bw_points, density=bw_density,
-                slopes_bgr=bw_slopes)
+                slopes_bgr=bw_slopes,
+                input_scale=getattr(parent, "profile_headroom", 1.0))
             # Reversal-look clear-film mask (spec/sprocket-hole-mask.md), so a
             # sliced strip stays consistent with the parent preview.
             parent.sprocket_alpha = compute_sprocket_alpha(_raw_scan, bw_points[0])
