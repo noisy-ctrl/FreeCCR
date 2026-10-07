@@ -344,10 +344,18 @@ _CCR_NEUTRAL_SIG = b'CCRn'
 # See spec/trichrome-camera-profile.md §6.
 _CCR_KIND_SIG = b'CCRk'
 
+# Private ICC tag marking a "prevent channel clipping" profile (the IT8 wizard's
+# checkbox). Such a profile scales its output down by a fixed per-profile factor
+# just large enough that NO channel can clip after its white balance, instead of
+# clipping the channel the balance boosts. Absent means the classic behaviour, so
+# every existing profile is unchanged. Payload reuses XYZType (x=1) like
+# _CCR_KIND_SIG. See spec/profile-no-clip.md.
+_CCR_NOCLIP_SIG = b'CCRh'
+
 
 def _append_ccr_tags(tags: dict, order: list, neutral=None,
-                     trichrome: bool = False) -> None:
-    """Attach FreeCCR's private tags to a profile under construction. Both reuse
+                     trichrome: bool = False, no_clip: bool = False) -> None:
+    """Attach FreeCCR's private tags to a profile under construction. All reuse
     the XYZType container so the tag table stays well-formed for any CMM, which
     then ignores the unknown signatures."""
     nv = green_normalised(neutral)
@@ -359,6 +367,41 @@ def _append_ccr_tags(tags: dict, order: list, neutral=None,
         sig = _CCR_KIND_SIG.decode('ascii')
         tags[sig] = _xyz_type(1.0, 0.0, 0.0)
         order.append(sig)
+    if no_clip:
+        sig = _CCR_NOCLIP_SIG.decode('ascii')
+        tags[sig] = _xyz_type(1.0, 0.0, 0.0)
+        order.append(sig)
+
+
+def headroom_bound(A: np.ndarray, gains, base_max=None) -> float:
+    """Upper bound of a linear profile output, for the no-clip scale.
+
+    A maps WHITE-BALANCED device RGB -> linear Adobe RGB; the balanced input of
+    a raw in [0,1] lies in the box [0, gains]. Each output channel's maximum
+    over that box is the sum of its positive coefficients times the gains.
+    `base_max` (per-channel), when given, is the maximum the profile can output
+    INSIDE the unit cube (a cLUT's table), and only the excess (gains - 1)
+    extends past it. Returns max(1, bound): 1 means nothing can clip anyway."""
+    A = np.asarray(A, dtype=np.float64)
+    g = np.asarray(gains, dtype=np.float64)[:3]
+    pos = np.maximum(A, 0.0)
+    if base_max is None:
+        bound = pos @ g
+    else:
+        bound = np.asarray(base_max, dtype=np.float64) + pos @ np.maximum(g - 1.0, 0.0)
+    return float(max(1.0, np.max(bound)))
+
+
+def active_headroom_scale() -> float:
+    """The no-clip scale of the camera profile that would be applied NOW (1.0
+    when none is active, it carries no flag, or it is disabled). Informational
+    for the UI; the conversion uses the scale recorded on each decoded image
+    (CCRImage.profile_headroom), which also knows when a decode skipped the
+    profile (Positive mode, monochrome)."""
+    if not camera_profile_active():
+        return 1.0
+    prof = _active_dcp_profile if _active_dcp_profile is not None else _active_input_profile
+    return float(getattr(prof, "headroom", 1.0) or 1.0)
 
 
 def build_matrix_shaper_icc(desc: str,
@@ -368,13 +411,16 @@ def build_matrix_shaper_icc(desc: str,
                             trc_para: Tuple[float, float, float, float, float],
                             wtpt: Tuple[float, float, float] = D50_XYZ,
                             copyright_text: str = "Public Domain. No rights reserved.",
-                            neutral=None, trichrome: bool = False) -> bytes:
+                            neutral=None, trichrome: bool = False,
+                            no_clip: bool = False) -> bytes:
     """Build a valid ICC v2.4 RGB matrix-shaper profile from D50 colorants and a
     shared parametric (type-3) TRC. Returns the raw profile bytes.
 
     neutral: optional camera-native calibration neutral (3 values) recorded in the
     private 'CCRn' tag — see resolve_wb_gains. trichrome marks the profile as built
-    from a 3-way merge capture ('CCRk') — see spec/trichrome-camera-profile.md."""
+    from a 3-way merge capture ('CCRk') — see spec/trichrome-camera-profile.md.
+    no_clip marks a "prevent channel clipping" profile ('CCRh') — see
+    spec/profile-no-clip.md."""
     tags = {
         'desc': _desc_type(desc),
         'wtpt': _xyz_type(*wtpt),
@@ -389,7 +435,7 @@ def build_matrix_shaper_icc(desc: str,
     tags['bTRC'] = trc
 
     order = ['desc', 'rXYZ', 'gXYZ', 'bXYZ', 'wtpt', 'rTRC', 'gTRC', 'bTRC', 'cprt']
-    _append_ccr_tags(tags, order, neutral, trichrome)
+    _append_ccr_tags(tags, order, neutral, trichrome, no_clip)
     n = len(order)
     header_size = 128
     table_size = 4 + n * 12
@@ -692,6 +738,11 @@ class InputProfile:
         # Built from a TRICHROME (3-way merge) capture ('CCRk')? A different
         # device space — see spec/trichrome-camera-profile.md.
         self.is_trichrome: bool = False
+        # "Prevent channel clipping" ('CCRh') and its fixed output scale (>= 1;
+        # 1.0 = classic clipping behaviour). See spec/profile-no-clip.md.
+        self.no_clip: bool = False
+        self.headroom: float = 1.0
+        self._base_xyz: Optional[np.ndarray] = None   # cLUT base matrix (bal -> XYZ)
 
     @classmethod
     def _from_clut(cls, clut: "_CLUT", desc: str) -> "InputProfile":
@@ -705,6 +756,9 @@ class InputProfile:
         self.description = desc
         self.calibration_neutral = None
         self.is_trichrome = False
+        self.no_clip = False
+        self.headroom = 1.0
+        self._base_xyz = None
         return self
 
     @staticmethod
@@ -718,6 +772,45 @@ class InputProfile:
             return green_normalised(_parse_xyz(icc, tags[_CCR_NEUTRAL_SIG][0]))
         except Exception:
             return None
+
+    def _init_headroom(self) -> None:
+        """Fix the no-clip output scale once, at load. Only meaningful with a
+        calibration neutral: the gains are then a per-profile constant, so every
+        frame is scaled identically (a per-frame as-shot balance would make the
+        exposure drift frame to frame, so the flag is inert without one)."""
+        self.headroom = 1.0
+        self._base_xyz = None
+        if not self.no_clip or self.calibration_neutral is None:
+            return
+        g = resolve_wb_gains(self.calibration_neutral, None)
+        if g is None:
+            return
+        if self._kind == "clut":
+            # The cLUT covers balanced [0,1]^3. Recover its linear base (balanced
+            # -> XYZ) by least squares over the grid nodes: the wizard's table is
+            # that 3x3 plus a residual that fades to zero outside the chart's
+            # hull, so the fit is the 3x3 to within the residual. Values past the
+            # grid continue along this base instead of being clamped.
+            dims = self._clut.table.shape[:3]
+            axes = [np.linspace(0.0, 1.0, n) for n in dims]
+            nodes = np.stack(np.meshgrid(*axes, indexing="ij"), -1).reshape(-1, 3)
+            xyz = _clut_interp_tetra(nodes.astype(np.float32), self._clut).astype(np.float64)
+            B, *_ = np.linalg.lstsq(nodes, xyz, rcond=None)
+            self._base_xyz = B.T.astype(np.float32)          # (3,3) bal -> XYZ
+            adobe_nodes = xyz @ M_XYZ_D50_2_ADOBE.T
+            self.headroom = headroom_bound(M_XYZ_D50_2_ADOBE @ B.T, g,
+                                           base_max=adobe_nodes.max(axis=0))
+        else:
+            # Identity-TRC matrix profiles (the wizard's) have linear device in
+            # [0,1]; a TRC with a different end point scales the box accordingly.
+            ends = np.array([float(l[-1]) for l in self._luts], dtype=np.float64)
+            self.headroom = headroom_bound(self._matrix, g * np.maximum(ends, 0.0))
+
+    @staticmethod
+    def _read_no_clip(tags: dict) -> bool:
+        """Whether the profile carries the private 'CCRh' no-clip tag (presence
+        is the signal, like 'CCRk')."""
+        return _CCR_NOCLIP_SIG in tags
 
     @staticmethod
     def _read_is_trichrome(tags: dict) -> bool:
@@ -743,6 +836,8 @@ class InputProfile:
             prof = cls(combined, luts, cls._read_desc(icc, tags))
             prof.calibration_neutral = cls._read_calibration_neutral(icc, tags)
             prof.is_trichrome = cls._read_is_trichrome(tags)
+            prof.no_clip = cls._read_no_clip(tags)
+            prof._init_headroom()
             return prof
         # LUT-based: an A2B0 (fall back A2B1) device->PCS cLUT in mft1/mft2/mAB.
         a2b = next((t for t in (b'A2B0', b'A2B1') if t in tags), None)
@@ -755,6 +850,8 @@ class InputProfile:
             prof = cls._from_clut(clut, cls._read_desc(icc, tags))
             prof.calibration_neutral = cls._read_calibration_neutral(icc, tags)
             prof.is_trichrome = cls._read_is_trichrome(tags)
+            prof.no_clip = cls._read_no_clip(tags)
+            prof._init_headroom()
             return prof
         raise UnsupportedICCError(
             "only RGB matrix-shaper or A2B cLUT ICC profiles are supported "
@@ -806,6 +903,9 @@ class InputProfile:
         if m is not None:
             lin = lin * m                                # white balance (raw -> balanced)
         adobe_lin = lin @ self._matrix.T                 # balanced -> linear Adobe RGB
+        k = float(getattr(self, "headroom", 1.0) or 1.0)
+        if k > 1.0:
+            adobe_lin *= np.float32(1.0 / k)             # no-clip: fixed scale-down
         out = np.clip(adobe_lin, 0.0, 1.0)               # stay linear (no sRGB OETF)
         return np.rint(out * 65535.0).astype(np.uint16)
 
@@ -818,6 +918,24 @@ class InputProfile:
         lin = np.empty(rgb_u16.shape, dtype=np.float32)
         for c in range(3):                               # input curves (65536 LUTs)
             lin[..., c] = clut.in_luts[c][rgb_u16[..., c]]
+        k = float(getattr(self, "headroom", 1.0) or 1.0)
+        base = getattr(self, "_base_xyz", None)
+        if k > 1.0 and base is not None and m is not None:
+            # No-clip: look up the in-grid part, continue past the grid along the
+            # profile's linear base (instead of clamping the boosted channel),
+            # then scale everything down by the profile's fixed headroom.
+            lin *= m
+            inside = np.clip(lin, 0.0, 1.0)
+            xyz = _clut_interp_tetra(inside, clut)
+            lin -= inside                                # the part beyond the grid
+            del inside
+            if np.any(lin > 0):
+                xyz += lin @ base.T
+            del lin
+            adobe_lin = xyz @ M_XYZ_D50_2_ADOBE.T
+            adobe_lin *= np.float32(1.0 / k)
+            out = np.clip(adobe_lin, 0.0, 1.0)
+            return np.rint(out * 65535.0).astype(np.uint16)
         if m is not None:
             lin = np.clip(lin * m, 0.0, 1.0)             # balance into the [0,1] grid
         xyz = _clut_interp_tetra(lin, clut)              # (...,3) XYZ D50 (Y=1)
@@ -1095,7 +1213,8 @@ def _lut16_type(clut_xyz: np.ndarray, grid: int) -> bytes:
 def build_clut_icc(desc: str, clut_xyz: np.ndarray, grid: int,
                    wtpt: Tuple[float, float, float] = D50_XYZ,
                    copyright_text: str = "Public Domain. No rights reserved.",
-                   neutral=None, trichrome: bool = False) -> bytes:
+                   neutral=None, trichrome: bool = False,
+                   no_clip: bool = False) -> bytes:
     """Build a valid ICC v2.4 RGB->XYZ cLUT (lut16) profile. `clut_xyz` is a
     (grid,grid,grid,3) XYZ D50 (Y=1) table indexed [R][G][B]. Parses back via
     InputProfile.from_bytes (cLUT path).
@@ -1111,7 +1230,7 @@ def build_clut_icc(desc: str, clut_xyz: np.ndarray, grid: int,
         'cprt': _text_type(copyright_text),
     }
     order = ['desc', 'A2B0', 'wtpt', 'cprt']
-    _append_ccr_tags(tags, order, neutral, trichrome)
+    _append_ccr_tags(tags, order, neutral, trichrome, no_clip)
     n = len(order)
     base = 128 + 4 + n * 12
     data = b''

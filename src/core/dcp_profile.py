@@ -38,6 +38,11 @@ _T_ANALOGBAL = 50727; _T_ASSHOTNEUTRAL = 50728
 # the two must not be swapped silently. Absent means "normal", so every existing
 # profile stays valid. See spec/trichrome-camera-profile.md §6.
 _T_CCR_TRICHROME = 52525
+# Private tag marking a "prevent channel clipping" profile (IT8 wizard checkbox):
+# the output is scaled down by a fixed per-profile factor so no channel can clip
+# after the profile's white balance. Absent = classic behaviour.
+# See spec/profile-no-clip.md.
+_T_CCR_NOCLIP = 52526
 _T_ILLUM1 = 50778; _T_ILLUM2 = 50779
 _T_PROFILENAME = 50936
 _T_HSMDIMS = 50937; _T_HSMDATA1 = 50938; _T_HSMDATA2 = 50939
@@ -77,6 +82,10 @@ class DcpProfile:
     as_shot_neutral: Optional[np.ndarray] = None
     # Built from a trichrome (3-way merge) capture? (private tag 52525)
     is_trichrome: bool = False
+    # "Prevent channel clipping" (private tag 52526) and its fixed output scale
+    # (>= 1; 1.0 = classic clipping). Computed at parse. spec/profile-no-clip.md.
+    no_clip: bool = False
+    headroom: float = 1.0
 
     @property
     def has_forward(self) -> bool:
@@ -214,6 +223,8 @@ def parse_dcp_bytes(data: bytes) -> DcpProfile:
 
     if p.color_matrix_1 is None and p.forward_matrix_1 is None:
         raise DcpError("DCP has no ColorMatrix1 or ForwardMatrix1 — unusable")
+    p.no_clip = bool(e.get(_T_CCR_NOCLIP))
+    p.headroom = headroom_scale(p)
     return p
 
 
@@ -298,26 +309,51 @@ def apply_dcp(profile: DcpProfile, rgb_u16: np.ndarray, *,
     if m is None:
         m = np.ones(3)
 
-    w = _interp_weight(profile, m)
-    FM = _blend(profile.forward_matrix_1, profile.forward_matrix_2, w)
-    CM = _blend(profile.color_matrix_1, profile.color_matrix_2, w)
-    CC = _blend(profile.camera_calibration_1, profile.camera_calibration_2, w)
-    AB = np.diag(profile.analog_balance[:3])
-    inv_cc_ab = np.linalg.inv(CC @ AB)
-
+    w, T_xyz = _balanced_to_xyz(profile, m)
     d_wb = d * m                                      # as-shot white balance (unclipped)
-    if FM is not None:
-        xyz = d_wb @ (FM @ inv_cc_ab).T               # ForwardMatrix -> XYZ D50
-    else:
-        # ColorMatrix-only fallback: inv(CM) on the white-balanced camera RGB
-        # (colorimetrically weaker than the ForwardMatrix path; CM is D50-referenced).
-        xyz = d_wb @ np.linalg.inv(CM @ AB).T
+    xyz = d_wb @ T_xyz.T                              # balanced camera -> XYZ D50
 
     if apply_look:
         xyz = _apply_look(profile, xyz, w)
 
     adobe = xyz @ cm.M_XYZ_D50_2_ADOBE.T
+    k = float(getattr(profile, "headroom", 1.0) or 1.0)
+    if k > 1.0:
+        adobe *= 1.0 / k                              # no-clip: fixed scale-down
     return np.rint(np.clip(adobe, 0.0, 1.0) * 65535.0).astype(np.uint16)
+
+
+def _balanced_to_xyz(profile: DcpProfile, m: np.ndarray):
+    """(interpolation weight, 3x3 white-balanced camera RGB -> XYZ D50) for the
+    WB diagonal m. ForwardMatrix path when the profile has one, else the
+    colorimetrically weaker ColorMatrix inverse."""
+    w = _interp_weight(profile, m)
+    FM = _blend(profile.forward_matrix_1, profile.forward_matrix_2, w)
+    CM = _blend(profile.color_matrix_1, profile.color_matrix_2, w)
+    CC = _blend(profile.camera_calibration_1, profile.camera_calibration_2, w)
+    AB = np.diag(profile.analog_balance[:3])
+    if FM is not None:
+        return w, FM @ np.linalg.inv(CC @ AB)         # ForwardMatrix -> XYZ D50
+    # ColorMatrix-only fallback: inv(CM) on the white-balanced camera RGB
+    # (CM is D50-referenced).
+    return w, np.linalg.inv(CM @ AB)
+
+
+def headroom_scale(profile: DcpProfile) -> float:
+    """The fixed no-clip output scale of a flagged profile (1.0 otherwise).
+    Needs the profile's own calibration neutral (AsShotNeutral), which makes the
+    WB — and so this scale — a per-profile constant; with per-frame as-shot WB
+    the exposure would drift frame to frame, so the flag is inert there."""
+    if not getattr(profile, "no_clip", False) or profile.as_shot_neutral is None:
+        return 1.0
+    m = cm.resolve_wb_gains(profile.as_shot_neutral, None)
+    if m is None:
+        return 1.0
+    try:
+        _w, T_xyz = _balanced_to_xyz(profile, m)
+    except Exception:
+        return 1.0
+    return cm.headroom_bound(cm.M_XYZ_D50_2_ADOBE @ T_xyz, m)
 
 
 # --------------------------------------------------------------------------- #
@@ -477,7 +513,7 @@ def _write_ifd(tags: Dict[int, Tuple[str, object]]) -> bytes:
 
 def build_camera_dcp(fit, name: str, *, illuminant: int = 23,
                      bake_neutral: bool = True,
-                     trichrome: bool = False) -> bytes:
+                     trichrome: bool = False, no_clip: bool = False) -> bytes:
     """Synthesise a minimal single-illuminant matrix DCP from the IT8 fit.
 
     The fit's matrix M maps WHITE-BALANCED camera RGB -> XYZ D50 with M@(1,1,1)=D50,
@@ -509,4 +545,6 @@ def build_camera_dcp(fit, name: str, *, illuminant: int = 23,
         tags[_T_ASSHOTNEUTRAL] = ('rational', list(1.0 / wb))
     if trichrome:
         tags[_T_CCR_TRICHROME] = ('long', [1])
+    if no_clip:
+        tags[_T_CCR_NOCLIP] = ('long', [1])
     return _write_ifd(tags)

@@ -900,7 +900,7 @@ def build_camera_icc(fit: CameraFit, desc: str, *,
                      samples: Optional[Dict[str, "PatchSample"]] = None,
                      ref: Optional[IT8Reference] = None,
                      copyright_text: str = "Public Domain. No rights reserved.",
-                     trichrome: bool = False) -> bytes:
+                     trichrome: bool = False, no_clip: bool = False) -> bytes:
     """Synthesise camera-profile ICC bytes from the fit. Round-trips through
     InputProfile.from_bytes.
 
@@ -911,7 +911,8 @@ def build_camera_icc(fit: CameraFit, desc: str, *,
     Both record the chart's camera-native neutral (`1/wb_mult`) in the private
     'CCRn' tag, so apply balances every frame on the setup the profile was
     calibrated on instead of the frame's as-shot metadata (see
-    spec/camera-profile-calibration-wb.md)."""
+    spec/camera-profile-calibration-wb.md). no_clip marks the profile to scale
+    its output so no channel clips after that balance (spec/profile-no-clip.md)."""
     desc = str(desc).encode("ascii", "replace").decode("ascii")
     copyright_text = str(copyright_text).encode("ascii", "replace").decode("ascii")
     neutral = 1.0 / np.asarray(fit.wb_mult, dtype=np.float64)[:3]
@@ -921,7 +922,7 @@ def build_camera_icc(fit: CameraFit, desc: str, *,
         clut_xyz = build_residual_clut(fit, samples, ref, grid=grid)
         return color_management.build_clut_icc(
             desc, clut_xyz, grid, copyright_text=copyright_text, neutral=neutral,
-            trichrome=trichrome)
+            trichrome=trichrome, no_clip=no_clip)
     M = np.asarray(fit.matrix, dtype=np.float64)
     return color_management.build_matrix_shaper_icc(
         desc,
@@ -930,6 +931,7 @@ def build_camera_icc(fit: CameraFit, desc: str, *,
         copyright_text=copyright_text,
         neutral=neutral,
         trichrome=trichrome,
+        no_clip=no_clip,
     )
 
 
