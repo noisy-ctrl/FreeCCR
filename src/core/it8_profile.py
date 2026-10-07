@@ -1147,6 +1147,20 @@ SHUTTER_THIRDS = [
 ]
 
 
+# Standard third-stop ISO values offered for "Speeds at ISO".
+ISO_THIRDS = [50, 64, 80, 100, 125, 160, 200, 250, 320, 400, 500, 640, 800,
+              1000, 1250, 1600, 2000, 2500, 3200, 4000, 5000, 6400]
+
+
+def iso_equivalent_time(seconds: float, shot_iso, target_iso) -> float:
+    """The shutter time at `target_iso` that gives the same exposure as
+    `seconds` at `shot_iso` (time scales inversely with ISO). Unchanged when
+    either ISO is unknown or no target is set."""
+    if not target_iso or not shot_iso:
+        return float(seconds)
+    return float(seconds) * float(shot_iso) / float(target_iso)
+
+
 def nearest_shutter(seconds: float) -> Tuple[float, str]:
     """The standard third-stop speed closest (in stops) to `seconds`."""
     t = max(float(seconds), 1e-6)

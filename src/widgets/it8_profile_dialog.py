@@ -462,7 +462,36 @@ class IT8ProfileDialog(QDialog):
         # live from the same samples as "Valid patches", so the user can choose
         # between retaking and Prevent channel clipping knowing why.
         # See spec/it8-capture-check.md.
+        # Calculated on request: the default quad samples the wrong areas until
+        # the corners are placed. After the first click it follows corner moves
+        # live; loading another chart clears it.
         self._capture_report = None
+        self._capture_requested = False
+        chk = QHBoxLayout()
+        self.check_exposure_btn = QPushButton("Check exposure")
+        self.check_exposure_btn.setToolTip(
+            "Place the four corners on the grid first, then click to check each "
+            "photo's exposure and get suggested shutter speeds. Updates as you "
+            "adjust the corners afterwards.")
+        self.check_exposure_btn.clicked.connect(self._on_check_exposure)
+        chk.addWidget(self.check_exposure_btn)
+        chk.addSpacing(12)
+        chk.addWidget(QLabel("Speeds at ISO:"))
+        self.calc_iso_combo = QComboBox()
+        self.calc_iso_combo.addItem("As shot", 0)
+        for iso in it8.ISO_THIRDS:
+            self.calc_iso_combo.addItem(str(iso), iso)
+        saved_iso = self._settings.value("it8/calc_iso", 0, type=int)
+        i = self.calc_iso_combo.findData(saved_iso)
+        self.calc_iso_combo.setCurrentIndex(i if i >= 0 else 0)
+        self.calc_iso_combo.setToolTip(
+            "The ISO the suggested shutter speeds are worked out for. As shot "
+            "uses each photo's own ISO from its metadata; choose another to plan "
+            "a reshoot at that ISO (base ISO gives the cleanest result).")
+        self.calc_iso_combo.currentIndexChanged.connect(self._on_calc_iso_changed)
+        chk.addWidget(self.calc_iso_combo)
+        chk.addStretch(1)
+        lay.addLayout(chk)
         self.capture_label = QLabel("")
         self.capture_label.setTextFormat(Qt.RichText)
         self.capture_label.setWordWrap(True)
@@ -802,20 +831,34 @@ class IT8ProfileDialog(QDialog):
             out.append(cache[p])
         return out
 
+    def _on_check_exposure(self):
+        self._capture_requested = True
+        self._update_locate_status()          # samples + renders
+
+    def _on_calc_iso_changed(self, _i=None):
+        self._settings.setValue("it8/calc_iso", int(self._calc_iso()))
+        self._render_capture_report()
+
+    def _calc_iso(self) -> int:
+        """The ISO chosen for the suggestions (0 = as shot)."""
+        return int(self.calc_iso_combo.currentData() or 0)
+
     @staticmethod
     def _speed(seconds) -> str:
         return f"{it8.nearest_shutter(seconds)[1]} s"
 
-    def _advice(self, t, c) -> str:
-        """Shutter-speed advice for one photo (or a stops fallback without EXIF)."""
+    def _advice(self, t, c, t_eff=None, same_iso=True) -> str:
+        """Shutter-speed advice for one photo (or a stops fallback without EXIF).
+        t_eff: the current exposure expressed at the chosen ISO."""
         if not t:
             if c.status == "clipped":
                 return "Retake with less exposure."
             return f"Suggested: {c.stops:+.1f} stops."
-        sug_s, sug_l = it8.suggest_shutter(t, c)
+        t_eff = t if t_eff is None else t_eff
+        sug_s, sug_l = it8.suggest_shutter(t_eff, c)
         if c.status == "clipped":
             return f"Try {sug_l} s or shorter."
-        if it8.nearest_shutter(t)[1] == sug_l:
+        if same_iso and it8.nearest_shutter(t)[1] == sug_l:
             return f"Keep {sug_l} s."
         return f"Suggested: {sug_l} s."
 
@@ -830,6 +873,11 @@ class IT8ProfileDialog(QDialog):
     def _render_capture_report(self):
         """Fill the Step 3 capture-check text from self._capture_report. Plain
         text only: colour cues would clash with the channel colour names."""
+        if not self._capture_requested:
+            self.capture_label.setText(
+                "Place the four corners on the grid, then click Check exposure.")
+            self.capture_label.setToolTip("")
+            return
         r = self._capture_report
         if r is None:
             self.capture_label.setText("")
@@ -838,18 +886,36 @@ class IT8ProfileDialog(QDialog):
         merged = bool(self._target_merge) and len(self._target_merge) == 3
         exps = self._shot_exposures()
         isos = {iso for _t, iso in exps if iso}
-        head = "<b>Exposure</b>" + (f" (ISO {next(iter(isos))})" if len(isos) == 1 else "")
+        calc = self._calc_iso()
+        shot_iso = next(iter(isos)) if len(isos) == 1 else None
+        if calc and calc != shot_iso:
+            head = (f"<b>Exposure</b> (speeds for ISO {calc}"
+                    + (f"; shot at ISO {shot_iso}" if shot_iso else "") + ")")
+        else:
+            head = "<b>Exposure</b>" + (f" (ISO {shot_iso})" if shot_iso else "")
+
+        def eff(t, iso):
+            """(current exposure at the chosen ISO, whether that is its own ISO)"""
+            if not t:
+                return None, True
+            if calc and iso and calc != iso:
+                return it8.iso_equivalent_time(t, iso, calc), False
+            return t, True
+
         rows, ratios = [head], []
         if merged:
             for i, c in enumerate(r.channels):
                 t, iso = exps[i] if i < len(exps) else (None, None)
+                t_eff, same = eff(t, iso)
                 iso_note = f", ISO {iso}" if len(isos) > 1 and iso else ""
                 rows.append(f"{c.name} photo ({os.path.basename(self._target_merge[i])}): "
-                            f"{self._level(c, t)}{iso_note}. {self._advice(t, c)}")
+                            f"{self._level(c, t)}{iso_note}. "
+                            f"{self._advice(t, c, t_eff, same)}")
                 if t:
-                    ratios.append(it8.suggest_shutter(t, c)[0] / t)
+                    ratios.append(it8.suggest_shutter(t_eff, c)[0] / t_eff)
         else:
-            t = exps[0][0] if exps else None
+            t, iso = exps[0] if exps else (None, None)
+            t_eff, same = eff(t, iso)
             for c in r.channels:
                 rows.append(f"{c.name} channel: {self._level(c, None)}")
             # One exposure for the whole shot: set by its brightest channel
@@ -857,7 +923,7 @@ class IT8ProfileDialog(QDialog):
             worst = next((c for c in r.channels if c.status == "clipped"),
                          max(r.channels, key=lambda c: c.peak))
             when = f" (currently {self._speed(t)})" if t else ""
-            rows.append(f"Whole shot{when}: {self._advice(t, worst)}")
+            rows.append(f"Whole shot{when}: {self._advice(t, worst, t_eff, same)}")
         paras = ["<br>".join(rows)]
         if r.gains is not None:
             if r.balanced:
@@ -1006,6 +1072,7 @@ class IT8ProfileDialog(QDialog):
             return False
         self._target_path = path
         self._target_img = arr
+        self._capture_requested = False    # new shot: corners start over
         self.locator.set_image(arr)        # resets the quad for the new shot
         self._locator_arr = arr
         return True
@@ -1250,6 +1317,7 @@ class IT8ProfileDialog(QDialog):
         if self.stack.currentIndex() == self.PAGE_LOCATE:
             self._configure_locate_page()
             if self._target_img is not self._locator_arr:
+                self._capture_requested = False   # new chart: check again
                 self.locator.set_image(self._target_img)
                 self._locator_arr = self._target_img
             self._update_locate_status()

@@ -9,8 +9,17 @@ push the weakest channel. That lets them choose between retaking and
 
 ## UX
 
-Plain text under the Step 3 controls row, updated live with "Valid patches"
-(same samples, so it follows the corners). **No colour coding**: traffic-light
+A row under the Step 3 controls: **Check exposure** and **Speeds at ISO**
+[As shot | 50 ... 6400, third stops]. Nothing is calculated until Check
+exposure is clicked, because the default corner positions sample the wrong
+areas; the text says "Place the four corners on the grid, then click Check
+exposure." After the click the report follows corner moves live; loading
+another chart or card resets it. The ISO choice persists (`it8/calc_iso`,
+0 = as shot): suggestions are worked out at that ISO (time scales inversely
+with ISO, `iso_equivalent_time`), the header reads "speeds for ISO 160; shot
+at ISO 400", and "Keep" is only offered at the shot's own ISO.
+
+The report is plain text under that row. **No colour coding**: traffic-light
 colours clashed with the channel colour names, and a green "handled" state
 wrongly praised the least preferable fix.
 
