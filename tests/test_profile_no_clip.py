@@ -253,7 +253,8 @@ class TestWizard:
         old = s.value("it8/no_clip", False, type=bool)
         try:
             dlg = IT8ProfileDialog()
-            assert dlg.no_clip_check.text() == "Prevent channel clipping"
+            assert dlg.no_clip_check.text() == "Prevent channel clipping (experimental)"
+            assert "better fix" in dlg.no_clip_check.toolTip()
             dlg.no_clip_check.setChecked(True)
             assert s.value("it8/no_clip", False, type=bool) is True   # remembered
             dlg._fit = _fit()

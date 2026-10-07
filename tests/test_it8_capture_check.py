@@ -108,14 +108,17 @@ class TestDialog:
         assert "Green photo (G1.RAF): 52%" in t and "good" in t
         assert "Blue photo (B1.RAF): 97%" in t and "close to clipping" in t
         assert "boosts red 2.6" in t and "above 38%" in t
-        assert "Tick Prevent channel clipping" in t
+        assert "Best fix: give red more light" in t
+        assert "Prevent channel clipping (experimental)" in t
+        assert t.count("<p ") == 2 and "margin:0 0 6px 0" in t     # gap between lines
         assert "same change" in d.capture_label.toolTip()
 
     def test_ticking_the_box_updates_the_advice(self):
         d = self._dlg((0.199, 0.52, 0.968))
         d.no_clip_check.setChecked(False)
         d.no_clip_check.setChecked(True)               # toggling re-renders
-        assert "is ticked, so this is handled" in d.capture_label.text()
+        t = d.capture_label.text()
+        assert "is ticked, so scans won't clip" in t and "still the better fix" in t
 
     def test_single_photo_wording(self):
         d = self._dlg((0.6, 0.62, 0.61))
