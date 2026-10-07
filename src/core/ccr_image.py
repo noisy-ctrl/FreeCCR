@@ -544,7 +544,9 @@ class CCRImage:
             return arr
         self._warn_kind_mismatch(profile)
         try:
-            return profile.apply(arr, as_shot_wb=as_shot_wb)
+            out = profile.apply(arr, as_shot_wb=as_shot_wb)
+            self.profile_headroom = float(getattr(profile, "headroom", 1.0) or 1.0)
+            return out
         except Exception as e:
             logging.warning(f"Input ICC profile could not be applied: {e}")
             return arr
@@ -595,7 +597,9 @@ class CCRImage:
         self._warn_kind_mismatch(profile)
         try:
             from core import dcp_profile
-            return dcp_profile.apply_dcp(profile, arr, as_shot_wb=as_shot_wb)
+            out = dcp_profile.apply_dcp(profile, arr, as_shot_wb=as_shot_wb)
+            self.profile_headroom = float(getattr(profile, "headroom", 1.0) or 1.0)
+            return out
         except Exception as e:
             logging.warning(f"DCP profile could not be applied: {e}")
             return arr
@@ -814,6 +818,12 @@ class CCRImage:
         # extension branch and BEFORE positive_mode is read (a merged frame is
         # always a camera-native negative). All re-read call sites (export,
         # zoom, slice, duplicate) flow through here, so they re-merge for free.
+        # The no-clip output scale the camera profile applies to THIS decode
+        # (spec/profile-no-clip.md). Reset per decode, and set by
+        # _apply_input_icc/_apply_input_dcp only when the profile is actually
+        # applied — so a Positive, monochrome, unprofiled or disabled decode
+        # records 1.0. The no-anchor conversion reads it to stay unchanged.
+        self.profile_headroom = 1.0
         if getattr(self, "is_merged", False) and self.merge_sources:
             return self._read_merged(preview=preview, max_long_side=max_long_side,
                                      apply_input_icc=apply_input_icc)
@@ -2036,7 +2046,8 @@ class CCRImage:
             black_point, white_point = ci["bw"]
             out = apply_bwpoint_normalization(img, black_point, white_point,
                                               density=ci.get("density", False),
-                                              slopes_bgr=ci.get("slopes"))
+                                              slopes_bgr=ci.get("slopes"),
+                                              input_scale=getattr(self, "profile_headroom", 1.0))
             # Hi-res clear-film mask from the re-decoded raw (same threshold as
             # the preview; morphology/feather scale with this resolution).
             sprocket_alpha = compute_sprocket_alpha(img, black_point)
