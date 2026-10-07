@@ -1118,3 +1118,105 @@ def assess_capture(samples: Dict[str, "PatchSample"], ref: Optional["IT8Referenc
             boost = float(max(gains[boost_ch], 1.0))
             clip_level = 1.0 / boost
     return CaptureReport(chans, gains, boost_ch, boost, clip_level)
+
+
+# --------------------------------------------------------------------------- #
+# Shutter-speed suggestions for the capture check. Each trichrome photo has its
+# own exposure, so a per-photo shutter speed is the lever the user can actually
+# move (the light's own channels are often already at full power). Bringing
+# every photo's brightest patch to about IDEAL_PEAK also evens the light
+# balance, so the profile has little left to boost. See
+# spec/it8-capture-check.md.
+# --------------------------------------------------------------------------- #
+# Standard third-stop shutter speeds: (seconds, label).
+SHUTTER_THIRDS = [
+    (1 / 8000, "1/8000"), (1 / 6400, "1/6400"), (1 / 5000, "1/5000"),
+    (1 / 4000, "1/4000"), (1 / 3200, "1/3200"), (1 / 2500, "1/2500"),
+    (1 / 2000, "1/2000"), (1 / 1600, "1/1600"), (1 / 1250, "1/1250"),
+    (1 / 1000, "1/1000"), (1 / 800, "1/800"), (1 / 640, "1/640"),
+    (1 / 500, "1/500"), (1 / 400, "1/400"), (1 / 320, "1/320"),
+    (1 / 250, "1/250"), (1 / 200, "1/200"), (1 / 160, "1/160"),
+    (1 / 125, "1/125"), (1 / 100, "1/100"), (1 / 80, "1/80"), (1 / 60, "1/60"),
+    (1 / 50, "1/50"), (1 / 40, "1/40"), (1 / 30, "1/30"), (1 / 25, "1/25"),
+    (1 / 20, "1/20"), (1 / 15, "1/15"), (1 / 13, "1/13"), (1 / 10, "1/10"),
+    (1 / 8, "1/8"), (1 / 6, "1/6"), (1 / 5, "1/5"), (1 / 4, "1/4"),
+    (0.3, "0.3"), (0.4, "0.4"), (0.5, "0.5"), (0.6, "0.6"), (0.8, "0.8"),
+    (1.0, "1"), (1.3, "1.3"), (1.6, "1.6"), (2.0, "2"), (2.5, "2.5"),
+    (3.2, "3.2"), (4.0, "4"), (5.0, "5"), (6.0, "6"), (8.0, "8"), (10.0, "10"),
+    (13.0, "13"), (15.0, "15"), (20.0, "20"), (25.0, "25"), (30.0, "30"),
+]
+
+
+def nearest_shutter(seconds: float) -> Tuple[float, str]:
+    """The standard third-stop speed closest (in stops) to `seconds`."""
+    t = max(float(seconds), 1e-6)
+    return min(SHUTTER_THIRDS, key=lambda e: abs(np.log2(e[0] / t)))
+
+
+def _shutter_index(seconds: float) -> int:
+    return SHUTTER_THIRDS.index(nearest_shutter(seconds))
+
+
+def suggest_shutter(current_s: float, ch: "ChannelExposure") -> Tuple[float, str]:
+    """Suggested speed for one photo: the LONGEST third-stop speed that keeps
+    its brightest patch no more than a sixth of a stop above IDEAL_PEAK (so
+    near-ties resolve to the safer, shorter speed). A clipped photo's true
+    level is unknown, so it gets one stop shorter as a starting point."""
+    i = _shutter_index(current_s)
+    if ch.status == "clipped":
+        return SHUTTER_THIRDS[max(i - 3, 0)]
+    cap = IDEAL_PEAK * 2.0 ** (1.0 / 6.0)
+    ok = [e for e in SHUTTER_THIRDS if ch.peak * e[0] / current_s <= cap]
+    return ok[-1] if ok else SHUTTER_THIRDS[0]
+
+
+def predicted_boost(report: "CaptureReport", ratios) -> Optional[float]:
+    """The profile's largest WB boost if each channel's exposure were scaled by
+    `ratios` (suggested / current shutter). None without gains."""
+    if report.gains is None:
+        return None
+    n = (1.0 / np.asarray(report.gains, dtype=np.float64)) * np.asarray(ratios, dtype=np.float64)
+    g = n[1] / n
+    return float(max(1.0, g.max()))
+
+
+def read_shot_exposure(path: str) -> Tuple[Optional[float], Optional[int]]:
+    """(shutter seconds, ISO) from a shot's EXIF, or (None, None). Fujifilm RAF
+    files keep their EXIF in the embedded preview JPEG, which exifread can't
+    find in the RAF container, so that JPEG is read directly first."""
+    import io
+    import struct
+    try:
+        import exifread
+    except Exception:
+        return None, None
+
+    def _parse(fobj):
+        tags = exifread.process_file(fobj, details=False)
+        t = tags.get("EXIF ExposureTime")
+        iso = tags.get("EXIF ISOSpeedRatings") or tags.get("EXIF PhotographicSensitivity")
+        sec = None
+        if t is not None and t.values:
+            v = t.values[0]
+            sec = float(v.num) / float(v.den) if hasattr(v, "num") and v.den else float(v)
+        iso_v = None
+        if iso is not None and iso.values:
+            try:
+                iso_v = int(iso.values[0])
+            except (TypeError, ValueError):
+                iso_v = None
+        return sec, iso_v
+
+    try:
+        with open(path, "rb") as f:
+            head = f.read(100)
+            if head[:16] == b"FUJIFILMCCD-RAW ":
+                off, ln = struct.unpack(">II", head[84:92])
+                f.seek(off)
+                sec, iso = _parse(io.BytesIO(f.read(ln)))
+                if sec is not None:
+                    return sec, iso
+            f.seek(0)
+            return _parse(f)
+    except Exception:
+        return None, None
