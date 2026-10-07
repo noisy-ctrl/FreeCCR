@@ -32,7 +32,12 @@ downstream.
 ## UX
 
 IT8 wizard, Step 3 (Locate the patches), next to Mirrored capture:
-**Prevent channel clipping** (tooltip explains). Remembered in QSettings
+**Prevent channel clipping (experimental)**. The tooltip explains it and says
+that a properly balanced exposure (more light or exposure on the weak channel,
+for the chart and the negatives alike) is the better fix; this is for when
+that isn't practical. Marked experimental because the profile itself is
+fitted to the chart's dyes (an Ektachrome IT8 here), so negative colours can
+still look off for reasons this option doesn't touch. Remembered in QSettings
 (`it8/no_clip`, default off). It is a property of the saved profile (ICC or
 DCP), not a global setting, so it travels with the profile file.
 

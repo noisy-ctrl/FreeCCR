@@ -421,15 +421,18 @@ class IT8ProfileDialog(QDialog):
         ctl.addWidget(self.mirror_check)
         # Prevent channel clipping: a property of the SAVED profile (spec/
         # profile-no-clip.md). Remembered between runs of the wizard.
-        self.no_clip_check = QCheckBox("Prevent channel clipping")
+        self.no_clip_check = QCheckBox("Prevent channel clipping (experimental)")
         self.no_clip_check.setToolTip(
-            "Saves a profile that never clips a colour channel. The profile's "
-            "white balance boosts the channel your light is weakest in; without "
-            "this, bright areas of that channel (thin parts of a negative) clip "
-            "and shift colour.\n\nWith it ticked the profiled image comes out "
-            "darker before conversion, by a fixed amount for this profile; the "
-            "negative conversion is unaffected. Recommended for strongly "
-            "coloured light such as trichrome RGB scanning.")
+            "Experimental. Saves a profile that never clips a colour channel. "
+            "The profile's white balance boosts the channel your light is "
+            "weakest in; without this, bright areas of that channel (thin parts "
+            "of a negative) clip and shift colour.\n\nA properly balanced "
+            "exposure is the better fix: give the weak channel more light or "
+            "exposure, for the chart and your negatives alike, so the profile "
+            "has less to boost. Use this when that isn't practical.\n\nWith "
+            "it ticked the profiled image comes out darker before conversion, "
+            "by a fixed amount for this profile; the negative conversion "
+            "allows for that.")
         self.no_clip_check.setChecked(
             self._settings.value("it8/no_clip", False, type=bool))
         self.no_clip_check.toggled.connect(
@@ -826,12 +829,18 @@ class IT8ProfileDialog(QDialog):
                         "scanned this way. ")
                 if self.no_clip_check.isChecked():
                     text += ("<span style='color:#6cc36c;'>Prevent channel clipping "
-                             "is ticked, so this is handled.</span>")
+                             "(experimental) is ticked, so scans won't clip. Giving "
+                             f"{ch} more light is still the better fix.</span>")
                 else:
-                    text += (f"<span style='color:#e0a030;'>Tick Prevent channel "
-                             f"clipping, or give {ch} more light.</span>")
+                    text += (f"<span style='color:#e0a030;'>Best fix: give {ch} "
+                             "more light or exposure. Otherwise tick Prevent "
+                             "channel clipping (experimental).</span>")
                 lines.append(text)
-        self.capture_label.setText("<br>".join(lines))
+        # Each line its own paragraph with a small gap, so Light balance
+        # doesn't run on from a wrapped Exposure line.
+        self.capture_label.setText(
+            "".join(f"<p style='margin:0 0 {6 if i < len(lines) - 1 else 0}px 0;'>"
+                    f"{line}</p>" for i, line in enumerate(lines)))
         each = "photo" if merged else "shot"
         self.capture_label.setToolTip(
             f"Exposure: the brightest patch in each {'photo' if merged else 'channel'}, "
@@ -846,9 +855,10 @@ class IT8ProfileDialog(QDialog):
                "Changing all three by the same amount keeps the balance.\n"
                if merged else "") +
             "\nLight balance: how much the profile's white balance multiplies your "
-            "weakest channel. Prevent channel clipping handles that without "
-            "retaking; giving that channel more light (for the chart and your "
-            "negatives alike) also gives it a cleaner signal.")
+            "weakest channel. Giving that channel more light (for the chart and "
+            "your negatives alike) is the best fix, and gives it a cleaner "
+            "signal too. Prevent channel clipping (experimental) avoids the "
+            "clipping without retaking.")
 
     # ------------------------------------------------------------------ #
     # Page 3b — multi-card mapping (block-mode targets split across cards)
