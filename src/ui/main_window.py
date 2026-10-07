@@ -305,6 +305,7 @@ class MainWindow(QMainWindow):
         self.sliders_panel._update_bwp_mode_label()
 
         self.installEventFilter(self)
+        self._install_drop_support()
         self.create_menu()
 
         # Restore the active camera-profile selection (applied to every decode).
@@ -1443,6 +1444,8 @@ class MainWindow(QMainWindow):
             start_dir,
             "Images (*.dng *.tif *.tiff *.arw *.nef *.cr2 *.cr3 *.raf *.png *.jpg *.jpeg *.rw2 *.3fr *.fff);;All Files (*)"
         )
+        if files and not self._confirm_replace_session():
+            return
         if files:
             # Remember where the user BROWSED to (survives restarts). Set here
             # rather than in _import_file_list so a command-line import never
@@ -1515,6 +1518,8 @@ class MainWindow(QMainWindow):
             "Select Folder",
             start_dir
         )
+        if folder and not self._confirm_replace_session():
+            return
         if folder:
             # Dialog-only, like open_files above: `freeccr .` would otherwise
             # persist the literal "." as the browse location.
@@ -1551,6 +1556,8 @@ class MainWindow(QMainWindow):
         nothing, then hands off to the same importers the dialogs use.
         See spec/cli-file-args.md."""
         from utils.cli_args import plan_open
+        if not self._confirm_replace_session():
+            return
         # Loading a new batch replaces the current one — persist its edits first
         ccr_backend.save_catalog()
         plan = plan_open(paths)
@@ -1920,7 +1927,78 @@ class MainWindow(QMainWindow):
         if wp is not None:
             ccr_backend.set_white_point(wp)
 
+    # --- Replacing the session ------------------------------------------------
+    def _confirm_replace_session(self) -> bool:
+        """Opening files replaces the loaded batch. Ask first whenever one is
+        loaded (no prompt on an empty window, e.g. a command-line start).
+        Edits are kept: save_catalog() persists them and reopening the same
+        files restores them. See spec/open-confirm-and-drop.md."""
+        n = len(ccr_backend.images or [])
+        if n == 0:
+            return True
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Question)
+        box.setWindowTitle("Close current session?")
+        box.setText(f"Opening these files will close the current session "
+                    f"({n} image{'' if n == 1 else 's'}).")
+        box.setInformativeText("Your edits are saved and come back when you "
+                               "reopen those files.")
+        open_btn = box.addButton("Open", QMessageBox.AcceptRole)
+        cancel_btn = box.addButton(QMessageBox.Cancel)
+        box.setDefaultButton(cancel_btn)
+        box.setEscapeButton(cancel_btn)
+        box.exec()
+        return box.clickedButton() is open_btn
+
+    # --- Drag and drop from Finder / Explorer ----------------------------------
+    # The window accepts drops itself, so a drop over any child that doesn't
+    # want it (panels, labels) propagates up to the window. The few children
+    # that accept drops on their own (the canvas viewport, text boxes) would
+    # otherwise catch or refuse a file drop, so the window's event filter is
+    # installed on exactly those — never app-wide, which would put every event
+    # in the application through Python. Only EXTERNAL drags carrying local
+    # file URLs are taken; in-app drags (event.source() set) pass through.
+    @staticmethod
+    def _dropped_paths(event):
+        if event.source() is not None:
+            return []
+        md = event.mimeData()
+        if md is None or not md.hasUrls():
+            return []
+        return [u.toLocalFile() for u in md.urls() if u.isLocalFile() and u.toLocalFile()]
+
+    def _install_drop_support(self):
+        self.setAcceptDrops(True)
+        for child in self.findChildren(QWidget):
+            if child.acceptDrops():
+                child.installEventFilter(self)
+
+    def _handle_drop_event(self, event) -> bool:
+        etype = event.type()
+        if etype not in (QEvent.DragEnter, QEvent.DragMove, QEvent.Drop):
+            return False
+        paths = self._dropped_paths(event)
+        if not paths:
+            return False
+        if etype == QEvent.Drop:
+            event.acceptProposedAction()
+            # Defer: running modal dialogs (confirm, TIFF question) inside the
+            # platform's drop callback can wedge the drag session on macOS.
+            QTimer.singleShot(0, lambda p=list(paths): self.load_paths(p))
+        else:
+            event.acceptProposedAction()
+        return True
+
     def eventFilter(self, obj, event):
+        if event.type() in (QEvent.DragEnter, QEvent.DragMove, QEvent.Drop):
+            if self._handle_drop_event(event):
+                return True
+            return super().eventFilter(obj, event)
+        # The filter is also installed on drop-accepting children (above);
+        # the window's pre-existing key handling below must stay scoped to the
+        # window itself, or Up/Down would be stolen from those text boxes.
+        if obj is not self:
+            return super().eventFilter(obj, event)
         if event.type() == QEvent.KeyPress and event.key() in (Qt.Key_Up, Qt.Key_Down):
             self.thumbnail_list.thumbnail_list.setFocus()
             self.thumbnail_list.thumbnail_list.keyPressEvent(event)

@@ -168,10 +168,12 @@ def test_details_has_its_own_sync_group_and_keys_stay_partitioned():
     (focus, grain, how far the frame was downscaled), synced independently of
     colour."""
     groups = {gid: keys for gid, _label, keys in SYNC_GROUPS}
+    # (plus its "Bypass until export" flag — spec/bypass-until-export.md)
     assert tuple(groups["details"]) == ("sharpen_amount", "sharpen_radius",
-                                        "sharpen_masking")
+                                        "sharpen_masking", "sharpen_export_only")
+    from widgets.sliders_panel import GLOBAL_FLAG_KEYS
     grouped = [k for _gid, _label, keys in SYNC_GROUPS for k in keys]
-    grouped = [k for k in grouped if k != "cineon_log"]
+    grouped = [k for k in grouped if k not in GLOBAL_FLAG_KEYS]   # flags, not sliders
     assert sorted(grouped) == sorted(SlidersPanel.ADJUSTMENT_KEYS)
     assert len(grouped) == len(set(grouped))
 
