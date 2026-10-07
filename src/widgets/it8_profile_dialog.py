@@ -455,6 +455,17 @@ class IT8ProfileDialog(QDialog):
         ctl.addWidget(self.locate_status)
         lay.addLayout(ctl)
 
+        # Capture check: per-photo exposure verdicts and the light-balance boost,
+        # live from the same samples as "Valid patches", so the user can choose
+        # between retaking and Prevent channel clipping knowing why.
+        # See spec/it8-capture-check.md.
+        self._capture_report = None
+        self.capture_label = QLabel("")
+        self.capture_label.setTextFormat(Qt.RichText)
+        self.capture_label.setWordWrap(True)
+        lay.addWidget(self.capture_label)
+        self.no_clip_check.toggled.connect(lambda _on: self._render_capture_report())
+
         # Row 2: block patch-id range (non-classic grids only).
         self.block_row = QWidget()
         brow = QHBoxLayout(self.block_row)
@@ -735,11 +746,15 @@ class IT8ProfileDialog(QDialog):
         img = self.locator.image_array()
         if img is None or self._ref is None:
             self.locator.set_invalid_ids(set())
+            self._capture_report = None
+            self._render_capture_report()
             return
         pts = self.locator.points()
         nc, nr = self.locator.grid_dims()
         samples = it8.sample_patches(img, pts, self.locator.quad(),
                                      ncols=nc, nrows=nr)
+        self._capture_report = it8.assess_capture(samples, self._ref)
+        self._render_capture_report()
         in_ref = [sid for sid in samples if sid in self._ref.patches]
         invalid = [sid for sid in in_ref if not samples[sid].valid]
         self.locator.set_invalid_ids(set(invalid))
@@ -765,6 +780,75 @@ class IT8ProfileDialog(QDialog):
             self.locate_status.setText(
                 f"Valid patches: {valid}/{len(in_ref)}{warn}")
             self.locate_status.setToolTip("")
+
+    _CAPTURE_COLOURS = {"good": "#6cc36c", "near": "#e0a030", "low": "#e0a030",
+                        "clipped": "#e64646", "under": "#e64646"}
+
+    def _capture_verdict(self, c) -> str:
+        if c.status == "clipped":
+            n = c.clipped
+            return f"clipped on {n} patch{'' if n == 1 else 'es'}, needs less exposure"
+        if c.status == "near":
+            return f"close to clipping ({c.stops:+.1f} stops would be safer)"
+        if c.status == "good":
+            return "good"
+        if c.status == "low":
+            return f"a little low (up to {c.stops:+.1f} stops)"
+        return f"underexposed ({c.stops:+.1f} stops)"
+
+    def _render_capture_report(self):
+        """Fill the Step 3 capture-check lines from self._capture_report."""
+        r = self._capture_report
+        if r is None:
+            self.capture_label.setText("")
+            self.capture_label.setToolTip("")
+            return
+        merged = bool(self._target_merge) and len(self._target_merge) == 3
+        parts = []
+        for i, c in enumerate(r.channels):
+            who = (f"{c.name} photo ({os.path.basename(self._target_merge[i])})"
+                   if merged else f"{c.name} channel")
+            col = self._CAPTURE_COLOURS[c.status]
+            parts.append(f"<span style='color:{col};'>&#9679;</span> {who}: "
+                         f"{c.peak * 100:.0f}% &middot; {self._capture_verdict(c)}")
+        lines = ["<b>Exposure</b>&nbsp;&nbsp; " + "&nbsp;&nbsp;&nbsp; ".join(parts)]
+        if r.gains is not None:
+            if r.balanced:
+                lines.append(
+                    "<b>Light balance</b>&nbsp;&nbsp; even: the profile boosts no "
+                    f"channel by more than {r.boost:.1f}&times;, so it adds no "
+                    "clipping risk.")
+            else:
+                ch = r.channels[r.boost_channel].name.lower()
+                text = (f"<b>Light balance</b>&nbsp;&nbsp; the profile boosts {ch} "
+                        f"{r.boost:.1f}&times; to balance your light, so {ch} above "
+                        f"{r.clip_level * 100:.0f}% of full scale clips in negatives "
+                        "scanned this way. ")
+                if self.no_clip_check.isChecked():
+                    text += ("<span style='color:#6cc36c;'>Prevent channel clipping "
+                             "is ticked, so this is handled.</span>")
+                else:
+                    text += (f"<span style='color:#e0a030;'>Tick Prevent channel "
+                             f"clipping, or give {ch} more light.</span>")
+                lines.append(text)
+        self.capture_label.setText("<br>".join(lines))
+        each = "photo" if merged else "shot"
+        self.capture_label.setToolTip(
+            f"Exposure: the brightest patch in each {'photo' if merged else 'channel'}, "
+            "as a share of the sensor's full scale. Aim for about "
+            f"{it8.IDEAL_PEAK * 100:.0f}%.\n"
+            f"  \u2022 Clipped: those patches can't be used. Retake that {each} "
+            "with less exposure.\n"
+            "  \u2022 Underexposed: a noisy channel makes the profile less "
+            f"accurate. Retake that {each} with more exposure.\n"
+            + ("\nChanging ONE photo's exposure changes the light balance the "
+               "profile records, so scan your negatives with the same change. "
+               "Changing all three by the same amount keeps the balance.\n"
+               if merged else "") +
+            "\nLight balance: how much the profile's white balance multiplies your "
+            "weakest channel. Prevent channel clipping handles that without "
+            "retaking; giving that channel more light (for the chart and your "
+            "negatives alike) also gives it a cleaner signal.")
 
     # ------------------------------------------------------------------ #
     # Page 3b — multi-card mapping (block-mode targets split across cards)
