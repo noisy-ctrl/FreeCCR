@@ -9,25 +9,34 @@ push the weakest channel. That lets them choose between retaking and
 
 ## UX
 
-Two lines under the Step 3 controls row, updated live with "Valid patches"
-(same samples, so it follows the corners):
+Plain text under the Step 3 controls row, updated live with "Valid patches"
+(same samples, so it follows the corners). **No colour coding**: traffic-light
+colours clashed with the channel colour names, and a green "handled" state
+wrongly praised the least preferable fix.
 
-- **Exposure**: per channel, labelled by photo for a trichrome target
-  ("Red photo (DSCF1517.RAF)") or by channel for a single shot. Brightest
-  valid patch as % of full scale, a coloured dot and a verdict:
-  clipped (red, with patch count), close to clipping (amber, >= 92 %),
-  good (green, 40-92 %), a little low (amber, 20-40 %), underexposed
-  (red, < 20 %). Low/near verdicts give the stops to the 75 % target.
-- **Light balance**: the profile's largest WB boost. <= 1.25x: "even".
-  Otherwise the boosted channel, the factor, and the raw level above which
-  scans clip (1/boost). The advice leads with the better fix (more light or
-  exposure on that channel) and offers Prevent channel clipping
-  (experimental) second; when that is ticked it turns green but still names
-  the better fix. The two lines are separate paragraphs with a 6 px gap, so a
-  wrapped Exposure line doesn't run into Light balance.
-- Tooltip: what each verdict means and what to do; for trichrome, that
-  changing ONE photo's exposure changes the recorded balance (scan negatives
-  with the same change), while changing all three equally keeps it.
+- **Exposure (ISO n)**: one line per photo for a trichrome target, e.g.
+  "Red photo (DSCF1517.RAF): 20% at 1/10 s, underexposed. Suggested: 0.4 s."
+  Level = brightest valid patch as % of full scale; verdict = clipped (with
+  patch count) / close to clipping (>= 92 %) / good (40-92 %) / a little low
+  (20-40 %) / underexposed (< 20 %). The shutter speed and ISO come from each
+  photo's EXIF (Fujifilm RAF: from the embedded preview JPEG, which exifread
+  can read when the RAF container defeats it). ISO is shown per photo only
+  when the three differ. Without EXIF the advice falls back to stops.
+- Suggested speed: the LONGEST standard third-stop speed that keeps the
+  brightest patch no more than 1/6 stop above the 75 % target (near-ties go
+  to the safer, shorter speed); "Keep" when that is the current speed. A
+  clipped photo's true level is unknown, so it gets one stop shorter "or
+  shorter". Shutter speed is the lever because each trichrome photo has its
+  own exposure, while the light's channels are often already at full power.
+- Single-shot target: per-channel levels, then one "Whole shot" suggestion
+  set by the brightest (or a clipped) channel.
+- **Light balance**: the profile's largest WB boost and the raw level above
+  which scans clip. For trichrome, the boost the suggested speeds would leave
+  (equal levels even out the light, so it typically drops to ~1x). Prevent
+  channel clipping (experimental) is presented as a fallback, ticked or not.
+  Trichrome also gets: shoot the negatives with the same three speeds, or all
+  three changed by the same amount, because the profile records that balance.
+- The two paragraphs are separated by a 6 px gap.
 
 ## Data / math
 
@@ -37,7 +46,9 @@ computed by `sample_patches`; optional field, default None).
 Peaks from valid patches; clipped count = patches with a channel's
 `clip_frac >= 0.02` (the same rule that invalidates them); gains from the
 lightest valid neutral (`_pick_wb_id`, as the fit uses), green = 1;
-`boost = max(1, max gain)`.
+`boost = max(1, max gain)`. `suggest_shutter`, `predicted_boost`
+(neutral scaled by each photo's speed ratio) and `read_shot_exposure` are
+pure helpers in `it8_profile`; the dialog caches EXIF per file.
 
 Levels are fractions of the sensor's full scale: the profiling decode is
 camera-native with manual white-level scaling.

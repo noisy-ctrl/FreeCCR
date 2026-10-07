@@ -784,81 +784,132 @@ class IT8ProfileDialog(QDialog):
                 f"Valid patches: {valid}/{len(in_ref)}{warn}")
             self.locate_status.setToolTip("")
 
-    _CAPTURE_COLOURS = {"good": "#6cc36c", "near": "#e0a030", "low": "#e0a030",
-                        "clipped": "#e64646", "under": "#e64646"}
+    _VERDICTS = {"near": "close to clipping", "good": "good",
+                 "low": "a little low", "under": "underexposed"}
 
-    def _capture_verdict(self, c) -> str:
+    def _shot_exposures(self):
+        """[(shutter s, ISO)] per target photo (R, G, B for trichrome), read
+        once from EXIF and cached; (None, None) where it can't be read."""
+        if self._target_merge and len(self._target_merge) == 3:
+            paths = list(self._target_merge)
+        else:
+            paths = [self._target_path] if self._target_path else []
+        cache = self.__dict__.setdefault("_exposure_cache", {})
+        out = []
+        for p in paths:
+            if p not in cache:
+                cache[p] = it8.read_shot_exposure(p)
+            out.append(cache[p])
+        return out
+
+    @staticmethod
+    def _speed(seconds) -> str:
+        return f"{it8.nearest_shutter(seconds)[1]} s"
+
+    def _advice(self, t, c) -> str:
+        """Shutter-speed advice for one photo (or a stops fallback without EXIF)."""
+        if not t:
+            if c.status == "clipped":
+                return "Retake with less exposure."
+            return f"Suggested: {c.stops:+.1f} stops."
+        sug_s, sug_l = it8.suggest_shutter(t, c)
+        if c.status == "clipped":
+            return f"Try {sug_l} s or shorter."
+        if it8.nearest_shutter(t)[1] == sug_l:
+            return f"Keep {sug_l} s."
+        return f"Suggested: {sug_l} s."
+
+    @staticmethod
+    def _level(c, t) -> str:
+        at = f" at {IT8ProfileDialog._speed(t)}" if t else ""
         if c.status == "clipped":
             n = c.clipped
-            return f"clipped on {n} patch{'' if n == 1 else 'es'}, needs less exposure"
-        if c.status == "near":
-            return f"close to clipping ({c.stops:+.1f} stops would be safer)"
-        if c.status == "good":
-            return "good"
-        if c.status == "low":
-            return f"a little low (up to {c.stops:+.1f} stops)"
-        return f"underexposed ({c.stops:+.1f} stops)"
+            return f"clipped on {n} patch{'' if n == 1 else 'es'}{at}"
+        return f"{c.peak * 100:.0f}%{at}, {IT8ProfileDialog._VERDICTS[c.status]}"
 
     def _render_capture_report(self):
-        """Fill the Step 3 capture-check lines from self._capture_report."""
+        """Fill the Step 3 capture-check text from self._capture_report. Plain
+        text only: colour cues would clash with the channel colour names."""
         r = self._capture_report
         if r is None:
             self.capture_label.setText("")
             self.capture_label.setToolTip("")
             return
         merged = bool(self._target_merge) and len(self._target_merge) == 3
-        parts = []
-        for i, c in enumerate(r.channels):
-            who = (f"{c.name} photo ({os.path.basename(self._target_merge[i])})"
-                   if merged else f"{c.name} channel")
-            col = self._CAPTURE_COLOURS[c.status]
-            parts.append(f"<span style='color:{col};'>&#9679;</span> {who}: "
-                         f"{c.peak * 100:.0f}% &middot; {self._capture_verdict(c)}")
-        lines = ["<b>Exposure</b>&nbsp;&nbsp; " + "&nbsp;&nbsp;&nbsp; ".join(parts)]
+        exps = self._shot_exposures()
+        isos = {iso for _t, iso in exps if iso}
+        head = "<b>Exposure</b>" + (f" (ISO {next(iter(isos))})" if len(isos) == 1 else "")
+        rows, ratios = [head], []
+        if merged:
+            for i, c in enumerate(r.channels):
+                t, iso = exps[i] if i < len(exps) else (None, None)
+                iso_note = f", ISO {iso}" if len(isos) > 1 and iso else ""
+                rows.append(f"{c.name} photo ({os.path.basename(self._target_merge[i])}): "
+                            f"{self._level(c, t)}{iso_note}. {self._advice(t, c)}")
+                if t:
+                    ratios.append(it8.suggest_shutter(t, c)[0] / t)
+        else:
+            t = exps[0][0] if exps else None
+            for c in r.channels:
+                rows.append(f"{c.name} channel: {self._level(c, None)}")
+            # One exposure for the whole shot: set by its brightest channel
+            # (or a clipped one).
+            worst = next((c for c in r.channels if c.status == "clipped"),
+                         max(r.channels, key=lambda c: c.peak))
+            when = f" (currently {self._speed(t)})" if t else ""
+            rows.append(f"Whole shot{when}: {self._advice(t, worst)}")
+        paras = ["<br>".join(rows)]
         if r.gains is not None:
             if r.balanced:
-                lines.append(
-                    "<b>Light balance</b>&nbsp;&nbsp; even: the profile boosts no "
-                    f"channel by more than {r.boost:.1f}&times;, so it adds no "
-                    "clipping risk.")
+                text = ("<b>Light balance</b>&nbsp;&nbsp; even: the profile boosts no "
+                        f"channel by more than {r.boost:.1f}&times;, so it adds no "
+                        "clipping risk.")
             else:
                 ch = r.channels[r.boost_channel].name.lower()
                 text = (f"<b>Light balance</b>&nbsp;&nbsp; the profile boosts {ch} "
                         f"{r.boost:.1f}&times; to balance your light, so {ch} above "
                         f"{r.clip_level * 100:.0f}% of full scale clips in negatives "
-                        "scanned this way. ")
+                        "scanned this way.")
+                pb = (it8.predicted_boost(r, ratios)
+                      if merged and len(ratios) == 3 else None)
+                if pb is not None and pb < r.boost - 0.05:
+                    text += (" With the suggested speeds that boost would be about "
+                             f"{pb:.1f}&times;.")
                 if self.no_clip_check.isChecked():
-                    text += ("<span style='color:#6cc36c;'>Prevent channel clipping "
-                             "(experimental) is ticked, so scans won't clip. Giving "
-                             f"{ch} more light is still the better fix.</span>")
+                    text += (" Prevent channel clipping (experimental) is ticked as "
+                             "a fallback.")
                 else:
-                    text += (f"<span style='color:#e0a030;'>Best fix: give {ch} "
-                             "more light or exposure. Otherwise tick Prevent "
-                             "channel clipping (experimental).</span>")
-                lines.append(text)
-        # Each line its own paragraph with a small gap, so Light balance
-        # doesn't run on from a wrapped Exposure line.
+                    text += (" If you can't reshoot, Prevent channel clipping "
+                             "(experimental) is a fallback.")
+            if merged:
+                text += (" Shoot your negatives with the same three speeds, or "
+                         "change all three by the same amount, so they match the "
+                         "profile.")
+            paras.append(text)
+        # Paragraphs with a small gap, so Light balance doesn't run on from the
+        # Exposure lines.
         self.capture_label.setText(
-            "".join(f"<p style='margin:0 0 {6 if i < len(lines) - 1 else 0}px 0;'>"
-                    f"{line}</p>" for i, line in enumerate(lines)))
-        each = "photo" if merged else "shot"
+            "".join(f"<p style='margin:0 0 {6 if i < len(paras) - 1 else 0}px 0;'>"
+                    f"{p}</p>" for i, p in enumerate(paras)))
         self.capture_label.setToolTip(
-            f"Exposure: the brightest patch in each {'photo' if merged else 'channel'}, "
-            "as a share of the sensor's full scale. Aim for about "
-            f"{it8.IDEAL_PEAK * 100:.0f}%.\n"
-            f"  \u2022 Clipped: those patches can't be used. Retake that {each} "
-            "with less exposure.\n"
+            "Exposure: the brightest patch in each "
+            f"{'photo' if merged else 'channel'}, as a share of the sensor's full "
+            f"scale. Suggested speeds aim for about {it8.IDEAL_PEAK * 100:.0f}%, "
+            "rounded to the nearest third-stop speed, at the same ISO.\n"
+            "  \u2022 Clipped: those patches can't be used, and how far over is "
+            "unknown, so the suggestion is a stop shorter as a starting point.\n"
             "  \u2022 Underexposed: a noisy channel makes the profile less "
-            f"accurate. Retake that {each} with more exposure.\n"
-            + ("\nChanging ONE photo's exposure changes the light balance the "
-               "profile records, so scan your negatives with the same change. "
-               "Changing all three by the same amount keeps the balance.\n"
+            "accurate.\n"
+            + ("\nGiving each photo its own speed is how a trichrome capture "
+               "balances the light without changing the light itself. Bringing "
+               "all three to the same level also evens the light balance, so the "
+               "profile has little to boost. Whatever speeds you settle on, the "
+               "negatives need the same three (or all three changed by the same "
+               "amount), because the profile records that balance.\n"
                if merged else "") +
             "\nLight balance: how much the profile's white balance multiplies your "
-            "weakest channel. Giving that channel more light (for the chart and "
-            "your negatives alike) is the best fix, and gives it a cleaner "
-            "signal too. Prevent channel clipping (experimental) avoids the "
-            "clipping without retaking.")
+            "weakest channel. Prevent channel clipping (experimental) avoids the "
+            "clipping without reshooting.")
 
     # ------------------------------------------------------------------ #
     # Page 3b — multi-card mapping (block-mode targets split across cards)
