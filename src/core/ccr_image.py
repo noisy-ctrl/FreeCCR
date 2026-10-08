@@ -1750,12 +1750,26 @@ class CCRImage:
         # baked auto-exposure (eb) so they don't double-apply. Deferred import —
         # ccr_backend imports CCRImage at load.
         from core.ccr_backend import ccr_backend
-        auto_on = getattr(ccr_backend, "auto_gain", True) and self.converted
-        if auto_gain_override is not None:
+        # Film Look (spec/film-look-lut.md): a fitted decode in Cineon's slot.
+        # It already places the tones, so neither Auto Gain nor the baked eb —
+        # both display-referred gains AFTER the decode — may re-expose it;
+        # exposure with a look is Master Shift (a density offset).
+        look = None
+        if s.get("look_lut"):
+            from core.look_lut import resolve_look
+            look = resolve_look(s.get("look_lut"))
+        auto_on = (getattr(ccr_backend, "auto_gain", True) and self.converted
+                   and look is None)
+        if auto_gain_override is not None and look is None:
             ag = float(auto_gain_override)     # measured once from the full base
         else:
             ag = compute_auto_gain_offset(image, ws) if auto_on else 0.0
-        eb_eff = 0.0 if auto_on else eb        # suppress-overlap with the baked eb
+        eb_eff = 0.0 if (auto_on or look is not None) else eb   # no double-apply
+        if look is not None:
+            # The negative-look brightness baseline (bb = -8, a darkening power
+            # curve) is part of the DEFAULT render; the look already is the
+            # render, fitted with every slider at 0, so it must not be bent.
+            bb = 0
         if (not s and cb == 0 and tb == 0 and bb == 0 and eb_eff == 0 and ag == 0
                 and bc == 0 and not has_areas):
             # No slider/base/area adjustments. A windowed working-space base still
@@ -1825,6 +1839,7 @@ class CCRImage:
                      # key, and they grade the decoded base.
                      # See spec/cineon-display-transform.md.
                      cineon_log=bool(s.get('cineon_log')),
+                     look_lut=look,
                      # Windowed working-space base → de-window + Gain/Exposure
                      # recovery happens inside the adjustment call.
                      ws_windowed=ws)

@@ -50,9 +50,10 @@ SYNC_GROUPS = [
         "ch_r_shift", "ch_r_gain", "ch_r_blackpoint",
         "ch_g_shift", "ch_g_gain", "ch_g_blackpoint",
         "ch_b_shift", "ch_b_gain", "ch_b_blackpoint",
-        # Non-slider flag (Cineon log → workspace decode) — rides the
-        # Channel Levels sync group, preserved specially in the merge.
-        "cineon_log")),
+        # Non-slider flags (Cineon log → workspace decode, and the Film Look
+        # that replaces it) — ride the Channel Levels sync group, preserved
+        # specially in the merge.
+        "cineon_log", "look_lut")),
     # Channel Balance — the tone-WEIGHTED per-channel control, its own group
     # right after Channel Levels (the tone-uniform one), matching the panel's
     # adjacency. Separate from "wb" because the two are different stages that a
@@ -172,15 +173,24 @@ _BAND_KEYS = frozenset(BAND_ADJUSTMENT_KEYS) | {"band_feather"}
 _NOISE_KEYS = ("chroma_nr", "chroma_nr_radius")
 _XT_KEYS = ("xt_rg", "xt_rb", "xt_gr", "xt_gb", "xt_br", "xt_bg")
 _SHARPEN_KEYS = ("sharpen_amount", "sharpen_radius", "sharpen_masking")
-# Whole-image, non-slider boolean flags stored in the GLOBAL adjustment dict.
-# A slider edit rebuilds that dict from the sliders, so every one of these must
-# be re-attached (_attach_cineon) and preserved by Sync / Paste when its own
-# group isn't being applied. Area layers never carry them.
-GLOBAL_FLAG_KEYS = ("cineon_log", "chroma_nr_export_only", "sharpen_export_only")
+# Whole-image, non-slider flags stored in the GLOBAL adjustment dict. A slider
+# edit rebuilds that dict from the sliders, so every one of these must be
+# re-attached (_attach_cineon) and preserved by Sync / Paste when its own group
+# isn't being applied. Area layers never carry them. Most are booleans;
+# "look_lut" carries a value (the Film Look's library file name), so the
+# re-attach / preserve paths copy the VALUE, which is True for the booleans.
+GLOBAL_FLAG_KEYS = ("cineon_log", "chroma_nr_export_only", "sharpen_export_only",
+                    "look_lut")
 
 # Dialog section order (top to bottom).
 PASTE_SECTIONS = ("Adjustments", "Channel Levels", "Channel Balance",
                   "Colour", "Detail", "Geometry")
+
+
+def _look_display_name(name):
+    """'Noritsu Lomo 800.cube' -> 'Noritsu Lomo 800'."""
+    name = str(name or "")
+    return name[:-5] if name.lower().endswith(".cube") else name
 
 
 def adjustment_label(key):
@@ -222,6 +232,9 @@ def paste_options(clip, default_for):
                      f"{adjustment_label(key)}  ({_fmt_value(val)})"))
     if clip.get("cineon_log"):
         rows.append(("Channel Levels", "cineon_log", "Cineon Log → Workspace"))
+    if clip.get("look_lut"):
+        rows.append(("Channel Levels", "look_lut",
+                     f"Film Look: {_look_display_name(clip['look_lut'])}"))
     if clip.get("profile", "color") != "color":
         rows.append(("Colour", "profile", "Colour Profile: Black & White"))
     if clip.get("curves"):
@@ -618,6 +631,16 @@ class SlidersPanel(QWidget):
                           "conversion in density mode (black point only, or "
                           "two-point with Density on).")
     CROSSTALK_AREA = "Applies to the whole image, not to area layers."
+    CROSSTALK_LOOK = ("A Film Look is set: looks are fitted with crosstalk at 0, "
+                      "so leave these at 0 unless you mean to stack them.")
+    LOOK_TOOLTIP = (
+        "A fitted film look (3D LUT, .cube) that decodes density the way a lab "
+        "scanner does — made with tools/fit_look.py from lab scans of negatives "
+        "you have also scanned yourself. It takes Cineon's place (one decode at "
+        "a time). While a look is set, Auto Gain is off for this image: set "
+        "exposure with Master Shift and colour with R/G/B Shift (and Gain for "
+        "contrast per channel), exactly as the fitter's report lists them.")
+    LOOK_IMPORT = "__import__"
 
     def _update_crosstalk_hint(self, img):
         from core.ccr_processor import crosstalk_applies
@@ -628,6 +651,8 @@ class SlidersPanel(QWidget):
             text = self.CROSSTALK_INACTIVE
         else:
             text = self.CROSSTALK_HINT
+            if img is not None and img.adjustment_settings.get("look_lut"):
+                text += " " + self.CROSSTALK_LOOK
         self.crosstalk_hint.setText(text)
 
     def _default_for(self, key):
@@ -1090,6 +1115,20 @@ class SlidersPanel(QWidget):
         self.cineon_checkbox.toggled.connect(self._on_cineon_toggled)
         self.od_section.add_widget(self.cineon_checkbox)
 
+        # Film Look — a fitted 3-D LUT decoding density in Cineon's slot
+        # ("look_lut" in adjustment_settings: the library file name).
+        # Whole-image only, like Cineon. See spec/film-look-lut.md.
+        look_row = QHBoxLayout()
+        look_label = QLabel("Film Look")
+        look_label.setToolTip(self.LOOK_TOOLTIP)
+        self.look_combo = QComboBox()
+        self.look_combo.setToolTip(self.LOOK_TOOLTIP)
+        self.look_combo.activated.connect(self._on_look_activated)
+        look_row.addWidget(look_label)
+        look_row.addWidget(self.look_combo, 1)
+        self.od_section.add_layout(look_row)
+        self._populate_look_combo()
+
         # --- Populate Channel Balance (the section widget is placed above,
         # right under Master Gain) ---
         # Created after the Channel Levels sliders and before the band sliders,
@@ -1456,8 +1495,13 @@ class SlidersPanel(QWidget):
         self.cineon_checkbox.setChecked(
             bool(img is not None and img.adjustment_settings.get("cineon_log")))
         self.cineon_checkbox.blockSignals(False)
-        self.cineon_checkbox.setEnabled(
-            img is not None and img.active_area_id is None)
+        global_layer = img is not None and img.active_area_id is None
+        look_name = (img.adjustment_settings.get("look_lut")
+                     if img is not None else None) or ""
+        # One decode at a time: a look takes Cineon's slot.
+        self.cineon_checkbox.setEnabled(global_layer and not look_name)
+        self._select_look_in_combo(look_name)
+        self.look_combo.setEnabled(global_layer)
         # Crosstalk is a base-level correction: whole image only.
         for i, key in enumerate(self.adjustment_keys):
             if key.startswith("xt_") and i < len(self.sliders):
@@ -1719,7 +1763,7 @@ class SlidersPanel(QWidget):
             # export" flags would otherwise vanish on the next slider move.
             for flag in GLOBAL_FLAG_KEYS:
                 if img.adjustment_settings.get(flag):
-                    adjustment[flag] = True
+                    adjustment[flag] = img.adjustment_settings[flag]
         return adjustment
 
     def _on_cineon_toggled(self, checked):
@@ -1737,6 +1781,84 @@ class SlidersPanel(QWidget):
             img.adjustment_settings["cineon_log"] = True
         else:
             img.adjustment_settings.pop("cineon_log", None)
+        img.update_thumbnail_and_preview()
+        self.parent().parent().image_preview.update_preview(self.current_idx)
+        self._update_thumb()
+
+    # --- Film Look (spec/film-look-lut.md) -----------------------------------
+    def _populate_look_combo(self, select=None):
+        from core.look_lut import list_looks
+        combo = self.look_combo
+        current = select if select is not None else (combo.currentData() or "")
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("None", "")
+        for name in list_looks():
+            combo.addItem(_look_display_name(name), name)
+        combo.insertSeparator(combo.count())
+        combo.addItem("Import…", self.LOOK_IMPORT)
+        combo.blockSignals(False)
+        self._select_look_in_combo(current)
+
+    def _select_look_in_combo(self, name):
+        combo = self.look_combo
+        i = combo.findData(name or "")
+        if i < 0 and name:
+            # Set on this image but not in the library (moved / another
+            # machine): show it anyway so the user can see why it is ignored.
+            combo.blockSignals(True)
+            combo.insertItem(1, f"{_look_display_name(name)} (missing)", name)
+            combo.blockSignals(False)
+            i = 1
+        combo.blockSignals(True)
+        combo.setCurrentIndex(max(i, 0))
+        combo.blockSignals(False)
+
+    def _on_look_activated(self, index):
+        data = self.look_combo.itemData(index)
+        if data == self.LOOK_IMPORT:
+            from PySide6.QtWidgets import QFileDialog
+            from core.look_lut import import_look, CubeError
+            path, _ = QFileDialog.getOpenFileName(
+                self, "Import film look", "", "3D LUT (*.cube)")
+            img = (ccr_backend.get_image_by_index(self.current_idx)
+                   if self.current_idx is not None else None)
+            previous = (img.adjustment_settings.get("look_lut") if img else "") or ""
+            if not path:
+                self._select_look_in_combo(previous)
+                return
+            try:
+                data = import_look(path)
+            except (CubeError, OSError) as e:
+                self.set_temporary_hint(f"Could not import look: {e}", duration=6000)
+                self._select_look_in_combo(previous)
+                return
+            self._populate_look_combo(select=data)
+        self.set_look(data or "")
+
+    def set_look(self, name):
+        """Set (or clear, with "") the Film Look on the current image's GLOBAL
+        settings — one undo step, then re-render (same path as Cineon)."""
+        if self.current_idx is None:
+            return
+        img = ccr_backend.get_image_by_index(self.current_idx)
+        if img is None or img.active_area_id is not None:
+            return
+        if (img.adjustment_settings.get("look_lut") or "") == (name or ""):
+            return
+        self.end_undo_burst()
+        img.push_undo_state()
+        if name:
+            img.adjustment_settings["look_lut"] = name
+            self.set_temporary_hint(
+                f"Film Look '{_look_display_name(name)}': Auto Gain is off for this "
+                "image — set exposure with Master Shift, colour with R/G/B Shift.",
+                duration=6000)
+        else:
+            img.adjustment_settings.pop("look_lut", None)
+        self.cineon_checkbox.setEnabled(not name)
+        self._select_look_in_combo(name)
+        self._update_crosstalk_hint(img)
         img.update_thumbnail_and_preview()
         self.parent().parent().image_preview.update_preview(self.current_idx)
         self._update_thumb()
@@ -2025,7 +2147,7 @@ class SlidersPanel(QWidget):
                 # adjustment_keys would silently drop it otherwise.
                 for flag in GLOBAL_FLAG_KEYS:
                     if flag not in keys and img.adjustment_settings.get(flag):
-                        merged[flag] = True
+                        merged[flag] = img.adjustment_settings[flag]
                 img.adjustment_settings = merged
             if curves_changes:
                 if src_curves:
@@ -2548,14 +2670,15 @@ class SlidersPanel(QWidget):
                 live["curves"] = g["curves"]
             for flag in GLOBAL_FLAG_KEYS:
                 if g.get(flag):
-                    live[flag] = True
+                    live[flag] = g[flag]
         self.clipboard = {
             "adjustments": {k: live[k] for k in self.adjustment_keys},
             "curves": copy.deepcopy(live.get("curves")) or None,
             "cineon_log": bool(live.get("cineon_log")),
+            "look_lut": live.get("look_lut") or None,
             # Bypass-until-export flags ride with their section's paste row.
             "flags": {f: bool(live.get(f)) for f in GLOBAL_FLAG_KEYS
-                      if f != "cineon_log"},
+                      if f not in ("cineon_log", "look_lut")},
             "profile": getattr(img, "color_profile", "color") or "color",
             "crop": (img.crop_rect, getattr(img, "crop_angle", 0.0) or 0.0),
             "rotation": int(getattr(img, "rotation_angle", 0) or 0),
@@ -2668,7 +2791,8 @@ class SlidersPanel(QWidget):
             adj_keys += [k for k in self.adjustment_keys if k in _SHARPEN_KEYS]
         # Section -> its bypass flag (pasted with the section's row).
         flag_for = {"noise": "chroma_nr_export_only", "sharpen": "sharpen_export_only"}
-        touch_adj = (bool(adj_keys) or "curves" in chosen or "cineon_log" in chosen)
+        touch_adj = (bool(adj_keys) or "curves" in chosen or "cineon_log" in chosen
+                     or "look_lut" in chosen)
         merged = None
         if touch_adj:
             # Build a COMPLETE dict from the target (missing keys filled with
@@ -2687,6 +2811,10 @@ class SlidersPanel(QWidget):
                 merged["curves"] = target["curves"]
             if "cineon_log" in chosen or target.get("cineon_log"):
                 merged["cineon_log"] = True
+            if "look_lut" in chosen and clip.get("look_lut"):
+                merged["look_lut"] = clip["look_lut"]
+            elif target.get("look_lut"):
+                merged["look_lut"] = target["look_lut"]
             clip_flags = clip.get("flags") or {}
             for row, flag in flag_for.items():
                 if row in chosen:
