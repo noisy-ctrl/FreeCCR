@@ -1557,7 +1557,8 @@ def _apply_working_space_recovery(img16: np.ndarray, exposure: float,
                                   ch_b_blackpoint: float = 0.0,
                                   balance_r: float = 0.0, balance_g: float = 0.0,
                                   balance_b: float = 0.0,
-                                  cineon_log: bool = False) -> np.ndarray:
+                                  cineon_log: bool = False,
+                                  look_lut=None) -> np.ndarray:
     """De-window a windowed base, apply the highlight-recovery controls UN-clamped
     (so headroom can be pulled back below white), then clamp to the display window
     and return a normal full-range [0,65535] positive for the look chain. This
@@ -1598,7 +1599,12 @@ def _apply_working_space_recovery(img16: np.ndarray, exposure: float,
     # display-referred data. Un-clamped like its neighbours: floored at 0,
     # but headroom above white survives for the White Point recovery below.
     # See spec/cineon-display-transform.md.
-    if cineon_log:
+    # A Film Look (fitted 3-D LUT) is the same decode, measured from lab scans
+    # instead of fixed; it takes the slot and Cineon steps aside.
+    # See spec/film-look-lut.md.
+    if look_lut is not None:
+        d = _apply_look(d, look_lut)
+    elif cineon_log:
         d = apply_cineon_to_workspace(d)
     # Channel Balance - the tone-WEIGHTED per-channel control, right after the
     # tone-uniform one and in the slot Temperature/Tint used to occupy. It runs
@@ -3124,6 +3130,9 @@ def adjust_image(
     # Vibrance (spec/vibrance.md) — appended last for the same reason. Runs
     # right after Saturation, before Subtracted Sat.
     vibrance: float = 0.0,
+    # Film Look (spec/film-look-lut.md): a parsed LookLUT, decoded in Cineon's
+    # slot (and instead of it). Appended last for the same reason.
+    look_lut=None,
 ) -> np.ndarray:
     """
     Apply temperature, tint, exposure, brightness, blackpoint, whitepoint, highlights, shadows,
@@ -3144,7 +3153,8 @@ def adjust_image(
                                               ch_g_shift, ch_g_gain, ch_g_blackpoint,
                                               ch_b_shift, ch_b_gain, ch_b_blackpoint,
                                               balance_r, balance_g, balance_b,
-                                              cineon_log)
+                                              cineon_log, look_lut)
+        look_lut = None      # decoded inside the recovery, in Cineon's slot
         exposure = 0.0       # consumed by the recovery pre-stage
         whitepoint = 0.0     # White Point is the headroom-recovery control here
         kelvin_shift = 0.0   # White Balance consumed (flat per-channel gain, pre-clamp)
@@ -3179,7 +3189,7 @@ def adjust_image(
                                         ch_b_shift, ch_b_gain, ch_b_blackpoint)
     _balance_on = _channel_balance_active(balance_r, balance_g, balance_b)
     _mden = _master_gain_divisor(ch_master_gain)
-    if _levels_on or _balance_on or _mden != 1.0 or cineon_log:
+    if _levels_on or _balance_on or _mden != 1.0 or cineon_log or look_lut is not None:
         img /= np.float32(65535.0)
         if _levels_on:
             _apply_channel_levels(img, ch_input_gain, ch_master_shift, ch_master_gain,
@@ -3190,7 +3200,11 @@ def adjust_image(
         # Cineon log -> workspace, between Channel Levels and Channel Balance:
         # Levels grades in log, everything after the decode grades
         # display-referred data.
-        if cineon_log:
+        if look_lut is not None:
+            img = _apply_look(img, look_lut)
+            look_lut = None
+            cineon_log = False
+        elif cineon_log:
             img = apply_cineon_to_workspace(img)
             cineon_log = False
         if _balance_on:
@@ -3603,6 +3617,8 @@ def adjust_image_opencl(
     cineon_log: bool = False,
     # Vibrance — appended last, see adjust_image.
     vibrance: float = 0.0,
+    # Film Look — appended last, see adjust_image.
+    look_lut=None,
 ) -> np.ndarray:
     """
     GPU-accelerated (OpenCL) version of adjust_image.
@@ -3623,7 +3639,8 @@ def adjust_image_opencl(
                                               ch_g_shift, ch_g_gain, ch_g_blackpoint,
                                               ch_b_shift, ch_b_gain, ch_b_blackpoint,
                                               balance_r, balance_g, balance_b,
-                                              cineon_log)
+                                              cineon_log, look_lut)
+        look_lut = None
         exposure = 0.0
         whitepoint = 0.0
         ws_windowed = False
@@ -3647,7 +3664,8 @@ def adjust_image_opencl(
     # apply it -> exact CPU/GPU parity, and no kernel change at all. ws consumed
     # above; this covers the non-windowed bases. Placed immediately before the
     # WB block so the Balance -> White Balance order matches adjust_image.
-    if _channel_balance_active(balance_r, balance_g, balance_b) or cineon_log:
+    if (_channel_balance_active(balance_r, balance_g, balance_b) or cineon_log
+            or look_lut is not None):
         img16 = img16.astype(np.float32)
         img16 /= np.float32(65535.0)
         # Channel Levels runs BEFORE Balance (adjust_image's order, and the
@@ -3672,7 +3690,11 @@ def adjust_image_opencl(
         # Cineon log -> workspace, between Channel Levels and Channel Balance
         # and before the kernel sees anything, so the decode cannot land after
         # a stage that is supposed to grade its result.
-        if cineon_log:
+        if look_lut is not None:
+            img16 = _apply_look(img16, look_lut)
+            look_lut = None
+            cineon_log = False
+        elif cineon_log:
             img16 = apply_cineon_to_workspace(img16)
             cineon_log = False
         if _channel_balance_active(balance_r, balance_g, balance_b):
@@ -3724,7 +3746,7 @@ def adjust_image_opencl(
                           # so the fallback stays correct if that block moves.
                           balance_r=balance_r, balance_g=balance_g,
                           balance_b=balance_b, cineon_log=cineon_log,
-                          vibrance=vibrance)
+                          vibrance=vibrance, look_lut=look_lut)
 
     try:
       # Serialize GPU submissions: the hi-res zoom worker may run this
@@ -3797,7 +3819,7 @@ def adjust_image_opencl(
                           # so the fallback stays correct if that block moves.
                           balance_r=balance_r, balance_g=balance_g,
                           balance_b=balance_b, cineon_log=cineon_log,
-                          vibrance=vibrance)
+                          vibrance=vibrance, look_lut=look_lut)
 
 
 
@@ -4130,6 +4152,13 @@ def cineon_decode(code: np.ndarray) -> np.ndarray:
     lin -= np.float32(off)
     lin *= np.float32(1.0 / (1.0 - off))
     return lin
+
+
+def _apply_look(d: np.ndarray, lut) -> np.ndarray:
+    """Film Look decode (spec/film-look-lut.md) — thin wrapper so the module
+    is imported lazily and the call sites read like the Cineon ones."""
+    from core.look_lut import apply_look
+    return apply_look(d, lut)
 
 
 def apply_cineon_to_workspace(d: np.ndarray) -> np.ndarray:
