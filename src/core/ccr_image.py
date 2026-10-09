@@ -87,6 +87,48 @@ def _cached_auto_gain(owner, base: np.ndarray, ws: bool, xt_settings,
     return val
 
 
+def _exif_stream(f):
+    """The stream exifread should parse for an open image file. Fujifilm RAF
+    keeps its EXIF in the embedded preview JPEG, which exifread cannot find in
+    the RAF container ("File format not recognized", and no camera/lens info),
+    so for a RAF that JPEG is handed over instead. Same layout as
+    it8_profile.read_shot_exposure. Any other file is returned rewound."""
+    import io
+    import struct
+    try:
+        head = f.read(100)
+        if head[:16] == b"FUJIFILMCCD-RAW ":
+            off, ln = struct.unpack(">II", head[84:92])
+            if 0 < ln < 64 * 1024 * 1024:
+                f.seek(off)
+                return io.BytesIO(f.read(ln))
+    except Exception:
+        pass
+    f.seek(0)
+    return f
+
+
+def _exif_number(tag) -> Optional[float]:
+    """A positive number from an exifread tag (Ratio or plain), else None —
+    including the 0/0 and 0 a camera writes when it does not know."""
+    if not tag:
+        return None
+    try:
+        val = tag.values[0]
+        if hasattr(val, "num") and hasattr(val, "den"):
+            if not val.den:
+                return None
+            out = float(val.num) / float(val.den)
+        else:
+            out = float(val)
+    except Exception:
+        try:
+            out = float(str(tag))
+        except Exception:
+            return None
+    return out if out > 0 else None
+
+
 # --- Positive-mode base render curve ---------------------------------------- #
 # Strength (percent) of the base render curve baked into every positive decode.
 # 100 = the full curve fitted to the camera's own JPEG rendering; 0 = none, the
@@ -2429,7 +2471,7 @@ class CCRImage:
             # Normalize path to handle Unicode characters
             raw_path = os.path.normpath(raw_path)
             with open(raw_path, 'rb') as f:
-                tags = exifread.process_file(f, details=False)
+                tags = exifread.process_file(_exif_stream(f), details=False)
                 info['camera_make'] = str(tags.get('Image Make', '')).strip()
                 info['camera_model'] = str(tags.get('Image Model', '')).strip()
                 info['lens_make'] = str(tags.get('EXIF LensMake', '')).strip()
@@ -2439,58 +2481,12 @@ class CCRImage:
                     if "DG DN" in lens_model or "DC DN" in lens_model:
                         info['lens_make'] = "Sigma"
                 # FocalLength and FNumber may be Ratio objects, convert to float
-                focal = tags.get('EXIF FocalLength')
-                if focal:
-                    try:
-                        val = focal.values[0]
-                        if hasattr(val, 'num') and hasattr(val, 'den') and val.den != 0:
-                            info['focal_length'] = float(val.num) / float(val.den)
-                        else:
-                            info['focal_length'] = float(val)
-                    except Exception as e:
-                        logging.warning(f"Error parsing focal length from EXIF: {e}")
-                        try:
-                            info['focal_length'] = float(str(focal))
-                        except Exception as e2:
-                            logging.warning(f"Error converting focal length to float: {e2}")
-                            info['focal_length'] = None
-                else:
-                    info['focal_length'] = None
-                fnum = tags.get('EXIF FNumber')
-                if fnum:
-                    try:
-                        val = fnum.values[0]
-                        if hasattr(val, 'num') and hasattr(val, 'den') and val.den != 0:
-                            info['aperture'] = float(val.num) / float(val.den)
-                        else:
-                            info['aperture'] = float(val)
-                    except Exception as e:
-                        logging.warning(f"Error parsing aperture from EXIF: {e}")
-                        try:
-                            info['aperture'] = float(str(fnum))
-                        except Exception as e2:
-                            logging.warning(f"Error converting aperture to float: {e2}")
-                            info['aperture'] = None
-                else:
-                    info['aperture'] = None
-                # Fetch focus distance (in meters)
-                dist = tags.get('EXIF SubjectDistance')
-                if dist:
-                    try:
-                        val = dist.values[0]
-                        if hasattr(val, 'num') and hasattr(val, 'den') and val.den != 0:
-                            info['distance'] = float(val.num) / float(val.den)
-                        else:
-                            info['distance'] = float(val)
-                    except Exception as e:
-                        logging.warning(f"Error parsing subject distance from EXIF: {e}")
-                        try:
-                            info['distance'] = float(str(dist))
-                        except Exception as e2:
-                            logging.warning(f"Error converting subject distance to float: {e2}")
-                            info['distance'] = None
-                else:
-                    info['distance'] = None
+                # A manual (adapted) lens records 0/0 for the aperture and
+                # 0 for the focal length: those mean "unknown", not an error.
+                info['focal_length'] = _exif_number(tags.get('EXIF FocalLength'))
+                info['aperture'] = _exif_number(tags.get('EXIF FNumber'))
+                # Focus distance (in meters)
+                info['distance'] = _exif_number(tags.get('EXIF SubjectDistance'))
         except Exception as e:
             logging.error(f"Failed to extract EXIF info from {raw_path}: {e}")
             info = {
