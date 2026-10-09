@@ -272,6 +272,8 @@ class MainWindow(QMainWindow):
         # so 100% shows real source pixels. See spec/full-res-zoom.md.
         ccr_backend.full_res_zoom = self._settings.value(
             "view/full_res_zoom", True, type=bool)
+        ccr_backend.sharp_fit_preview = self._settings.value(
+            "view/sharp_fit", True, type=bool)
         # Restore the Auto WB toggle + algorithm (defaults OFF / Gray World).
         # When on, a fresh conversion writes AWB-estimated temperature/tint into
         # the image's sliders — only when neither is already set. Affects only
@@ -1019,6 +1021,17 @@ class MainWindow(QMainWindow):
             duration=5000)
 
     # --- Full-resolution zoom (global, persistent) ------------------------
+    def on_sharp_fit_toggled(self, checked: bool):
+        """Sharp preview at the fitted view (spec/sharp-fit-preview.md):
+        display resolution only, so no reprocess."""
+        ccr_backend.sharp_fit_preview = bool(checked)
+        self._settings.setValue("view/sharp_fit", bool(checked))
+        ip = self.image_preview
+        if not checked and not ip._zoomed_in_enough():
+            ip._release_hires(refresh=True)
+        elif checked:
+            ip._hires_timer.start(150)
+
     def on_full_res_zoom_toggled(self, checked: bool):
         """Flip the full-resolution zoom flag and persist it. This changes
         RESOLUTION, not the look — nothing is baked, re-converted or

@@ -227,6 +227,13 @@ class SettingsDialog(QDialog):
             "detail stays on screen until the sharper render is ready. Turn off "
             "to keep zoom detail at the half-size decode, which uses "
             "noticeably less memory and time on large files."))
+        self._cb_sharp_fit = QCheckBox("Sharp preview on high-resolution screens")
+        gz.addWidget(self._cb_sharp_fit)
+        gz.addWidget(self._muted(
+            "On a Retina/high-DPI screen the editing preview is enlarged to fill "
+            "the window. With this on, a screen-sized render replaces it a moment "
+            "after each edit settles, so the unzoomed view is sharp. Turn off on "
+            "a slow machine: it costs a little extra processing per edit."))
         lay.addWidget(grp_zoom)
 
         grp_keys = QGroupBox("Keyboard")
@@ -543,6 +550,8 @@ class SettingsDialog(QDialog):
                         (self._cb_sprocket, ccr_backend.sprocket_mask_white),
                         (self._cb_full_res_zoom,
                          getattr(ccr_backend, "full_res_zoom", True)),
+                        (self._cb_sharp_fit,
+                         getattr(ccr_backend, "sharp_fit_preview", True)),
                         (self._cb_balance_hotkeys,
                          getattr(ccr_backend, "balance_hotkeys", False)),
                         (self._cb_mono_raw,
@@ -615,6 +624,9 @@ class SettingsDialog(QDialog):
                 != bool(getattr(ccr_backend, "full_res_zoom", True))):
             self._mw.on_full_res_zoom_toggled(
                 bool(self._cb_full_res_zoom.isChecked()))
+        if (bool(self._cb_sharp_fit.isChecked())
+                != bool(getattr(ccr_backend, "sharp_fit_preview", True))):
+            self._mw.on_sharp_fit_toggled(bool(self._cb_sharp_fit.isChecked()))
         # Input colour space — affects the NEXT import only, so nothing is
         # re-decoded here (spec/input-transfer-function.md §4.2).
         if (bool(self._cb_tiff_ask.isChecked())
