@@ -7,7 +7,8 @@ from PySide6.QtGui import (QKeySequence, QShortcut, QPainter, QColor,
                            QLinearGradient, QPen)
 from core.ccr_backend import ccr_backend
 from core.ccr_processor import (COLOR_BANDS, BAND_PARAMS, BAND_ADJUSTMENT_KEYS,
-                                compute_density_slopes, CHROMA_NR_RADIUS_DEFAULT)
+                                compute_density_slopes, CHROMA_NR_RADIUS_DEFAULT,
+                                normalize_tone_shape, TONE_SHAPE_DEFAULT)
 from core.film_stocks import (decode_film_stocks, encode_film_stocks,
                               find_film_stock, upsert_film_stock,
                               remove_film_stock)
@@ -239,6 +240,10 @@ def paste_options(clip, default_for):
         rows.append(("Colour", "profile", "Colour Profile: Black & White"))
     if clip.get("curves"):
         rows.append(("Colour", "curves", "Curves"))
+    if normalize_tone_shape(clip.get("tone_shape")):
+        from widgets.tone_range_popup import describe_shape
+        rows.append(("Adjustments", "tone_shape", "Highlights/Shadows range  ("
+                     + describe_shape(normalize_tone_shape(clip["tone_shape"])) + ")"))
     xt = [(k, adj.get(k, 0)) for k in _XT_KEYS if adj.get(k, 0)]
     if xt:
         arrows = {"xt_rg": "R\u2190G", "xt_rb": "R\u2190B", "xt_gr": "G\u2190R",
@@ -985,6 +990,19 @@ class SlidersPanel(QWidget):
         self.highlights_slider_layout = self.create_slider("Highlights")
         self.white_point_slider_layout = self.create_slider("White Point")
         self.shadows_slider_layout = self.create_slider("Shadows")
+        # Right-click the Highlights / Shadows LABEL for range and
+        # keep-endpoint options (spec/highlights-shadows-range.md).
+        self._tone_shape = None          # active layer's shape (None = default)
+        self._tone_popup = None
+        self._tone_labels = {}
+        for tool, lay in (("hl", self.highlights_slider_layout),
+                          ("sh", self.shadows_slider_layout)):
+            lbl = lay.itemAt(0).widget()
+            lbl.setContextMenuPolicy(Qt.CustomContextMenu)
+            lbl.customContextMenuRequested.connect(
+                lambda pos, t=tool, l=lbl: self._open_tone_popup(t, l.mapToGlobal(pos)))
+            self._tone_labels[tool] = lbl
+        self._update_tone_labels()
         self.black_point_slider_layout = self.create_slider("Black Point")
         self.contrast_slider_layout = self.create_slider("Contrast")
         self.saturation_slider_layout = self.create_slider("Saturation")
@@ -1480,6 +1498,9 @@ class SlidersPanel(QWidget):
         # re-enters here for the SAME image and reloading would clear the drag.
         if not self.curve_editor.is_dragging():
             self.curve_editor.set_curves(adjustment.get("curves") if adjustment else None)
+        self._tone_shape = normalize_tone_shape(
+            adjustment.get("tone_shape") if adjustment else None)
+        self._update_tone_labels()
         for i, key in enumerate(self.adjustment_keys):
             if i < len(self.sliders):
                 val = adjustment.get(key, self._default_for(key)) if adjustment \
@@ -1749,6 +1770,10 @@ class SlidersPanel(QWidget):
         curves = self.curve_editor.get_curves()
         if curves:
             adjustment["curves"] = curves
+        # The Highlights/Shadows shape is a nested, non-slider setting like the
+        # curves; it rides every slider -> dict rebuild the same way.
+        if self._tone_shape:
+            adjustment["tone_shape"] = dict(self._tone_shape)
         return adjustment
 
     def _attach_cineon(self, adjustment: dict) -> dict:
@@ -1784,6 +1809,58 @@ class SlidersPanel(QWidget):
         img.update_thumbnail_and_preview()
         self.parent().parent().image_preview.update_preview(self.current_idx)
         self._update_thumb()
+
+    # --- Highlights / Shadows range (spec/highlights-shadows-range.md) --------
+    TONE_LABEL_TIP = "Right-click: range and endpoint options"
+
+    def _update_tone_labels(self):
+        from widgets.tone_range_popup import describe_shape
+        shape = self._tone_shape or TONE_SHAPE_DEFAULT
+        for tool, lbl in getattr(self, "_tone_labels", {}).items():
+            custom = (shape[f"{tool}_keep"] != TONE_SHAPE_DEFAULT[f"{tool}_keep"]
+                      or shape[f"{tool}_range"] != TONE_SHAPE_DEFAULT[f"{tool}_range"])
+            f = lbl.font()
+            f.setUnderline(custom)
+            lbl.setFont(f)
+            part = [p for p in describe_shape(shape).split("; ")
+                    if p.startswith("Highlights" if tool == "hl" else "Shadows")]
+            lbl.setToolTip((part[0] + "\n" if custom and part else "") + self.TONE_LABEL_TIP)
+
+    def _tone_slider_value(self, tool):
+        key = "highlights" if tool == "hl" else "shadows"
+        i = self.adjustment_keys.index(key)
+        return self.sliders[i].value()
+
+    def _open_tone_popup(self, tool, global_pos):
+        if self.current_idx is None:
+            return
+        from widgets.tone_range_popup import ToneRangePopup
+        shape = self._tone_shape or TONE_SHAPE_DEFAULT
+        self.end_undo_burst()
+        pop = ToneRangePopup(tool, shape[f"{tool}_keep"], shape[f"{tool}_range"],
+                             self._tone_slider_value(tool), self)
+        pop.changed.connect(self._on_tone_shape_changed)
+        pop.closed.connect(self._on_tone_popup_closed)
+        self._tone_popup = pop
+        pop.adjustSize()
+        pop.move(global_pos)
+        pop.show()
+
+    def _on_tone_shape_changed(self, tool, keep, rng):
+        shape = dict(self._tone_shape or TONE_SHAPE_DEFAULT)
+        shape[f"{tool}_keep"] = bool(keep)
+        shape[f"{tool}_range"] = int(rng)
+        self._tone_shape = normalize_tone_shape(shape)
+        self._update_tone_labels()
+        # Same store / preview / debounced-reprocess path as a slider move;
+        # its undo burst is held open until the popup closes (one undo step).
+        self.on_slider_changed()
+        self._undo_burst_timer.stop()
+
+    def _on_tone_popup_closed(self):
+        if self._tone_popup is not None:
+            self._tone_popup = None
+            self.end_undo_burst()
 
     # --- Film Look (spec/film-look-lut.md) -----------------------------------
     def _populate_look_combo(self, select=None):
@@ -2102,12 +2179,15 @@ class SlidersPanel(QWidget):
         sync_profile = bool(selection.get("profile"))
         sync_curves = bool(selection.get("curves"))
         sync_orientation = bool(selection.get("orientation"))
+        # The Highlights/Shadows shape rides the Tone group (its two sliders).
+        sync_tone_shape = bool(selection.get("tone"))
         # Sync always copies the SOURCE image's GLOBAL (whole-image) layer, not
         # the live sliders — those may currently reflect an active area, and
         # areas are per-image (never synced). Read from the global dict.
         src = ccr_backend.get_image_by_index(self.current_idx)
         src_global = dict(src.adjustment_settings) if src is not None else {}
         src_curves = src_global.get("curves")  # None when identity/absent
+        src_shape = normalize_tone_shape(src_global.get("tone_shape"))
         current_adjustment = src_global
         crop_rect = src.crop_rect if src is not None else None
         crop_angle = getattr(src, "crop_angle", 0.0) if src is not None else 0.0
@@ -2124,8 +2204,10 @@ class SlidersPanel(QWidget):
             profile_changes = sync_profile and getattr(img, "color_profile", "color") != src_profile
             curves_changes = sync_curves and img.adjustment_settings.get("curves") != src_curves
             orient_changes = sync_orientation and _orientation_of(img) != src_orientation
+            own_shape = normalize_tone_shape(img.adjustment_settings.get("tone_shape"))
+            shape_changes = sync_tone_shape and own_shape != src_shape
             if (not adj_changes and not crop_changes and not profile_changes
-                    and not curves_changes and not orient_changes):
+                    and not curves_changes and not orient_changes and not shape_changes):
                 continue  # nothing to change — and no dead undo snapshot
             img.push_undo_state()
             if adj_changes:
@@ -2142,6 +2224,9 @@ class SlidersPanel(QWidget):
                 existing_curves = img.adjustment_settings.get("curves")
                 if existing_curves is not None:
                     merged["curves"] = existing_curves
+                if own_shape and not shape_changes:
+                    # not synced, or already equal to the source's: keep it
+                    merged["tone_shape"] = dict(own_shape)
                 # Same for the Cineon flag when the channels group (which
                 # carries it) is NOT being synced — the rebuild from
                 # adjustment_keys would silently drop it otherwise.
@@ -2149,6 +2234,11 @@ class SlidersPanel(QWidget):
                     if flag not in keys and img.adjustment_settings.get(flag):
                         merged[flag] = img.adjustment_settings[flag]
                 img.adjustment_settings = merged
+            if shape_changes:
+                if src_shape:
+                    img.adjustment_settings["tone_shape"] = dict(src_shape)
+                else:
+                    img.adjustment_settings.pop("tone_shape", None)
             if curves_changes:
                 if src_curves:
                     img.adjustment_settings["curves"] = copy.deepcopy(src_curves)
@@ -2163,7 +2253,8 @@ class SlidersPanel(QWidget):
                 # Display-level only (no reprocess): the thumbnail refresh and
                 # update_preview below re-apply it from these attributes.
                 _apply_orientation(img, src_orientation)
-            if adj_changes or profile_changes or curves_changes or crop_changes:
+            if (adj_changes or profile_changes or curves_changes or crop_changes
+                    or shape_changes):
                 # Adjustments, curves, and the color profile all change pixels;
                 # a crop change moves the region the histogram is computed over
                 # (it samples only the cropped area). Any of these needs a
@@ -2668,6 +2759,8 @@ class SlidersPanel(QWidget):
             live = {k: g.get(k, self._default_for(k)) for k in self.adjustment_keys}
             if g.get("curves"):
                 live["curves"] = g["curves"]
+            if g.get("tone_shape"):
+                live["tone_shape"] = g["tone_shape"]
             for flag in GLOBAL_FLAG_KEYS:
                 if g.get(flag):
                     live[flag] = g[flag]
@@ -2676,6 +2769,7 @@ class SlidersPanel(QWidget):
             "curves": copy.deepcopy(live.get("curves")) or None,
             "cineon_log": bool(live.get("cineon_log")),
             "look_lut": live.get("look_lut") or None,
+            "tone_shape": copy.deepcopy(normalize_tone_shape(live.get("tone_shape"))),
             # Bypass-until-export flags ride with their section's paste row.
             "flags": {f: bool(live.get(f)) for f in GLOBAL_FLAG_KEYS
                       if f not in ("cineon_log", "look_lut")},
@@ -2792,7 +2886,7 @@ class SlidersPanel(QWidget):
         # Section -> its bypass flag (pasted with the section's row).
         flag_for = {"noise": "chroma_nr_export_only", "sharpen": "sharpen_export_only"}
         touch_adj = (bool(adj_keys) or "curves" in chosen or "cineon_log" in chosen
-                     or "look_lut" in chosen)
+                     or "look_lut" in chosen or "tone_shape" in chosen)
         merged = None
         if touch_adj:
             # Build a COMPLETE dict from the target (missing keys filled with
@@ -2809,6 +2903,10 @@ class SlidersPanel(QWidget):
                 merged["curves"] = copy.deepcopy(clip["curves"])
             elif target.get("curves") is not None:
                 merged["curves"] = target["curves"]
+            if "tone_shape" in chosen and clip.get("tone_shape"):
+                merged["tone_shape"] = copy.deepcopy(clip["tone_shape"])
+            elif normalize_tone_shape(target.get("tone_shape")):
+                merged["tone_shape"] = target["tone_shape"]
             if "cineon_log" in chosen or target.get("cineon_log"):
                 merged["cineon_log"] = True
             if "look_lut" in chosen and clip.get("look_lut"):
