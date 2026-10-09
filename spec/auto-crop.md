@@ -165,6 +165,6 @@ confirmed crops, never from unchecked guesses.
 - Second set (20 scans: 19 white-light 35mm strips, partly cut top rows, two
   near-base interiors, plus an IT8 chart slide): before the gap rule one thin
   frame came out portrait and one took in the gap and 35 px of the next
-  frame; one more kept 17 px of gap. With it all 20 crop cleanly (15 high);
+  frame; one more kept 17 px of gap. With it all 20 crop cleanly (16 high);
   the first 30 are unchanged. The IT8 slide crops to the whole target film,
   not the patch grid inside it.
