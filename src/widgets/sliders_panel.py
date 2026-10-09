@@ -17,6 +17,8 @@ from widgets.histogram_widget import HistogramWidget
 from widgets.long_press_button import LongPressButton
 from ui import theme
 import copy
+import time
+from contextlib import contextmanager
 from datetime import date
 
 # First combo entry of the film-stock selector: the baked scalar
@@ -685,10 +687,13 @@ class SlidersPanel(QWidget):
         self._hint_timer = QTimer(self)  # Timer for temporary hints
         self._hint_timer.setSingleShot(True)
         
-        # Simple processing flag and debouncing
-        self._processing = False
+        # Live edits render off the GUI thread, latest wins; the debounce timer
+        # below is the "control went idle" settle. See spec/slider-speed.md.
         self._pending_adjustment = None
         self._pending_idx = None
+        self._live = None                 # LiveRenderer, created on first use
+        self._live_refresh_depth = 0      # >0: canvas refresh, don't re-render
+        self._last_live_req = 0.0
 
         # Coalesce rapid slider changes (one drag) into a single undo step.
         self._undo_burst_active = False
@@ -1390,6 +1395,9 @@ class SlidersPanel(QWidget):
             self.on_slider_changed()
 
         slider.valueChanged.connect(handle_slider_change)
+        # Letting go of the handle settles at once (full render) instead of
+        # waiting out the idle debounce. See spec/slider-speed.md.
+        slider.sliderReleased.connect(self._settle_now)
 
         slider_layout = QHBoxLayout()
         slider_layout.setContentsMargins(0, 0, 0, 0)
@@ -1570,15 +1578,24 @@ class SlidersPanel(QWidget):
             cb.setEnabled(img is not None and img.active_area_id is None)
 
     def set_current_idx(self, idx):
-        # Clear any pending adjustments for the previous image
-        self._pending_adjustment = None
-        self._pending_idx = None
-        self._debounce_timer.stop()
+        # A canvas refresh for a frame that was JUST rendered (a live result
+        # landing, or a discrete edit that rendered first) must neither render
+        # it again nor cancel the idle settle. See spec/slider-speed.md.
+        refresh_only = self._live_refresh_depth > 0 and idx == self.current_idx
+        if not refresh_only:
+            # Clear any pending adjustments for the previous image
+            self._pending_adjustment = None
+            self._pending_idx = None
+            self._debounce_timer.stop()
         # End the undo burst only on a real image switch — this method is
         # also re-entered on same-image refreshes during a slider drag.
         if idx != self.current_idx:
             self._end_undo_burst()
             self._undo_burst_timer.stop()
+            # The frame being left may still show a draft (or be mid-render):
+            # finish it in the background so its preview and thumbnail are
+            # full renders of its final settings.
+            self._settle_live_image(self.current_idx)
 
         self.current_idx = idx
         # Reflect this image's color profile (independent of the slider dict,
@@ -1596,8 +1613,103 @@ class SlidersPanel(QWidget):
         self._load_active_layer(idx)
         # Reprocess only when the active layer carries edits (mirrors the old
         # populated-path behavior; a blank image is already rendered elsewhere).
-        if idx is not None and adjustment:
+        if idx is not None and adjustment and not refresh_only:
             ccr_backend.apply_adjustment_by_index(idx)
+
+    # --- Live rendering (spec/slider-speed.md) ------------------------------
+    def _live_renderer(self):
+        if self._live is None:
+            from widgets.live_render import LiveRenderer
+            self._live = LiveRenderer(self, on_applied=self._on_live_applied)
+        return self._live
+
+    @contextmanager
+    def live_refresh(self):
+        """Scope in which update_preview -> set_current_idx only redraws."""
+        self._live_refresh_depth += 1
+        try:
+            yield
+        finally:
+            self._live_refresh_depth -= 1
+
+    def _preview_widget(self):
+        ip = self._ip()
+        if ip is not None:
+            return ip
+        try:
+            return self.parent().parent().image_preview
+        except AttributeError:
+            return None
+
+    def _show_rendered(self):
+        """Show the current image after a synchronous render done here,
+        without set_current_idx rendering it a second time."""
+        ip = self._preview_widget()
+        if ip is None or self.current_idx is None:
+            return
+        with self.live_refresh():
+            ip.update_preview(self.current_idx)
+
+    def _cancel_live(self):
+        """A discrete edit is about to render synchronously: drop queued live
+        renders of this image (an in-flight one is voided by the epoch)."""
+        if self._live is not None and self.current_idx is not None \
+                and 0 <= self.current_idx < len(ccr_backend.images):
+            self._live.cancel_pending(ccr_backend.images[self.current_idx])
+
+    def _live_request(self):
+        """Queue a live render of the current image's stored settings and
+        (re)arm the idle settle. Mid-drag on a slow machine it is a draft."""
+        from widgets.live_render import BURST_WINDOW_S, DRAFT_THRESHOLD_MS
+        idx = self.current_idx
+        if idx is None or not (0 <= idx < len(ccr_backend.images)):
+            return
+        lr = self._live_renderer()
+        now = time.monotonic()
+        burst = (now - self._last_live_req) < BURST_WINDOW_S
+        self._last_live_req = now
+        slow = lr.last_full_ms is not None and lr.last_full_ms > DRAFT_THRESHOLD_MS
+        lr.request(ccr_backend.images[idx], draft=burst and slow)
+        self._debounce_timer.stop()
+        self._debounce_timer.start(150)
+
+    def _settle_now(self):
+        if self._debounce_timer.isActive():
+            self._debounce_timer.stop()
+            self._process_pending_adjustment()
+
+    def _settle_live_image(self, idx):
+        if self._live is None or idx is None or not (0 <= idx < len(ccr_backend.images)):
+            return
+        img = ccr_backend.images[idx]
+        if self._live.needs_full(img):
+            self._live.request(img, draft=False)
+
+    def _on_live_applied(self, img, draft):
+        """A live result was stored on `img`: redraw the canvas if it shows
+        that image, and refresh its sidebar thumbnail after a full render."""
+        idx = next((i for i, x in enumerate(ccr_backend.images) if x is img), None)
+        if idx is None:
+            return
+        ip = self._preview_widget()
+        # A late result must not throw the user out of a mode they entered
+        # after letting go of the slider (any refresh leaves crop/slice mode);
+        # the pixels are stored and show on the mode's own exit refresh.
+        in_modal = bool(getattr(ip, "crop_mode", False) or getattr(ip, "slice_mode", False))
+        if (ip is not None and idx == self.current_idx and not in_modal
+                and getattr(ip, "current_idx", None) == idx):
+            with self.live_refresh():
+                ip.update_preview(idx)
+        if not draft:
+            try:
+                self.parent().parent().thumbnail_list.update_thumbnail(idx)
+            except AttributeError:
+                pass
+
+    def shutdown_live_render(self):
+        """App close: wait out an in-flight live render."""
+        if self._live is not None:
+            self._live.shutdown()
 
     # --- Layers list (area editing) ---------------------------------------
     def _ip(self):
@@ -1754,14 +1866,8 @@ class SlidersPanel(QWidget):
         ccr_backend.update_area_geometry_by_index(
             self.current_idx, img.active_area_id, feather=val / 100.0,
             reprocess=False)
-        ip = self._ip()
-        if ip is not None:
-            ip.update_preview(self.current_idx)
-        # Debounce the heavy reprocess like a slider drag.
-        self._pending_adjustment = self._read_active_settings(self.current_idx)
-        self._pending_idx = self.current_idx
-        self._debounce_timer.stop()
-        self._debounce_timer.start(150)
+        # Rendered off the GUI thread like a slider drag (spec/slider-speed.md).
+        self._live_request()
 
     def _update_thumb(self):
         try:
@@ -1788,14 +1894,10 @@ class SlidersPanel(QWidget):
                 self._begin_undo_burst(ccr_backend.images[self.current_idx])
                 self._store_active_settings(self.current_idx, adjustment)
 
-            # Immediate preview update for visual feedback
-            self.parent().parent().image_preview.update_preview(self.current_idx)
-            
-            # Store the pending adjustment for debounced heavy processing
-            self._pending_adjustment = adjustment
-            self._pending_idx = self.current_idx
-            self._debounce_timer.stop()
-            self._debounce_timer.start(150)  # Slightly longer debounce for heavy processing
+            # Render off the GUI thread and show the result when it lands
+            # (latest wins); the idle settle guarantees a full final render.
+            # See spec/slider-speed.md.
+            self._live_request()
     
     def _attach_curves(self, adjustment: dict) -> dict:
         """Re-attach the live tone-curve state from the editor onto a freshly
@@ -1840,8 +1942,9 @@ class SlidersPanel(QWidget):
             img.adjustment_settings["cineon_log"] = True
         else:
             img.adjustment_settings.pop("cineon_log", None)
+        self._cancel_live()
         img.update_thumbnail_and_preview()
-        self.parent().parent().image_preview.update_preview(self.current_idx)
+        self._show_rendered()      # no second render (spec/slider-speed.md)
         self._update_thumb()
 
     # --- Settings -> Panel: show / hide sections (spec/panel-visibility.md) ----
@@ -2116,8 +2219,9 @@ class SlidersPanel(QWidget):
         self.cineon_checkbox.setEnabled(not name)
         self._select_look_in_combo(name)
         self._update_crosstalk_hint(img)
+        self._cancel_live()
         img.update_thumbnail_and_preview()
-        self.parent().parent().image_preview.update_preview(self.current_idx)
+        self._show_rendered()      # no second render (spec/slider-speed.md)
         self._update_thumb()
 
     def _make_bypass_checkbox(self, flag, what):
@@ -2143,8 +2247,9 @@ class SlidersPanel(QWidget):
             img.adjustment_settings[flag] = True
         else:
             img.adjustment_settings.pop(flag, None)
+        self._cancel_live()
         img.update_thumbnail_and_preview()
-        self.parent().parent().image_preview.update_preview(self.current_idx)
+        self._show_rendered()      # no second render (spec/slider-speed.md)
         self._update_thumb()
 
     def _on_curve_changed(self):
@@ -2159,11 +2264,7 @@ class SlidersPanel(QWidget):
         if 0 <= self.current_idx < len(ccr_backend.images):
             self._begin_undo_burst(ccr_backend.images[self.current_idx])
             self._store_active_settings(self.current_idx, adjustment)
-        self.parent().parent().image_preview.update_preview(self.current_idx)
-        self._pending_adjustment = adjustment
-        self._pending_idx = self.current_idx
-        self._debounce_timer.stop()
-        self._debounce_timer.start(150)
+        self._live_request()
 
     def _settle_preview(self):
         """Show the final state of a DISCRETE (one-shot) edit right away.
@@ -2180,8 +2281,9 @@ class SlidersPanel(QWidget):
         self._debounce_timer.stop()
         self._pending_adjustment = None
         self._pending_idx = None
+        self._cancel_live()
         ccr_backend.images[self.current_idx].update_thumbnail_and_preview()
-        self.parent().parent().image_preview.update_preview(self.current_idx)
+        self._show_rendered()
         try:
             self.parent().parent().thumbnail_list.update_thumbnail(self.current_idx)
         except AttributeError:
@@ -2193,31 +2295,12 @@ class SlidersPanel(QWidget):
         self._settle_preview()
 
     def _process_pending_adjustment(self):
-        """Process the pending adjustment if not already processing."""
-        if not self._processing and self._pending_adjustment is not None:
-            self._processing = True
-            
-            # Use QTimer to process in the next event loop iteration
-            QTimer.singleShot(0, self._do_backend_processing)
-    
-    def _do_backend_processing(self):
-        """Perform the heavier backend processing operations (thumbnail updates, etc.)."""
-        # Capture which index to process and clear pending so new changes can queue up
-        idx = self._pending_idx
+        """Idle settle (debounce timeout): make sure the current frame ends on
+        a FULL render of its latest settings — a drag may have ended on a
+        draft, or with the last value still queued."""
         self._pending_adjustment = None
         self._pending_idx = None
-        try:
-            if idx is not None and 0 <= idx < len(ccr_backend.images):
-                ccr_backend.images[idx].update_thumbnail_and_preview()
-        finally:
-            self._processing = False
-            # Process any adjustment that arrived while we were working
-            QTimer.singleShot(0, self._check_for_pending)
-    
-    def _check_for_pending(self):
-        """Check if there's another pending adjustment to process."""
-        if not self._processing and self._pending_adjustment is not None:
-            self._process_pending_adjustment()
+        self._settle_live_image(self.current_idx)
 
     def get_slider_values(self):
         return {key: slider.value() for key, slider in zip(self.adjustment_keys, self.sliders)}
@@ -2271,9 +2354,10 @@ class SlidersPanel(QWidget):
         # their own state and have their own delete control).
         if self.current_idx is not None:
             adjustment = {key: 0 for key in self.adjustment_keys}
+            self._cancel_live()
             ccr_backend.set_active_settings_by_index(self.current_idx, adjustment,
                                                      reprocess=True)
-            self.parent().parent().image_preview.update_preview(self.current_idx)
+            self._show_rendered()      # no second render (spec/slider-speed.md)
 
     def on_compare_pressed(self):
         # Temporarily show the fully UNADJUSTED positive while the button is
@@ -2301,19 +2385,23 @@ class SlidersPanel(QWidget):
             slider.setValue(0)
             slider.blockSignals(False)
             self.slider_value_labels[i].setText("0")
+        self._cancel_live()
         img.update_thumbnail_and_preview()
-        self.parent().parent().image_preview.update_preview(self.current_idx)
+        self._show_rendered()      # no second render (spec/slider-speed.md)
 
     def on_compare_released(self):
         # Restore the global dict + area enabled states and refill sliders.
         if self.current_idx is None or not hasattr(self, "_original_adjustment"):
             return
         img = ccr_backend.get_image_by_index(self.current_idx)
+        rendered = False
         if img is not None and hasattr(self, "_compare_global"):
             img.adjustment_settings = self._compare_global
             for a, enabled in self._compare_area_enabled:
                 a["enabled"] = enabled
+            self._cancel_live()
             img.update_thumbnail_and_preview()
+            rendered = True
         adjustment = self._original_adjustment or {}
         for i, key in enumerate(self.adjustment_keys):
             val = adjustment.get(key, self._default_for(key))
@@ -2321,7 +2409,10 @@ class SlidersPanel(QWidget):
             self.sliders[i].setValue(val)
             self.sliders[i].blockSignals(False)
             self.slider_value_labels[i].setText(str(val))
-        self.parent().parent().image_preview.update_preview(self.current_idx)
+        if rendered:
+            self._show_rendered()      # no second render (spec/slider-speed.md)
+        else:
+            self.parent().parent().image_preview.update_preview(self.current_idx)
         del self._original_adjustment
         if hasattr(self, "_compare_global"):
             del self._compare_global
