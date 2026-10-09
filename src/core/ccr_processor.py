@@ -25,6 +25,7 @@ except ImportError:
 # The hi-res zoom worker can call adjust_image_opencl concurrently with the
 # GUI thread; pyopencl command queues are not safe for concurrent submission.
 _opencl_lock = threading.Lock()
+_opencl_init_lock = threading.Lock()
 
 # Global OpenCL cache
 _opencl_cache = {
@@ -109,7 +110,16 @@ def _initialize_opencl():
     # Check if already initialized
     if _opencl_cache['program'] is not None:
         return True
-    
+    # The loader's worker threads all reach here at once on the first render;
+    # without the lock each built its own context and compiled the kernel.
+    with _opencl_init_lock:
+        if _opencl_cache['program'] is not None:
+            return True
+        return _initialize_opencl_locked()
+
+
+def _initialize_opencl_locked():
+    global _opencl_cache
     try:
         # Setup OpenCL context and queue automatically
         platforms = cl.get_platforms()

@@ -8,6 +8,7 @@ from core.ccr_processor import (ccr_normalize_with_reference, ccr_normalize_with
 import os
 import glob
 import concurrent.futures
+import threading
 import math
 import time
 import uuid
@@ -188,6 +189,31 @@ class CCRBackend:
         # cancelled load resurrecting its partial batch and against a stale,
         # abandoned loader thread clobbering a newer load.
         self._load_generation = 0
+        self._load_progress = (None, 0, 0)          # (generation, done, total)
+        self._load_progress_lock = threading.Lock()
+
+    # --- Load progress ------------------------------------------------------
+    # The loaders publish the batch only when it is complete (_commit_load), so
+    # the dialog cannot count loaded images; it reads this instead. Tagged with
+    # the load generation so a stale loader thread can't move a newer count.
+    def _set_load_progress(self, gen, done, total):
+        if gen is None or gen == self._load_generation:
+            self._load_progress = (gen, int(done), int(total))
+
+    def _bump_load_progress(self, gen):
+        with self._load_progress_lock:
+            g, done, total = getattr(self, "_load_progress", (None, 0, 0))
+            if g == gen and gen == self._load_generation:
+                self._load_progress = (gen, done + 1, total)
+
+    def reset_load_progress(self):
+        self._load_progress = (None, 0, 0)
+
+    def get_load_progress(self):
+        """(done, total) for the load in progress (units: files, or merged
+        frames in 3-way merge mode)."""
+        g, done, total = getattr(self, "_load_progress", (None, 0, 0))
+        return done, total
 
     def load_images_from_files(self, file_paths: List[str], cancel_flag=None,
                                force_no_merge: bool = False) -> int:
@@ -201,6 +227,7 @@ class CCRBackend:
         gen = self._load_generation
         self.images.clear()
         self.file_paths = file_paths
+        self._set_load_progress(gen, 0, len(file_paths))
         # A fresh batch is a new roll: drop any B/W point sampled from the
         # previous roll so its film base / dense-area density can't carry over
         # (different stocks differ). Only the in-memory fields are cleared — the
@@ -288,6 +315,7 @@ class CCRBackend:
                 if cancel_flag and cancel_flag():
                     break
                 _path, imgs = load_single_image(path)
+                self._bump_load_progress(gen)
                 if imgs:
                     results.extend(imgs)
                     loaded_file_count += 1
@@ -299,6 +327,7 @@ class CCRBackend:
                     if cancel_flag and cancel_flag():
                         break
                     path, imgs = future.result()
+                    self._bump_load_progress(gen)
                     if imgs:
                         results.extend(imgs)
                         loaded_file_count += 1
@@ -365,6 +394,7 @@ class CCRBackend:
         if current:
             self.file_paths = ([t[0] for t in triplets]
                                + list(passthrough_paths or []))
+        self._set_load_progress(gen, 0, len(triplets) + len(passthrough_paths or []))
 
         # Read the catalog ONCE for the batch so a re-merge of the same three
         # frames restores its saved edits. See spec/merge-catalog-persistence.md.
@@ -404,6 +434,7 @@ class CCRBackend:
                 if cancel_flag and cancel_flag():
                     break
                 imgs = load_triplet(order, triplet)
+                self._bump_load_progress(gen)
                 if imgs:
                     results.extend(imgs)
         else:
@@ -414,6 +445,7 @@ class CCRBackend:
                     if cancel_flag and cancel_flag():
                         break
                     imgs = future.result()
+                    self._bump_load_progress(gen)
                     if imgs:
                         results.extend(imgs)
 
@@ -436,6 +468,7 @@ class CCRBackend:
                     print(f"Failed to load merge TIFF {os.path.basename(p)}: {e}")
                     failures.append(
                         (p, load_errors.describe_load_failure(p, e)))
+                self._bump_load_progress(gen)
 
         # User cancelled mid-load: suppress any decode error a worker recorded
         # for the aborted import (the pool above has joined, so every write has

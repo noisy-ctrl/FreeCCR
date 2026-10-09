@@ -43,8 +43,12 @@ class LoadingDialog(QDialog):
 
     def update_dots(self):
         self.dot_count = (self.dot_count % 3) + 1  # Cycles 1, 2, 3
-        count = ccr_backend.get_image_count()  
-        total = ccr_backend.get_total_file_paths()  # Assuming this method exists
+        # The loader publishes the batch only when it is complete, so count
+        # finished files/frames from its progress, not loaded images.
+        count, total = ccr_backend.get_load_progress()
+        if not total:
+            count = ccr_backend.get_image_count()
+            total = ccr_backend.get_total_file_paths()
         self.label.setText("Loading images, please wait" + "." * self.dot_count + f" ({count}/{total})")
 
     def closeEvent(self, event):
@@ -182,6 +186,7 @@ class ThumbnailList(QWidget):
             worker = getattr(main_window, '_loader_worker', None)
             if worker is not None:
                 worker.cancel()
+        ccr_backend.reset_load_progress()     # don't flash the previous load's count
         self.loading_dialog = LoadingDialog(self, cancel_callback=cancel_loading)
         self.loading_dialog.show()
         QApplication.processEvents()
