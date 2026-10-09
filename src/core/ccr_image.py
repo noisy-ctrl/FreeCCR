@@ -1802,6 +1802,9 @@ class CCRImage:
                      self.tint_balance_factor,
                      highlights=s.get('highlights', 0),
                      shadows=s.get('shadows', 0),
+                     # Range / keep-endpoint shape of the two tools
+                     # (spec/highlights-shadows-range.md); per layer.
+                     tone_shape=s.get('tone_shape'),
                      ch_input_gain=s.get('ch_input_gain', 0),
                      ch_master_shift=s.get('ch_master_shift', 0),
                      # Auto Gain rides Master Gain: ADDED to the user's value, so
@@ -1929,6 +1932,9 @@ class CCRImage:
                      self.tint_balance_factor,
                      highlights=s.get('highlights', 0),
                      shadows=s.get('shadows', 0),
+                     # Range / keep-endpoint shape of the two tools
+                     # (spec/highlights-shadows-range.md); per layer.
+                     tone_shape=s.get('tone_shape'),
                      ch_input_gain=s.get('ch_input_gain', 0),
                      ch_master_shift=s.get('ch_master_shift', 0),
                      ch_master_gain=s.get('ch_master_gain', 0),
