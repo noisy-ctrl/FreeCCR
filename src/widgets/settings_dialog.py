@@ -215,25 +215,28 @@ class SettingsDialog(QDialog):
             "export, so no adjustment tints it. B/W-point conversions only."))
         lay.addWidget(grp_border)
 
-        grp_zoom = QGroupBox("Zoom")
+        grp_zoom = QGroupBox("Preview")
         gz = QVBoxLayout(grp_zoom)
         gz.setSpacing(theme.GAP_ROW)
-        self._cb_full_res_zoom = QCheckBox("Load full resolution at 100% zoom")
-        gz.addWidget(self._cb_full_res_zoom)
+        # Preview detail (spec/preview-detail.md): one choice in place of the
+        # old "full resolution at 100%" and "sharp preview" checkboxes.
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Preview detail"))
+        self._combo_preview_detail = QComboBox()
+        for label, level in (("Full", "full"), ("Balanced", "balanced"),
+                             ("Fast", "fast")):
+            self._combo_preview_detail.addItem(label, level)
+        row.addWidget(self._combo_preview_detail, 1)
+        gz.addLayout(row)
         gz.addWidget(self._muted(
-            "Zooming in re-decodes the frame at the resolution the zoom needs, "
-            "up to the file's own — so 100% shows one real source pixel per "
-            "screen pixel instead of a half-size decode scaled up. The current "
-            "detail stays on screen until the sharper render is ready. Turn off "
-            "to keep zoom detail at the half-size decode, which uses "
-            "noticeably less memory and time on large files."))
-        self._cb_sharp_fit = QCheckBox("Sharp preview on high-resolution screens")
-        gz.addWidget(self._cb_sharp_fit)
-        gz.addWidget(self._muted(
-            "On a Retina/high-DPI screen the editing preview is enlarged to fill "
-            "the window. With this on, a screen-sized render replaces it a moment "
-            "after each edit settles, so the unzoomed view is sharp. Turn off on "
-            "a slow machine: it costs a little extra processing per edit."))
+            "How much detail the preview renders after each edit. It changes "
+            "only what you see while editing, never the export or the colours.\n"
+            "Full: a screen-sized render at the fitted view, and real source "
+            "pixels at 100% zoom.\n"
+            "Balanced: the screen render is capped at 2000 px and zoom at "
+            "6000 px, about half the work of Full when zoomed in.\n"
+            "Fast: the 1080 px preview only, and zoom detail from the half-size "
+            "decode. Least memory and time; best for a slower computer."))
         lay.addWidget(grp_zoom)
 
         grp_keys = QGroupBox("Keyboard")
@@ -548,10 +551,6 @@ class SettingsDialog(QDialog):
                         (self._cb_auto_awb, ccr_backend.auto_awb),
                         (self._cb_gamma_lum, ccr_backend.gamma_luminance),
                         (self._cb_sprocket, ccr_backend.sprocket_mask_white),
-                        (self._cb_full_res_zoom,
-                         getattr(ccr_backend, "full_res_zoom", True)),
-                        (self._cb_sharp_fit,
-                         getattr(ccr_backend, "sharp_fit_preview", True)),
                         (self._cb_balance_hotkeys,
                          getattr(ccr_backend, "balance_hotkeys", False)),
                         (self._cb_mono_raw,
@@ -563,6 +562,11 @@ class SettingsDialog(QDialog):
         self._combo_merge_detail.setCurrentIndex(
             self._combo_merge_detail.findData(self._backend_merge_detail()))
         self._combo_merge_detail.blockSignals(False)
+        self._combo_preview_detail.blockSignals(True)
+        self._combo_preview_detail.setCurrentIndex(max(0,
+            self._combo_preview_detail.findData(
+                getattr(ccr_backend, "preview_detail", "full"))))
+        self._combo_preview_detail.blockSignals(False)
         # Input colour space: the ask toggle, the remembered default, and the
         # space used when that default is "manual".
         self._cb_tiff_ask.blockSignals(True)
@@ -619,14 +623,10 @@ class SettingsDialog(QDialog):
                 != bool(getattr(ccr_backend, "warn_no_anchor_convert", True))):
             self._mw.on_warn_no_anchor_toggled(
                 bool(self._cb_warn_no_anchor.isChecked()))
-        # Resolution-only, display-only: no reprocess pass (§5.4).
-        if (bool(self._cb_full_res_zoom.isChecked())
-                != bool(getattr(ccr_backend, "full_res_zoom", True))):
-            self._mw.on_full_res_zoom_toggled(
-                bool(self._cb_full_res_zoom.isChecked()))
-        if (bool(self._cb_sharp_fit.isChecked())
-                != bool(getattr(ccr_backend, "sharp_fit_preview", True))):
-            self._mw.on_sharp_fit_toggled(bool(self._cb_sharp_fit.isChecked()))
+        # Resolution-only, display-only: no reprocess pass (spec/preview-detail.md).
+        level = self._combo_preview_detail.currentData()
+        if level and level != getattr(ccr_backend, "preview_detail", "full"):
+            self._mw.on_preview_detail_changed(level)
         # Input colour space — affects the NEXT import only, so nothing is
         # re-decoded here (spec/input-transfer-function.md §4.2).
         if (bool(self._cb_tiff_ask.isChecked())

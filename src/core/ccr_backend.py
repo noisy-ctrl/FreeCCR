@@ -128,6 +128,9 @@ class CCRBackend:
         # Sharp preview at the fitted view on high-DPI screens: a screen-sized
         # detail render follows settled edits (spec/sharp-fit-preview.md).
         self.sharp_fit_preview: bool = True
+        # Preview detail (spec/preview-detail.md): one setting over the two
+        # flags above plus resolution caps. Set via set_preview_detail().
+        self.preview_detail: str = "full"
         # Auto white balance: when True, a fresh conversion writes AWB-estimated
         # temperature/tint into the image's sliders — only when neither is
         # already set. The algorithm id selects the estimator (core/awb.py).
@@ -191,6 +194,36 @@ class CCRBackend:
         self._load_generation = 0
         self._load_progress = (None, 0, 0)          # (generation, done, total)
         self._load_progress_lock = threading.Lock()
+
+    # --- Preview detail (spec/preview-detail.md) -------------------------
+    PREVIEW_DETAIL_LEVELS = ("full", "balanced", "fast")
+    # (fitted-view render cap, zoom tile cap) in source pixels on the long side;
+    # None = uncapped.
+    _PREVIEW_CAPS = {"full": (None, None), "balanced": (2000, 6000),
+                     "fast": (None, None)}
+
+    def set_preview_detail(self, level: str) -> str:
+        """Set the preview detail level and the two display flags it subsumes.
+        Unknown levels fall back to "full". Returns the level applied."""
+        level = level if level in self.PREVIEW_DETAIL_LEVELS else "full"
+        self.preview_detail = level
+        self.sharp_fit_preview = level != "fast"
+        self.full_res_zoom = level != "fast"
+        return level
+
+    def preview_caps(self):
+        """(fit_cap, zoom_cap) for the current level."""
+        return self._PREVIEW_CAPS.get(getattr(self, "preview_detail", "full"),
+                                      (None, None))
+
+    @staticmethod
+    def preview_detail_from_flags(sharp_fit: bool, full_res_zoom: bool) -> str:
+        """Migration from the two old checkboxes."""
+        if sharp_fit and full_res_zoom:
+            return "full"
+        if not sharp_fit and not full_res_zoom:
+            return "fast"
+        return "balanced"
 
     # --- Load progress ------------------------------------------------------
     # The loaders publish the batch only when it is complete (_commit_load), so
