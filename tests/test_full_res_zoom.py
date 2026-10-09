@@ -250,12 +250,40 @@ class TestTargetFromZoom:
         assert preview is False
         assert target == pytest.approx(8256, abs=8)
 
-    def test_fitted_view_asks_for_the_floor(self, fake_worker):
+    def test_fitted_view_asks_for_the_floor(self, fake_worker, monkeypatch):
+        # Sharp fit preview off: the legacy fitted request, floored.
+        monkeypatch.setattr(ccr_backend, "sharp_fit_preview", False, raising=False)
         ip = _setup()
         if not _viewport_ok(ip):
             pytest.skip("offscreen viewport not sized")
         ip.zoom_to_fit()
         assert ip._hires_target_long_side() == (True, 4128)
+
+    def test_fitted_view_dust_mode_keeps_the_floor(self, fake_worker, monkeypatch):
+        monkeypatch.setattr(ccr_backend, "sharp_fit_preview", True, raising=False)
+        ip = _setup()
+        if not _viewport_ok(ip):
+            pytest.skip("offscreen viewport not sized")
+        ip.zoom_to_fit()
+        ip.dust_mode = True
+        try:
+            assert ip._hires_target_long_side() == (True, 4128)
+        finally:
+            ip.dust_mode = False
+
+    def test_fitted_view_sharp_fit_is_screen_sized(self, fake_worker, monkeypatch):
+        # spec/sharp-fit-preview.md: as many source pixels as the window shows
+        # in DEVICE pixels, without the zoom tiles' floor.
+        monkeypatch.setattr(ccr_backend, "sharp_fit_preview", True, raising=False)
+        ip = _setup()
+        if not _viewport_ok(ip):
+            pytest.skip("offscreen viewport not sized")
+        ip.zoom_to_fit()
+        monkeypatch.setattr(ip, "_dpr", lambda: 2.0)
+        want = round(ip._current_percent() * 8256 * 2.0)
+        preview, target = ip._hires_target_long_side()
+        assert target == pytest.approx(want, abs=2)
+        assert target < 4128
 
     def test_feature_off_is_the_legacy_request(self, fake_worker, monkeypatch):
         ip = _setup()

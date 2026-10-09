@@ -1265,6 +1265,10 @@ class ImagePreview(QWidget):
             # disabled there too.
             self.rotation_slider.setEnabled(not self.dust_mode and not self.crop_mode)
             self.pixmap_item = QGraphicsPixmapItem(preview_img)
+            # The item's own mode wins over the view's SmoothPixmapTransform
+            # hint; the default (Fast) drew an enlarged preview nearest-
+            # neighbour, i.e. blocky. See spec/sharp-fit-preview.md.
+            self.pixmap_item.setTransformationMode(Qt.SmoothTransformation)
             self.scene.addItem(self.pixmap_item)
 
             ref = getattr(ccr_backend.images[idx], "reference_frame", None)
@@ -1764,9 +1768,44 @@ class ImagePreview(QWidget):
         # (_hires_display_pixmap), so it lines up with the dust overlay.
         if self.dust_mode:
             return True
-        if self._view_scale() <= 1.05:
+        if self._view_scale() > 1.05 and (self._zoom > 1.0 or self._crop_wants_hires()):
+            return True
+        return self._fit_wants_hires()
+
+    # --- Sharp preview at the fitted view (spec/sharp-fit-preview.md) -------
+    SHARP_FIT_MIN_DEVICE_SCALE = 1.15
+
+    def _dpr(self):
+        try:
+            return float(self.view.viewport().devicePixelRatioF()) or 1.0
+        except Exception:
+            return 1.0
+
+    def _sharp_fit_on(self):
+        return bool(getattr(ccr_backend, "sharp_fit_preview", True))
+
+    def _fit_wants_hires(self):
+        """At the fitted view on a high-DPI screen the 1080 preview is
+        magnified in DEVICE pixels even when it is not in logical ones; worth a
+        screen-sized render when the source has more detail than the preview."""
+        if not self._sharp_fit_on():
             return False
-        return self._zoom > 1.0 or self._crop_wants_hires()
+        if self.crop_mode or self.slice_mode or self.area_mode:
+            return False
+        img = (ccr_backend.get_image_by_index(self.current_idx)
+               if self.current_idx is not None else None)
+        if img is None or not (getattr(img, "converted", False)
+                               or ccr_backend.positive_mode):
+            return False
+        if self._view_scale() * self._dpr() <= self.SHARP_FIT_MIN_DEVICE_SCALE:
+            return False
+        ratio = self._preview_to_source_ratio()
+        return ratio is not None and ratio < 0.95
+
+    def _fit_only_request(self):
+        """A detail render wanted only for screen density, not zoom/crop/dust."""
+        return (self._zoom <= 1.0 + 1e-9 and not self.dust_mode
+                and not self._crop_wants_hires())
 
     def _crop_wants_hires(self):
         """At the fitted view a confirmed crop magnifies the kept region. Worth
@@ -1936,11 +1975,18 @@ class ImagePreview(QWidget):
         if decide is None:
             return True, self.HIRES_MAX_LONG_SIDE
         want = None
+        dpr = self._dpr() if self._sharp_fit_on() else 1.0
+        pct = self._current_percent()
+        full = getattr(img, "original_full_size", None)
+        if self._sharp_fit_on() and self._fit_only_request() and pct and full:
+            # Screen-sized render for the fitted view: as many source pixels as
+            # the window shows in DEVICE pixels, without the zoom tiles' 4,500
+            # floor (spec/sharp-fit-preview.md).
+            want = int(round(pct * max(full) * dpr))
+            return decide(want, want)
         if getattr(ccr_backend, "full_res_zoom", True):
-            pct = self._current_percent()
-            full = getattr(img, "original_full_size", None)
             if pct and full:
-                want = int(round(pct * max(full)))
+                want = int(round(pct * max(full) * dpr))
         return decide(want, self.HIRES_MAX_LONG_SIDE)
 
     def _maybe_request_hires(self):

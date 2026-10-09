@@ -183,10 +183,33 @@ class TestZoomedInEnoughWithCrop:
         _setup(ip, _ImgStub((0.0, 0.0, 0.5, 0.5)), view_scale=0.9, zoom=1.0)
         assert ip._zoomed_in_enough() is False
 
-    def test_no_crop_at_fit_is_not_enough(self):
-        ip = _make_preview()
-        _setup(ip, _ImgStub(None), view_scale=1.5, zoom=1.0)
-        assert ip._zoomed_in_enough() is False
+    def test_no_crop_at_fit_is_not_enough(self, monkeypatch=None):
+        # With the sharp fit preview OFF, an uncropped fitted view never asks
+        # for detail (the original behaviour).
+        prev = getattr(ccr_backend, "sharp_fit_preview", True)
+        ccr_backend.sharp_fit_preview = False
+        try:
+            ip = _make_preview()
+            _setup(ip, _ImgStub(None), view_scale=1.5, zoom=1.0)
+            assert ip._zoomed_in_enough() is False
+        finally:
+            ccr_backend.sharp_fit_preview = prev
+
+    def test_magnified_fit_wants_detail_with_sharp_fit(self):
+        # spec/sharp-fit-preview.md: the preview is enlarged 1.5x on screen at
+        # the fitted view, so a screen-sized render is worth it.
+        prev = getattr(ccr_backend, "sharp_fit_preview", True)
+        ccr_backend.sharp_fit_preview = True
+        try:
+            ip = _make_preview()
+            _setup(ip, _ImgStub(None), view_scale=1.5, zoom=1.0)
+            assert ip._zoomed_in_enough() is True
+            _setup(ip, _ImgStub(None), view_scale=1.05, zoom=1.0)
+            assert ip._zoomed_in_enough() is False           # not magnified
+            ip._dpr = lambda: 2.0                            # ...but on a 2x screen
+            assert ip._zoomed_in_enough() is True
+        finally:
+            ccr_backend.sharp_fit_preview = prev
 
     def test_zoomed_in_path_unchanged(self):
         ip = _make_preview()
