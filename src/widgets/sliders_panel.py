@@ -855,6 +855,22 @@ class SlidersPanel(QWidget):
         self._settings.remove("convert/film_stock_selected")
         self._reload_film_stock_combo(select="")
 
+        # Auto black point: measure each frame's film base from its own clear
+        # border at Convert time (spec/auto-black-point.md). Persisted.
+        self.auto_bp_checkbox = QCheckBox("Auto black point (per frame)")
+        self.auto_bp_checkbox.setToolTip(
+            "Convert measures each frame's film base from its own clear border "
+            "(the even strip between the holder and the image), so a light "
+            "that drifts between frames no longer shifts the colour. A frame "
+            "whose border can't be measured with confidence (none visible, "
+            "clipped, or edges that disagree with the roll) falls back to the "
+            "sampled Black Point, or the rest of the roll's, and says so.")
+        ccr_backend.auto_black_point = self._settings.value(
+            "convert/auto_black_point", False, type=bool)
+        self.auto_bp_checkbox.setChecked(ccr_backend.auto_black_point)
+        self.auto_bp_checkbox.toggled.connect(self._on_auto_bp_toggled)
+        scroll_layout.addWidget(self.auto_bp_checkbox)
+
         # Shows which slope source the next conversion will use. Eliding: this
         # line names the selected film stock, and a user-supplied name is
         # arbitrarily long — as a plain QLabel it would set a minimum width the
@@ -2444,7 +2460,11 @@ class SlidersPanel(QWidget):
         bp_set = ccr_backend.black_point_bgr is not None
         wp_set = ccr_backend.white_point_bgr is not None
         stock = ccr_backend.film_stock_name
-        if not bp_set:
+        if getattr(ccr_backend, "auto_black_point", False):
+            slope = ("white point (scaled per frame)" if (wp_set and bp_set)
+                     else f"film stock — {stock}" if stock else "default slope")
+            text = f"Anchor source: auto black point per frame, {slope}"
+        elif not bp_set:
             # No anchor sampled: converting is still allowed, and runs the
             # fixed-constant density inversion (spec/no-anchor-convert.md). Say so
             # rather than showing nothing, so the panel always states what
@@ -2617,6 +2637,15 @@ class SlidersPanel(QWidget):
             self.set_temporary_hint(
                 "White Point sampled! Now set the <b>Black Point</b> (film base).", duration=5000)
 
+    def _on_auto_bp_toggled(self, checked):
+        ccr_backend.auto_black_point = bool(checked)
+        self._settings.setValue("convert/auto_black_point", bool(checked))
+        self._update_bwp_mode_label()
+        if checked:
+            self.set_temporary_hint(
+                "Auto black point on: Convert measures each frame's film base "
+                "from its clear border.", duration=5000)
+
     def _confirm_no_anchor_convert(self) -> bool:
         """True when the conversion may proceed. With no black point sampled the
         conversion is a plain per-channel flip with nothing normalised, so ask
@@ -2624,6 +2653,8 @@ class SlidersPanel(QWidget):
         See spec/no-anchor-convert.md."""
         if ccr_backend.black_point_bgr is not None:
             return True
+        if getattr(ccr_backend, "auto_black_point", False):
+            return True          # each frame measures its own base
         if not getattr(ccr_backend, "warn_no_anchor_convert", True):
             return True
         box = QMessageBox(self)
@@ -2660,6 +2691,17 @@ class SlidersPanel(QWidget):
             from core.ccr_processor import ccr_normalize_with_bwpoint
             black = ccr_backend.black_point_bgr  # may be None → direct invert
             white = ccr_backend.white_point_bgr  # may be None → default slope
+            auto_res = auto_source = None
+            if getattr(ccr_backend, "auto_black_point", False):
+                # The raw was just reloaded above (when converted).
+                auto_res = ccr_backend.detect_frame_black_point(img, reload=False)
+                black, auto_source = ccr_backend.resolve_auto_black_point(auto_res)
+                if black is None:
+                    self.set_temporary_hint(
+                        "Auto black point: " + auto_res.summary()
+                        + " — set a Black Point by hand for this frame.", duration=8000)
+                    return
+                white = ccr_backend.auto_white_point_for(black)
             # Film-stock slopes apply only in black-point-only mode — a sampled
             # white point wins, and with no black point there is nothing for a
             # slope to act on (spec/film-stock-slopes.md).
@@ -2685,6 +2727,9 @@ class SlidersPanel(QWidget):
                 "density": bool(ccr_backend.density_bwpoint),
                 "slopes": slopes,
             }
+            if auto_source is not None:
+                img.conversion_inputs["auto_bp"] = ccr_backend.auto_bp_record(
+                    auto_res, auto_source)
             ccr_backend.maybe_auto_awb(img)
             img.update_thumbnail_and_preview()
             mw = self.parent().parent()
@@ -2692,7 +2737,19 @@ class SlidersPanel(QWidget):
             mw.image_preview.update_preview(self.current_idx)
             mw.image_preview._update_unconvert_action_state()
             ccr_backend.save_catalog()
-            self.set_temporary_hint("Current image converted!", duration=3000)
+            if auto_source == "auto":
+                self.set_temporary_hint(
+                    f"Converted with auto black point: {auto_res.summary()}, "
+                    f"{auto_res.confidence} confidence (outlined).", duration=6000)
+                if hasattr(mw.image_preview, "flash_auto_bp_strip"):
+                    mw.image_preview.flash_auto_bp_strip(auto_res.rect)
+            elif auto_source is not None:
+                self.set_temporary_hint(
+                    f"Auto black point: {auto_res.summary()} — used the "
+                    f"{'sampled black point' if auto_source == 'sampled' else 'roll'} "
+                    "instead.", duration=8000)
+            else:
+                self.set_temporary_hint("Current image converted!", duration=3000)
         except Exception as e:
             QMessageBox.critical(self, "Conversion Error", str(e))
 
@@ -2727,7 +2784,21 @@ class SlidersPanel(QWidget):
         except AttributeError:
             pass
         ccr_backend.save_catalog()
-        self.set_temporary_hint("B/W Point conversion complete!", duration=3000)
+        summ = getattr(ccr_backend, "last_auto_bp_summary", None)
+        if getattr(ccr_backend, "auto_black_point", False) and summ:
+            n_auto = summ["high"] + summ["medium"]
+            msg = (f"Auto black point on {n_auto} frame{'s' if n_auto != 1 else ''}: "
+                   f"{summ['high']} high, {summ['medium']} medium confidence")
+            if summ["fallback"]:
+                msg += f"; {summ['fallback']} fell back"
+            if summ["skipped"]:
+                msg += f"; {summ['skipped']} not converted"
+            if summ["notes"]:
+                msg += " (" + "; ".join(dict.fromkeys(summ["notes"]))[:160] + ")"
+            self.set_temporary_hint(msg + ".", duration=10000)
+            ccr_backend.last_auto_bp_summary = None
+        else:
+            self.set_temporary_hint("B/W Point conversion complete!", duration=3000)
 
     # --- Copy / Paste Settings -------------------------------------------
     # Copy takes a full snapshot; Paste opens PasteSettingsDialog listing what

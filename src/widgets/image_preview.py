@@ -2636,6 +2636,40 @@ class ImagePreview(QWidget):
 
     # --- Crop mode -----------------------------------------------------
 
+    def flash_auto_bp_strip(self, rect_norm, ms=4000):
+        """Outline, for a few seconds, the clear-border strip the auto black
+        point measured (spec/auto-black-point.md). `rect_norm` is (x1, y1, x2,
+        y2) normalised to the raw preview, which is full-image space here."""
+        if not rect_norm or self.current_idx is None:
+            return
+        img = ccr_backend.get_image_by_index(self.current_idx)
+        raw = getattr(img, "resized_raw", None) if img is not None else None
+        if raw is None:
+            return
+        h, w = raw.shape[:2]
+        x1, y1, x2, y2 = rect_norm
+        corners = [(x1 * w, y1 * h), (x2 * w, y1 * h), (x2 * w, y2 * h), (x1 * w, y2 * h)]
+        if self._crop_display_transform is not None:
+            inv, ok = self._crop_display_transform.inverted()
+            if not ok:
+                return
+            corners = [(p.x(), p.y()) for p in (inv.map(QPointF(*c)) for c in corners)]
+        poly = QPolygonF([QPointF(*c) for c in corners])
+        item = QGraphicsPolygonItem(poly)
+        item.setPen(QPen(QColor(255, 140, 0, 220), 2, Qt.DashLine))
+        item.setZValue(50)
+        item.setTransform(self.view._display_transform())
+        self.view.scene().addItem(item)
+
+        def _remove():
+            try:
+                sc = item.scene()
+                if sc is not None:
+                    sc.removeItem(item)
+            except RuntimeError:
+                pass          # the scene was rebuilt and took the item with it
+        QTimer.singleShot(ms, _remove)
+
     def map_displayed_to_full(self, x, y):
         """Map a point from displayed-pixmap coords to full-image coords.
         Identity unless a confirmed crop is currently being displayed."""
