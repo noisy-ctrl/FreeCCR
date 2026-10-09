@@ -1089,21 +1089,19 @@ class SlidersPanel(QWidget):
         def _section_separator():
             return theme.section_separator()
 
-        scroll_layout.addWidget(_section_separator())
-        self.curves_section = CollapsibleSection("Curves")
-        scroll_layout.addWidget(self.curves_section)
-
-        scroll_layout.addWidget(_section_separator())
-        self.band_section = CollapsibleSection("Subtractive Saturations")
-        scroll_layout.addWidget(self.band_section)
-
-        scroll_layout.addWidget(_section_separator())
-        self.noise_section = CollapsibleSection("Chroma Noise Reduction")
-        scroll_layout.addWidget(self.noise_section)
-
-        scroll_layout.addWidget(_section_separator())
-        self.details_section = CollapsibleSection("Details")
-        scroll_layout.addWidget(self.details_section)
+        for sid, attr, title in (("curves", "curves_section", "Curves"),
+                                 ("bands", "band_section", "Subtractive Saturations"),
+                                 ("noise", "noise_section", "Chroma Noise Reduction"),
+                                 ("details", "details_section", "Details")):
+            sep = _section_separator()
+            scroll_layout.addWidget(sep)
+            section = CollapsibleSection(title)
+            setattr(self, attr, section)
+            scroll_layout.addWidget(section)
+            self._section_separators[sid] = sep
+        # Every hideable section exists now: apply the user's Settings -> Panel
+        # choice (spec/panel-visibility.md).
+        self.apply_section_visibility(self.hidden_sections())
 
         # --- Populate Channel Levels (the section widget itself is placed far
         # above, just under the Convert row) ---
@@ -1845,6 +1843,39 @@ class SlidersPanel(QWidget):
         img.update_thumbnail_and_preview()
         self.parent().parent().image_preview.update_preview(self.current_idx)
         self._update_thumb()
+
+    # --- Settings -> Panel: show / hide sections (spec/panel-visibility.md) ----
+    HIDEABLE_SECTIONS = (("printer_lights", "Printer Lights", "printer_section"),
+                         ("crosstalk", "Crosstalk Correction", "crosstalk_section"),
+                         ("levels", "Channel Levels (incl. Film Look, Cineon)", "od_section"),
+                         ("balance", "Channel Balance", "balance_section"),
+                         ("curves", "Curves", "curves_section"),
+                         ("bands", "Subtractive Saturations", "band_section"),
+                         ("noise", "Chroma Noise Reduction", "noise_section"),
+                         ("details", "Details", "details_section"))
+    _HIDDEN_KEY = "panel/hidden_sections"
+
+    def hidden_sections(self) -> set:
+        known = {sid for sid, _l, _a in self.HIDEABLE_SECTIONS}
+        raw = self._settings.value(self._HIDDEN_KEY, "", type=str) or ""
+        return {x for x in raw.split(",") if x in known}
+
+    def set_hidden_sections(self, ids):
+        known = [sid for sid, _l, _a in self.HIDEABLE_SECTIONS]
+        ids = [x for x in known if x in set(ids)]
+        self._settings.setValue(self._HIDDEN_KEY, ",".join(ids))
+        self.apply_section_visibility(set(ids))
+
+    def apply_section_visibility(self, hidden):
+        for sid, _label, attr in self.HIDEABLE_SECTIONS:
+            section = getattr(self, attr, None)
+            if section is None:
+                continue
+            visible = sid not in hidden
+            section.setVisible(visible)
+            sep = self._section_separators.get(sid)
+            if sep is not None:
+                sep.setVisible(visible)
 
     # --- Printer Lights (spec/printer-lights.md) ------------------------------
     PRINTER_POINT_UNITS = 3     # Shift-slider units per printer point (0.02 density)

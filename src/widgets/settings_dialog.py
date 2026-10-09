@@ -61,6 +61,11 @@ class SettingsDialog(QDialog):
 
         self._add_category("General", self._build_general_page())
         self._add_category("Color Management", self._build_color_management_page())
+        # Settings -> Panel (spec/panel-visibility.md); only with a real panel.
+        self._panel_checks = {}
+        if getattr(main_window, "sliders_panel", None) is not None and hasattr(
+                main_window.sliders_panel, "HIDEABLE_SECTIONS"):
+            self._add_category("Panel", self._build_panel_page())
 
         root.addWidget(theme.section_separator())
         footer = QHBoxLayout()
@@ -243,6 +248,35 @@ class SettingsDialog(QDialog):
     # ------------------------------------------------------------------ #
     # Color Management page
     # ------------------------------------------------------------------ #
+    # ------------------------------------------------------------------ #
+    # Panel page (spec/panel-visibility.md)
+    # ------------------------------------------------------------------ #
+    def _build_panel_page(self) -> QWidget:
+        panel = self._mw.sliders_panel
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        theme.apply_panel_spacing(lay, spacing=theme.GAP_SECTION)
+        grp = QGroupBox("Show in the editing panel")
+        g = QVBoxLayout(grp)
+        g.setSpacing(theme.GAP_ROW)
+        hidden = panel.hidden_sections()
+        for sid, label, _attr in panel.HIDEABLE_SECTIONS:
+            cb = QCheckBox(label)
+            cb.setChecked(sid not in hidden)
+            g.addWidget(cb)
+            self._panel_checks[sid] = cb
+        g.addWidget(self._muted(
+            "Hiding a tool only removes it from the panel. Any values it already "
+            "has on an image keep applying, so hide tools you leave at their "
+            "defaults. Master Gain, the tone sliders and the black/white point "
+            "controls are always shown."))
+        lay.addWidget(grp)
+        lay.addStretch(1)
+        return page
+
+    def _staged_hidden_sections(self):
+        return {sid for sid, cb in self._panel_checks.items() if not cb.isChecked()}
+
     def _muted(self, text: str) -> QLabel:
         lbl = QLabel(text)
         lbl.setWordWrap(True)
@@ -611,6 +645,12 @@ class SettingsDialog(QDialog):
         if (bool(self._cb_mono_raw.isChecked())
                 != bool(getattr(ccr_backend, "mono_raw", False))):
             self._mw.on_mono_raw_toggled(bool(self._cb_mono_raw.isChecked()))
+        # Panel visibility: display-only, so no reprocess.
+        if self._panel_checks:
+            panel = self._mw.sliders_panel
+            staged = self._staged_hidden_sections()
+            if staged != panel.hidden_sections():
+                panel.set_hidden_sections(staged)
 
     def accept(self):
         """Done: commit the staged toggles, then close. (Escape/close → reject,
