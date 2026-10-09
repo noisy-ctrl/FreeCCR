@@ -876,6 +876,21 @@ class SlidersPanel(QWidget):
         self.auto_bp_checkbox.toggled.connect(self._on_auto_bp_toggled)
         scroll_layout.addWidget(self.auto_bp_checkbox)
 
+        # Auto crop: find the frame on the raw scan, straighten, crop to the
+        # picture as part of Convert (spec/auto-crop.md). Persisted.
+        self.auto_crop_checkbox = QCheckBox("Auto crop (find the frame)")
+        self.auto_crop_checkbox.setToolTip(
+            "Convert also finds each frame's picture area on the raw scan "
+            "(past the holder, the film rebate and the sprocket rows), "
+            "straightens it and crops to it, so the histogram and levels see "
+            "only the photograph. A frame it isn't sure about is left uncropped "
+            "and named in the summary. Ctrl+Z removes an auto crop; the Crop "
+            "panel's Auto button does the same for one frame, for review.")
+        ccr_backend.auto_crop = self._settings.value("convert/auto_crop", False, type=bool)
+        self.auto_crop_checkbox.setChecked(ccr_backend.auto_crop)
+        self.auto_crop_checkbox.toggled.connect(self._on_auto_crop_toggled)
+        scroll_layout.addWidget(self.auto_crop_checkbox)
+
         # Shows which slope source the next conversion will use. Eliding: this
         # line names the selected film stock, and a user-supplied name is
         # arbitrarily long — as a plain QLabel it would set a minimum width the
@@ -2902,6 +2917,19 @@ class SlidersPanel(QWidget):
                 "Auto black point on: Convert measures each frame's film base "
                 "from its clear border.", duration=5000)
 
+    def _on_auto_crop_toggled(self, checked):
+        ccr_backend.auto_crop = bool(checked)
+        self._settings.setValue("convert/auto_crop", bool(checked))
+
+    @staticmethod
+    def _auto_crop_hint(frame, applied) -> str:
+        if frame is None:
+            return ""
+        if applied:
+            return f" Auto crop: {frame.summary()} ({frame.confidence} confidence)."
+        why = frame.reason or f"{frame.confidence} confidence"
+        return f" Auto crop left this frame uncropped: {why}."
+
     def _confirm_no_anchor_convert(self) -> bool:
         """True when the conversion may proceed. With no black point sampled the
         conversion is a plain per-channel flip with nothing normalised, so ask
@@ -2944,6 +2972,9 @@ class SlidersPanel(QWidget):
         try:
             if img.converted:
                 img.reload_image()
+            # resized_raw holds the raw scan now: find the frame before converting
+            frame = (ccr_backend.detect_frame_crop(img, raw=img.resized_raw)
+                     if getattr(ccr_backend, "auto_crop", False) else None)
             from core.ccr_processor import ccr_normalize_with_bwpoint
             black = ccr_backend.black_point_bgr  # may be None → direct invert
             white = ccr_backend.white_point_bgr  # may be None → default slope
@@ -2987,6 +3018,8 @@ class SlidersPanel(QWidget):
                 img.conversion_inputs["auto_bp"] = ccr_backend.auto_bp_record(
                     auto_res, auto_source)
             ccr_backend.maybe_auto_awb(img)
+            cropped = ccr_backend.apply_auto_crop(img, frame) if frame is not None else False
+            crop_msg = self._auto_crop_hint(frame, cropped)
             img.update_thumbnail_and_preview()
             mw = self.parent().parent()
             mw.thumbnail_list.update_all_thumbnails()
@@ -2996,16 +3029,18 @@ class SlidersPanel(QWidget):
             if auto_source == "auto":
                 self.set_temporary_hint(
                     f"Converted with auto black point: {auto_res.summary()}, "
-                    f"{auto_res.confidence} confidence (outlined).", duration=6000)
+                    f"{auto_res.confidence} confidence (outlined)." + crop_msg,
+                    duration=8000 if crop_msg else 6000)
                 if hasattr(mw.image_preview, "flash_auto_bp_strip"):
                     mw.image_preview.flash_auto_bp_strip(auto_res.rect)
             elif auto_source is not None:
                 self.set_temporary_hint(
                     f"Auto black point: {auto_res.summary()} — used the "
                     f"{'sampled black point' if auto_source == 'sampled' else 'roll'} "
-                    "instead.", duration=8000)
+                    "instead." + crop_msg, duration=8000)
             else:
-                self.set_temporary_hint("Current image converted!", duration=3000)
+                self.set_temporary_hint("Current image converted!" + crop_msg,
+                                        duration=6000 if crop_msg else 3000)
         except Exception as e:
             QMessageBox.critical(self, "Conversion Error", str(e))
 
@@ -3040,6 +3075,7 @@ class SlidersPanel(QWidget):
         except AttributeError:
             pass
         ccr_backend.save_catalog()
+        crop_msg = self._auto_crop_summary_text()
         summ = getattr(ccr_backend, "last_auto_bp_summary", None)
         if getattr(ccr_backend, "auto_black_point", False) and summ:
             n_auto = summ["high"] + summ["medium"]
@@ -3051,10 +3087,25 @@ class SlidersPanel(QWidget):
                 msg += f"; {summ['skipped']} not converted"
             if summ["notes"]:
                 msg += " (" + "; ".join(dict.fromkeys(summ["notes"]))[:160] + ")"
-            self.set_temporary_hint(msg + ".", duration=10000)
+            self.set_temporary_hint(msg + "." + crop_msg, duration=12000 if crop_msg else 10000)
             ccr_backend.last_auto_bp_summary = None
         else:
-            self.set_temporary_hint("B/W Point conversion complete!", duration=3000)
+            self.set_temporary_hint("B/W Point conversion complete!" + crop_msg,
+                                    duration=10000 if crop_msg else 3000)
+
+    @staticmethod
+    def _auto_crop_summary_text() -> str:
+        """' Auto crop: 34 cropped (30 high, 4 medium); 2 left uncropped (…).'"""
+        summ = getattr(ccr_backend, "last_auto_crop_summary", None)
+        ccr_backend.last_auto_crop_summary = None
+        if not summ:
+            return ""
+        msg = (f" Auto crop: {summ['cropped']} cropped ({summ['high']} high, "
+               f"{summ['medium']} medium confidence)")
+        if summ["skipped"]:
+            msg += (f"; {summ['skipped']} left uncropped ("
+                    + "; ".join(summ["notes"])[:200] + ")")
+        return msg + "."
 
     # --- Copy / Paste Settings -------------------------------------------
     # Copy takes a full snapshot; Paste opens PasteSettingsDialog listing what

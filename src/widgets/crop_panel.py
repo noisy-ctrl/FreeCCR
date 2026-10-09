@@ -173,6 +173,25 @@ class CropPanel(QWidget):
         hz_row.addWidget(self.horizon_btn, 1)
         layout.addLayout(hz_row)
 
+        layout.addWidget(self._separator())
+        # Auto: find the frame on the raw scan (spec/auto-crop.md). It only sets
+        # the pending box + straighten; nothing is committed until Done.
+        layout.addWidget(self._section_label("Find Frame"))
+        self.auto_btn = QPushButton("Auto")
+        self.auto_btn.setFixedHeight(theme.CONTROL_H)
+        self.auto_btn.setToolTip(
+            "Find this frame's picture area on the raw scan, past the holder, "
+            "the film rebate and the sprocket rows, and straighten it. The box "
+            "is only a suggestion: adjust it if needed, then Done.")
+        theme.style_button(self.auto_btn, "secondary")
+        self.auto_btn.clicked.connect(self._on_auto)
+        layout.addWidget(self.auto_btn)
+        self.auto_status = QLabel("")
+        self.auto_status.setWordWrap(True)
+        self.auto_status.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 11px;")
+        self.auto_status.setVisible(False)
+        layout.addWidget(self.auto_status)
+
         hint = QLabel(
             "Drag on the image to draw a box; drag handles to resize, the top "
             "knob (or the slider above) to straighten, the center to move. "
@@ -209,12 +228,30 @@ class CropPanel(QWidget):
     def _separator():
         return theme.section_separator()
 
+    def _on_auto(self):
+        res = self.image_preview.auto_detect_crop()
+        if res is None:
+            return
+        if res.rect is None:
+            msg = f"No frame found: {res.reason or 'no clear edges'}. The box is unchanged."
+        elif res.confidence == "low":
+            msg = (f"Found {res.summary()}, but low confidence ({res.reason}). "
+                   "Check the box before Done.")
+        else:
+            msg = f"Found {res.summary()} ({res.confidence} confidence). Adjust if needed, then Done."
+            if res.soft:
+                msg += (" A soft edge is where the picture is as thin as the film "
+                        "base, so the gate can't be seen; it stops at the rebate.")
+        self.auto_status.setText(msg)
+        self.auto_status.setVisible(True)
+
     # --- Public API used by MainWindow / ImagePreview ---------------------
     def bind_image(self):
         """Refresh panel state when crop mode opens: reflect the (possibly
         folded) straighten angle, and seed/keep a box matching the remembered
         ratio. Called by MainWindow.toggle_crop_panel after enter_crop_mode."""
         self._update_custom_visibility()
+        self.auto_status.setVisible(False)
         self.image_preview.seed_crop_ratio_on_entry()
         self.on_crop_geometry_changed()
         self.image_preview.redraw_crop_overlay()
