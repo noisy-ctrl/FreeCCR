@@ -3656,6 +3656,32 @@ class ImagePreview(QWidget):
         self._pending_crop_angle = float(degrees)
         self._draw_crop_overlay()
 
+    def auto_detect_crop(self):
+        """Crop panel Auto: find the frame on the raw scan and put it in as the
+        pending box + straighten. Nothing is committed until Done (so it can be
+        reviewed and adjusted). Returns the core.auto_crop.FrameCrop, or None
+        when not in crop mode. See spec/auto-crop.md."""
+        if not self.crop_mode or self.current_idx is None or self.current_pixmap is None:
+            return None
+        img = ccr_backend.get_image_by_index(self.current_idx)
+        if img is None:
+            return None
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            res = ccr_backend.detect_frame_crop(img)
+        finally:
+            QApplication.restoreOverrideCursor()
+        if res.rect is None:
+            return res
+        w, h = self.current_pixmap.width(), self.current_pixmap.height()
+        x1, y1, x2, y2 = res.rect
+        self._pending_crop_local = QRectF(x1 * w, y1 * h, (x2 - x1) * w, (y2 - y1) * h)
+        self._pending_crop_angle = float(res.angle)
+        self._crop_box_is_seed = False
+        self._draw_crop_overlay()
+        self._sync_crop_panel()
+        return res
+
     def reset_pending_crop(self):
         """Reset button: clear the pending box + straighten (no commit)."""
         if not self.crop_mode:
