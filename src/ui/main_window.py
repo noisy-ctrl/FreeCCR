@@ -274,6 +274,13 @@ class MainWindow(QMainWindow):
             "view/full_res_zoom", True, type=bool)
         ccr_backend.sharp_fit_preview = self._settings.value(
             "view/sharp_fit", True, type=bool)
+        # Preview detail subsumes both flags (spec/preview-detail.md); without a
+        # saved level, derive one from them.
+        level = self._settings.value("view/preview_detail", "", type=str)
+        if not level:
+            level = ccr_backend.preview_detail_from_flags(
+                ccr_backend.sharp_fit_preview, ccr_backend.full_res_zoom)
+        ccr_backend.set_preview_detail(level)
         # Restore the Auto WB toggle + algorithm (defaults OFF / Gray World).
         # When on, a fresh conversion writes AWB-estimated temperature/tint into
         # the image's sliders — only when neither is already set. Affects only
@@ -1022,6 +1029,24 @@ class MainWindow(QMainWindow):
             "Converting without a black point will no longer ask — it does a "
             "direct invert; grade it with Channel Levels.",
             duration=5000)
+
+    # --- Preview detail (spec/preview-detail.md) ---------------------------
+    def on_preview_detail_changed(self, level: str):
+        """Fast / Balanced / Full. Display resolution only: release the current
+        detail tile and let the view ask again at the new size (no reprocess)."""
+        level = ccr_backend.set_preview_detail(level)
+        self._settings.setValue("view/preview_detail", level)
+        # Keep the old keys in step so an older build still reads sensibly.
+        self._settings.setValue("view/sharp_fit", ccr_backend.sharp_fit_preview)
+        self._settings.setValue("view/full_res_zoom", ccr_backend.full_res_zoom)
+        ip = self.image_preview
+        ip._release_hires(refresh=True)
+        ip._update_hires_state()
+        names = {"full": "Full: sharpest preview, most processing.",
+                 "balanced": "Balanced: screen renders up to 2000 px, zoom up to 6000 px.",
+                 "fast": "Fast: 1080 px preview; zoom uses the half-size decode."}
+        self.sliders_panel.set_temporary_hint("Preview detail: " + names[level],
+                                              duration=5000)
 
     # --- Full-resolution zoom (global, persistent) ------------------------
     def on_sharp_fit_toggled(self, checked: bool):

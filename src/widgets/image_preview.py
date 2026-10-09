@@ -1978,15 +1978,22 @@ class ImagePreview(QWidget):
         dpr = self._dpr() if self._sharp_fit_on() else 1.0
         pct = self._current_percent()
         full = getattr(img, "original_full_size", None)
+        # Preview detail (spec/preview-detail.md): Balanced caps both renders.
+        caps = getattr(ccr_backend, "preview_caps", None)
+        fit_cap, zoom_cap = caps() if callable(caps) else (None, None)
         if self._sharp_fit_on() and self._fit_only_request() and pct and full:
             # Screen-sized render for the fitted view: as many source pixels as
             # the window shows in DEVICE pixels, without the zoom tiles' 4,500
             # floor (spec/sharp-fit-preview.md).
             want = int(round(pct * max(full) * dpr))
+            if fit_cap:
+                want = min(want, int(fit_cap))
             return decide(want, want)
         if getattr(ccr_backend, "full_res_zoom", True):
             if pct and full:
                 want = int(round(pct * max(full) * dpr))
+                if zoom_cap:
+                    want = min(want, int(zoom_cap))
         return decide(want, self.HIRES_MAX_LONG_SIDE)
 
     def _maybe_request_hires(self):
