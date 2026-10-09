@@ -1984,26 +1984,33 @@ class SlidersPanel(QWidget):
     PRINTER_POINT_UNITS = 3     # Shift-slider units per printer point (0.02 density)
     _PL_KEYS = {"C": "ch_r_shift", "M": "ch_g_shift", "Y": "ch_b_shift",
                 "D": "ch_master_shift"}
-    _PL_COLOURS = {("C", "-"): ("#d64545", "#ffffff"), ("M", "-"): ("#3fa55a", "#ffffff"),
-                   ("Y", "-"): ("#3d6fd6", "#ffffff"), ("D", "-"): ("#8a8a8a", "#ffffff"),
-                   ("C", "+"): ("#2fbfc4", "#0f2526"), ("M", "+"): ("#d6417a", "#ffffff"),
-                   ("Y", "+"): ("#d9c22e", "#1e1e1e"), ("D", "+"): ("#3a3a3a", "#ffffff")}
+    # Saturated, one hue per press: "+" adds that colour (or density), "−" its
+    # complement. Dark text on the light hues (cyan, yellow, light grey).
+    _PL_COLOURS = {("D", "-"): ("#d9d9d9", "#141414"), ("D", "+"): ("#101010", "#ffffff"),
+                   ("C", "-"): ("#e5261f", "#ffffff"), ("C", "+"): ("#00c3d9", "#06282c"),
+                   ("M", "-"): ("#12a83c", "#ffffff"), ("M", "+"): ("#e3168c", "#ffffff"),
+                   ("Y", "-"): ("#1f58ea", "#ffffff"), ("Y", "+"): ("#ffd000", "#1e1a00")}
     _PL_TIPS = {"C": ("cyan", "red", "red"), "M": ("magenta", "green", "green"),
                 "Y": ("yellow", "blue", "blue")}
+    _PL_ORDER = "DCMY"           # density first, as on a lab printer's keypad
+    PL_BIG_STEP = 4              # points per Shift-click
 
     def _build_printer_lights(self):
-        from PySide6.QtWidgets import QGridLayout, QButtonGroup
+        from PySide6.QtWidgets import QGridLayout
         grid = QGridLayout()
         grid.setSpacing(theme.GAP_TIGHT)
         self._pl_buttons = {}
         for row, sign in enumerate(("-", "+")):
-            for col, ch in enumerate("CMYD"):
+            for col, ch in enumerate(self._PL_ORDER):
                 b = QPushButton(f"{ch}{'−' if sign == '-' else '+'}")
                 bg, fg = self._PL_COLOURS[(ch, sign)]
                 pressed = QColor(bg).darker(130).name()
+                # D+ is near-black: outline it so it doesn't vanish on the panel
+                edge = (f"border: 1px solid {theme.BORDER_STRONG};" if ch == "D" and sign == "+"
+                        else "border: none;")
                 b.setStyleSheet(
                     f"QPushButton {{ background: {bg}; color: {fg}; font-weight: bold; "
-                    f"border: none; border-radius: {theme.RADIUS_SM}px; padding: 6px 0; }}"
+                    f"{edge} border-radius: {theme.RADIUS_SM}px; padding: 6px 0; }}"
                     f"QPushButton:pressed {{ background: {pressed}; }}"
                     f"QPushButton:disabled {{ background: {theme.SURFACE}; "
                     f"color: {theme.TEXT_DISABLED}; }}")
@@ -2014,39 +2021,31 @@ class SlidersPanel(QWidget):
                     more, less, chan = self._PL_TIPS[ch]
                     tip = (f"More {more} (less {less})" if sign == "+"
                            else f"Less {more} (more {less})")
-                b.setToolTip(f"{tip} by the step below. One printer point is about "
+                b.setToolTip(f"{tip}, one printer point per click "
+                             f"(Shift-click: {self.PL_BIG_STEP}). One point is about "
                              "1/12 stop; it moves the Channel Levels "
                              f"{'Master' if ch == 'D' else chan.capitalize()} Shift "
-                             f"slider by {self.PRINTER_POINT_UNITS}.")
+                             f"slider by {self.PRINTER_POINT_UNITS}.\n"
+                             "Right-click: reset all printer lights to 0.")
                 b.clicked.connect(lambda _=False, c=ch, sg=sign: self._printer_light(c, sg))
+                b.setContextMenuPolicy(Qt.CustomContextMenu)
+                b.customContextMenuRequested.connect(
+                    lambda pos, w=b: self._printer_lights_menu(w, pos))
                 grid.addWidget(b, row, col)
                 self._pl_buttons[(ch, sign)] = b
         self.printer_section.add_layout(grid)
-
-        steps = QHBoxLayout()
-        steps.setSpacing(theme.GAP_TIGHT)
-        self._pl_step = 1
-        self._pl_step_group = QButtonGroup(self)
-        self._pl_step_group.setExclusive(True)
-        for n in (1, 2, 4):
-            sb = QPushButton(f"+{n}")
-            sb.setCheckable(True)
-            sb.setChecked(n == 1)
-            sb.setToolTip(f"Each press moves {n} printer point{'s' if n > 1 else ''}")
-            sb.clicked.connect(lambda _=False, k=n: setattr(self, "_pl_step", k))
-            self._pl_step_group.addButton(sb)
-            steps.addWidget(sb)
-        zero = QPushButton("0")
-        zero.setToolTip("Reset the printer lights (the four Channel Levels Shift "
-                        "sliders) to 0")
-        zero.clicked.connect(self._printer_lights_reset)
-        steps.addWidget(zero)
-        self.printer_section.add_layout(steps)
 
         self._pl_readout = QLabel("")
         self._pl_readout.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 11px;")
         self._pl_readout.setAlignment(Qt.AlignCenter)
         self.printer_section.add_widget(self._pl_readout)
+
+    def _printer_lights_menu(self, button, pos):
+        from PySide6.QtWidgets import QMenu
+        menu = QMenu(self)
+        act = menu.addAction("Reset printer lights to 0")
+        act.triggered.connect(self._printer_lights_reset)
+        menu.exec(button.mapToGlobal(pos))
 
     def _pl_slider(self, ch):
         key = self._PL_KEYS[ch]
@@ -2059,7 +2058,9 @@ class SlidersPanel(QWidget):
         sl = self._pl_slider(ch)
         if sl is None or self.current_idx is None or not sl.isEnabled():
             return
-        delta = self.PRINTER_POINT_UNITS * int(self._pl_step)
+        from PySide6.QtWidgets import QApplication
+        big = bool(QApplication.keyboardModifiers() & Qt.ShiftModifier)
+        delta = self.PRINTER_POINT_UNITS * (self.PL_BIG_STEP if big else 1)
         new = sl.value() + (-delta if sign == "+" else delta)
         new = max(sl.minimum(), min(sl.maximum(), new))
         if new == sl.value():
@@ -2070,7 +2071,7 @@ class SlidersPanel(QWidget):
     def _printer_lights_reset(self):
         if self.current_idx is None:
             return
-        for ch in "CMYD":
+        for ch in self._PL_ORDER:
             sl = self._pl_slider(ch)
             if sl is not None and sl.isEnabled() and sl.value() != 0:
                 sl.setValue(0)
@@ -2087,7 +2088,7 @@ class SlidersPanel(QWidget):
         if not hasattr(self, "_pl_readout"):
             return
         parts = []
-        for ch in "CMYD":
+        for ch in self._PL_ORDER:
             sl = self._pl_slider(ch)
             v = sl.value() if sl is not None else 0
             parts.append(f"{ch} {self._fmt_points(-v / self.PRINTER_POINT_UNITS)}")
