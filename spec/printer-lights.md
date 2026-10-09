@@ -34,17 +34,24 @@ convention.
   printer lights act) all work unchanged.
 - Section **Printer Lights**, between Crosstalk Correction and Channel Levels
   (pipeline order), expanded by default.
-- Row 1: C− M− Y− D−; row 2: C+ M+ Y+ D+, coloured like the colour each press
-  pushes towards. Row 3: step **+1 / +2 / +4** (exclusive, default +1) and
-  **0** (resets the four Shift sliders).
-- A readout under the pad: `C +3  M −2  Y 0  D +5` (points; one decimal when a
-  slider was set by hand to a non-multiple of 3). Updates on every change.
+- Row 1: D− C− M− Y−; row 2: D+ C+ M+ Y+ — **density first**, as on a lab
+  printer's keypad — in saturated colours: each button is the colour its press
+  pushes towards (D− light grey, D+ near-black with an outline).
+- One printer point per click; **Shift-click** moves 4. **Right-click** any
+  button: "Reset printer lights to 0" (the four Shift sliders).
+- No step row and no per-channel value boxes (Negbase shows the values in boxes
+  under its buttons; this pad deliberately doesn't copy that). A single muted
+  readout line under the pad: `D +5  C +3  M −2  Y 0  points` (one decimal when
+  a slider was set by hand to a non-multiple of 3). Updates on every change.
 - At a slider's limit (±100 = ±33 points) further presses do nothing and the
   hint says so.
 
+*Revised 2026-10-09:* the first version had a +1/+2/+4/0 step row under the pad
+and C M Y D order; replaced by Shift-click / right-click and D C M Y.
+
 ## Tests
 
-- Each button moves the right slider by 3 × step in the right direction; D
-  moves Master Shift.
+- Each button moves the right slider by 3 (Shift: 12) in the right direction;
+  D moves Master Shift. Columns are D C M Y; there is no step row.
 - Readout reflects slider values (including hand-set fractions); 0 resets.
 - Limit handling; the pad changes the active layer (area) like the sliders.
