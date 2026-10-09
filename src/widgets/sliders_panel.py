@@ -903,12 +903,30 @@ class SlidersPanel(QWidget):
         # Crosstalk Correction sits ABOVE Channel Levels because it runs before
         # it: on the converted density base, ahead of every other adjustment
         # (spec/density-crosstalk.md). Collapsed by default; populated below.
-        scroll_layout.addWidget(theme.section_separator())
+        # Separators that sit directly above a hideable section, so hiding the
+        # section (Settings -> Panel) can hide its separator with it.
+        self._section_separators = {}
+        sep = theme.section_separator()
+        scroll_layout.addWidget(sep)
         self.crosstalk_section = CollapsibleSection("Crosstalk Correction")
         scroll_layout.addWidget(self.crosstalk_section)
-        scroll_layout.addWidget(theme.section_separator())
+        self._section_separators["crosstalk"] = sep
+        # Printer Lights: a lab-style pad driving the Channel Levels Shift
+        # sliders in printer points (spec/printer-lights.md). Between Crosstalk
+        # and Channel Levels — pipeline order — and open by default.
+        sep = theme.section_separator()
+        scroll_layout.addWidget(sep)
+        self.printer_section = CollapsibleSection("Printer Lights")
+        scroll_layout.addWidget(self.printer_section)
+        self._section_separators["printer_lights"] = sep
+        self._build_printer_lights()
+        self.printer_section._toggle_btn.setChecked(True)
+        self.printer_section._on_toggle(True)
+        sep = theme.section_separator()
+        scroll_layout.addWidget(sep)
         self.od_section = CollapsibleSection("Channel Levels")
         scroll_layout.addWidget(self.od_section)
+        self._section_separators["levels"] = sep
         # Channel Balance sits directly under Channel Levels, collapsed by
         # default: it is the tone-WEIGHTED per-channel control (crossover), where
         # Channel Levels above it is the tone-uniform one and White Balance below
@@ -1544,6 +1562,7 @@ class SlidersPanel(QWidget):
             if key.startswith("xt_") and i < len(self.sliders):
                 self.sliders[i].setEnabled(img is not None and img.active_area_id is None)
         self._update_crosstalk_hint(img)
+        self._update_printer_readout()
         # "Bypass until export" flags: global, like Cineon.
         for cb, flag in ((self.nr_bypass_checkbox, "chroma_nr_export_only"),
                          (self.sharpen_bypass_checkbox, "sharpen_export_only")):
@@ -1758,6 +1777,7 @@ class SlidersPanel(QWidget):
         Save the current slider values to the backend when any slider changes.
         Provides immediate visual feedback while debouncing heavy processing.
         """
+        self._update_printer_readout()
         if self.current_idx is not None:
             adjustment = {key: slider.value() for key, slider in zip(self.adjustment_keys, self.sliders)}
             self._attach_curves(adjustment)
@@ -1825,6 +1845,119 @@ class SlidersPanel(QWidget):
         img.update_thumbnail_and_preview()
         self.parent().parent().image_preview.update_preview(self.current_idx)
         self._update_thumb()
+
+    # --- Printer Lights (spec/printer-lights.md) ------------------------------
+    PRINTER_POINT_UNITS = 3     # Shift-slider units per printer point (0.02 density)
+    _PL_KEYS = {"C": "ch_r_shift", "M": "ch_g_shift", "Y": "ch_b_shift",
+                "D": "ch_master_shift"}
+    _PL_COLOURS = {("C", "-"): ("#d64545", "#ffffff"), ("M", "-"): ("#3fa55a", "#ffffff"),
+                   ("Y", "-"): ("#3d6fd6", "#ffffff"), ("D", "-"): ("#8a8a8a", "#ffffff"),
+                   ("C", "+"): ("#2fbfc4", "#0f2526"), ("M", "+"): ("#d6417a", "#ffffff"),
+                   ("Y", "+"): ("#d9c22e", "#1e1e1e"), ("D", "+"): ("#3a3a3a", "#ffffff")}
+    _PL_TIPS = {"C": ("cyan", "red", "red"), "M": ("magenta", "green", "green"),
+                "Y": ("yellow", "blue", "blue")}
+
+    def _build_printer_lights(self):
+        from PySide6.QtWidgets import QGridLayout, QButtonGroup
+        grid = QGridLayout()
+        grid.setSpacing(theme.GAP_TIGHT)
+        self._pl_buttons = {}
+        for row, sign in enumerate(("-", "+")):
+            for col, ch in enumerate("CMYD"):
+                b = QPushButton(f"{ch}{'−' if sign == '-' else '+'}")
+                bg, fg = self._PL_COLOURS[(ch, sign)]
+                pressed = QColor(bg).darker(130).name()
+                b.setStyleSheet(
+                    f"QPushButton {{ background: {bg}; color: {fg}; font-weight: bold; "
+                    f"border: none; border-radius: {theme.RADIUS_SM}px; padding: 6px 0; }}"
+                    f"QPushButton:pressed {{ background: {pressed}; }}"
+                    f"QPushButton:disabled {{ background: {theme.SURFACE}; "
+                    f"color: {theme.TEXT_DISABLED}; }}")
+                if ch == "D":
+                    tip = ("Darker: more density, as on a printer's D key"
+                           if sign == "+" else "Lighter: less density")
+                else:
+                    more, less, chan = self._PL_TIPS[ch]
+                    tip = (f"More {more} (less {less})" if sign == "+"
+                           else f"Less {more} (more {less})")
+                b.setToolTip(f"{tip} by the step below. One printer point is about "
+                             "1/12 stop; it moves the Channel Levels "
+                             f"{'Master' if ch == 'D' else chan.capitalize()} Shift "
+                             f"slider by {self.PRINTER_POINT_UNITS}.")
+                b.clicked.connect(lambda _=False, c=ch, sg=sign: self._printer_light(c, sg))
+                grid.addWidget(b, row, col)
+                self._pl_buttons[(ch, sign)] = b
+        self.printer_section.add_layout(grid)
+
+        steps = QHBoxLayout()
+        steps.setSpacing(theme.GAP_TIGHT)
+        self._pl_step = 1
+        self._pl_step_group = QButtonGroup(self)
+        self._pl_step_group.setExclusive(True)
+        for n in (1, 2, 4):
+            sb = QPushButton(f"+{n}")
+            sb.setCheckable(True)
+            sb.setChecked(n == 1)
+            sb.setToolTip(f"Each press moves {n} printer point{'s' if n > 1 else ''}")
+            sb.clicked.connect(lambda _=False, k=n: setattr(self, "_pl_step", k))
+            self._pl_step_group.addButton(sb)
+            steps.addWidget(sb)
+        zero = QPushButton("0")
+        zero.setToolTip("Reset the printer lights (the four Channel Levels Shift "
+                        "sliders) to 0")
+        zero.clicked.connect(self._printer_lights_reset)
+        steps.addWidget(zero)
+        self.printer_section.add_layout(steps)
+
+        self._pl_readout = QLabel("")
+        self._pl_readout.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 11px;")
+        self._pl_readout.setAlignment(Qt.AlignCenter)
+        self.printer_section.add_widget(self._pl_readout)
+
+    def _pl_slider(self, ch):
+        key = self._PL_KEYS[ch]
+        if key not in self.adjustment_keys:
+            return None
+        i = self.adjustment_keys.index(key)
+        return self.sliders[i] if i < len(self.sliders) else None
+
+    def _printer_light(self, ch, sign):
+        sl = self._pl_slider(ch)
+        if sl is None or self.current_idx is None or not sl.isEnabled():
+            return
+        delta = self.PRINTER_POINT_UNITS * int(self._pl_step)
+        new = sl.value() + (-delta if sign == "+" else delta)
+        new = max(sl.minimum(), min(sl.maximum(), new))
+        if new == sl.value():
+            self.set_temporary_hint(f"{ch} printer light is at its limit.", duration=3000)
+            return
+        sl.setValue(new)            # -> on_slider_changed: store, preview, undo burst
+
+    def _printer_lights_reset(self):
+        if self.current_idx is None:
+            return
+        for ch in "CMYD":
+            sl = self._pl_slider(ch)
+            if sl is not None and sl.isEnabled() and sl.value() != 0:
+                sl.setValue(0)
+
+    @staticmethod
+    def _fmt_points(pts):
+        if abs(pts) < 1e-9:
+            return "0"
+        txt = (f"{abs(round(pts)):d}" if abs(pts - round(pts)) < 1e-6
+               else f"{abs(pts):.1f}")
+        return ("+" if pts > 0 else "−") + txt
+
+    def _update_printer_readout(self):
+        if not hasattr(self, "_pl_readout"):
+            return
+        parts = []
+        for ch in "CMYD":
+            sl = self._pl_slider(ch)
+            v = sl.value() if sl is not None else 0
+            parts.append(f"{ch} {self._fmt_points(-v / self.PRINTER_POINT_UNITS)}")
+        self._pl_readout.setText("   ".join(parts) + "   points")
 
     # --- Highlights / Shadows range (spec/highlights-shadows-range.md) --------
     TONE_LABEL_TIP = "Right-click: range and endpoint options"
