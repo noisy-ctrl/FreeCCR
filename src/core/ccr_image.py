@@ -7,7 +7,9 @@ import rawpy
 import exifread
 import cv2
 import logging
+import threading
 import time
+import weakref
 from PySide6.QtCore import QCoreApplication, QThread
 from PySide6.QtGui import QImage, QPixmap  # or from PySide6.QtGui import QImage, QPixmap if you use PySide
 #import lensfunpy  # Make sure lensfunpy is installed
@@ -16,6 +18,7 @@ from core.ccr_processor import (adjust_image, adjust_image_opencl,
                                 apply_sharpening,
                                 apply_chroma_denoise, CHROMA_NR_RADIUS_DEFAULT,
                                 apply_density_crosstalk, crosstalk_applies,
+                                CROSSTALK_KEYS,
                                 apply_gamma_curve,
                                 apply_area_layers, apply_crop_to_image,
                                 apply_dust_removal, DUST_FEATHER_DEFAULT,
@@ -33,6 +36,55 @@ try:
 except ImportError:
     TIFFFILE_AVAILABLE = False
     logging.warning("tifffile not available, TIFF reading may be limited")
+
+
+# --- Per-image render lock (spec/slider-speed.md) ---------------------------- #
+# The live slider renderer renders on a worker thread; a synchronous render of
+# the same image on the GUI thread must wait for it rather than race it on the
+# image's caches. Kept OUTSIDE the instance (weak-keyed) so CCRImage stays
+# deep-copyable / picklable.
+_RENDER_LOCKS: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+_RENDER_LOCKS_GUARD = threading.Lock()
+
+
+def render_lock(img) -> "threading.RLock":
+    with _RENDER_LOCKS_GUARD:
+        lk = _RENDER_LOCKS.get(img)
+        if lk is None:
+            lk = _RENDER_LOCKS[img] = threading.RLock()
+        return lk
+
+
+def _base_fingerprint(base: np.ndarray) -> int:
+    """Cheap content check for the per-base caches: a sparse sum (~µs)."""
+    try:
+        return int(base[::53, ::59].sum(dtype=np.int64))
+    except Exception:
+        return 0
+
+
+def _cached_auto_gain(owner, base: np.ndarray, ws: bool, xt_settings,
+                      processed: Optional[np.ndarray] = None) -> float:
+    """compute_auto_gain_offset of `base` (after the crosstalk mix when
+    `xt_settings` is given), cached on `owner` against the base object. The
+    offset depends only on those pixels and the window flag, so it is constant
+    across a slider drag; the fingerprint guards an in-place edit. A plain
+    function (not a method) so apply_adjustments works on duck-typed images."""
+    xt_key = (None if xt_settings is None else
+              tuple(float(xt_settings.get(k, 0) or 0) for k, _i, _j in CROSSTALK_KEYS))
+    key = (bool(ws), xt_key, base.shape, _base_fingerprint(base))
+    cached = getattr(owner, "_ag_cache", None)
+    if cached is not None and cached[0]() is base and cached[1] == key:
+        return cached[2]
+    if processed is None:
+        processed = (apply_density_crosstalk(base, xt_settings)
+                     if xt_settings is not None else base)
+    val = compute_auto_gain_offset(processed, ws)
+    try:
+        owner._ag_cache = (weakref.ref(base), key, val)
+    except Exception:
+        pass
+    return val
 
 
 # --- Positive-mode base render curve ---------------------------------------- #
@@ -1214,14 +1266,73 @@ class CCRImage:
         Populates/updates the thumbnail and resized_preview attributes using the 16-bit resized_raw image.
         Both outputs are 8-bit RGB np.ndarray.
         Applies adjustments before resizing.
+
+        Render (render_preview_pixels, pure) then store (_apply_preview_pixels).
+        The live slider renderer runs the same two halves with the render on a
+        worker thread; the per-image render lock makes this synchronous call
+        wait for an in-flight live render instead of racing it on the shared
+        caches (dust plan, Auto Gain). See spec/slider-speed.md.
         """
         if self.resized_raw is None:
             return
+        with render_lock(self):
+            result = self.render_preview_pixels(thumbnail_size=thumbnail_size,
+                                                preview_size=preview_size)
+            if result is not None:
+                self._apply_preview_pixels(result)
+
+    def preview_render_snapshot(self) -> dict:
+        """Everything mutable that render_preview_pixels reads, captured on the
+        GUI thread so a worker can render while the user keeps editing (the
+        HiResDetailWorker pattern). Settings and areas are deep-copied: they
+        nest dicts (curves, tone shape, area geometry)."""
+        from core.ccr_backend import ccr_backend
+        return {
+            "base": self.resized_raw,
+            "settings": copy.deepcopy(self.adjustment_settings),
+            "areas": copy.deepcopy(getattr(self, "area_layers", []) or []),
+            "contrast_base": self.contrast_base,
+            "temperature_base": self.temperature_base,
+            "brightness_base": self.brightness_base,
+            "exposure_base": getattr(self, "exposure_base", 0.0),
+            "base_curve": getattr(self, "base_curve", 0),
+            "color_profile": self.color_profile,
+            "ws_windowed": bool(getattr(self, "_ws_windowed", False)),
+            "converted": bool(self.converted),
+            "positive_mode": self._positive_mode_active(),
+            "sprocket_alpha": self.sprocket_alpha,
+            "sprocket_white": bool(getattr(ccr_backend, "sprocket_mask_white", False)),
+            "crop_rect": self.crop_rect,
+            "crop_angle": getattr(self, "crop_angle", 0.0) or 0.0,
+            "has_dust": bool(getattr(self, "dust_spots", None)),
+            "epoch": getattr(self, "_render_epoch", 0),
+        }
+
+    def render_preview_pixels(self, snap: Optional[dict] = None,
+                              thumbnail_size: int = 156, preview_size: int = 1080,
+                              draft_long: Optional[int] = None) -> Optional[dict]:
+        """Compute the preview/thumbnail pixels and histogram WITHOUT storing
+        them. `snap=None` reads the live image (the synchronous path, exactly
+        the historical render); a snapshot from preview_render_snapshot()
+        renders that captured state instead.
+
+        `draft_long` renders a reduced-resolution DRAFT for an active drag:
+        the base is downscaled to that long side, rendered with the Auto Gain
+        measured on the FULL base (so exposure matches the full render) and
+        the sharpening radius scaled to the same frame fraction, then upscaled
+        back to the base's exact size so every overlay/crop mapping is
+        unchanged. A draft has no thumbnail. See spec/slider-speed.md."""
+        live = snap is None
+        base = self.resized_raw if live else snap["base"]
+        if base is None:
+            return None
 
         def to_8bit(img16: np.ndarray) -> np.ndarray:
             # Saturating SIMD 16->8 bit conversion (~4x faster than the
             # previous float divide + astype)
             return cv2.convertScaleAbs(img16, alpha=255.0 / 65535.0)
+
+        work = self._draft_base(base, draft_long) if draft_long else base
 
         # Apply adjustments first.
         # The preview is the ONE caller that exaggerates the sharpening radius: a
@@ -1234,11 +1345,28 @@ class CCRImage:
         # it from original_full_size/buffer would over-sharpen a CROPPED export
         # (whose buffer is the crop at native resolution). See spec/sharpening.md.
         full = getattr(self, "original_full_size", None)
-        prev_long = max(self.resized_raw.shape[:2])
+        prev_long = max(work.shape[:2])
         sharpen_scale = (max(full) / prev_long
                          if full and prev_long else 1.0)
-        adjusted_img = self.apply_adjustments(self.resized_raw,
-                                              sharpen_scale=sharpen_scale)
+        kwargs = {}
+        if not live:
+            kwargs = dict(settings=snap["settings"],
+                          contrast_base=snap["contrast_base"],
+                          temperature_base=snap["temperature_base"],
+                          brightness_base=snap["brightness_base"],
+                          exposure_base=snap["exposure_base"],
+                          base_curve=snap["base_curve"],
+                          color_profile=snap["color_profile"],
+                          areas_override=snap["areas"],
+                          ws_windowed=snap["ws_windowed"])
+        if work is not base:
+            kwargs["auto_gain_override"] = self._auto_gain_for_base(base, snap)
+        adjusted_img = self.apply_adjustments(work, sharpen_scale=sharpen_scale,
+                                              **kwargs)
+        if work is not base:
+            h, w = base.shape[:2]
+            adjusted_img = cv2.resize(adjusted_img, (w, h),
+                                      interpolation=cv2.INTER_LINEAR)
 
         # Display-only auto-brightness: the un-converted negative scan is very dark
         # (linear-gamma data sitting low in the 16-bit range). Stretch it so it's
@@ -1249,8 +1377,10 @@ class CCRImage:
         # own the look, so the auto-brightness is skipped. Positive mode decodes a
         # correctly-exposed positive too, so it skips the negative auto-brightness
         # as well (the adjustments own the look).
+        converted = self.converted if live else snap["converted"]
+        positive = self._positive_mode_active() if live else snap["positive_mode"]
         display_img = (adjusted_img
-                       if (self.converted or self._positive_mode_active())
+                       if (converted or positive)
                        else self._auto_brightness_for_preview(adjusted_img))
 
         # Sprocket-hole / clear-film white mask (reversal look) — the LAST look
@@ -1260,34 +1390,27 @@ class CCRImage:
         # pixmap) only — the histogram reads the PRE-mask image below, so a
         # whitened border doesn't add a misleading spike at white. display_img
         # shares resized_raw's dims, as does the alpha. See spec §4.2.
-        from core.ccr_backend import ccr_backend
-        _mask_on = (self.converted and not self._positive_mode_active()
-                    and self.sprocket_alpha is not None
-                    and ccr_backend.sprocket_mask_white)
+        if live:
+            from core.ccr_backend import ccr_backend
+            alpha = self.sprocket_alpha
+            white = ccr_backend.sprocket_mask_white
+        else:
+            alpha = snap["sprocket_alpha"]
+            white = snap["sprocket_white"]
+        _mask_on = (converted and not positive
+                    and alpha is not None and white)
         if _mask_on:
             from core.ccr_processor import apply_sprocket_mask
-            display_masked = apply_sprocket_mask(display_img, self.sprocket_alpha)
+            display_masked = apply_sprocket_mask(display_img, alpha)
         else:
             display_masked = display_img
 
         # Create thumbnail + preview pixels (8-bit RGB numpy — safe on any thread)
-        thumb_img_8 = to_8bit(self.resize_image_to_max_pixel(display_masked, thumbnail_size))
+        thumb_img_8 = (None if draft_long else
+                       to_8bit(self.resize_image_to_max_pixel(display_masked, thumbnail_size)))
         preview_img = self.resize_image_to_max_pixel(display_masked, preview_size)
         preview_img_8bit = to_8bit(preview_img)
 
-        # QPixmap may only be created on the GUI thread, but the batch paths
-        # (initial load, auto-frame-all, B/W convert-all) run this method on
-        # pool/QThread workers. Off the GUI thread, stash the pixels and let
-        # the first GUI-thread read of .thumbnail/.resized_preview build the
-        # pixmaps (see the property getters).
-        if self._on_gui_thread():
-            self.thumbnail = QPixmap.fromImage(
-                self.generate_qimage_from_np_array_8(thumb_img_8))
-            self.resized_preview = QPixmap.fromImage(
-                self.generate_qimage_from_np_array_8(preview_img_8bit))
-        else:
-            self._thumb_np8 = thumb_img_8
-            self._preview_np8 = preview_img_8bit
         # Compute the per-channel histogram over the 8-bit preview (RGB). When a
         # crop is set, it's computed over only the kept (cropped) region so it
         # matches what the canvas shows. Same normalized-rect + angle contract as
@@ -1303,12 +1426,78 @@ class CCRImage:
         # resize when it is on. See spec/sprocket-hole-mask.md §7.
         hist_base_8bit = (to_8bit(self.resize_image_to_max_pixel(display_img, preview_size))
                           if _mask_on else preview_img_8bit)
-        hist_source = apply_crop_to_image(
-            hist_base_8bit, self.crop_rect, getattr(self, "crop_angle", 0.0) or 0.0)
+        crop = self.crop_rect if live else snap["crop_rect"]
+        angle = ((getattr(self, "crop_angle", 0.0) or 0.0) if live
+                 else snap["crop_angle"])
+        hist_source = apply_crop_to_image(hist_base_8bit, crop, angle)
         counts = np.empty((3, 256), dtype=np.float32)
         for i in range(3):   # 0=R, 1=G, 2=B
             counts[i] = cv2.calcHist([hist_source], [i], None, [256], [0, 256]).flatten()
-        self.histogram_data = counts
+        return {"thumb8": thumb_img_8, "preview8": preview_img_8bit,
+                "hist": counts, "draft": bool(draft_long)}
+
+    def _apply_preview_pixels(self, result: dict) -> None:
+        """Store a render_preview_pixels result and advance the render epoch
+        (a live worker result whose request predates the epoch is stale)."""
+        # QPixmap may only be created on the GUI thread, but the batch paths
+        # (initial load, auto-frame-all, B/W convert-all) run this method on
+        # pool/QThread workers. Off the GUI thread, stash the pixels and let
+        # the first GUI-thread read of .thumbnail/.resized_preview build the
+        # pixmaps (see the property getters).
+        thumb_img_8 = result.get("thumb8")
+        preview_img_8bit = result["preview8"]
+        if self._on_gui_thread():
+            if thumb_img_8 is not None:
+                self.thumbnail = QPixmap.fromImage(
+                    self.generate_qimage_from_np_array_8(thumb_img_8))
+            self.resized_preview = QPixmap.fromImage(
+                self.generate_qimage_from_np_array_8(preview_img_8bit))
+        else:
+            if thumb_img_8 is not None:
+                self._thumb_np8 = thumb_img_8
+            self._preview_np8 = preview_img_8bit
+        self.histogram_data = result["hist"]
+        self._render_epoch = getattr(self, "_render_epoch", 0) + 1
+
+    # --- Live-render helpers (spec/slider-speed.md) ---------------------------
+    def _draft_base(self, base: np.ndarray, draft_long: int) -> np.ndarray:
+        """`base` downscaled (INTER_AREA) to `draft_long` on its long side,
+        cached per base object so a drag pays the resize once."""
+        h, w = base.shape[:2]
+        if max(h, w) <= draft_long:
+            return base
+        cached = getattr(self, "_draft_base_cache", None)
+        if (cached is not None and cached[0]() is base and cached[1] == draft_long
+                and cached[2] == _base_fingerprint(base)):
+            return cached[3]
+        out = self.resize_image_to_max_pixel(base, draft_long)
+        self._draft_base_cache = (weakref.ref(base), draft_long,
+                                  _base_fingerprint(base), out)
+        return out
+
+    def _auto_gain_for_base(self, base: np.ndarray, snap: Optional[dict] = None) -> float:
+        """The Auto Gain offset apply_adjustments would measure on `base`
+        (dust-free), for a draft that must not measure its own downscaled copy.
+        0.0 whenever Auto Gain does not apply, so passing it as an override is
+        exactly equivalent."""
+        from core.ccr_backend import ccr_backend
+        s = (self.adjustment_settings if snap is None else snap["settings"]) or {}
+        converted = self.converted if snap is None else snap["converted"]
+        ws = (bool(getattr(self, "_ws_windowed", False)) if snap is None
+              else snap["ws_windowed"])
+        if s.get("look_lut"):
+            from core.look_lut import resolve_look
+            if resolve_look(s.get("look_lut")) is not None:
+                return 0.0       # ignored by apply_adjustments with a look
+        if not (getattr(ccr_backend, "auto_gain", True) and converted):
+            return 0.0
+        xt = s if (ws and crosstalk_applies(getattr(self, "conversion_inputs", None))) else None
+        return self._auto_gain_cached(base, ws, xt)
+
+    def _auto_gain_cached(self, base: np.ndarray, ws: bool, xt_settings,
+                          processed: Optional[np.ndarray] = None) -> float:
+        """compute_auto_gain_offset of `base`, cached; see _cached_auto_gain."""
+        return _cached_auto_gain(self, base, ws, xt_settings, processed)
 
     def generate_qimage_from_np_array_8(self, thumb_img_8):
         h, w, ch = thumb_img_8.shape
@@ -1713,14 +1902,19 @@ class CCRImage:
         # It runs on the (possibly WINDOWED) base, so the heal must know — the
         # sampling rule's hue/sat/value deltas are computed on display values.
         ws = self._ws_windowed if ws_windowed is None else ws_windowed
+        base_in = image
         if not skip_dust:
             image = self._apply_dust_removal(image, ws_windowed=ws)
+        # The heal returns its input untouched when there are no spots; a healed
+        # image is a fresh array every render, so Auto Gain is not cached then.
+        healed = image is not base_in
         s = self.adjustment_settings if settings is None else settings
         # Density crosstalk (spec/density-crosstalk.md): on a density base the
         # windowed values are optical density above the measured film base, so
         # a rows-sum-to-1 mix here keeps the base and every neutral unchanged.
         # First, so Auto Gain and Channel Levels see the corrected base.
-        if ws and crosstalk_applies(getattr(self, "conversion_inputs", None)):
+        xt_on = bool(ws and crosstalk_applies(getattr(self, "conversion_inputs", None)))
+        if xt_on:
             image = apply_density_crosstalk(image, s)
         cb = self.contrast_base if contrast_base is None else contrast_base
         tb = self.temperature_base if temperature_base is None else temperature_base
@@ -1762,8 +1956,14 @@ class CCRImage:
                    and look is None)
         if auto_gain_override is not None and look is None:
             ag = float(auto_gain_override)     # measured once from the full base
+        elif not auto_on:
+            ag = 0.0
+        elif healed:
+            ag = compute_auto_gain_offset(image, ws)
         else:
-            ag = compute_auto_gain_offset(image, ws) if auto_on else 0.0
+            # Same value, measured once per base (spec/slider-speed.md §5).
+            ag = _cached_auto_gain(self, base_in, ws, s if xt_on else None,
+                                   processed=image)
         eb_eff = 0.0 if (auto_on or look is not None) else eb   # no double-apply
         if look is not None:
             # The negative-look brightness baseline (bb = -8, a darkening power

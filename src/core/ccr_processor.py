@@ -35,6 +35,66 @@ _opencl_cache = {
     'device_name': None
 }
 
+def _opencl_wanted() -> bool:
+    """FREECCR_OPENCL=0 runs every render on the numpy path (same output)."""
+    return os.environ.get("FREECCR_OPENCL", "1").strip().lower() not in (
+        "0", "false", "no", "off")
+
+
+def _device_kind(dev) -> str:
+    try:
+        t = int(dev.type)
+        if cl is not None:
+            if t & int(cl.device_type.GPU):
+                return "GPU"
+            if t & int(cl.device_type.CPU):
+                return "CPU"
+            if t & int(cl.device_type.ACCELERATOR):
+                return "accelerator"
+    except Exception:
+        pass
+    return "other"
+
+
+def _pick_opencl_device(platforms, choice: str = ""):
+    """(platform, device) to run the kernel on. With no `choice` this is the
+    historical pick, the first device of the first platform. `choice` is
+    "gpu" / "cpu" (first device of that type on any platform) or an index into
+    the flat list of all devices, in platform order. Every device found is
+    listed once, so a slow machine can be diagnosed from the start-up log."""
+    flat = []
+    for plat in platforms:
+        try:
+            devs = plat.get_devices()
+        except Exception:
+            devs = []
+        for dev in devs:
+            flat.append((plat, dev))
+    if not flat:
+        return None, None
+    for i, (plat, dev) in enumerate(flat):
+        kind = _device_kind(dev)
+        print(f"OpenCL device {i}: {dev.name} [{kind}] on {plat.name}")
+    choice = (choice or "").strip().lower()
+    if choice in ("gpu", "cpu"):
+        want = getattr(cl.device_type, choice.upper(), None) if cl is not None else None
+        for plat, dev in flat:
+            if want is not None and (dev.type & want):
+                return plat, dev
+        print(f"FREECCR_OPENCL_DEVICE={choice}: no such device, using the default")
+    elif choice.isdigit():
+        n = int(choice)
+        if n < len(flat):
+            return flat[n]
+        print(f"FREECCR_OPENCL_DEVICE={choice}: only {len(flat)} device(s), using the default")
+    # Historical default: first platform's first device.
+    first_plat = platforms[0]
+    for plat, dev in flat:
+        if plat is first_plat:
+            return plat, dev
+    return flat[0]
+
+
 def _initialize_opencl():
     """
     Initialize OpenCL environment and compile kernel once. Cache the results.
@@ -43,7 +103,7 @@ def _initialize_opencl():
     global _opencl_cache
     
     # Check if PyOpenCL is available
-    if not OPENCL_AVAILABLE:
+    if not OPENCL_AVAILABLE or not _opencl_wanted():
         return False
     
     # Check if already initialized
@@ -57,14 +117,14 @@ def _initialize_opencl():
             print("No OpenCL platforms found")
             return False
         
-        # Use the first available platform and device
-        platform = platforms[0]
-        devices = platform.get_devices()
-        if not devices:
+        # Default: the first device of the first platform (unchanged).
+        # FREECCR_OPENCL_DEVICE=gpu|cpu|<n> overrides it; see
+        # spec/slider-speed.md §7 and tools/bench_render.py.
+        platform, device = _pick_opencl_device(
+            platforms, os.environ.get("FREECCR_OPENCL_DEVICE", ""))
+        if device is None:
             print("No OpenCL devices found")
             return False
-        
-        device = devices[0]
         ctx = cl.Context([device])
         queue = cl.CommandQueue(ctx)
         

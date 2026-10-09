@@ -437,6 +437,9 @@ class MainWindow(QMainWindow):
             # tracked by the preview): destroyed-while-running aborts the exit.
             if hasattr(self, "image_preview"):
                 self.image_preview.shutdown_workers()
+            # And the live slider render (spec/slider-speed.md).
+            if hasattr(self, "sliders_panel"):
+                self.sliders_panel.shutdown_live_render()
             # And for loader threads — active or previously abandoned. Their
             # RAW decodes are not interruptible, so wait them out; the
             # load-generation guard keeps their results from landing.
