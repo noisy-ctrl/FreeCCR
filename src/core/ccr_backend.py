@@ -95,6 +95,10 @@ class CCRBackend:
         # so a forgotten black point can't silently convert a whole roll
         # unanchored. Global, persisted by MainWindow. See spec/no-anchor-convert.md.
         self.warn_no_anchor_convert: bool = True
+        # Auto black point (spec/auto-black-point.md): measure each frame's film
+        # base from its own clear border at Convert time. Restored by the panel.
+        self.auto_black_point: bool = False
+        self.last_auto_bp_summary = None
         # Input transfer function for non-RAW (TIFF) imports: FreeCCR's density
         # math assumes LINEAR data, but a scanner TIFF is often gamma-encoded.
         # `ask` shows the import dialog; `mode` ("embedded"|"linear"|"manual")
@@ -2512,6 +2516,46 @@ class CCRBackend:
         self.film_stock_name = None
         self.film_stock_slopes = None
 
+    # --- Auto black point (spec/auto-black-point.md) --------------------------
+    def detect_frame_black_point(self, img, reload=True):
+        """Measure `img`'s film base from its clear border. Works on the raw
+        (unconverted) preview — reloaded first when the image is converted
+        (pass reload=False when the caller just did) — exactly the data a
+        manual Set Black Point samples."""
+        from core.auto_black_point import find_rebate
+        if reload and img.converted:
+            img.reload_image()
+        return find_rebate(img.resized_raw)
+
+    def resolve_auto_black_point(self, result, consensus=None):
+        """(black_point, source) for one frame: its own measurement when
+        confident, else the sampled black point, else the roll consensus."""
+        from core.auto_black_point import LOW
+        if result is not None and result.black_point is not None and result.confidence != LOW:
+            return tuple(result.black_point), "auto"
+        if self.black_point_bgr is not None:
+            return tuple(self.black_point_bgr), "sampled"
+        if consensus is not None:
+            return tuple(consensus), "roll"
+        return None, "none"
+
+    def auto_white_point_for(self, black):
+        """A sampled white point was measured under the light of the frame the
+        black point came from; scale it by the per-channel light change this
+        frame's base shows, so the two-point map stays consistent. None when
+        there is no white point, or nothing to scale it against."""
+        if self.white_point_bgr is None or self.black_point_bgr is None or black is None:
+            return None
+        return tuple(float(w) * float(b) / max(float(s), 1e-9)
+                     for w, b, s in zip(self.white_point_bgr, black, self.black_point_bgr))
+
+    @staticmethod
+    def auto_bp_record(result, source):
+        return {"source": source,
+                "side": getattr(result, "side", None),
+                "confidence": getattr(result, "confidence", None),
+                "reason": getattr(result, "reason", "")}
+
     def apply_bwpoint_to_all_images(self, progress_callback=None):
         """
         Apply B/W point film negative conversion to all loaded images using the same
@@ -2537,6 +2581,8 @@ class CCRBackend:
         total = len(self.images)
         if progress_callback:
             progress_callback(0, total)
+        if self.auto_black_point:
+            return self._apply_auto_bwpoint_to_all(progress_callback)
         for i, img in enumerate(self.images):
             try:
                 # Ensure we start from original (unprocessed) scan data
@@ -2569,6 +2615,67 @@ class CCRBackend:
                 print(f"B/W point conversion failed for image {i}: {e}")
             if progress_callback:
                 progress_callback(i + 1, total)
+
+    def _apply_auto_bwpoint_to_all(self, progress_callback=None):
+        """Convert All with a per-frame black point: detect every frame first,
+        check them against the roll, then convert each with its own base (or a
+        stated fallback). See spec/auto-black-point.md."""
+        from core.auto_black_point import roll_check
+        total = len(self.images)
+        results = []
+        for i, img in enumerate(self.images):
+            try:
+                results.append(self.detect_frame_black_point(img))
+            except Exception as e:
+                print(f"Auto black point detection failed for image {i}: {e}")
+                results.append(None)
+            if progress_callback:
+                progress_callback(i + 1, 2 * total)      # detection = first half
+        consensus = roll_check([r for r in results if r is not None])
+        summary = {"high": 0, "medium": 0, "fallback": 0, "skipped": 0, "notes": []}
+        for i, (img, res) in enumerate(zip(self.images, results)):
+            try:
+                black, source = self.resolve_auto_black_point(res, consensus)
+                if black is None:
+                    summary["skipped"] += 1
+                    summary["notes"].append(
+                        f"{os.path.basename(getattr(img, 'file_path', '') or str(i))}: "
+                        f"{res.reason if res else 'detection failed'}")
+                    continue
+                if source == "auto":
+                    summary[res.confidence] += 1
+                else:
+                    summary["fallback"] += 1
+                    if res is not None and res.reason:
+                        summary["notes"].append(res.reason)
+                white = self.auto_white_point_for(black)
+                slopes = self.film_stock_slopes if white is None else None
+                # The detection pass already reloaded the raw; only a frame
+                # whose detection failed outright may still hold a conversion.
+                if res is None and img.converted:
+                    img.reload_image()
+                processed = ccr_normalize_with_bwpoint(
+                    img, black, white, density=self.density_bwpoint, slopes_bgr=slopes)
+                if processed is not None:
+                    img.resized_raw = processed
+                img.converted = True
+                img.conversion_inputs = {
+                    "mode": "bw",
+                    "bw": (tuple(black), tuple(white) if white is not None else None),
+                    "fine_rot": img.fine_rotation_angle,
+                    "density": bool(self.density_bwpoint),
+                    "slopes": slopes,
+                    "auto_bp": self.auto_bp_record(res, source),
+                }
+                self.maybe_auto_awb(img)
+                img.update_thumbnail_and_preview()
+            except Exception as e:
+                print(f"Auto black point conversion failed for image {i}: {e}")
+                summary["skipped"] += 1
+            if progress_callback:
+                progress_callback(total + i + 1, 2 * total)
+        self.last_auto_bp_summary = summary
+
 
 # Singleton instance
 ccr_backend = CCRBackend()
