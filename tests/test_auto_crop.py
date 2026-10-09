@@ -78,6 +78,30 @@ def scan_strip(invisible_top=False):
     return _to_raw(v), (fx0, fy0, fx0 + fw, fy1)
 
 
+def scan_thin_strip():
+    """35mm strip whose frame is thin (near base) at both gates, like an
+    underexposed interior: the left gate is too faint to count as an edge and
+    shows as the flat gap beside it, and the right part is as flat as bare
+    base, so its gap can't be seen at all. The frame is 1.51:1 between the
+    gaps; its top and bottom edges are visible against the rebate."""
+    v = np.full((H, W), BASE, np.float32)
+    for top in (20, H - 90):
+        for x in range(10, W, 130):
+            v[top:top + 70, x:x + 46] = 1.0
+    fy0, fy1 = 120, H - 120
+    fh = fy1 - fy0
+    fw = int(round(fh * 1.51))
+    fx0, gap = 110, 30
+    yy, xx = np.mgrid[0:fh, 0:fw].astype(np.float32)
+    rng = np.random.default_rng(3)
+    tex = cv2.GaussianBlur(rng.normal(0, 1, (fh, fw)).astype(np.float32), (0, 0), 3) * 0.02
+    d = 0.035 + 0.055 * np.clip(xx / (fw * 0.1), 0, 1) + 0.6 * np.exp(-(((xx - fw * 0.4) / (fw * 0.18)) ** 2 + ((yy - fh / 2) / (fh * 0.25)) ** 2)) + tex
+    d[:, int(fw * 0.72):] = 0.004                       # thin as the base: no gate, no gap
+    v[fy0:fy1, fx0:fx0 + fw] = BASE * 10 ** (-np.clip(d, 0.0, None))
+    v[fy0:fy1, :fx0 - gap] = _picture(fh, fx0 - gap, seed=12)   # the previous frame
+    return _to_raw(v, blur=1.0), (fx0, fy0, fx0 + fw, fy1)
+
+
 def scan_leader():
     """35mm in a masking holder; the left half of the frame is fogged leader
     (dense, featureless) — the crop must still be the full 3:2 frame."""
@@ -126,6 +150,30 @@ def test_strip_with_an_invisible_gate_edge():
     fc = detect_frame(raw)
     assert fc.usable and fc.strip
     assert _inside(fc.debug["deskewed_rect"], truth, 0.03), (fc.debug["deskewed_rect"], truth)
+
+
+def test_thin_strip_frame_is_placed_by_the_gap():
+    """No visible gate on either side: the gap on the left places the frame,
+    the frame width places the right edge (reported soft), and it stays
+    landscape — a strip frame is never portrait."""
+    raw, truth = scan_thin_strip()
+    fc = detect_frame(raw)
+    assert fc.usable and fc.strip, fc.reason
+    x0, y0, x1, y1 = fc.debug["deskewed_rect"]
+    assert x1 - x0 > y1 - y0
+    assert fc.debug["best"]["anchored"] == "L" and "R" in fc.soft
+    assert truth[0] - 2 <= x0 <= truth[0] + 15, (x0, truth)
+    assert abs(x1 - truth[2]) <= 0.025 * (truth[2] - truth[0]), (x1, truth)
+
+
+def test_strip_gap_runs_need_flat_base():
+    from core.auto_crop import _strip_gap_runs, sprocket_bands
+    raw, (fx0, _, fx1, _) = scan_thin_strip()
+    L = log_luminance(raw)
+    runs = _strip_gap_runs(L, *sprocket_bands(L, float(L.max())))
+    assert any(abs(b - fx0) <= 3 and 25 <= b - a <= 35 for a, b in runs), runs
+    # the thin right third reads as base too, as one wide run up to the border
+    assert any(b >= W - 1 and b - a > 150 for a, b in runs), runs
 
 
 def test_fogged_leader_keeps_the_whole_frame():

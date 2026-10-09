@@ -40,6 +40,15 @@ OUT_BAND = 6
 OUT_GAPS = (3, 8, 14, 22, 32, 44)   # the outside band may start past the blur
 SYM_WEIGHT = 15.0         # strip: frame off-centre between the sprocket rows
 GAP_PENALTY = 0.6         # strip: inter-frame gap inside a side edge
+# Gaps between frames place a strip frame's side edges outright (bare, flat
+# film base over the picture rows). Gap-to-gap width measured 1.48-1.54 x height
+# on 24 strip scans from two cameras.
+STRIP_RATIO = 1.51
+STRIP_W_TOL = 0.03        # two gaps this close to one frame width apart = the frame
+GAP_LEVEL = 0.02          # log10 from the rebate's base level
+GAP_FLAT = 0.02           # ...and this flat down the column (median-filtered std)
+GAP_MIN = 8               # px: narrower runs are flat picture, not a gap
+GAP_MAX = 0.10            # x frame width: wider runs are thin picture beside a gap
 HOLDER_GAP = 0.8          # log10: outside this much darker than inside = holder
 INSET_FRAC = 0.006        # final inset, fraction of the short side
 MAX_SKEW = 4.0
@@ -224,12 +233,10 @@ def sprocket_bands(L, clip):
     return (top[1] if top else None), (bot[0] if bot else None)
 
 
-def _strip_gap_columns(L, st, sb, tol=0.035):
-    """35mm strip: columns that are bare film base over the picture rows (the
-    gap between frames). The base is read from the rebate between the sprocket
-    holes, so it is exact for this frame; the column MEDIAN is used because a
-    gap can carry a light leak or the neighbour's edge."""
-    h, w = L.shape
+def _rebate_base(L, st, sb):
+    """35mm strip: the film base level, read from the rebate between the
+    sprocket holes (exact for this frame). None without a sprocket band."""
+    h = L.shape[0]
     clip = float(L.max())
     parts = []
     if st is not None:
@@ -240,9 +247,17 @@ def _strip_gap_columns(L, st, sb, tol=0.035):
         return None
     reb = np.concatenate([p.ravel() for p in parts])
     reb = reb[reb < clip - 0.1]
-    if reb.size < 100:
+    return float(np.median(reb)) if reb.size >= 100 else None
+
+
+def _strip_gap_columns(L, st, sb, tol=0.035):
+    """35mm strip: columns that are bare film base over the picture rows (the
+    gap between frames). The column MEDIAN is used because a gap can carry a
+    light leak or the neighbour's edge."""
+    h, w = L.shape
+    base = _rebate_base(L, st, sb)
+    if base is None:
         return None
-    base = float(np.median(reb))
     r0 = (st if st is not None else 0) + 40
     r1 = (sb if sb is not None else h) - 40
     if r1 - r0 < 50:
@@ -251,13 +266,31 @@ def _strip_gap_columns(L, st, sb, tol=0.035):
     return np.abs(colmed - base) < tol
 
 
+def _strip_gap_runs(L, st, sb):
+    """35mm strip: the gaps between frames, as (start, stop) column runs that
+    are bare film base AND flat down the picture rows. Stricter than
+    `_strip_gap_columns` because these place the frame outright: a thin
+    picture can match the base level, but rarely stays flat for 500 rows."""
+    h, w = L.shape
+    base = _rebate_base(L, st, sb)
+    r0 = (st if st is not None else 0) + 40
+    r1 = (sb if sb is not None else h) - 40
+    if base is None or r1 - r0 < 50:
+        return []
+    band = cv2.medianBlur(np.ascontiguousarray(L[r0:r1], dtype=np.float32), 5)
+    m = (np.abs(np.median(band, axis=0) - base) < GAP_LEVEL) & (band.std(axis=0) < GAP_FLAT)
+    edges = np.flatnonzero(np.diff(np.concatenate(([0], m.astype(np.int8), [0]))))
+    return [(int(a), int(b)) for a, b in zip(edges[::2], edges[1::2]) if b - a >= GAP_MIN]
+
+
 # --- Rectangle search ----------------------------------------------------------
 def _format_fit(ar, strip):
     fmts = {"35mm 3:2": 1.5} if strip else FORMATS
     slack = STRIP_SLACK if strip else ASPECT_SLACK
     best = (9.0, "")
     for name, v in fmts.items():
-        for f in (v, 1 / v):
+        # a frame on a strip with horizontal sprocket rows is landscape
+        for f in ((v,) if strip else (v, 1 / v)):
             d = max(0.0, abs(np.log(ar / f)) - slack) + RARE.get(name, 0.0)
             if d < best[0]:
                 best = (d, name)
@@ -341,6 +374,44 @@ def _format_snap(E, best, strip, colp, gap=None, bands=None, ratio=1.5, search=0
     return best
 
 
+def _strip_anchor(E, best, runs, gap, bands):
+    """35mm strip: put the side edges on the gaps between frames. Two gaps one
+    frame width apart (height x STRIP_RATIO, +/-3%) are the frame. One gap
+    places one side; the other stays at the search's edge when that is a real
+    edge a frame width away, else goes at the frame width (reported soft). A
+    frame never contains a gap. Returns (best, anchored sides, soft side)."""
+    w = E.w
+    sx0, y0, sx1, y1 = best["rect"]
+    W = STRIP_RATIO * (y1 - y0)
+    lo, hi = W * (1 - STRIP_W_TOL), W * (1 + STRIP_W_TOL)
+
+    def seen(i):          # the search found a real gate edge on that side
+        return not best["border"][i] and best["covs"][i] >= 0.5
+
+    gaps = [(a, b) for a, b in runs if b - a <= GAP_MAX * W]
+    lefts = [b for a, b in gaps if b < w - 1]      # a frame starts where a gap ends
+    rights = [a for a, b in gaps if a > 0]         # ...and stops where the next begins
+    cands = [((l, r), "LR", None) for l in lefts for r in rights if lo <= r - l <= hi]
+    for l in lefts:
+        if lo <= sx1 - l <= hi and seen(1):
+            cands.append(((l, sx1), "L", None))
+        else:
+            cands.append(((l, min(int(round(l + W)), w - 2)), "L", "R"))
+    for r in rights:
+        if lo <= r - sx0 <= hi and seen(0):
+            cands.append(((sx0, r), "R", None))
+        else:
+            cands.append(((max(int(round(r - W)), 1), r), "R", "L"))
+    pick = None
+    for (x0, x1), sides, soft in cands:
+        if x1 - x0 < 0.85 * W or any(x0 + 8 < a and b < x1 - 8 for a, b in gaps):
+            continue
+        sc = _score(E, (x0, y0, x1, y1), True, gap, bands)
+        if pick is None or (len(sides), sc["score"]) > (len(pick[1]), pick[0]["score"]):
+            pick = (sc, sides, soft)
+    return pick if pick is not None else (best, "", None)
+
+
 def _search(L):
     h, w = L.shape
     E = _Edges(L)
@@ -378,6 +449,9 @@ def _search(L):
                 best = sc
     if best is not None and strip:
         best = _format_snap(E, best, strip, colp, gap, (st, sb))
+        runs = _strip_gap_runs(L, st, sb)
+        best, sides, free = _strip_anchor(E, best, runs, gap, (st, sb))
+        best = dict(best, anchored=sides, free_side=free, gap_runs=runs)
     return best, strip
 
 
@@ -527,12 +601,20 @@ def detect_frame(raw: np.ndarray, inset_frac: float = INSET_FRAC) -> FrameCrop:
     x0, y0, x1, y1 = rect
     ins = int(round(inset_frac * min(x1 - x0, y1 - y0)))
     x0, y0, x1, y1 = x0 + ins, y0 + ins, x1 - ins, y1 - ins
+    anchored = best.get("anchored", "")
+    if best.get("free_side"):
+        # a strip side placed by the frame width alone: no gap or gate seen
+        side = best["free_side"]
+        if not best["border"][0 if side == "L" else 1]:
+            soft[side] = True
     soft_sides = tuple(s for s in ("L", "R", "T", "B") if soft.get(s))
     debug = dict(best=best, peel=peeled, trim=trimmed, blur=blurred, inset=ins,
                  deskewed_rect=(x0, y0, x1, y1), plateaus=plateaus)
 
     n_border = sum(best["border"])
-    real_covs = [c for c, bd in zip(best["covs"], best["border"]) if not bd]
+    # side edges placed by the gaps between frames need no gradient of their own
+    real_covs = [c for c, bd, side in zip(best["covs"], best["border"], "LRTB")
+                 if not bd and side not in anchored]
     if x1 - x0 < MIN_SIDE * w * 0.8 or y1 - y0 < MIN_SIDE * h * 0.8:
         return FrameCrop(None, angle=ang, strip=strip, reason="frame too small", debug=debug)
     if n_border >= 3 or (best["area"] > 0.97 and n_border >= 2):
@@ -540,7 +622,7 @@ def detect_frame(raw: np.ndarray, inset_frac: float = INSET_FRAC) -> FrameCrop:
                          reason="no border found: the picture fills the scan")
     if n_border >= 2:
         conf, why = "low", "two edges are the scan border"
-    elif real_covs and min(real_covs) < 0.2 and not (strip and best["fit"] == 0.0):
+    elif real_covs and min(real_covs) < 0.2 and not (strip and (best["fit"] == 0.0 or anchored)):
         # (on a 35mm strip that fits 3:2 exactly, a gate at base density is
         # expected to be faint: the sprocket rows and the format place it)
         conf, why = "low", "an edge is too faint"
