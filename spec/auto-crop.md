@@ -50,7 +50,20 @@ All on the raw (unconverted) 1080 preview, in log10 luminance `L`.
    boundaries become candidate edges, and a box with gap just inside a side
    edge is penalised. (The trim, step 6, is skipped on strips: the rows and
    3:2 already place the frame, and picture at base density would look like
-   rebate to it.)
+   rebate to it.) A strip frame is always landscape: the sprocket rows run
+   along its long side.
+3b. **Strip gaps place the side edges** (after the search). A gap is a run of
+   ≥ 8 columns that are at the rebate's base level (±0.02 log) AND flat down
+   the picture rows (median-filtered std < 0.02), no wider than 10% of a
+   frame: a thin picture can match the base level, but rarely stays flat for
+   500 rows, and a wider run is thin picture merged with a gap. Two gaps one
+   frame width apart (height × 1.51, ±3%; measured 1.48–1.54 gap-to-gap on 24
+   strips from two cameras) are the frame. One gap places one side; the other
+   keeps the search's edge when that is a real edge (coverage ≥ 0.5) a frame
+   width away, otherwise goes at the frame width and is reported **soft**. A
+   frame never contains a gap. Sides placed by a gap need no gradient of their
+   own for the confidence rules. This is what crops a thin, underexposed
+   frame whose gates are invisible, and stops a box taking in the gap.
 4. **Rectangle search.** Every candidate pair × pair (each side ≥ 35% of the
    scan) is scored:
    `Σ coverage(edge over its own span) − 4·Σ outside-band roughness + area −
@@ -149,3 +162,9 @@ confirmed crops, never from unchecked guesses.
 - Result on the 30 development scans: all cropped correctly (5 high, 25
   medium — medium is mostly "soft": a side where the picture is as thin as
   the base). ~0.3–0.5 s per frame at 1080 px.
+- Second set (20 scans: 19 white-light 35mm strips, partly cut top rows, two
+  near-base interiors, plus an IT8 chart slide): before the gap rule one thin
+  frame came out portrait and one took in the gap and 35 px of the next
+  frame; one more kept 17 px of gap. With it all 20 crop cleanly (15 high);
+  the first 30 are unchanged. The IT8 slide crops to the whole target film,
+  not the patch grid inside it.
