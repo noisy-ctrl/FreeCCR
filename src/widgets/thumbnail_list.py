@@ -131,6 +131,26 @@ class ThumbnailList(QWidget):
         self.layout.addWidget(self.profile_combo)
         # Positive mode now lives only in Settings ▸ Color Management.
 
+        # Contact sheet (spec/contact-sheet.md): a live view of every frame and
+        # its crop, shown in place of the main image. Not an item in the list
+        # (rows stay == image indices); a dashed border sets it apart.
+        self.sheet_btn = QPushButton("▦  Contact sheet")
+        self.sheet_btn.setCheckable(True)
+        self.sheet_btn.setFixedHeight(theme.CONTROL_H + 6)
+        self.sheet_btn.setToolTip(
+            "Every frame on one sheet, uncropped, with its crop marked: green "
+            "confirmed by you, amber auto crop, blue drawn by hand, red dashed "
+            "auto crop wasn't sure. Click a frame to open it, double-click to "
+            "open it in the Crop panel.")
+        self.sheet_btn.setStyleSheet(
+            f"QPushButton {{ border: 1px dashed {theme.BORDER_STRONG}; border-radius: 4px;"
+            f" background: transparent; color: {theme.TEXT}; }}"
+            f"QPushButton:hover {{ background: {theme.SURFACE_HOVER}; }}"
+            f"QPushButton:checked {{ border: 1px solid {theme.TEXT_MUTED};"
+            f" background: {theme.SURFACE_ACTIVE}; }}")
+        self.sheet_btn.clicked.connect(self._on_sheet_clicked)
+        self.layout.addWidget(self.sheet_btn)
+
         self.thumbnail_list = QListWidget()
         self.thumbnail_list.setViewMode(QListWidget.IconMode)
         # Set the icon size up front so incrementally-appended items (e.g.
@@ -289,13 +309,31 @@ class ThumbnailList(QWidget):
             self.thumbnail_list.setCurrentRow(self.thumbnail_list.count() - 1)
         return True
         
+    def _on_sheet_clicked(self, checked):
+        mw = self._main_window()
+        if not hasattr(mw, "show_contact_sheet") or not mw.show_contact_sheet(checked):
+            self.set_sheet_checked(getattr(mw, "contact_sheet_shown", lambda: False)())
+
+    def set_sheet_checked(self, on):
+        self.sheet_btn.blockSignals(True)
+        self.sheet_btn.setChecked(bool(on))
+        self.sheet_btn.blockSignals(False)
+
+    def _leave_sheet(self):
+        """Picking a frame in the list leaves the contact sheet."""
+        mw = self._main_window()
+        if getattr(mw, "contact_sheet_shown", lambda: False)():
+            mw.show_contact_sheet(False)
+
     def on_thumbnail_clicked(self, item):
+        self._leave_sheet()
         idx = item.data(Qt.UserRole)
         self._main_window().image_preview.update_preview(idx)
         self._main_window().sliders_panel.set_current_idx(idx)
 
     def on_current_item_changed(self, current, previous):
         if current:
+            self._leave_sheet()
             idx = current.data(Qt.UserRole)
             self._main_window().image_preview.update_preview(idx)
             self._main_window().sliders_panel.set_current_idx(idx)

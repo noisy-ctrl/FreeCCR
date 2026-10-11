@@ -202,8 +202,20 @@ class MainWindow(QMainWindow):
         self.tether_banner.stopRequested.connect(self.stop_tethering)
         self.image_preview.set_tether_banner(self.tether_banner)
 
+        # Contact sheet (spec/contact-sheet.md): a SIBLING of image_preview,
+        # shown in its place — not a stack around it, so ImagePreview's
+        # parent().parent() chain to MainWindow stays valid.
+        from widgets.contact_sheet import ContactSheetView
+        self.contact_sheet = ContactSheetView(self)
+        self.contact_sheet.setMinimumWidth(900)
+        self.contact_sheet.setVisible(False)
+        self.contact_sheet.frameActivated.connect(self.open_frame_from_sheet)
+        self.contact_sheet.autoCropRequested.connect(self._auto_crop_from_sheet)
+        self.contact_sheet.closeRequested.connect(lambda: self.show_contact_sheet(False))
+
         self.layout.addWidget(self.thumbnail_list, 0)
         self.layout.addWidget(self.image_preview, 3)
+        self.layout.addWidget(self.contact_sheet, 3)
         self.layout.addWidget(self.sliders_panel, 0)
         self.layout.addWidget(self.dust_panel, 0)
         self.layout.addWidget(self.crop_panel, 0)
@@ -468,6 +480,64 @@ class MainWindow(QMainWindow):
 
     def on_image_selected(self, file_path):
         pass
+
+    # --- Contact sheet (spec/contact-sheet.md) ------------------------------
+    def contact_sheet_shown(self) -> bool:
+        return not self.contact_sheet.isHidden()
+
+    def show_contact_sheet(self, on=True) -> bool:
+        """Show the contact sheet in place of the image view (or go back).
+        Refused while cropping or removing dust. True when the state changed
+        as asked."""
+        ip = self.image_preview
+        if on:
+            if ip.crop_mode or getattr(ip, "dust_mode", False):
+                self.sliders_panel.set_temporary_hint(
+                    "Finish cropping or dust removal first (Done or Esc), then "
+                    "open the contact sheet.", duration=5000)
+                self.thumbnail_list.set_sheet_checked(False)
+                return False
+            if not ccr_backend.images:
+                self.thumbnail_list.set_sheet_checked(False)
+                return False
+            ip.setVisible(False)
+            self.contact_sheet.setVisible(True)
+            self.contact_sheet.activate(current=ip.current_idx)
+        else:
+            self.contact_sheet.deactivate()
+            self.contact_sheet.setVisible(False)
+            ip.setVisible(True)
+        self.thumbnail_list.set_sheet_checked(on)
+        return True
+
+    def open_frame_from_sheet(self, idx, crop=False):
+        """A tile was clicked (or double-clicked: open it in the Crop panel)."""
+        self.show_contact_sheet(False)
+        lst = self.thumbnail_list.thumbnail_list
+        if lst.currentRow() != idx:
+            lst.setCurrentRow(idx)          # drives update_preview + set_current_idx
+        else:
+            self.image_preview.update_preview(idx)
+        if crop:
+            self.toggle_crop_panel(True)
+
+    def _auto_crop_from_sheet(self, idx):
+        img = ccr_backend.get_image_by_index(idx)
+        if img is None:
+            return
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            frame, applied = ccr_backend.auto_crop_one(img)
+        finally:
+            QApplication.restoreOverrideCursor()
+        if applied:
+            self.thumbnail_list.update_thumbnail(idx)
+            ccr_backend.save_catalog()
+        self.sliders_panel.set_temporary_hint(
+            (f"Auto crop: {frame.summary()} ({frame.confidence} confidence)." if applied
+             else f"Auto crop left this frame as it was: "
+                  f"{frame.reason or frame.confidence + ' confidence'}."), duration=6000)
+        self.contact_sheet.refresh()
 
     # --- Dust removal (panel cover + canvas mode) -------------------------
     def toggle_dust_removal(self, on=None):
