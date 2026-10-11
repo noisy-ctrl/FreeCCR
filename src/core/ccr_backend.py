@@ -104,6 +104,9 @@ class CCRBackend:
         # straighten, crop to the picture. High/medium confidence only.
         self.auto_crop: bool = False
         self.last_auto_crop_summary = None
+        # Learn from the crops you confirm (spec/auto-crop-learning.md).
+        # Persisted by MainWindow (crop/learn); the store is core.crop_memory.
+        self.auto_crop_learn: bool = True
         # Input transfer function for non-RAW (TIFF) imports: FreeCCR's density
         # math assumes LINEAR data, but a scanner TIFF is often gamma-encoded.
         # `ask` shows the import dialog; `mode` ("embedded"|"linear"|"manual")
@@ -2609,17 +2612,110 @@ class CCRBackend:
             return img.resized_raw
         return img.read_image(img.file_path, max_long_side=1080)
 
-    def detect_frame_crop(self, img, raw=None):
+    def detect_frame_crop(self, img, raw=None, extra_priors=None):
         """Find `img`'s picture area (core.auto_crop.FrameCrop). `raw` must be
-        the unconverted preview; it is fetched when omitted."""
+        the unconverted preview; it is fetched when omitted. The frames learned
+        on this setup (and `extra_priors`, e.g. the roll's) guide it, and the
+        result is kept on the image so a confirmed crop can be learned from
+        (spec/auto-crop-learning.md)."""
         from core.auto_crop import detect_frame, FrameCrop
+        from core.crop_memory import memory, setup_key
         try:
             if raw is None:
                 raw = self.raw_preview(img)
-            return detect_frame(raw)
+            h, w = raw.shape[:2]
+            key = setup_key(img, w, h)
+            priors = list(memory().priors(key)) if self.auto_crop_learn else []
+            priors += list(extra_priors or ())
+            res = detect_frame(raw, priors=priors)
+            img.auto_crop_last, img.auto_crop_key = res, key
+            return res
         except Exception as e:                    # never let a crop stop a convert
             print(f"Auto crop failed for {getattr(img, 'file_path', '?')}: {e}")
             return FrameCrop(None, reason=f"detection failed ({e})")
+
+    def learn_confirmed_crop(self, img) -> bool:
+        """The Crop panel committed a crop (Done / Enter): remember it for this
+        setup when auto crop looked at this image this session, it is frame
+        sized, and it isn't a creative re-crop of a frame already learned.
+        True when something was learned. spec/auto-crop-learning.md."""
+        from core.crop_memory import (memory, box_of, det_record, frame_like,
+                                      inward_shifts, REFINE_MAX)
+        det = getattr(img, "auto_crop_last", None)
+        key = getattr(img, "auto_crop_key", None)
+        rect = getattr(img, "crop_rect", None)
+        if not self.auto_crop_learn or det is None or key is None or rect is None:
+            return False
+        try:
+            w, h = (int(v) for v in key.split("|")[1].split("x"))
+            final = box_of(rect, getattr(img, "crop_angle", 0.0), w, h)
+            if not frame_like(final, w, h):
+                return False
+            mem = memory()
+            prev = getattr(img, "auto_crop_example", None)
+            if prev is not None:
+                old = mem.get(key, prev)
+                if old is not None:
+                    shifts, _ = inward_shifts(old["final"], final)
+                    if max(abs(v) for v in shifts) >= REFINE_MAX:
+                        return False          # a creative re-crop, not the frame
+            img.auto_crop_example = mem.record(
+                key, final, w, h, det=det_record(det), strip=det.strip,
+                fmt=det.fmt, ex_id=prev)
+            return True
+        except Exception as e:                    # learning must never break a crop
+            print(f"Could not learn the crop of {getattr(img, 'file_path', '?')}: {e}")
+            return False
+
+    def _roll_consistent_crops(self, imgs, frames, raws):
+        """Convert All: frames converted together share a frame size. With at
+        least 3 usable frames agreeing within 3% (half of them or more), a
+        frame that is unusable or off that size is re-detected with the roll's
+        size as a prior. `raws[i]` is frame i's unconverted preview (or None).
+        Returns the (possibly replaced) frames and how many were re-placed."""
+        import numpy as np
+        from core.auto_crop import Prior, snap_soft_sides
+        gates = [(i, f.geom["gate"]) for i, f in enumerate(frames)
+                 if f is not None and f.usable and (f.geom or {}).get("gate")]
+        if len(gates) < 3:
+            return frames, 0
+        g = np.array([v for _, v in gates], float)
+        med = np.median(g, axis=0)
+        agree = np.all(np.abs(g / med - 1) < 0.03, axis=1)
+        if agree.sum() < max(3, 0.5 * len(gates)):
+            return frames, 0
+        roll = np.median(g[agree], axis=0)
+        members = [frames[i] for (i, _), a in zip(gates, agree) if a]
+        strips = [f.strip for f in members]
+        # the roll's output frame size per axis, only from frames that saw
+        # both gates on that axis (a soft side sits on the rebate)
+        def axis_size(a, b, k):
+            v = [f.geom["out"][k + 2] - f.geom["out"][k] for f in members
+                 if a not in f.soft and b not in f.soft]
+            return float(np.median(v)) if len(v) >= 2 else None
+        roll_out = (axis_size("L", "R", 0), axis_size("T", "B", 1))
+        prior = Prior(gate=(float(roll[0]), float(roll[1])), kind="roll", out=roll_out,
+                      strip=max(set(strips), key=strips.count))
+        out, n = list(frames), 0
+        for i, f in enumerate(frames):
+            if f is None:
+                continue
+            gate = (f.geom or {}).get("gate")
+            if f.usable and gate and all(abs(gate[k] / roll[k] - 1) < 0.03 for k in (0, 1)):
+                # right size: an invisible gate still goes at the roll's size
+                f2 = snap_soft_sides(f, roll_out)
+                if f2 is not f:
+                    out[i], n = f2, n + 1
+                    imgs[i].auto_crop_last = f2
+                continue
+            if raws[i] is None:
+                continue
+            f2 = self.detect_frame_crop(imgs[i], raw=raws[i], extra_priors=[prior])
+            if f2.usable and f2.learned:
+                out[i], n = f2, n + 1
+            else:
+                imgs[i].auto_crop_last = f   # keep the original detection
+        return out, n
 
     @staticmethod
     def apply_auto_crop(img, result) -> bool:
@@ -2633,11 +2729,62 @@ class CCRBackend:
         img.crop_rect = tuple(result.rect)
         img.crop_angle = float(result.angle)
         img.fine_rotation_angle = 0
+        img.auto_crop_rect = img.crop_rect     # so Re-crop all knows it set this one
         return True
+
+    def recrop_candidates(self):
+        """Frames Re-crop all may change: uncropped, or still holding the crop
+        auto crop set. A crop you drew yourself, or confirmed with Done, stays."""
+        out = []
+        for img in self.images:
+            if getattr(img, "auto_crop_example", None):
+                continue
+            rect = getattr(img, "crop_rect", None)
+            if rect is None or rect == getattr(img, "auto_crop_rect", None):
+                out.append(img)
+        return out
+
+    def recrop_all(self, progress_callback=None, should_cancel=None):
+        """Re-run auto crop on every frame `recrop_candidates` allows, with what
+        has been learned and the roll check, without re-converting. Returns
+        the Convert All style summary (spec/auto-crop-learning.md)."""
+        import numpy as np
+        imgs = self.recrop_candidates()
+        total = len(imgs)
+        summary = self._new_crop_summary()
+        frames, lums = [None] * total, [None] * total
+        for i, img in enumerate(imgs):
+            if should_cancel is not None and should_cancel():
+                return None
+            try:
+                raw = self.raw_preview(img)
+                # keep a one-channel copy for the roll check: a third of the
+                # memory of the RGB preview, and all detection reads
+                lums[i] = (raw.astype(np.float32).mean(axis=2).astype(raw.dtype)
+                           if raw.ndim == 3 else raw)
+                frames[i] = self.detect_frame_crop(img, raw=raw)
+            except Exception as e:
+                print(f"Re-crop failed for {getattr(img, 'file_path', '?')}: {e}")
+            if progress_callback:
+                progress_callback(i + 1, total)
+        frames, summary["roll"] = self._roll_consistent_crops(imgs, frames, lums)
+        for img, frame in zip(imgs, frames):
+            if frame is None:
+                continue
+            same = (frame.usable and img.crop_rect is not None
+                    and all(abs(a - b) < 1e-6 for a, b in zip(img.crop_rect, frame.rect))
+                    and abs((img.crop_angle or 0.0) - frame.angle) < 1e-6)
+            if same:                  # unchanged: no junk undo step
+                self._note_crop(summary, img, frame, True)
+                continue
+            self._note_crop(summary, img, frame, self.apply_auto_crop(img, frame))
+            img.update_thumbnail_and_preview()
+        return summary
 
     @staticmethod
     def _new_crop_summary():
-        return {"cropped": 0, "high": 0, "medium": 0, "skipped": 0, "notes": []}
+        return {"cropped": 0, "high": 0, "medium": 0, "skipped": 0, "notes": [],
+                "roll": 0, "learned": 0}
 
     def _note_crop(self, summary, img, result, applied):
         if summary is None:
@@ -2645,6 +2792,8 @@ class CCRBackend:
         if applied:
             summary["cropped"] += 1
             summary[result.confidence] += 1
+            if result.learned in ("matched", "usual"):
+                summary["learned"] += 1
         else:
             summary["skipped"] += 1
             name = os.path.basename(getattr(img, "file_path", "") or "?")
@@ -2710,14 +2859,35 @@ class CCRBackend:
         if self.auto_black_point:
             return self._apply_auto_bwpoint_to_all(progress_callback)
         crop_summary = self.last_auto_crop_summary
+        frames = [None] * total
+        if self.auto_crop:
+            # Find every frame on its raw scan first, so the roll can check
+            # them against each other before anything is converted.
+            raws = [None] * total
+            for i, img in enumerate(self.images):
+                try:
+                    if img.converted:
+                        img.reload_image()
+                    raws[i] = img.resized_raw      # (also marks it reloaded)
+                    frames[i] = self.detect_frame_crop(img, raw=img.resized_raw)
+                except Exception as e:
+                    print(f"Auto crop detection failed for image {i}: {e}")
+                if progress_callback:
+                    progress_callback(i + 1, 2 * total)
+            frames, crop_summary["roll"] = self._roll_consistent_crops(
+                self.images, frames, raws)
+            reloaded = [r is not None for r in raws]
+            raws = None
+        else:
+            reloaded = [False] * total
         for i, img in enumerate(self.images):
             try:
-                # Ensure we start from original (unprocessed) scan data
-                if img.converted:
+                # Ensure we start from original (unprocessed) scan data (the
+                # auto crop pass already reloaded it: reload_image does not
+                # clear `converted`, so don't decode twice)
+                if img.converted and not reloaded[i]:
                     img.reload_image()
-                # resized_raw is the raw scan here: find the frame before converting
-                frame = (self.detect_frame_crop(img, raw=img.resized_raw)
-                         if self.auto_crop else None)
+                frame = frames[i]
                 processed = ccr_normalize_with_bwpoint(
                     img, self.black_point_bgr, self.white_point_bgr,
                     density=self.density_bwpoint, slopes_bgr=slopes
@@ -2746,7 +2916,10 @@ class CCRBackend:
             except Exception as e:
                 print(f"B/W point conversion failed for image {i}: {e}")
             if progress_callback:
-                progress_callback(i + 1, total)
+                if self.auto_crop:
+                    progress_callback(total + i + 1, 2 * total)
+                else:
+                    progress_callback(i + 1, total)
 
     def _apply_auto_bwpoint_to_all(self, progress_callback=None):
         """Convert All with a per-frame black point: detect every frame first,
@@ -2770,6 +2943,14 @@ class CCRBackend:
                           if (self.auto_crop and raw_ok) else None)
             if progress_callback:
                 progress_callback(i + 1, 2 * total)      # detection = first half
+        if self.auto_crop:
+            # the raw scans are all still in resized_raw: check the frames
+            # against the roll before converting (spec/auto-crop-learning.md)
+            raws = [img.resized_raw if (r is not None and f is not None) else None
+                    for img, r, f in zip(self.images, results, frames)]
+            frames, crop_summary["roll"] = self._roll_consistent_crops(
+                self.images, frames, raws)
+            raws = None
         consensus = roll_check([r for r in results if r is not None])
         summary = {"high": 0, "medium": 0, "fallback": 0, "skipped": 0, "notes": []}
         for i, (img, res) in enumerate(zip(self.images, results)):

@@ -16,7 +16,7 @@ import os
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QGroupBox,
-    QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QPushButton, QScrollArea,
+    QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QScrollArea,
     QStackedWidget, QVBoxLayout, QWidget,
 )
 
@@ -126,6 +126,30 @@ class SettingsDialog(QDialog):
             "you grade it with Channel Levels. Turn this off to skip the "
             "confirmation and convert straight away."))
         lay.addWidget(grp_conv)
+
+        # --- Auto crop learning (spec/auto-crop-learning.md) ------------- #
+        grp_crop = QGroupBox("Auto crop")
+        gcr = QVBoxLayout(grp_crop)
+        gcr.setSpacing(theme.GAP_ROW)
+        self._cb_crop_learn = QCheckBox("Learn from my crops")
+        gcr.addWidget(self._cb_crop_learn)
+        gcr.addWidget(self._muted(
+            "When you press Done in the Crop panel on a frame auto crop has "
+            "looked at, it remembers that frame's size, position and angle for "
+            "your setup (camera and scan size), and how you moved each edge. "
+            "Next time it expects your frame and moves the edges the way you "
+            "do. Only box geometry is saved, on this computer. Turning this off "
+            "stops using it without forgetting it."))
+        forget_row = QHBoxLayout()
+        forget_row.setSpacing(theme.GAP_BTN)
+        self._crop_memory_label = QLabel("")
+        forget_row.addWidget(self._crop_memory_label, 1)
+        self._btn_forget_crops = QPushButton("Forget learned crops")
+        self._btn_forget_crops.clicked.connect(self._on_forget_crops)
+        forget_row.addWidget(self._btn_forget_crops)
+        gcr.addLayout(forget_row)
+        self._refresh_crop_memory_label()
+        lay.addWidget(grp_crop)
 
         # --- Input colour space (non-RAW / TIFF decode space) ------------ #
         from core.input_transfer import TRANSFER_CHOICES
@@ -254,6 +278,32 @@ class SettingsDialog(QDialog):
 
         lay.addStretch(1)
         return page
+
+    def _refresh_crop_memory_label(self):
+        try:
+            from core.crop_memory import memory
+            n, setups = memory().counts()
+        except Exception:
+            n, setups = 0, 0
+        if n:
+            self._crop_memory_label.setText(
+                f"{n} confirmed crop{'s' if n != 1 else ''} learned on "
+                f"{setups} setup{'s' if setups != 1 else ''}.")
+        else:
+            self._crop_memory_label.setText("Nothing learned yet.")
+        self._btn_forget_crops.setEnabled(n > 0)
+
+    def _on_forget_crops(self):
+        """Immediate (not staged): asks first, then clears the crop memory."""
+        if QMessageBox.question(
+                self, "Forget learned crops",
+                "Forget every crop auto crop has learned, on all setups? "
+                "It goes back to finding frames on its own.",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+            return
+        from core.crop_memory import memory
+        memory().forget()
+        self._refresh_crop_memory_label()
 
     # ------------------------------------------------------------------ #
     # Color Management page
@@ -548,6 +598,8 @@ class SettingsDialog(QDialog):
                         (self._cb_auto_gain, ccr_backend.auto_gain),
                         (self._cb_warn_no_anchor,
                          getattr(ccr_backend, "warn_no_anchor_convert", True)),
+                        (self._cb_crop_learn,
+                         getattr(ccr_backend, "auto_crop_learn", True)),
                         (self._cb_auto_awb, ccr_backend.auto_awb),
                         (self._cb_gamma_lum, ccr_backend.gamma_luminance),
                         (self._cb_sprocket, ccr_backend.sprocket_mask_white),
@@ -623,6 +675,9 @@ class SettingsDialog(QDialog):
                 != bool(getattr(ccr_backend, "warn_no_anchor_convert", True))):
             self._mw.on_warn_no_anchor_toggled(
                 bool(self._cb_warn_no_anchor.isChecked()))
+        if (bool(self._cb_crop_learn.isChecked())
+                != bool(getattr(ccr_backend, "auto_crop_learn", True))):
+            self._mw.on_auto_crop_learn_toggled(bool(self._cb_crop_learn.isChecked()))
         # Resolution-only, display-only: no reprocess pass (spec/preview-detail.md).
         level = self._combo_preview_detail.currentData()
         if level and level != getattr(ccr_backend, "preview_detail", "full"):

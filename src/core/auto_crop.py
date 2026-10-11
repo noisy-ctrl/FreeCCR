@@ -12,7 +12,7 @@ The result is a normalised `crop_rect` in the UNROTATED image plus a
 the catalog need nothing new.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import itertools
 from typing import Optional, Tuple
 
@@ -52,6 +52,12 @@ GAP_MAX = 0.10            # x frame width: wider runs are thin picture beside a 
 HOLDER_GAP = 0.8          # log10: outside this much darker than inside = holder
 INSET_FRAC = 0.006        # final inset, fraction of the short side
 MAX_SKEW = 4.0
+# Learned frames (spec/auto-crop-learning.md): your confirmed crops / the roll.
+LEARN_TOL = 0.03          # a box within 3% of a learned gate size is that frame
+LEARN_BONUS = 1.0         # ...and scores this much (falling to 0 at the tolerance)
+LEARN_POS = 0.5           # plus this, Gaussian on the learned centre
+HABIT_MAX = 0.06          # a habit shift is at most 6% of the frame per side
+HABIT_MAX_ANGLE = 1.0     # ...and 1 degree of straighten
 
 
 @dataclass
@@ -66,6 +72,12 @@ class FrameCrop:
     strip: bool = False               # 35mm strip (sprocket rows seen)
     fmt: str = ""                     # nearest film format
     reason: str = ""
+    # how a learned frame was used: "" | "matched" (your frame size, your
+    # habit applied) | "usual" (nothing found: your usual box) | "roll"
+    learned: str = ""
+    # geometry for learning, in deskewed preview px: the search's gate box
+    # size, the output box, the scan size (spec/auto-crop-learning.md)
+    geom: dict = field(default_factory=dict, repr=False)
     debug: dict = field(default_factory=dict, repr=False)
 
     @property
@@ -80,7 +92,34 @@ class FrameCrop:
             bits.append("35mm strip")
         if self.soft:
             bits.append("soft edge " + "/".join(_SIDE_NAMES[s] for s in self.soft))
+        if self.learned:
+            bits.append(_LEARNED_NOTES[self.learned])
         return ", ".join(bits)
+
+
+@dataclass
+class Prior:
+    """A frame the detector should expect (spec/auto-crop-learning.md): one
+    learned from your confirmed crops on this setup, or the roll's frame size.
+    Positions are UNROTATED preview px; sizes are box-frame px."""
+    gate: Tuple[float, float]                       # search-box size when found
+    centre: Optional[Tuple[float, float]] = None    # None: no position prior
+    spread: Tuple[float, float] = (1e9, 1e9)
+    habit: Tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)  # L R T B, inward
+    dangle: float = 0.0
+    size: Optional[Tuple[float, float]] = None      # your confirmed box size
+    out: Optional[Tuple[float, float]] = None       # the detector's box for it, before the habit
+    box_centre: Optional[Tuple[float, float]] = None  # ...its centre (`centre` is the search box's)
+    angle: float = 0.0                              # your confirmed angle
+    fallback: bool = False                          # usable as the usual box
+    fmt: str = ""
+    kind: str = "matched"                           # "matched" | "roll"
+    n: int = 1
+    strip: Optional[bool] = None                    # learned on a strip / not; None = either
+
+
+_LEARNED_NOTES = {"matched": "matched your frame", "usual": "your usual frame",
+                  "roll": "matched to the roll"}
 
 
 _SIDE_NAMES = {"L": "left", "R": "right", "T": "top", "B": "bottom"}
@@ -297,7 +336,7 @@ def _format_fit(ar, strip):
     return best
 
 
-def _score(E, rect, strip, gap=None, bands=None):
+def _score(E, rect, strip, gap=None, bands=None, learned=None):
     w, h = E.w, E.h
     x0, y0, x1, y1 = rect
     my, mx = int((y1 - y0) * .06), int((x1 - x0) * .06)
@@ -333,7 +372,22 @@ def _score(E, rect, strip, gap=None, bands=None):
     ar = (x1 - x0) / max(1, (y1 - y0))
     fit, fmt = _format_fit(ar, strip)
     area = (x1 - x0) * (y1 - y0) / float(w * h)
-    score = (sum(covs)
+    bonus, match = 0.0, None
+    for i, (gw, gh, cx, cy, sx, sy, lstrip) in enumerate(learned or ()):
+        if lstrip is not None and lstrip != strip:
+            continue        # a strip frame's size says nothing about a holder's
+        err = max(abs((x1 - x0) / gw - 1.0), abs((y1 - y0) / gh - 1.0))
+        if err < LEARN_TOL:
+            # your frame is a format: no misfit, plus a bonus for the size and
+            # for sitting where your frames sit
+            pos = float(np.exp(-0.5 * (((x0 + x1) / 2 - cx) / sx) ** 2
+                               - 0.5 * (((y0 + y1) / 2 - cy) / sy) ** 2)) if cx is not None else 0.0
+            b = LEARN_BONUS * (1.0 - err / LEARN_TOL) + LEARN_POS * pos
+            if b > bonus:
+                bonus, match = b, i
+    if match is not None:
+        fit = 0.0
+    score = (bonus + sum(covs)
              - ROUGHNESS_WEIGHT * sum(min(max(o - 0.02, 0.0), 0.25) for o in outs)
              + area - (STRIP_WEIGHT if strip else ASPECT_WEIGHT) * fit)
     if bands is not None and bands[0] is not None and bands[1] is not None:
@@ -348,10 +402,11 @@ def _score(E, rect, strip, gap=None, bands=None):
             if seg.size and seg.mean() > 0.5:
                 score -= GAP_PENALTY
     return dict(score=score, rect=rect, covs=covs, outs=outs, border=border,
-                aspect=ar, fit=fit, fmt=fmt, area=area)
+                aspect=ar, fit=fit, fmt=fmt, area=area, learned=match)
 
 
-def _format_snap(E, best, strip, colp, gap=None, bands=None, ratio=1.5, search=0.015):
+def _format_snap(E, best, strip, colp, gap=None, bands=None, ratio=1.5, search=0.015,
+                 learned=None):
     """35mm strip: a gate edge at base density is too faint to be shortlisted.
     Try each vertical edge at the exact 3:2 position (snapped to the strongest
     column within ±1.5%) and keep it when the score improves."""
@@ -368,13 +423,13 @@ def _format_snap(E, best, strip, colp, gap=None, bands=None, ratio=1.5, search=0
         lo, hi = max(0, c - r), min(E.w, c + r + 1)
         trials.append((lo + int(np.argmax(colp[lo:hi])), y0, x1, y1))
     for t in trials:
-        sc = _score(E, t, strip, gap, bands)
+        sc = _score(E, t, strip, gap, bands, learned)
         if sc["score"] > best["score"]:
             best = sc
     return best
 
 
-def _strip_anchor(E, best, runs, gap, bands):
+def _strip_anchor(E, best, runs, gap, bands, learned=None):
     """35mm strip: put the side edges on the gaps between frames. Two gaps one
     frame width apart (height x STRIP_RATIO, +/-3%) are the frame. One gap
     places one side; the other stays at the search's edge when that is a real
@@ -406,13 +461,28 @@ def _strip_anchor(E, best, runs, gap, bands):
     for (x0, x1), sides, soft in cands:
         if x1 - x0 < 0.85 * W or any(x0 + 8 < a and b < x1 - 8 for a, b in gaps):
             continue
-        sc = _score(E, (x0, y0, x1, y1), True, gap, bands)
+        sc = _score(E, (x0, y0, x1, y1), True, gap, bands, learned)
         if pick is None or (len(sides), sc["score"]) > (len(pick[1]), pick[0]["score"]):
             pick = (sc, sides, soft)
     return pick if pick is not None else (best, "", None)
 
 
-def _search(L):
+def _learned_boxes(xs, ys, w, h, gw, gh, cx, cy):
+    """Boxes of a learned gate size: every candidate column starting or ending
+    one, crossed with the same for rows, plus the box on the learned centre."""
+    def spans(cands, size, lim, c):
+        out = set()
+        for v in cands:
+            out.add((int(v), int(round(v + size))))
+            out.add((int(round(v - size)), int(v)))
+        if c is not None:
+            out.add((int(round(c - size / 2)), int(round(c + size / 2))))
+        return [(a, b) for a, b in out if a >= 1 and b <= lim - 2]
+    return [(x0, y0, x1, y1) for x0, x1 in spans(xs, gw, w, cx)
+            for y0, y1 in spans(ys, gh, h, cy)]
+
+
+def _search(L, learned=None):
     h, w = L.shape
     E = _Edges(L)
     yc0, yc1, xc0, xc1 = int(h * .2), int(h * .8), int(w * .2), int(w * .8)
@@ -444,13 +514,20 @@ def _search(L):
         for y0, y1 in itertools.combinations(ys, 2):
             if y1 - y0 < MIN_SIDE * h:
                 continue
-            sc = _score(E, (x0, y0, x1, y1), strip, gap, (st, sb))
+            sc = _score(E, (x0, y0, x1, y1), strip, gap, (st, sb), learned)
+            if best is None or sc["score"] > best["score"]:
+                best = sc
+    for gw, gh, cx, cy, _sx, _sy, lstrip in (learned or ()):
+        if lstrip is not None and lstrip != strip:
+            continue
+        for box in _learned_boxes(xs, ys, w, h, gw, gh, cx, cy):
+            sc = _score(E, box, strip, gap, (st, sb), learned)
             if best is None or sc["score"] > best["score"]:
                 best = sc
     if best is not None and strip:
-        best = _format_snap(E, best, strip, colp, gap, (st, sb))
+        best = _format_snap(E, best, strip, colp, gap, (st, sb), learned=learned)
         runs = _strip_gap_runs(L, st, sb)
-        best, sides, free = _strip_anchor(E, best, runs, gap, (st, sb))
+        best, sides, free = _strip_anchor(E, best, runs, gap, (st, sb), learned)
         best = dict(best, anchored=sides, free_side=free, gap_runs=runs)
     return best, strip
 
@@ -578,15 +655,106 @@ def _blur_inward(L, rect, reach=14, frac=0.9):
 
 
 # --- Public API ----------------------------------------------------------------
-def detect_frame(raw: np.ndarray, inset_frac: float = INSET_FRAC) -> FrameCrop:
-    """Detect the picture area of an unconverted scan (H, W, 3 or H, W)."""
+def _deskew_map(w, h, ang):
+    """getRotationMatrix2D(ang) maps original -> deskewed (x_d = A x_o + t);
+    apply_crop_to_image samples C + R(angle) q, and R(ang) = A^-1."""
+    m = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), ang, 1.0)
+    return m[:, :2], m[:, 2]
+
+
+def _priors_deskewed(priors, w, h, ang):
+    """Priors as (gate w, gate h, centre x, centre y, spread x, spread y) in
+    the deskewed frame of this scan."""
+    A, t = _deskew_map(w, h, ang)
+    out = []
+    for p in priors or ():
+        if p.centre is None:
+            cx = cy = None
+        else:
+            cx, cy = (A @ np.asarray(p.centre, float) + t).tolist()
+        out.append((float(p.gate[0]), float(p.gate[1]), cx, cy,
+                    max(float(p.spread[0]), 1.0), max(float(p.spread[1]), 1.0), p.strip))
+    return out
+
+
+def _to_crop(box, ang, w, h):
+    """Deskewed pixel box -> normalised box in the unrotated image + angle."""
+    x0, y0, x1, y1 = box
+    A, t = _deskew_map(w, h, ang)
+    co = np.linalg.solve(A, np.array([(x0 + x1) / 2.0, (y0 + y1) / 2.0]) - t)
+    bw, bh = float(x1 - x0), float(y1 - y0)
+    return ((co[0] - bw / 2) / w, (co[1] - bh / 2) / h,
+            (co[0] + bw / 2) / w, (co[1] + bh / 2) / h)
+
+
+SNAP_TOL = 0.08          # a soft side is placed by a known frame size within 8%
+
+
+def _snap_soft(box, soft, out_size, tol=SNAP_TOL):
+    """A side whose gate can't be seen (soft) is placed by the frame size you
+    (or the roll) use, when the other side on that axis was seen. Only ever
+    INWARD: a soft side stops at the start of the rebate, so it can only be
+    too far out (border left in), never too far in. `out_size` entries may be
+    None (that axis is not known)."""
+    x0, y0, x1, y1 = box
+    ow, oh = out_size
+    if (ow and ("L" in soft) != ("R" in soft) and 0 <= (x1 - x0) / ow - 1 < tol):
+        x0, x1 = (x1 - ow, x1) if "L" in soft else (x0, x0 + ow)
+    if (oh and ("T" in soft) != ("B" in soft) and 0 <= (y1 - y0) / oh - 1 < tol):
+        y0, y1 = (y1 - oh, y1) if "T" in soft else (y0, y0 + oh)
+    return (x0, y0, x1, y1)
+
+
+def snap_soft_sides(fc, out_size, tol=SNAP_TOL):
+    """Roll check: re-place a frame's soft sides at the roll's output frame
+    size. Returns `fc` unchanged when nothing moves."""
+    g = getattr(fc, "geom", None) or {}
+    if fc is None or not fc.usable or not fc.soft or not g.get("out") or fc.learned:
+        return fc
+    box = _snap_soft(g["out"], set(fc.soft), out_size, tol)
+    if max(abs(a - b) for a, b in zip(box, g["out"])) < 2.0:
+        return fc
+    w, h = g["size"]
+    rect = _to_crop(box, g["angle"], w, h)
+    return replace(fc, rect=tuple(float(v) for v in rect), learned="roll",
+                   geom=dict(g, out=tuple(float(v) for v in box), out_rect=rect))
+
+
+def _usual_frame(priors, w, h, strip, base):
+    """Nothing usable found: your usual box on this setup, when one sits
+    still (spec/auto-crop-learning.md, Fallback)."""
+    cands = [p for p in priors or () if p.fallback and p.size and (p.box_centre or p.centre)]
+    if not cands:
+        return None
+    p = max(cands, key=lambda q: q.n)
+    (cx, cy), (bw, bh) = (p.box_centre or p.centre), p.size
+    rect = ((cx - bw / 2) / w, (cy - bh / 2) / h, (cx + bw / 2) / w, (cy + bh / 2) / h)
+    return FrameCrop(tuple(float(v) for v in rect), angle=float(p.angle), confidence="medium",
+                     strip=strip, fmt=p.fmt or "frame", learned="usual",
+                     reason=f"used your usual frame ({base.reason or base.confidence})",
+                     geom=dict(size=(w, h)), debug=dict(base=base))
+
+
+def detect_frame(raw: np.ndarray, inset_frac: float = INSET_FRAC, priors=None) -> FrameCrop:
+    """Detect the picture area of an unconverted scan (H, W, 3 or H, W).
+    `priors`: learned frames for this setup / the roll (`Prior`)."""
     if raw is None or np.asarray(raw).ndim not in (2, 3) or min(np.asarray(raw).shape[:2]) < 64:
         return FrameCrop(None, reason="image too small")
     L0 = log_luminance(raw)
     h, w = L0.shape
     ang = skew_angle(L0)
     L = cv2.GaussianBlur(_rotate(L0, ang), (0, 0), 1.0)
-    best, strip = _search(L)
+    learned = _priors_deskewed(priors, w, h, ang)
+    best, strip = _search(L, learned)
+    res = _finish(L, best, strip, ang, w, h, inset_frac, priors)
+    if not res.usable:
+        usual = _usual_frame(priors, w, h, strip, res)
+        if usual is not None:
+            return usual
+    return res
+
+
+def _finish(L, best, strip, ang, w, h, inset_frac, priors):
     if best is None:
         return FrameCrop(None, angle=ang, reason="no frame edges found", strip=strip)
     rect0 = best["rect"]
@@ -601,24 +769,51 @@ def detect_frame(raw: np.ndarray, inset_frac: float = INSET_FRAC) -> FrameCrop:
     x0, y0, x1, y1 = rect
     ins = int(round(inset_frac * min(x1 - x0, y1 - y0)))
     x0, y0, x1, y1 = x0 + ins, y0 + ins, x1 - ins, y1 - ins
-    anchored = best.get("anchored", "")
+    prior = priors[best["learned"]] if (priors and best.get("learned") is not None) else None
+    # a learned size alone is not a frame: it needs at least two sides the
+    # scan itself vouches for (a seen edge, a flat or holder band outside, a gap)
+    support = sum(1 for c, o, bd, side in zip(best["covs"], best["outs"], best["border"], "LRTB")
+                  if not bd and (c >= 0.5 or o <= 0.03 or side in best.get("anchored", "")))
+    if prior is not None and support < 2:
+        prior = None
     if best.get("free_side"):
         # a strip side placed by the frame width alone: no gap or gate seen
         side = best["free_side"]
         if not best["border"][0 if side == "L" else 1]:
             soft[side] = True
+    if prior is not None and prior.out:
+        # an invisible gate goes where your frame size puts it
+        x0, y0, x1, y1 = _snap_soft((x0, y0, x1, y1), {k for k, v in soft.items() if v},
+                                    prior.out)
+    out_box = (x0, y0, x1, y1)
+    if prior is not None:
+        # your habit on this frame: each edge moved the way you move it
+        hl, hr, ht, hb = (max(-HABIT_MAX, min(HABIT_MAX, v)) for v in prior.habit)
+        bw, bh = x1 - x0, y1 - y0
+        x0, x1 = x0 + hl * bw, x1 - hr * bw
+        y0, y1 = y0 + ht * bh, y1 - hb * bh
+    # the box's own angle: the deskew, plus your usual straighten change
+    out_ang = ang + (max(-HABIT_MAX_ANGLE, min(HABIT_MAX_ANGLE, prior.dangle))
+                     if prior is not None else 0.0)
+    anchored = best.get("anchored", "")
     soft_sides = tuple(s for s in ("L", "R", "T", "B") if soft.get(s))
+    x0, y0, x1, y1 = (int(round(v)) for v in (x0, y0, x1, y1))
+    gx0, gy0, gx1, gy1 = rect0
+    geom = dict(gate=(float(gx1 - gx0), float(gy1 - gy0)), out=tuple(map(float, out_box)),
+                size=(w, h), angle=float(ang), out_rect=_to_crop(out_box, ang, w, h))
     debug = dict(best=best, peel=peeled, trim=trimmed, blur=blurred, inset=ins,
                  deskewed_rect=(x0, y0, x1, y1), plateaus=plateaus)
+    learned_kind = prior.kind if prior is not None else ""
 
     n_border = sum(best["border"])
     # side edges placed by the gaps between frames need no gradient of their own
     real_covs = [c for c, bd, side in zip(best["covs"], best["border"], "LRTB")
                  if not bd and side not in anchored]
     if x1 - x0 < MIN_SIDE * w * 0.8 or y1 - y0 < MIN_SIDE * h * 0.8:
-        return FrameCrop(None, angle=ang, strip=strip, reason="frame too small", debug=debug)
+        return FrameCrop(None, angle=ang, strip=strip, reason="frame too small",
+                         geom=geom, debug=debug)
     if n_border >= 3 or (best["area"] > 0.97 and n_border >= 2):
-        return FrameCrop(None, angle=ang, strip=strip, debug=debug,
+        return FrameCrop(None, angle=ang, strip=strip, geom=geom, debug=debug,
                          reason="no border found: the picture fills the scan")
     if n_border >= 2:
         conf, why = "low", "two edges are the scan border"
@@ -632,17 +827,12 @@ def detect_frame(raw: np.ndarray, inset_frac: float = INSET_FRAC) -> FrameCrop:
         conf, why = "medium", ""
     else:
         conf, why = "high", ""
+    if prior is not None and conf == "low":
+        # your frame size (or the roll's) is strong evidence on its own
+        conf, why = "medium", ""
 
-    # Deskewed pixel box -> normalised box in the unrotated image + angle.
-    # getRotationMatrix2D(ang) maps original -> deskewed (x_d = A x_o + t);
-    # apply_crop_to_image samples C + R(angle) q, and R(ang) = A^-1.
-    m = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), ang, 1.0)
-    A, t = m[:, :2], m[:, 2]
-    cd = np.array([(x0 + x1) / 2.0, (y0 + y1) / 2.0])
-    co = np.linalg.solve(A, cd - t)
-    bw, bh = float(x1 - x0), float(y1 - y0)
-    rect_n = ((co[0] - bw / 2) / w, (co[1] - bh / 2) / h,
-              (co[0] + bw / 2) / w, (co[1] + bh / 2) / h)
-    return FrameCrop(tuple(float(v) for v in rect_n), angle=float(ang),
+    rect_n = _to_crop((x0, y0, x1, y1), ang, w, h)
+    return FrameCrop(tuple(float(v) for v in rect_n), angle=float(out_ang),
                      confidence=conf, soft=soft_sides, strip=strip,
-                     fmt=best["fmt"], reason=why, debug=debug)
+                     fmt=(prior.fmt or best["fmt"]) if prior is not None else best["fmt"],
+                     reason=why, learned=learned_kind, geom=geom, debug=debug)

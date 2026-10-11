@@ -18,3 +18,14 @@ try:
     import onnxruntime  # noqa: F401  (must precede any PySide6/Qt import)
 except Exception:
     pass
+
+
+# Auto crop learning (spec/auto-crop-learning.md) keeps a JSON memory under the
+# user's app folder. Point it at a throwaway file for the whole run so tests
+# never read or write the real one.
+import os as _os
+import tempfile as _tempfile
+
+_os.environ.setdefault(
+    "FREECCR_CROP_MEMORY",
+    _os.path.join(_tempfile.mkdtemp(prefix="freeccr-crop-memory-"), "auto_crop_memory.json"))
