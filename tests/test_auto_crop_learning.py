@@ -262,7 +262,7 @@ def test_roll_snaps_a_soft_side_inward():
 # --- Re-crop all, the Settings group, Done in the preview ---------------------------
 
 class _CImg(_Img):
-    """A frame Re-crop all can work on: unconverted, its raw in resized_raw."""
+    """A frame Auto Crop All can work on: unconverted, its raw in resized_raw."""
     converted = False
 
     def __init__(self, raw):
@@ -278,7 +278,7 @@ class _CImg(_Img):
         pass
 
 
-def test_recrop_all_leaves_your_crops_alone(backend):
+def test_auto_crop_all_leaves_your_crops_alone(backend):
     raws = [tac.scan_645(t)[0] for t in (0.0, 0.2, 0.4, 0.6)]
     imgs = [_CImg(r) for r in raws]
     imgs[1].crop_rect = (0.2, 0.2, 0.7, 0.7)                 # drawn by hand
@@ -287,17 +287,17 @@ def test_recrop_all_leaves_your_crops_alone(backend):
     saved = backend.images
     backend.images = imgs
     try:
-        assert backend.recrop_candidates() == [imgs[0], imgs[3]]
-        summ = backend.recrop_all()
+        assert backend.auto_crop_candidates() == [imgs[0], imgs[3]]
+        summ = backend.auto_crop_all()
         assert summ["cropped"] == 2 and imgs[0].crop_rect is not None
         assert imgs[1].crop_rect == (0.2, 0.2, 0.7, 0.7)
         assert imgs[2].crop_rect == (0.1, 0.1, 0.9, 0.9)
         assert imgs[0].auto_crop_rect == imgs[0].crop_rect      # set by auto crop...
-        assert backend.recrop_candidates() == [imgs[0], imgs[3]]  # ...so still re-croppable
+        assert backend.auto_crop_candidates() == [imgs[0], imgs[3]]  # ...so still re-croppable
         undo = imgs[0].undo
-        backend.recrop_all()
+        backend.auto_crop_all()
         assert imgs[0].undo == undo                              # unchanged: no undo step
-        assert backend.recrop_all(should_cancel=lambda: True) is None
+        assert backend.auto_crop_all(should_cancel=lambda: True) is None
     finally:
         backend.images = saved
 

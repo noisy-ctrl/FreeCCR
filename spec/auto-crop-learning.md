@@ -96,7 +96,10 @@ there was one, and a timestamp. 120 examples per setup, oldest dropped.
 The result says so: `FrameCrop.learned` and "matched your frame" /
 "your usual frame" in the summary.
 
-## Roll check (Convert All with Auto crop)
+## Roll check (Auto Crop All)
+
+> Originally run inside Convert All; since `spec/auto-crop-buttons.md` it runs
+> in Auto Crop All, which detects every frame first in the same way.
 
 Detect every frame first (Convert All already does with Auto black point; the
 manual-black-point path now does too), then: with ≥ 3 usable frames whose gate
@@ -116,6 +119,8 @@ soft frames, pushed two holder frames' edges onto the holder; hence the
 inward-only, both-gates-seen rules.
 
 ## Re-crop all frames
+
+> Now **Auto Crop All** (`spec/auto-crop-buttons.md`), with the same rules.
 
 A button under the Auto crop checkbox: after correcting a frame or two, run
 auto crop again on the rest with what it has learned and the roll check,

@@ -208,11 +208,11 @@ def test_crop_reproduces_the_straightened_box():
 @pytest.fixture
 def backend():
     from core.ccr_backend import ccr_backend
-    saved = (ccr_backend.images, ccr_backend.file_paths, ccr_backend.auto_crop,
+    saved = (ccr_backend.images, ccr_backend.file_paths,
              ccr_backend.auto_black_point, ccr_backend.black_point_bgr,
              ccr_backend.white_point_bgr)
     yield ccr_backend
-    (ccr_backend.images, ccr_backend.file_paths, ccr_backend.auto_crop,
+    (ccr_backend.images, ccr_backend.file_paths,
      ccr_backend.auto_black_point, ccr_backend.black_point_bgr,
      ccr_backend.white_point_bgr) = saved
 
@@ -244,18 +244,22 @@ def test_apply_auto_crop_sets_crop_and_is_one_undo(backend, tmp_path):
     assert not backend.apply_auto_crop(img, low) and img.crop_rect is None
 
 
-def test_convert_all_with_auto_crop(backend, tmp_path):
+def test_auto_crop_is_separate_from_convert(backend, tmp_path):
+    """spec/auto-crop-buttons.md: Convert never crops; Auto Crop works on a
+    converted frame too (it re-reads the raw scan, leaving the conversion)."""
     raw, _ = scan_645(0.4)
     img = _image(tmp_path, raw)
     backend.images, backend.file_paths = [img], [img.file_path]
     backend.auto_black_point = False
     backend.black_point_bgr = tuple(float(BASE * 65535) for _ in range(3))
     backend.white_point_bgr = None
-    backend.auto_crop = True
     backend.apply_bwpoint_to_all_images()
-    assert img.converted and img.crop_rect is not None
+    assert img.converted and img.crop_rect is None
+    converted = img.resized_raw.copy()
+    frame, applied = backend.auto_crop_one(img)
+    assert applied and frame.usable and img.crop_rect is not None
     assert img.crop_angle == pytest.approx(0.4, abs=0.06)
-    assert backend.last_auto_crop_summary["cropped"] == 1
+    assert np.array_equal(img.resized_raw, converted)        # conversion untouched
 
 
 def test_crop_panel_auto_sets_pending_box_without_committing(backend, tmp_path, monkeypatch):
@@ -280,3 +284,41 @@ def test_crop_panel_auto_sets_pending_box_without_committing(backend, tmp_path, 
     after = (getattr(img, "crop_rect", None), getattr(img, "crop_angle", 0.0))
     assert after == before                                 # nothing committed
     ip.crop_mode = False
+
+
+# --- the Auto Crop buttons (spec/auto-crop-buttons.md) ---------------------------
+
+@pytest.fixture
+def panel():
+    from PySide6.QtWidgets import QApplication
+    QApplication.instance() or QApplication([])
+    from widgets.sliders_panel import SlidersPanel
+    p = SlidersPanel()
+    _PANELS.append(p)
+    return p
+
+
+_PANELS = []
+
+
+def test_panel_has_auto_crop_buttons_and_no_tickbox(panel):
+    assert panel.auto_crop_btn.text() == "Auto Crop"
+    assert panel.auto_crop_all_btn.text() == "Auto Crop All"
+    assert not hasattr(panel, "auto_crop_checkbox") and not hasattr(panel, "recrop_all_btn")
+
+
+def test_auto_crop_button_hints(panel, backend, monkeypatch):
+    from core.auto_crop import FrameCrop
+    hints = []
+    monkeypatch.setattr(panel, "set_temporary_hint", lambda m, duration=0: hints.append(m))
+    monkeypatch.setattr(panel, "_refresh_after_crop", lambda: None)
+    panel.current_idx = 0
+    monkeypatch.setattr(backend, "get_image_by_index", lambda i: object())
+    ok = FrameCrop((0.1, 0.1, 0.9, 0.9), angle=0.3, confidence="high", fmt="645")
+    monkeypatch.setattr(backend, "auto_crop_one", lambda img: (ok, True))
+    panel._on_auto_crop_current()
+    assert hints[-1].startswith("Auto crop: 645, +0.30°") and "Ctrl+Z" in hints[-1]
+    no = FrameCrop(None, reason="no border found: the picture fills the scan")
+    monkeypatch.setattr(backend, "auto_crop_one", lambda img: (no, False))
+    panel._on_auto_crop_current()
+    assert "left this frame as it was: no border found" in hints[-1]

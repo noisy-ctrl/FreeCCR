@@ -877,33 +877,9 @@ class SlidersPanel(QWidget):
         self.auto_bp_checkbox.toggled.connect(self._on_auto_bp_toggled)
         scroll_layout.addWidget(self.auto_bp_checkbox)
 
-        # Auto crop: find the frame on the raw scan, straighten, crop to the
-        # picture as part of Convert (spec/auto-crop.md). Persisted.
-        self.auto_crop_checkbox = QCheckBox("Auto crop (find the frame)")
-        self.auto_crop_checkbox.setToolTip(
-            "Convert also finds each frame's picture area on the raw scan "
-            "(past the holder, the film rebate and the sprocket rows), "
-            "straightens it and crops to it, so the histogram and levels see "
-            "only the photograph. A frame it isn't sure about is left uncropped "
-            "and named in the summary. Ctrl+Z removes an auto crop; the Crop "
-            "panel's Auto button does the same for one frame, for review.")
-        ccr_backend.auto_crop = self._settings.value("convert/auto_crop", False, type=bool)
-        self.auto_crop_checkbox.setChecked(ccr_backend.auto_crop)
-        self.auto_crop_checkbox.toggled.connect(self._on_auto_crop_toggled)
-        scroll_layout.addWidget(self.auto_crop_checkbox)
-        # Re-crop all (spec/auto-crop-learning.md): after correcting a frame or
-        # two, apply what auto crop learned to the rest without re-converting.
-        self.recrop_all_btn = QPushButton("Re-crop all frames")
-        self.recrop_all_btn.setFixedHeight(theme.CONTROL_H)
-        self.recrop_all_btn.setToolTip(
-            "Run auto crop again on every frame, using the crops you've "
-            "confirmed with Done (your frame size and how you move each edge) "
-            "and checking the frames against each other. Frames you've "
-            "confirmed or cropped by hand are left alone; nothing is "
-            "re-converted. Ctrl+Z on a frame undoes its new crop.")
-        theme.style_button(self.recrop_all_btn, "secondary")
-        self.recrop_all_btn.clicked.connect(self._on_recrop_all)
-        scroll_layout.addWidget(self.recrop_all_btn)
+        # The old "Auto crop" Convert tickbox is gone: auto crop is its own
+        # pair of buttons below the Convert row (spec/auto-crop-buttons.md).
+        self._settings.remove("convert/auto_crop")
 
         # Shows which slope source the next conversion will use. Eliding: this
         # line names the selected film stock, and a user-supplied name is
@@ -927,6 +903,30 @@ class SlidersPanel(QWidget):
         convert_row.addWidget(self.convert_current_bwp_btn)
         convert_row.addWidget(self.convert_all_bwp_btn)
         scroll_layout.addLayout(convert_row)
+        # Auto crop, independent of Convert (spec/auto-crop-buttons.md): find
+        # the frame on the raw scan, straighten, crop to the picture, with what
+        # it has learned from your confirmed crops (spec/auto-crop-learning.md).
+        self.auto_crop_btn = QPushButton("Auto Crop")
+        self.auto_crop_btn.setToolTip(
+            "Find this frame's picture area on the raw scan (past the holder, "
+            "the film rebate and the sprocket rows), straighten it and crop to "
+            "it. Works before or after converting and replaces this frame's "
+            "crop; Ctrl+Z undoes it. The Crop panel's Auto button does the same "
+            "as a suggestion you can adjust.")
+        self.auto_crop_all_btn = QPushButton("Auto Crop All")
+        self.auto_crop_all_btn.setToolTip(
+            "Auto crop every frame, checking the frames against each other and "
+            "using what it has learned from crops you've confirmed with Done. "
+            "Frames you've confirmed or cropped by hand are left alone. A frame "
+            "it isn't sure about is left as it was and named in the summary.")
+        for b in (self.auto_crop_btn, self.auto_crop_all_btn):
+            b.setFixedHeight(theme.CONTROL_H)
+        self.auto_crop_btn.clicked.connect(self._on_auto_crop_current)
+        self.auto_crop_all_btn.clicked.connect(self._on_auto_crop_all)
+        crop_row = theme.apply_button_row(QHBoxLayout())
+        crop_row.addWidget(self.auto_crop_btn)
+        crop_row.addWidget(self.auto_crop_all_btn)
+        scroll_layout.addLayout(crop_row)
 
         # Channel Levels sits directly under the Convert row and above the
         # WB/AWB row: it is the FIRST stage of the adjustment pipeline (it runs
@@ -2931,42 +2931,7 @@ class SlidersPanel(QWidget):
                 "Auto black point on: Convert measures each frame's film base "
                 "from its clear border.", duration=5000)
 
-    def _on_auto_crop_toggled(self, checked):
-        ccr_backend.auto_crop = bool(checked)
-        self._settings.setValue("convert/auto_crop", bool(checked))
-
-    def _on_recrop_all(self):
-        imgs = ccr_backend.recrop_candidates()
-        if not imgs:
-            self.set_temporary_hint(
-                "Nothing to re-crop: every frame has a crop you confirmed or drew.",
-                duration=5000)
-            return
-        n_all = len(ccr_backend.images)
-        kept = n_all - len(imgs)
-        msg = (f"Re-crop {len(imgs)} frame{'s' if len(imgs) != 1 else ''} with auto crop, "
-               "using what it has learned from your confirmed crops?")
-        if kept:
-            msg += (f" {kept} frame{'s' if kept != 1 else ''} you confirmed or cropped "
-                    "by hand will be left alone.")
-        if QMessageBox.question(self, "Re-crop all frames", msg,
-                                QMessageBox.Yes | QMessageBox.No,
-                                QMessageBox.Yes) != QMessageBox.Yes:
-            return
-        progress = QProgressDialog("Finding frames…", "Cancel", 0, len(imgs), self)
-        progress.setWindowTitle("Re-crop all frames")
-        progress.setWindowModality(Qt.WindowModal)
-        progress.setMinimumDuration(0)
-
-        def step(done, total):
-            progress.setValue(done)
-            QApplication.processEvents()
-
-        summ = ccr_backend.recrop_all(step, should_cancel=progress.wasCanceled)
-        progress.close()
-        if summ is None:
-            self.set_temporary_hint("Re-crop cancelled: no crops were changed.", duration=4000)
-            return
+    def _refresh_after_crop(self):
         try:
             mw = self.parent().parent()
             mw.thumbnail_list.update_all_thumbnails()
@@ -2975,18 +2940,63 @@ class SlidersPanel(QWidget):
         except AttributeError:
             pass
         ccr_backend.save_catalog()
-        ccr_backend.last_auto_crop_summary = summ
-        self.set_temporary_hint("Re-crop done." + self._auto_crop_summary_text(),
-                                duration=10000)
 
-    @staticmethod
-    def _auto_crop_hint(frame, applied) -> str:
-        if frame is None:
-            return ""
+    def _on_auto_crop_current(self):
+        if self.current_idx is None:
+            return
+        img = ccr_backend.get_image_by_index(self.current_idx)
+        if img is None:
+            return
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            frame, applied = ccr_backend.auto_crop_one(img)
+        finally:
+            QApplication.restoreOverrideCursor()
         if applied:
-            return f" Auto crop: {frame.summary()} ({frame.confidence} confidence)."
-        why = frame.reason or f"{frame.confidence} confidence"
-        return f" Auto crop left this frame uncropped: {why}."
+            self._refresh_after_crop()
+            self.set_temporary_hint(
+                f"Auto crop: {frame.summary()} ({frame.confidence} confidence). "
+                "Ctrl+Z to undo, or press Crop to adjust.", duration=6000)
+        else:
+            why = frame.reason or f"{frame.confidence} confidence"
+            self.set_temporary_hint(
+                f"Auto crop left this frame as it was: {why}. The Crop panel's "
+                "Auto button shows what it found.", duration=7000)
+
+    def _on_auto_crop_all(self):
+        imgs = ccr_backend.auto_crop_candidates()
+        if not imgs:
+            self.set_temporary_hint(
+                "Nothing to auto crop: every frame has a crop you confirmed or drew.",
+                duration=5000)
+            return
+        n_all = len(ccr_backend.images)
+        kept = n_all - len(imgs)
+        msg = f"Auto crop {len(imgs)} frame{'s' if len(imgs) != 1 else ''}?"
+        if kept:
+            msg += (f" {kept} frame{'s' if kept != 1 else ''} you confirmed or cropped "
+                    "by hand will be left alone.")
+        if QMessageBox.question(self, "Auto Crop All", msg,
+                                QMessageBox.Yes | QMessageBox.No,
+                                QMessageBox.Yes) != QMessageBox.Yes:
+            return
+        progress = QProgressDialog("Finding frames…", "Cancel", 0, len(imgs), self)
+        progress.setWindowTitle("Auto Crop All")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+
+        def step(done, total):
+            progress.setValue(done)
+            QApplication.processEvents()
+
+        summ = ccr_backend.auto_crop_all(step, should_cancel=progress.wasCanceled)
+        progress.close()
+        if summ is None:
+            self.set_temporary_hint("Auto crop cancelled: no crops were changed.",
+                                    duration=4000)
+            return
+        self._refresh_after_crop()
+        self.set_temporary_hint(self._auto_crop_summary_text(summ), duration=10000)
 
     def _confirm_no_anchor_convert(self) -> bool:
         """True when the conversion may proceed. With no black point sampled the
@@ -3030,9 +3040,6 @@ class SlidersPanel(QWidget):
         try:
             if img.converted:
                 img.reload_image()
-            # resized_raw holds the raw scan now: find the frame before converting
-            frame = (ccr_backend.detect_frame_crop(img, raw=img.resized_raw)
-                     if getattr(ccr_backend, "auto_crop", False) else None)
             from core.ccr_processor import ccr_normalize_with_bwpoint
             black = ccr_backend.black_point_bgr  # may be None → direct invert
             white = ccr_backend.white_point_bgr  # may be None → default slope
@@ -3076,8 +3083,6 @@ class SlidersPanel(QWidget):
                 img.conversion_inputs["auto_bp"] = ccr_backend.auto_bp_record(
                     auto_res, auto_source)
             ccr_backend.maybe_auto_awb(img)
-            cropped = ccr_backend.apply_auto_crop(img, frame) if frame is not None else False
-            crop_msg = self._auto_crop_hint(frame, cropped)
             img.update_thumbnail_and_preview()
             mw = self.parent().parent()
             mw.thumbnail_list.update_all_thumbnails()
@@ -3087,18 +3092,16 @@ class SlidersPanel(QWidget):
             if auto_source == "auto":
                 self.set_temporary_hint(
                     f"Converted with auto black point: {auto_res.summary()}, "
-                    f"{auto_res.confidence} confidence (outlined)." + crop_msg,
-                    duration=8000 if crop_msg else 6000)
+                    f"{auto_res.confidence} confidence (outlined).", duration=6000)
                 if hasattr(mw.image_preview, "flash_auto_bp_strip"):
                     mw.image_preview.flash_auto_bp_strip(auto_res.rect)
             elif auto_source is not None:
                 self.set_temporary_hint(
                     f"Auto black point: {auto_res.summary()} — used the "
                     f"{'sampled black point' if auto_source == 'sampled' else 'roll'} "
-                    "instead." + crop_msg, duration=8000)
+                    "instead.", duration=8000)
             else:
-                self.set_temporary_hint("Current image converted!" + crop_msg,
-                                        duration=6000 if crop_msg else 3000)
+                self.set_temporary_hint("Current image converted!", duration=3000)
         except Exception as e:
             QMessageBox.critical(self, "Conversion Error", str(e))
 
@@ -3133,7 +3136,6 @@ class SlidersPanel(QWidget):
         except AttributeError:
             pass
         ccr_backend.save_catalog()
-        crop_msg = self._auto_crop_summary_text()
         summ = getattr(ccr_backend, "last_auto_bp_summary", None)
         if getattr(ccr_backend, "auto_black_point", False) and summ:
             n_auto = summ["high"] + summ["medium"]
@@ -3145,27 +3147,24 @@ class SlidersPanel(QWidget):
                 msg += f"; {summ['skipped']} not converted"
             if summ["notes"]:
                 msg += " (" + "; ".join(dict.fromkeys(summ["notes"]))[:160] + ")"
-            self.set_temporary_hint(msg + "." + crop_msg, duration=12000 if crop_msg else 10000)
+            self.set_temporary_hint(msg + ".", duration=10000)
             ccr_backend.last_auto_bp_summary = None
         else:
-            self.set_temporary_hint("B/W Point conversion complete!" + crop_msg,
-                                    duration=10000 if crop_msg else 3000)
+            self.set_temporary_hint("B/W Point conversion complete!", duration=3000)
 
     @staticmethod
-    def _auto_crop_summary_text() -> str:
-        """' Auto crop: 34 cropped (30 high, 4 medium); 2 left uncropped (…).'"""
-        summ = getattr(ccr_backend, "last_auto_crop_summary", None)
-        ccr_backend.last_auto_crop_summary = None
+    def _auto_crop_summary_text(summ) -> str:
+        """'Auto crop: 34 cropped (30 high, 4 medium); 2 left as they were (…).'"""
         if not summ:
             return ""
-        msg = (f" Auto crop: {summ['cropped']} cropped ({summ['high']} high, "
+        msg = (f"Auto crop: {summ['cropped']} cropped ({summ['high']} high, "
                f"{summ['medium']} medium confidence)")
         if summ.get("learned"):
             msg += f"; {summ['learned']} from what it learned of your crops"
         if summ.get("roll"):
             msg += f"; {summ['roll']} re-found at the roll's frame size"
         if summ["skipped"]:
-            msg += (f"; {summ['skipped']} left uncropped ("
+            msg += (f"; {summ['skipped']} left as they were ("
                     + "; ".join(summ["notes"])[:200] + ")")
         return msg + "."
 

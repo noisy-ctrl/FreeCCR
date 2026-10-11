@@ -100,10 +100,8 @@ class CCRBackend:
         # base from its own clear border at Convert time. Restored by the panel.
         self.auto_black_point: bool = False
         self.last_auto_bp_summary = None
-        # Auto crop on Convert (spec/auto-crop.md): find the frame on the raw,
-        # straighten, crop to the picture. High/medium confidence only.
-        self.auto_crop: bool = False
-        self.last_auto_crop_summary = None
+        # Auto crop (spec/auto-crop.md, spec/auto-crop-buttons.md) is its own
+        # action now, not part of Convert: see auto_crop_one / auto_crop_all.
         # Learn from the crops you confirm (spec/auto-crop-learning.md).
         # Persisted by MainWindow (crop/learn); the store is core.crop_memory.
         self.auto_crop_learn: bool = True
@@ -2732,8 +2730,19 @@ class CCRBackend:
         img.auto_crop_rect = img.crop_rect     # so Re-crop all knows it set this one
         return True
 
-    def recrop_candidates(self):
-        """Frames Re-crop all may change: uncropped, or still holding the crop
+    def auto_crop_one(self, img):
+        """Auto Crop (the current frame): find the frame on the raw scan, with
+        what has been learned, and set it as the crop when usable. Runs on any
+        frame, converted or not, and replaces whatever crop it had (one undo
+        step). Returns (FrameCrop, applied)."""
+        frame = self.detect_frame_crop(img)
+        applied = self.apply_auto_crop(img, frame)
+        if applied:
+            img.update_thumbnail_and_preview()
+        return frame, applied
+
+    def auto_crop_candidates(self):
+        """Frames Auto Crop All may change: uncropped, or still holding the crop
         auto crop set. A crop you drew yourself, or confirmed with Done, stays."""
         out = []
         for img in self.images:
@@ -2744,12 +2753,12 @@ class CCRBackend:
                 out.append(img)
         return out
 
-    def recrop_all(self, progress_callback=None, should_cancel=None):
-        """Re-run auto crop on every frame `recrop_candidates` allows, with what
-        has been learned and the roll check, without re-converting. Returns
-        the Convert All style summary (spec/auto-crop-learning.md)."""
+    def auto_crop_all(self, progress_callback=None, should_cancel=None):
+        """Auto Crop All: auto crop every frame `auto_crop_candidates` allows,
+        with what has been learned and the roll check, converted or not.
+        Returns the summary, or None when cancelled (nothing changed)."""
         import numpy as np
-        imgs = self.recrop_candidates()
+        imgs = self.auto_crop_candidates()
         total = len(imgs)
         summary = self._new_crop_summary()
         frames, lums = [None] * total, [None] * total
@@ -2855,39 +2864,13 @@ class CCRBackend:
         total = len(self.images)
         if progress_callback:
             progress_callback(0, total)
-        self.last_auto_crop_summary = self._new_crop_summary() if self.auto_crop else None
         if self.auto_black_point:
             return self._apply_auto_bwpoint_to_all(progress_callback)
-        crop_summary = self.last_auto_crop_summary
-        frames = [None] * total
-        if self.auto_crop:
-            # Find every frame on its raw scan first, so the roll can check
-            # them against each other before anything is converted.
-            raws = [None] * total
-            for i, img in enumerate(self.images):
-                try:
-                    if img.converted:
-                        img.reload_image()
-                    raws[i] = img.resized_raw      # (also marks it reloaded)
-                    frames[i] = self.detect_frame_crop(img, raw=img.resized_raw)
-                except Exception as e:
-                    print(f"Auto crop detection failed for image {i}: {e}")
-                if progress_callback:
-                    progress_callback(i + 1, 2 * total)
-            frames, crop_summary["roll"] = self._roll_consistent_crops(
-                self.images, frames, raws)
-            reloaded = [r is not None for r in raws]
-            raws = None
-        else:
-            reloaded = [False] * total
         for i, img in enumerate(self.images):
             try:
-                # Ensure we start from original (unprocessed) scan data (the
-                # auto crop pass already reloaded it: reload_image does not
-                # clear `converted`, so don't decode twice)
-                if img.converted and not reloaded[i]:
+                # Ensure we start from original (unprocessed) scan data
+                if img.converted:
                     img.reload_image()
-                frame = frames[i]
                 processed = ccr_normalize_with_bwpoint(
                     img, self.black_point_bgr, self.white_point_bgr,
                     density=self.density_bwpoint, slopes_bgr=slopes
@@ -2910,16 +2893,11 @@ class CCRBackend:
                     "slopes": slopes,
                 }
                 self.maybe_auto_awb(img)
-                if frame is not None:
-                    self._note_crop(crop_summary, img, frame, self.apply_auto_crop(img, frame))
                 img.update_thumbnail_and_preview()
             except Exception as e:
                 print(f"B/W point conversion failed for image {i}: {e}")
             if progress_callback:
-                if self.auto_crop:
-                    progress_callback(total + i + 1, 2 * total)
-                else:
-                    progress_callback(i + 1, total)
+                progress_callback(i + 1, total)
 
     def _apply_auto_bwpoint_to_all(self, progress_callback=None):
         """Convert All with a per-frame black point: detect every frame first,
@@ -2928,29 +2906,14 @@ class CCRBackend:
         from core.auto_black_point import roll_check
         total = len(self.images)
         results = []
-        frames = []
-        crop_summary = self.last_auto_crop_summary
         for i, img in enumerate(self.images):
-            raw_ok = False
             try:
                 results.append(self.detect_frame_black_point(img))
-                raw_ok = True       # it reloaded the raw scan into resized_raw
             except Exception as e:
                 print(f"Auto black point detection failed for image {i}: {e}")
                 results.append(None)
-            # the raw scan is in resized_raw now: find the frame on it too
-            frames.append(self.detect_frame_crop(img, raw=img.resized_raw)
-                          if (self.auto_crop and raw_ok) else None)
             if progress_callback:
                 progress_callback(i + 1, 2 * total)      # detection = first half
-        if self.auto_crop:
-            # the raw scans are all still in resized_raw: check the frames
-            # against the roll before converting (spec/auto-crop-learning.md)
-            raws = [img.resized_raw if (r is not None and f is not None) else None
-                    for img, r, f in zip(self.images, results, frames)]
-            frames, crop_summary["roll"] = self._roll_consistent_crops(
-                self.images, frames, raws)
-            raws = None
         consensus = roll_check([r for r in results if r is not None])
         summary = {"high": 0, "medium": 0, "fallback": 0, "skipped": 0, "notes": []}
         for i, (img, res) in enumerate(zip(self.images, results)):
@@ -2988,11 +2951,6 @@ class CCRBackend:
                     "auto_bp": self.auto_bp_record(res, source),
                 }
                 self.maybe_auto_awb(img)
-                if self.auto_crop:
-                    frame = frames[i]
-                    if frame is None:     # detection pass could not reload the raw
-                        frame = self.detect_frame_crop(img)
-                    self._note_crop(crop_summary, img, frame, self.apply_auto_crop(img, frame))
                 img.update_thumbnail_and_preview()
             except Exception as e:
                 print(f"Auto black point conversion failed for image {i}: {e}")
