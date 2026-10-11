@@ -233,6 +233,12 @@ def serialize_image(img) -> dict:
         "input_transfer": getattr(img, "input_transfer", None),
         "crop_rect": list(img.crop_rect) if img.crop_rect else None,
         "crop_angle": float(img.crop_angle or 0.0),
+        # Where the crop came from (spec/contact-sheet.md): the box auto crop
+        # last set, and the crop-memory example a confirmed crop taught.
+        # Additive: absent = unknown (shown and treated as your own crop).
+        "auto_crop_rect": (list(img.auto_crop_rect)
+                           if getattr(img, "auto_crop_rect", None) else None),
+        "auto_crop_example": getattr(img, "auto_crop_example", None),
         "rotation_angle": int(img.rotation_angle),
         "fine_rotation_angle": int(img.fine_rotation_angle),
         "horizontal_mirrored": bool(img.horizontal_mirrored),
@@ -699,6 +705,9 @@ def _restore_image(file_path: str, state: dict, live_merge_sources=None,
     crop = state.get("crop_rect")
     img.crop_rect = tuple(crop) if crop else None
     img.crop_angle = state.get("crop_angle", 0.0) or 0.0
+    auto = state.get("auto_crop_rect")
+    img.auto_crop_rect = tuple(auto) if auto else None
+    img.auto_crop_example = state.get("auto_crop_example")
     img.tint_balance_factor = state.get("tint_balance_factor",
                                         getattr(img, "tint_balance_factor", 1.0))
 
