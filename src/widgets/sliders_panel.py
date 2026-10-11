@@ -1,7 +1,8 @@
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QSlider, QLabel, QHBoxLayout,
                                 QSizePolicy, QStyleOptionSlider, QFrame, QStyle,
                                 QPushButton, QDialog, QMessageBox, QScrollArea,
-                                QCheckBox, QComboBox, QInputDialog, QMenu)
+                                QCheckBox, QComboBox, QInputDialog, QMenu,
+                                QProgressDialog, QApplication)
 from PySide6.QtCore import Qt, QTimer, QThread, Signal, QRectF, QSettings
 from PySide6.QtGui import (QKeySequence, QShortcut, QPainter, QColor,
                            QLinearGradient, QPen)
@@ -890,6 +891,19 @@ class SlidersPanel(QWidget):
         self.auto_crop_checkbox.setChecked(ccr_backend.auto_crop)
         self.auto_crop_checkbox.toggled.connect(self._on_auto_crop_toggled)
         scroll_layout.addWidget(self.auto_crop_checkbox)
+        # Re-crop all (spec/auto-crop-learning.md): after correcting a frame or
+        # two, apply what auto crop learned to the rest without re-converting.
+        self.recrop_all_btn = QPushButton("Re-crop all frames")
+        self.recrop_all_btn.setFixedHeight(theme.CONTROL_H)
+        self.recrop_all_btn.setToolTip(
+            "Run auto crop again on every frame, using the crops you've "
+            "confirmed with Done (your frame size and how you move each edge) "
+            "and checking the frames against each other. Frames you've "
+            "confirmed or cropped by hand are left alone; nothing is "
+            "re-converted. Ctrl+Z on a frame undoes its new crop.")
+        theme.style_button(self.recrop_all_btn, "secondary")
+        self.recrop_all_btn.clicked.connect(self._on_recrop_all)
+        scroll_layout.addWidget(self.recrop_all_btn)
 
         # Shows which slope source the next conversion will use. Eliding: this
         # line names the selected film stock, and a user-supplied name is
@@ -2921,6 +2935,50 @@ class SlidersPanel(QWidget):
         ccr_backend.auto_crop = bool(checked)
         self._settings.setValue("convert/auto_crop", bool(checked))
 
+    def _on_recrop_all(self):
+        imgs = ccr_backend.recrop_candidates()
+        if not imgs:
+            self.set_temporary_hint(
+                "Nothing to re-crop: every frame has a crop you confirmed or drew.",
+                duration=5000)
+            return
+        n_all = len(ccr_backend.images)
+        kept = n_all - len(imgs)
+        msg = (f"Re-crop {len(imgs)} frame{'s' if len(imgs) != 1 else ''} with auto crop, "
+               "using what it has learned from your confirmed crops?")
+        if kept:
+            msg += (f" {kept} frame{'s' if kept != 1 else ''} you confirmed or cropped "
+                    "by hand will be left alone.")
+        if QMessageBox.question(self, "Re-crop all frames", msg,
+                                QMessageBox.Yes | QMessageBox.No,
+                                QMessageBox.Yes) != QMessageBox.Yes:
+            return
+        progress = QProgressDialog("Finding frames…", "Cancel", 0, len(imgs), self)
+        progress.setWindowTitle("Re-crop all frames")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+
+        def step(done, total):
+            progress.setValue(done)
+            QApplication.processEvents()
+
+        summ = ccr_backend.recrop_all(step, should_cancel=progress.wasCanceled)
+        progress.close()
+        if summ is None:
+            self.set_temporary_hint("Re-crop cancelled: no crops were changed.", duration=4000)
+            return
+        try:
+            mw = self.parent().parent()
+            mw.thumbnail_list.update_all_thumbnails()
+            if self.current_idx is not None:
+                mw.image_preview.update_preview(self.current_idx)
+        except AttributeError:
+            pass
+        ccr_backend.save_catalog()
+        ccr_backend.last_auto_crop_summary = summ
+        self.set_temporary_hint("Re-crop done." + self._auto_crop_summary_text(),
+                                duration=10000)
+
     @staticmethod
     def _auto_crop_hint(frame, applied) -> str:
         if frame is None:
@@ -3102,6 +3160,10 @@ class SlidersPanel(QWidget):
             return ""
         msg = (f" Auto crop: {summ['cropped']} cropped ({summ['high']} high, "
                f"{summ['medium']} medium confidence)")
+        if summ.get("learned"):
+            msg += f"; {summ['learned']} from what it learned of your crops"
+        if summ.get("roll"):
+            msg += f"; {summ['roll']} re-found at the roll's frame size"
         if summ["skipped"]:
             msg += (f"; {summ['skipped']} left uncropped ("
                     + "; ".join(summ["notes"])[:200] + ")")

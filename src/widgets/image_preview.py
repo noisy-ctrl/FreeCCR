@@ -4188,6 +4188,11 @@ class ImagePreview(QWidget):
                 applied = True
                 cleared = True
         self._exit_crop_mode()
+        # A confirmed frame teaches auto crop this setup's frame (only when auto
+        # crop looked at this image; spec/auto-crop-learning.md).
+        learned = (img_obj is not None and not cleared and not too_small
+                   and img_obj.crop_rect is not None
+                   and ccr_backend.learn_confirmed_crop(img_obj))
         if applied and img_obj is not None:
             # The kept pixel region changed, so the histogram (computed over
             # the cropped area) is stale — regenerate it before the redraw.
@@ -4201,6 +4206,8 @@ class ImagePreview(QWidget):
             hint = "Selection too small — crop unchanged."
         else:
             hint = "Crop unchanged."
+        if learned:
+            hint += " Auto crop will remember this frame."
         try:
             self.parent().parent().sliders_panel.set_temporary_hint(hint, duration=4000)
         except AttributeError:

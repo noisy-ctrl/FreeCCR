@@ -253,6 +253,9 @@ class MainWindow(QMainWindow):
         # Confirm before a no-anchor conversion (spec/no-anchor-convert.md).
         ccr_backend.warn_no_anchor_convert = self._settings.value(
             "convert/warn_no_anchor", True, type=bool)
+        # Auto crop learns from confirmed crops (spec/auto-crop-learning.md).
+        ccr_backend.auto_crop_learn = self._settings.value(
+            "crop/learn", True, type=bool)
         # Input transfer function for non-RAW (TIFF) imports: ask on import by
         # default, and remember the answer when the user opts out of asking.
         # Affects the NEXT import only. See spec/input-transfer-function.md.
@@ -1016,6 +1019,12 @@ class MainWindow(QMainWindow):
             "Auto gain off — Master Gain alone controls exposure.")
 
     # --- No-anchor convert warning (global, persistent) ------------------
+    def on_auto_crop_learn_toggled(self, checked: bool):
+        """Learn from confirmed crops on / off (spec/auto-crop-learning.md).
+        Off also stops using what was learned; nothing is forgotten."""
+        ccr_backend.auto_crop_learn = bool(checked)
+        self._settings.setValue("crop/learn", bool(checked))
+
     def on_warn_no_anchor_toggled(self, checked: bool):
         """Flip the confirm-before-unanchored-conversion flag and persist it.
         Pure UI gating — nothing is baked, rendered or re-converted, so unlike
