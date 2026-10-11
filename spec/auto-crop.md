@@ -104,6 +104,9 @@ otherwise. High and medium are applied.
 
 ## UX
 
+> Superseded for Convert by `spec/auto-crop-buttons.md`: auto crop is now the
+> Auto Crop / Auto Crop All buttons, and Convert no longer crops.
+
 - Crop panel: an **Auto** button. It reads the raw preview (re-decoded,
   without touching the conversion, when the frame is converted), detects, and
   puts the result in as the pending box and straighten. Nothing is committed
