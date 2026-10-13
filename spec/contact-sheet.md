@@ -1,87 +1,112 @@
-# Contact sheet: every frame and its crop, live
+# Contact sheet: the whole roll as one image, live
 
 ## Goal
 
-See the whole roll at once with each frame's crop marked, to check auto crop
-(and your own crops) at a glance and jump to the ones that need fixing. It
-pairs with Auto Crop All and learning (spec/auto-crop-learning.md): Auto Crop
-All, look over the sheet, fix the odd frame, Auto Crop All again.
+A contact sheet in the lab sense: ONE image of the roll, every frame
+uncropped and in order, with each crop overlaid, sitting at the top of the
+thumbnail column like another frame. It checks auto crop (and your own crops)
+at a glance, and pairs with Auto Crop All and learning
+(spec/auto-crop-learning.md): Auto Crop All, look over the sheet, fix the odd
+frame, Auto Crop All again.
+
+(The first version was a scrolling gallery of tiles. It was replaced: the
+point is one picture of the roll, zoomable like a frame and exportable as it
+is.)
 
 ## Non-goals
 
-- Not a file in your folder. It is a live view; **Save as image…** writes a
-  JPEG only when asked.
-- Not an editor: crops are adjusted in the Crop panel (double-click a tile).
-- Not part of the image list: it never appears in exports, the catalog or
-  Convert All.
+- Not a file in your folder: the image lives in memory and is redrawn as
+  things change. **Export…** writes it when asked.
+- Not a scan: never in the image list, Convert All, Auto Crop All, the
+  catalog, or the frame export; the per-frame controls are greyed while it is
+  showing.
+- Not an editor: crops are changed in the Crop panel.
+
+## The image
+
+- Frames in roll order on near-black, **6 across for 35mm** (a cut strip) and
+  **4 for medium format**. Which: the majority of what auto crop found (its
+  format) or of the crops' proportions (3:2 = 35mm); with nothing to go on, 6
+  for more than 12 frames, else 4.
+- Each frame **uncropped and as scanned** (no rotation or flips: as on the
+  film, which also keeps every cell the same shape), fitted in a cell of the
+  scans' shape, 480 px wide (360 px for rolls over 48 frames).
+- **Crop overlay**: outside the crop dimmed, and a line round it (rotated when
+  straightened), coloured by where the crop came from:
+  green confirmed by you, amber auto crop, blue drawn by hand; no crop, no
+  line; a red dashed outline round a frame auto crop looked at and wasn't sure
+  of.
+- **Edge print** under each frame: its number in a warm edge-print tone, the
+  file name, and the source (with auto crop's confidence, or why it wasn't
+  sure). Lettering scales with the cell so it reads with the sheet fitted.
+- A footer: frame count and date, and the colour key.
+- Frames show as they currently are (negative before converting, positive
+  after). **Negatives** shows every frame as its scan: an unconverted frame's
+  preview is remembered when seen; a converted frame's scan is otherwise read
+  in the background (a 0.4–0.5 s half-size decode, once per session).
+
+## Live
+
+`ContactSheet.update()` runs on a timer (every 0.4 s while showing, 1.5 s
+otherwise, for the thumbnail). Per frame it compares a signature (render
+epoch, crop, angle, source, name, Negatives state; no pixels) and redraws
+only the changed cells into the composite; a different frame count or layout
+rebuilds it. So a crop, Auto Crop (All), an undo, a slider move on a frame or
+a conversion shows up by itself.
 
 ## UX
 
-- **Entry**: a "Contact sheet" button at the top of the thumbnail column,
-  above the first frame: grid icon, dashed border (no other thumbnail has
-  one), highlighted while the sheet is showing. Clicking it toggles the sheet.
-  Disabled with a hint while cropping or removing dust (finish those first).
-- **The sheet** replaces the main image view (the side panels stay): a grid of
-  every frame, **uncropped**, with its crop drawn as a box (rotated when
-  straightened), the outside dimmed. Box colour shows where the crop came
-  from:
-  - green: confirmed by you (Done in the Crop panel),
-  - amber: set by auto crop, not yet confirmed,
-  - blue: drawn by hand,
-  - no box: no crop; a red dashed outline when auto crop looked at the frame
-    and wasn't sure (the caption says why).
-- Caption under each tile: number, file name, and the source (with auto
-  crop's confidence).
-- Frames show as they currently are: the negative before converting, the
-  positive after, in the frame's orientation (rotation / flips) like the
-  thumbnails. **Negatives** (a switch in the sheet's bar) always shows the
-  scans; a converted frame's scan is re-read in the background (a 0.4 s
-  half-size decode, once per frame per session) and shown when ready.
-- **Size**: Small / Medium / Large tiles (persisted, `sheet/size`); the grid
-  reflows with the window.
-- **Click** a tile: back to the single view on that frame. **Double-click**:
-  that frame in the Crop panel. **Right-click**: Open, Open in Crop panel,
-  Auto Crop this frame. **Esc** or the entry button: back to the frame you
-  were on. Picking a thumbnail also leaves the sheet.
-- **Live**: while showing, the sheet checks every 0.4 s whether any frame's
-  crop, angle, orientation, render or source changed (a tuple compare per
-  frame, no pixels) and redraws only those tiles. So a crop, an Auto Crop
-  (All), an undo, a slider move on the current frame or a conversion shows
-  up without doing anything.
-- **Save as image…**: the sheet at its current mode, 5 across (fewer for a
-  short roll), 480 px tiles, captions and a legend, dark background, JPEG
-  quality 92; default name `contact_sheet.jpg` in the first frame's folder.
+- **Entry**: the sheet's thumbnail pinned at the top of the thumbnail column
+  (not a list item, so rows stay == image indices), labelled "Contact sheet",
+  with a dashed edge-print-amber border (solid when showing), sized to the
+  sheet's shape. Hidden with no frames. Click toggles the sheet. Refused (with
+  a hint) while cropping or removing dust.
+- **Showing** replaces the main image view (side panels stay). A bar: title,
+  "Double-click a frame to open it", **Negatives**, **Fit**, **100%**,
+  **Export…**, **Back to frame**. Wheel zooms (to 4x), drag pans; fitted on
+  open and on resize until you zoom.
+- **Double-click** a frame: open it. **Right-click**: Open frame n, Open in
+  Crop panel, Auto Crop this frame, Export contact sheet…
+- **Esc**, Back to frame, the entry, or picking a thumbnail: back to the
+  single view (the frame you pick, or the one you were on), its controls
+  restored.
+- While showing, the sliders, Convert Current and Auto Crop (this frame) are
+  greyed: the sheet is not a frame. **Convert All** and **Auto Crop All** stay
+  available and their results appear on the sheet as they land.
+- **Export…**: JPEG (quality 92) or TIFF, default `contact_sheet.jpg` next to
+  the first frame. With Negatives on, scans still being read are read first.
 
 ## Data
 
-- Tiles come from `img.resized_preview` (the uncropped 1080 px render every
-  frame already has; the crop is only applied on screen) scaled to the tile:
-  nothing is rendered for the sheet.
-- Where a crop came from is tracked on the image: `auto_crop_rect` (the box
-  auto crop last set) and `auto_crop_example` (set when Done taught it the
-  frame). Both are now saved in the catalog (additive keys, absent = unknown)
-  so the colours and Auto Crop All's "leave your crops alone" survive a
-  restart.
+- Cells come from `img.resized_preview` (the uncropped 1080 px render every
+  frame has); nothing is rendered for the sheet.
+- Crop provenance on the image: `auto_crop_rect` (the box auto crop last set)
+  and `auto_crop_example` (set when Done taught it the frame), saved in the
+  catalog (additive keys; absent = unknown, shown as your own crop).
 
 ## Integration
 
-- `widgets/contact_sheet.py`: `crop_source(img)`, `compose_tile(...)`,
-  `ContactSheetView` (bar + scrollable `SheetCanvas`), `render_sheet_image`.
-- `MainWindow.contact_sheet` is a SIBLING of `image_preview` in the central
-  layout (not a stack around it), shown in its place, so ImagePreview's
-  `parent().parent()` chain stays valid. `show_contact_sheet(on)`,
-  `open_frame_from_sheet(idx, crop=False)`.
-- `ThumbnailList.sheet_btn`; selecting a thumbnail leaves the sheet.
-- Catalog: `auto_crop_rect`, `auto_crop_example`.
+- `widgets/contact_sheet.py`: `crop_source`, `crop_polygon`, `draw_frame`,
+  `film_columns`, `SheetLayout`, `ContactSheet` (model, `changed` signal,
+  `update`, `frame_at`, `thumbnail`, `save`), `ContactSheetView`.
+- `MainWindow.contact_sheet_model` / `contact_sheet` (a SIBLING of
+  `image_preview` in the central layout, shown in its place, so
+  ImagePreview's `parent().parent()` chain stays valid), `_sheet_timer`,
+  `show_contact_sheet(on)`, `open_frame_from_sheet(idx, crop)`.
+- `ThumbnailList.sheet_btn`, `set_sheet_icon`; picking a thumbnail leaves the
+  sheet.
 
 ## Tests
 
-- `crop_source` for each case; a tile's box lands where the crop is, in the
-  source colour, rotated and through a 90° orientation.
-- The grid reflows with width; a click maps to the right frame.
-- Live: changing a crop changes that tile's signature and only it.
-- Negatives mode uses the cached scan for a converted frame.
-- Save as image writes a JPEG of the expected size.
-- Main window: the entry toggles the sheet, a thumbnail pick leaves it, a
-  double-click opens the Crop panel; the entry is refused in crop mode.
-- Catalog round trip of the two provenance keys.
+- `crop_source` for each case; the overlay line on the crop in the source
+  colour, the outside dimmed, the rotation; the dashed outline.
+- 6 across for 35mm, 4 for 645; frames in order; `frame_at`; the overlay
+  lands in the composite.
+- Live: only the changed frame is redrawn; nothing when nothing changed.
+- Thumbnail; an empty roll clears it.
+- Negatives from the remembered scan and from a background read.
+- Export to JPEG and TIFF at the composite's size.
+- Main window: the entry appears with frames, toggles the sheet, greys the
+  per-frame controls and restores them, double-click opens a frame, refused
+  while cropping.
+- Catalog round trip of the provenance keys, and an old record without them.

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Contact sheet (spec/contact-sheet.md): crop sources, tile drawing (box
-position, colour, rotation), layout and clicks, the live signature, Negatives,
-Save as image, the main-window wiring, and the catalog keys."""
+"""Contact sheet (spec/contact-sheet.md): the whole roll as one image. Crop
+sources, the crop overlay, the layout (6 or 4 across) and frame lookup, live
+redraw of only the changed frames, Negatives, Export, the main-window wiring
+and the catalog keys."""
 
 import os
 import sys
@@ -46,17 +47,13 @@ class Img:
 def images(monkeypatch):
     imgs = [Img(f"f{i}.raf") for i in range(5)]
     monkeypatch.setattr(ccr_backend, "images", imgs)
-    monkeypatch.setattr(ccr_backend, "get_image_rotation_by_index",
-                        lambda i: ccr_backend.images[i].rotation_angle)
-    monkeypatch.setattr(ccr_backend, "get_image_horizontal_flip_by_index",
-                        lambda i: ccr_backend.images[i].horizontal_mirrored)
-    monkeypatch.setattr(ccr_backend, "get_image_vertical_flip_by_index",
-                        lambda i: ccr_backend.images[i].vertical_mirrored)
     return imgs
 
 
-def _rgb(pm, x, y):
-    c = pm.toImage().pixelColor(int(x), int(y))
+def _rgb(im, x, y):
+    if isinstance(im, QPixmap):
+        im = im.toImage()
+    c = im.pixelColor(int(x), int(y))
     return c.red(), c.green(), c.blue()
 
 
@@ -81,129 +78,142 @@ def test_crop_source():
     assert cs.crop_source(img)[0] == "confirmed"
 
 
-# --- drawing ---------------------------------------------------------------------
+# --- the overlay ---------------------------------------------------------------------
 
-def test_tile_box_lands_on_the_crop_in_the_source_colour():
-    src = QPixmap(400, 300)
+def _draw(rect, angle=0.0, source="auto", w=400, h=300):
+    from PySide6.QtCore import QRectF
+    from PySide6.QtGui import QPainter
+    src = QPixmap(w, h)
     src.fill(QColor(128, 128, 128))
-    pm = cs.compose_tile(src, (0.25, 0.2, 0.75, 0.8), 0.0, "auto", 0, False, False, 200, 200)
-    assert (pm.width(), pm.height()) == (200, 150)
-    amber = cs.SOURCES["auto"][0]
-    assert _near(_rgb(pm, 50, 75), amber)             # left edge of the box
-    assert _near(_rgb(pm, 100, 75), (128, 128, 128))  # inside: untouched
-    assert sum(_rgb(pm, 20, 75)) < sum((128, 128, 128)) - 60   # outside: dimmed
+    out = QImage(200, 150, QImage.Format_RGB888)
+    out.fill(QColor(0, 0, 0))
+    p = QPainter(out)
+    cs.draw_frame(p, QRectF(0, 0, 200, 150), src, rect, angle, source)
+    p.end()
+    return out
 
 
-def test_tile_box_rotates_with_the_crop_and_the_frame():
-    src = QPixmap(400, 300)
-    src.fill(QColor(128, 128, 128))
-    flat = cs.compose_tile(src, (0.25, 0.2, 0.75, 0.8), 0.0, "hand", 0, False, False, 200, 200)
-    tilted = cs.compose_tile(src, (0.25, 0.2, 0.75, 0.8), 10.0, "hand", 0, False, False, 200, 200)
-    assert flat.toImage() != tilted.toImage()
+def test_overlay_line_on_the_crop_in_the_source_colour_outside_dimmed():
+    out = _draw((0.25, 0.2, 0.75, 0.8))
+    assert _near(_rgb(out, 50, 75), cs.SOURCES["auto"][0])      # the crop's left edge
+    assert _near(_rgb(out, 100, 75), (128, 128, 128), 3)        # inside: the frame as is
+    assert sum(_rgb(out, 20, 75)) < 3 * 128 - 60                # outside: dimmed
+
+
+def test_overlay_follows_the_straighten():
+    assert _draw((0.25, 0.2, 0.75, 0.8), 0.0) != _draw((0.25, 0.2, 0.75, 0.8), 8.0)
     pts = cs.crop_polygon((0.25, 0.2, 0.75, 0.8), 90.0, 400, 300)
     xs = sorted(round(p.x()) for p in pts)
     assert xs[0] == 110 and xs[-1] == 290       # a quarter turn: x spans the box's height (180)
-    # a portrait frame (rotated 90) is laid out as displayed: taller than wide
-    rot = cs.compose_tile(src, (0.25, 0.2, 0.75, 0.8), 0.0, "hand", 90, False, False, 200, 200)
-    assert rot.height() > rot.width()
 
 
 def test_unsure_frame_gets_a_dashed_outline():
-    src = QPixmap(400, 300)
-    src.fill(QColor(128, 128, 128))
-    pm = cs.compose_tile(src, None, 0.0, "unsure", 0, False, False, 200, 200)
+    out = _draw(None, source="unsure")
     red = cs.SOURCES["unsure"][0]
-    edge = [_near(_rgb(pm, x, 1), red, 60) for x in range(10, 190)]
+    edge = [_near(_rgb(out, x, 1), red, 70) for x in range(10, 190)]
     assert any(edge) and not all(edge)              # dashed
 
 
-# --- the view --------------------------------------------------------------------
+# --- the sheet ------------------------------------------------------------------------
 
-def _view(width=1000):
-    v = cs.ContactSheetView()
-    v.resize(width, 700)
-    v.show()
-    _KEEP.append(v)
-    QApplication.processEvents()
-    return v
+def test_one_image_six_across_for_35mm_four_for_medium_format(images):
+    sheet = cs.ContactSheet()
+    sheet.update()
+    lay = sheet.layout()
+    assert lay.cols == 4                                       # 5 frames, nothing known
+    assert sheet.image().width() == lay.width and sheet.image().height() == lay.height
+    for img in images:
+        img.auto_crop_last = FrameCrop((0.1, 0.1, 0.9, 0.9), confidence="high", fmt="35mm 3:2")
+    sheet.update()
+    assert sheet.layout().cols == 6
+    for img in images:
+        img.auto_crop_last = FrameCrop((0.1, 0.1, 0.9, 0.9), confidence="high", fmt="645")
+    sheet.update()
+    assert sheet.layout().cols == 4
 
 
-def test_grid_reflows_and_clicks_map_to_frames(images):
-    v = _view(1000)
-    v.refresh(force=True)
-    c = v.canvas
-    assert len(c.tiles) == 5 and c._cols >= 2
-    cols_wide = c._cols
-    v.resize(500, 700)
-    QApplication.processEvents()
-    v.refresh(force=True)
-    assert c._cols < cols_wide
-    centre = c.cell_rect(3).center().toPoint()
-    assert c.tile_at(centre) == 3 and c.tile_at(QPoint(-50, -50)) is None
+def test_frames_sit_in_order_and_double_click_finds_them(images):
+    sheet = cs.ContactSheet()
+    sheet.update()
+    lay = sheet.layout()
+    c3 = lay.image_rect(3).center()
+    assert sheet.frame_at(c3.x(), c3.y()) == 3
+    assert sheet.frame_at(1, 1) is None                         # the margin
+    r0, r1 = lay.image_rect(0), lay.image_rect(1)
+    assert r1.left() > r0.right() and abs(r1.top() - r0.top()) < 1e-6
+    # the crop overlay is drawn into the one image
+    images[2].crop_rect = (0.25, 0.2, 0.75, 0.8)
+    images[2].auto_crop_rect = images[2].crop_rect
+    sheet.update()
+    r2 = lay.image_rect(2)
+    fw = r2.width()
+    fh = fw * 300 / 400
+    top = r2.y() + (r2.height() - fh) / 2
+    assert _near(_rgb(sheet.image(), r2.x() + 0.25 * fw, top + 0.5 * fh), cs.SOURCES["auto"][0])
+
+
+def test_live_only_the_changed_frame_is_redrawn(images):
+    sheet = cs.ContactSheet()
     got = []
-    v.frameActivated.connect(lambda i, crop: got.append((i, crop)))
-    c._pending_click = 3
-    c._single_click()
-    c.activated.emit(2, True)                       # what a double-click emits
-    assert got == [(3, False), (2, True)]
-
-
-def test_live_only_the_changed_tile_is_redrawn(images):
-    v = _view()
-    v.refresh(force=True)
-    before = {k: val[1] for k, val in v._cache.items()}
+    sheet.changed.connect(lambda: got.append(1))
+    sheet.update()
+    assert sheet.redrawn == [0, 1, 2, 3, 4] and got
+    assert not sheet.update() and sheet.redrawn == []           # nothing changed
     images[2].crop_rect = (0.1, 0.1, 0.9, 0.9)
-    v.refresh()
-    after = {k: val[1] for k, val in v._cache.items()}
-    changed = [i for i, img in enumerate(images) if before[id(img)] is not after[id(img)]]
-    assert changed == [2]
-    assert v.canvas.tiles[2]["source"] == "hand"
-    images[2]._render_epoch += 1                     # a re-render (slider, convert)
-    v.refresh()
-    assert v._cache[id(images[2])][1] is not after[id(images[2])]
+    assert sheet.update() and sheet.redrawn == [2]
+    images[4]._render_epoch += 1                                 # a re-render (slider, convert)
+    sheet.update()
+    assert sheet.redrawn == [4]
 
 
-def test_negatives_use_the_remembered_scan(images, monkeypatch):
-    v = _view()
-    v.refresh(force=True)                            # remembers the unconverted previews
+def test_thumbnail_and_empty_roll(images, monkeypatch):
+    sheet = cs.ContactSheet()
+    sheet.update()
+    th = sheet.thumbnail()
+    assert th.width() <= 156 and th.height() <= 117 and not th.isNull()
+    monkeypatch.setattr(ccr_backend, "images", [])
+    assert sheet.update() and sheet.image() is None and sheet.thumbnail().isNull()
+
+
+def test_negatives_use_the_remembered_scan(images):
+    sheet = cs.ContactSheet()
+    sheet.negatives = False
+    sheet.update()                                   # remembers the unconverted previews
     img = images[0]
     img.converted = True
     pos = QPixmap(400, 300)
     pos.fill(QColor(250, 250, 250))                  # the converted positive
     img.resized_preview = pos
     img._render_epoch += 1
-    v.neg_check.setChecked(True)
-    pm = v._cache[id(img)][1]
-    assert _near(_rgb(pm, pm.width() // 2, pm.height() // 2), (128, 128, 128), 5)
-    v.neg_check.setChecked(False)
-    pm = v._cache[id(img)][1]
-    assert _near(_rgb(pm, pm.width() // 2, pm.height() // 2), (250, 250, 250), 5)
+    sheet.set_negatives(True)
+    c = sheet.layout().image_rect(0).center()
+    assert _near(_rgb(sheet.image(), c.x(), c.y()), (128, 128, 128), 5)
+    sheet.set_negatives(False)
+    assert _near(_rgb(sheet.image(), c.x(), c.y()), (250, 250, 250), 5)
 
 
-def test_negatives_are_decoded_in_the_background_when_not_remembered(images, monkeypatch):
-    img = images[1]
-    img.converted = True
+def test_negatives_are_read_in_the_background_when_not_remembered(images, monkeypatch):
+    images[1].converted = True
     monkeypatch.setattr(cs, "decode_negative", lambda im: np.full((60, 80, 3), 40, np.uint8))
-    v = _view()
-    v.neg_check.setChecked(True)
-    for _ in range(200):
-        if not v._loader.pending():
-            break
-        QApplication.processEvents()
-    v._loader._thread.join(timeout=5)
-    v.refresh()
-    pm = v._cache[id(img)][1]
-    assert pm is not None and _near(_rgb(pm, pm.width() // 2, pm.height() // 2), (40, 40, 40), 5)
-    v.neg_check.setChecked(False)
+    sheet = cs.ContactSheet()
+    sheet.negatives = True
+    sheet.update()
+    sheet._loader._thread.join(timeout=5)
+    sheet.update()
+    assert sheet.redrawn == [1]
+    c = sheet.layout().image_rect(1).center()
+    assert _near(_rgb(sheet.image(), c.x(), c.y()), (40, 40, 40), 5)
+    sheet.set_negatives(False)
 
 
-def test_save_as_image(images, tmp_path):
-    v = _view()
-    images[0].crop_rect = (0.1, 0.1, 0.9, 0.9)
-    out = v.render_image(tile=200)
-    assert out.width() == 20 + 3 * 220 and out.height() > 2 * 200 * cs.IMG_ASPECT
-    p = str(tmp_path / "sheet.jpg")
-    assert out.save(p, "JPG", 92) and os.path.getsize(p) > 1000
+def test_export_jpeg_and_tiff(images, tmp_path):
+    sheet = cs.ContactSheet()
+    sheet.update()
+    for name in ("sheet.jpg", "sheet.tif"):
+        p = str(tmp_path / name)
+        assert sheet.save(p) and os.path.getsize(p) > 1000
+        back = QImage(p)
+        assert (back.width(), back.height()) == (sheet.layout().width, sheet.layout().height)
 
 
 # --- main window ------------------------------------------------------------------
@@ -214,20 +224,30 @@ def test_main_window_shows_and_leaves_the_sheet(monkeypatch):
     _KEEP.append(mw)
     imgs = [Img(f"g{i}.raf") for i in range(3)]
     monkeypatch.setattr(ccr_backend, "images", imgs)
-    for name in ("get_image_rotation_by_index", "get_image_horizontal_flip_by_index",
-                 "get_image_vertical_flip_by_index"):
-        monkeypatch.setattr(ccr_backend, name, lambda i: 0)
+    mw.contact_sheet_model.update()
+    assert not mw.thumbnail_list.sheet_btn.isHidden()           # its thumbnail appeared
+    sp = mw.sliders_panel
     assert mw.show_contact_sheet(True)
     assert mw.contact_sheet_shown() and not mw.image_preview.isVisibleTo(mw)
     assert mw.thumbnail_list.sheet_btn.isChecked()
+    assert not sp.auto_crop_btn.isEnabled() and not sp.convert_current_bwp_btn.isEnabled()
+    assert sp.auto_crop_all_btn.isEnabled()                     # the roll actions stay
+    monkeypatch.setattr(mw.image_preview, "update_preview", lambda *a, **k: None)
+    monkeypatch.setattr(mw.image_preview, "_update_unconvert_action_state", lambda: None)
+    monkeypatch.setattr(sp, "set_current_idx", lambda i: None)
     assert mw.show_contact_sheet(False)
     assert not mw.contact_sheet_shown() and not mw.thumbnail_list.sheet_btn.isChecked()
+    assert sp.auto_crop_btn.isEnabled()
     mw.image_preview.crop_mode = True                # refused while cropping
     assert not mw.show_contact_sheet(True) and not mw.contact_sheet_shown()
     mw.image_preview.crop_mode = False
     opened = []
     monkeypatch.setattr(mw, "toggle_crop_panel", lambda on=None: opened.append(on))
-    monkeypatch.setattr(mw.image_preview, "update_preview", lambda *a, **k: None)
+    mw.show_contact_sheet(True)
+    lay = mw.contact_sheet_model.layout()
+    c = lay.image_rect(1).center()
+    mw.contact_sheet._on_double_click(c.x(), c.y())             # double-click frame 2
+    assert not mw.contact_sheet_shown() and mw.thumbnail_list.thumbnail_list.currentRow() in (-1, 1)
     mw.show_contact_sheet(True)
     mw.open_frame_from_sheet(0, crop=True)
     assert not mw.contact_sheet_shown() and opened == [True]

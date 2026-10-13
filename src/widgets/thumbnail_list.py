@@ -1,4 +1,4 @@
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QListWidget, QListWidgetItem, QLabel, QDialog, QApplication, QPushButton, QMenu, QComboBox
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QListWidget, QListWidgetItem, QLabel, QDialog, QApplication, QPushButton, QMenu, QComboBox, QToolButton
 from PySide6.QtGui import QPixmap, QIcon, QTransform, QPainter
 from PySide6.QtCore import Qt, QSize, QTimer
 import os
@@ -131,25 +131,29 @@ class ThumbnailList(QWidget):
         self.layout.addWidget(self.profile_combo)
         # Positive mode now lives only in Settings ▸ Color Management.
 
-        # Contact sheet (spec/contact-sheet.md): a live view of every frame and
-        # its crop, shown in place of the main image. Not an item in the list
-        # (rows stay == image indices); a dashed border sets it apart.
-        self.sheet_btn = QPushButton("▦  Contact sheet")
+        # Contact sheet (spec/contact-sheet.md): the whole roll as one image,
+        # pinned above the frames (not a list item, so rows stay == image
+        # indices). Its dashed border sets it apart from the frames.
+        self.sheet_btn = QToolButton()
         self.sheet_btn.setCheckable(True)
-        self.sheet_btn.setFixedHeight(theme.CONTROL_H + 6)
+        self.sheet_btn.setText("Contact sheet")
+        self.sheet_btn.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
+        self.sheet_btn.setIconSize(QSize(176, 120))
+        self.sheet_btn.setFixedSize(196, 154)
         self.sheet_btn.setToolTip(
-            "Every frame on one sheet, uncropped, with its crop marked: green "
-            "confirmed by you, amber auto crop, blue drawn by hand, red dashed "
-            "auto crop wasn't sure. Click a frame to open it, double-click to "
-            "open it in the Crop panel.")
+            "The whole roll as one contact sheet, each frame with its crop "
+            "marked: green confirmed by you, amber auto crop, blue drawn by "
+            "hand, red dashed auto crop wasn't sure. Double-click a frame on "
+            "it to open that frame.")
         self.sheet_btn.setStyleSheet(
-            f"QPushButton {{ border: 1px dashed {theme.BORDER_STRONG}; border-radius: 4px;"
-            f" background: transparent; color: {theme.TEXT}; }}"
-            f"QPushButton:hover {{ background: {theme.SURFACE_HOVER}; }}"
-            f"QPushButton:checked {{ border: 1px solid {theme.TEXT_MUTED};"
+            f"QToolButton {{ border: 1px dashed {theme.EDGE_PRINT}; border-radius: 4px;"
+            f" background: transparent; color: {theme.TEXT}; padding-top: 4px; }}"
+            f"QToolButton:hover {{ background: {theme.SURFACE_HOVER}; }}"
+            f"QToolButton:checked {{ border: 2px solid {theme.EDGE_PRINT};"
             f" background: {theme.SURFACE_ACTIVE}; }}")
         self.sheet_btn.clicked.connect(self._on_sheet_clicked)
-        self.layout.addWidget(self.sheet_btn)
+        self.sheet_btn.setVisible(False)          # until there are frames
+        self.layout.addWidget(self.sheet_btn, 0, Qt.AlignHCenter)
 
         self.thumbnail_list = QListWidget()
         self.thumbnail_list.setViewMode(QListWidget.IconMode)
@@ -313,6 +317,17 @@ class ThumbnailList(QWidget):
         mw = self._main_window()
         if not hasattr(mw, "show_contact_sheet") or not mw.show_contact_sheet(checked):
             self.set_sheet_checked(getattr(mw, "contact_sheet_shown", lambda: False)())
+
+    def set_sheet_icon(self, pixmap):
+        """The contact sheet changed: show its thumbnail, the entry sized to
+        it (a long roll's sheet is tall, a short one's wide). Hidden when
+        there are no frames."""
+        has = pixmap is not None and not pixmap.isNull()
+        if has:
+            self.sheet_btn.setIcon(QIcon(pixmap))
+            self.sheet_btn.setIconSize(pixmap.size())
+            self.sheet_btn.setFixedHeight(pixmap.height() + 34)
+        self.sheet_btn.setVisible(has)
 
     def set_sheet_checked(self, on):
         self.sheet_btn.blockSignals(True)

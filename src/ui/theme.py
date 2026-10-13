@@ -71,6 +71,7 @@ WARN_BG = "#3a2f12"
 WARN_BORDER = "#5a4a1e"
 WARN_TEXT = "#e0c060"
 WARN_TEXT_MUTED = "#b89a48"
+EDGE_PRINT = "#b8954a"      # the contact sheet's entry border (film edge-print amber)
 
 # 3.6 Icons
 ICON = "#cfcfcf"

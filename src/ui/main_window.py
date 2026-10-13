@@ -205,13 +205,22 @@ class MainWindow(QMainWindow):
         # Contact sheet (spec/contact-sheet.md): a SIBLING of image_preview,
         # shown in its place — not a stack around it, so ImagePreview's
         # parent().parent() chain to MainWindow stays valid.
-        from widgets.contact_sheet import ContactSheetView
-        self.contact_sheet = ContactSheetView(self)
+        from widgets.contact_sheet import ContactSheet, ContactSheetView
+        self.contact_sheet_model = ContactSheet(self)
+        self.contact_sheet = ContactSheetView(self.contact_sheet_model, self)
         self.contact_sheet.setMinimumWidth(900)
         self.contact_sheet.setVisible(False)
         self.contact_sheet.frameActivated.connect(self.open_frame_from_sheet)
         self.contact_sheet.autoCropRequested.connect(self._auto_crop_from_sheet)
         self.contact_sheet.closeRequested.connect(lambda: self.show_contact_sheet(False))
+        # Keep the sheet (and its thumbnail) current: often while it is showing,
+        # now and then otherwise. Only frames that changed are redrawn.
+        self._sheet_timer = QTimer(self)
+        self._sheet_timer.setInterval(1500)
+        self._sheet_timer.timeout.connect(self.contact_sheet_model.update)
+        self.contact_sheet_model.changed.connect(
+            lambda: self.thumbnail_list.set_sheet_icon(self.contact_sheet_model.thumbnail(176, 120)))
+        self._sheet_timer.start()
 
         self.layout.addWidget(self.thumbnail_list, 0)
         self.layout.addWidget(self.image_preview, 3)
@@ -487,12 +496,15 @@ class MainWindow(QMainWindow):
 
     def show_contact_sheet(self, on=True) -> bool:
         """Show the contact sheet in place of the image view (or go back).
+        It is not a scan, so the per-frame controls are greyed while it shows
+        (Convert All and Auto Crop All stay: their result shows up live).
         Refused while cropping or removing dust. True when the state changed
         as asked."""
         ip = self.image_preview
+        sp = self.sliders_panel
         if on:
             if ip.crop_mode or getattr(ip, "dust_mode", False):
-                self.sliders_panel.set_temporary_hint(
+                sp.set_temporary_hint(
                     "Finish cropping or dust removal first (Done or Esc), then "
                     "open the contact sheet.", duration=5000)
                 self.thumbnail_list.set_sheet_checked(False)
@@ -502,11 +514,24 @@ class MainWindow(QMainWindow):
                 return False
             ip.setVisible(False)
             self.contact_sheet.setVisible(True)
-            self.contact_sheet.activate(current=ip.current_idx)
+            self.contact_sheet.activate()
+            self._sheet_timer.setInterval(400)
+            sp.set_sliders_enabled(False)
+            for btn in ("convert_current_bwp_btn", "auto_crop_btn"):
+                if hasattr(sp, btn):
+                    getattr(sp, btn).setEnabled(False)
         else:
-            self.contact_sheet.deactivate()
+            was = self.contact_sheet_shown()
             self.contact_sheet.setVisible(False)
             ip.setVisible(True)
+            self._sheet_timer.setInterval(1500)
+            if was:
+                # back to the frame you were on, with its own controls
+                if hasattr(sp, "auto_crop_btn"):
+                    sp.auto_crop_btn.setEnabled(True)
+                if ip.current_idx is not None:
+                    sp.set_current_idx(ip.current_idx)
+                ip._update_unconvert_action_state()
         self.thumbnail_list.set_sheet_checked(on)
         return True
 
@@ -537,7 +562,7 @@ class MainWindow(QMainWindow):
             (f"Auto crop: {frame.summary()} ({frame.confidence} confidence)." if applied
              else f"Auto crop left this frame as it was: "
                   f"{frame.reason or frame.confidence + ' confidence'}."), duration=6000)
-        self.contact_sheet.refresh()
+        self.contact_sheet_model.update()
 
     # --- Dust removal (panel cover + canvas mode) -------------------------
     def toggle_dust_removal(self, on=None):
