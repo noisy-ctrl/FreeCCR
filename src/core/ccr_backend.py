@@ -198,6 +198,7 @@ class CCRBackend:
         # abandoned loader thread clobbering a newer load.
         self._load_generation = 0
         self._load_progress = (None, 0, 0)          # (generation, done, total)
+        self._load_partial = {}                     # file -> fraction loaded so far
         self._load_progress_lock = threading.Lock()
 
     # --- Preview detail (spec/preview-detail.md) -------------------------
@@ -236,16 +237,41 @@ class CCRBackend:
     # the load generation so a stale loader thread can't move a newer count.
     def _set_load_progress(self, gen, done, total):
         if gen is None or gen == self._load_generation:
-            self._load_progress = (gen, int(done), int(total))
+            with self._load_progress_lock:
+                self._load_progress = (gen, int(done), int(total))
+                self._load_partial = {}
 
-    def _bump_load_progress(self, gen):
+    def _bump_load_progress(self, gen, token=None):
         with self._load_progress_lock:
             g, done, total = getattr(self, "_load_progress", (None, 0, 0))
             if g == gen and gen == self._load_generation:
                 self._load_progress = (gen, done + 1, total)
+                self._load_partial.pop(token, None)
+
+    def _file_step(self, gen, token, fraction):
+        """A file still loading is `fraction` done (core.load_progress)."""
+        with self._load_progress_lock:
+            if gen != self._load_generation or self._load_progress[0] != gen:
+                return
+            if fraction > self._load_partial.get(token, 0.0):
+                self._load_partial[token] = min(float(fraction), 0.99)
+
+    def _bound_progress(self, gen, token):
+        from core import load_progress
+        return load_progress.bound(lambda f: self._file_step(gen, token, f))
+
+    def get_load_fraction(self) -> float:
+        """0..1 for the load in progress, counting files part-way through
+        (spec/load-progress.md): what the loading dialog's bar shows."""
+        with self._load_progress_lock:
+            g, done, total = getattr(self, "_load_progress", (None, 0, 0))
+            part = sum(self._load_partial.values())
+        return min(1.0, (done + part) / total) if total else 0.0
 
     def reset_load_progress(self):
-        self._load_progress = (None, 0, 0)
+        with self._load_progress_lock:
+            self._load_progress = (None, 0, 0)
+            self._load_partial = {}
 
     def get_load_progress(self):
         """(done, total) for the load in progress (units: files, or merged
@@ -320,7 +346,8 @@ class CCRBackend:
                 print(f"Loading image: {os.path.basename(path)}")
                 # Restores cataloged state (slices, conversion, adjustments)
                 # when this file was processed before; plain load otherwise.
-                imgs = create_images_for_path(path, catalog_data=catalog_data)
+                with self._bound_progress(gen, path):
+                    imgs = create_images_for_path(path, catalog_data=catalog_data)
                 for order, img in enumerate(imgs):
                     img._catalog_order = order  # keep slice order within a file
                 print(f"Successfully loaded: {os.path.basename(path)}")
@@ -353,7 +380,7 @@ class CCRBackend:
                 if cancel_flag and cancel_flag():
                     break
                 _path, imgs = load_single_image(path)
-                self._bump_load_progress(gen)
+                self._bump_load_progress(gen, path)
                 if imgs:
                     results.extend(imgs)
                     loaded_file_count += 1
@@ -365,7 +392,7 @@ class CCRBackend:
                     if cancel_flag and cancel_flag():
                         break
                     path, imgs = future.result()
-                    self._bump_load_progress(gen)
+                    self._bump_load_progress(gen, path)
                     if imgs:
                         results.extend(imgs)
                         loaded_file_count += 1
@@ -451,10 +478,11 @@ class CCRBackend:
                 # slices) when this exact triplet was edited before; a fresh
                 # merge otherwise. Returns a LIST (>1 when the merge was sliced
                 # or duplicated last session).
-                imgs = create_images_for_merge(
-                    list(triplet), merge_demosaic=self.rgb_merge_demosaic,
-                    catalog_data=catalog_data,
-                    merge_mono=self.rgb_merge_mono)
+                with self._bound_progress(gen, ("merge", order)):
+                    imgs = create_images_for_merge(
+                        list(triplet), merge_demosaic=self.rgb_merge_demosaic,
+                        catalog_data=catalog_data,
+                        merge_mono=self.rgb_merge_mono)
             except Exception as e:
                 print(f"3-way merge failed for {os.path.basename(red)}: {e}")
                 self.last_merge_error = (
@@ -472,7 +500,7 @@ class CCRBackend:
                 if cancel_flag and cancel_flag():
                     break
                 imgs = load_triplet(order, triplet)
-                self._bump_load_progress(gen)
+                self._bump_load_progress(gen, ("merge", order))
                 if imgs:
                     results.extend(imgs)
         else:
@@ -483,7 +511,7 @@ class CCRBackend:
                     if cancel_flag and cancel_flag():
                         break
                     imgs = future.result()
-                    self._bump_load_progress(gen)
+                    self._bump_load_progress(gen, ("merge", futures[future]))
                     if imgs:
                         results.extend(imgs)
 
@@ -498,7 +526,8 @@ class CCRBackend:
                 if cancel_flag and cancel_flag():
                     break
                 try:
-                    imgs = create_images_for_path(p, catalog_data=catalog_data)
+                    with self._bound_progress(gen, p):
+                        imgs = create_images_for_path(p, catalog_data=catalog_data)
                     for order, im in enumerate(imgs):
                         im._catalog_order = order
                     results.extend(imgs)
@@ -506,7 +535,7 @@ class CCRBackend:
                     print(f"Failed to load merge TIFF {os.path.basename(p)}: {e}")
                     failures.append(
                         (p, load_errors.describe_load_failure(p, e)))
-                self._bump_load_progress(gen)
+                self._bump_load_progress(gen, p)
 
         # User cancelled mid-load: suppress any decode error a worker recorded
         # for the aborted import (the pool above has joined, so every write has
