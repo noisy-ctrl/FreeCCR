@@ -52,12 +52,22 @@ class CropPanel(QWidget):
         layout.addWidget(header)
 
         # --- Aspect ratio ---
-        layout.addWidget(self._section_label("Aspect Ratio"))
+        layout.addWidget(self._section_label("Format"))
         self.aspect_combo = QComboBox()
         self.aspect_combo.setFixedHeight(theme.CONTROL_H)
         theme.shrinkable_combo(self.aspect_combo)
-        for label, key, _ratio in crop_aspect.ASPECT_PRESETS:
-            self.aspect_combo.addItem(label, key)
+        for label, key, ratio in crop_aspect.ASPECT_PRESETS:
+            if ratio == crop_aspect.HEADING:
+                # a group title (Film formats / Print and screen): not selectable
+                self.aspect_combo.addItem(label.upper(), key)
+                item = self.aspect_combo.model().item(self.aspect_combo.count() - 1)
+                item.setEnabled(False)
+                f = item.font()
+                f.setPointSizeF(max(7.0, f.pointSizeF() - 1.5))
+                f.setBold(True)
+                item.setFont(f)
+            else:
+                self.aspect_combo.addItem(label, key)
         self.aspect_combo.currentIndexChanged.connect(self._on_aspect_changed)
         layout.addWidget(self.aspect_combo)
 
@@ -358,6 +368,13 @@ class CropPanel(QWidget):
     def _active_key(self):
         return self.aspect_combo.currentData()
 
+    def active_film_format(self):
+        """The film format picked in the list (a core.film_formats key), or
+        None for Free / Original / a print ratio. Done records it on the frame
+        (spec/film-formats.md)."""
+        key = self._active_key()
+        return key if key in crop_aspect.FILM_KEYS else None
+
     def _landscape(self):
         return self.landscape_radio.isChecked()
 
@@ -380,6 +397,8 @@ class CropPanel(QWidget):
         self._suppress = True
         key = self._settings.value("crop/aspect_key", "free", type=str)
         idx = self.aspect_combo.findData(key)
+        if idx >= 0 and crop_aspect.preset_for_key(key) is None:
+            idx = -1                       # a heading is never a choice
         self.aspect_combo.setCurrentIndex(idx if idx >= 0 else 0)
         landscape = self._settings.value(
             "crop/orientation", "landscape", type=str) != "portrait"

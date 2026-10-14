@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QFileDialog,
                                QGraphicsView, QHBoxLayout, QLabel, QMenu,
                                QPushButton, QVBoxLayout, QWidget)
 
+from core import film_formats
 from core.ccr_backend import ccr_backend
 from ui import theme
 
@@ -143,27 +144,44 @@ def draw_frame(p, target, source_img, crop_rect, crop_angle, source):
     return QRectF(x, y, w, h)
 
 
+def frame_format(img):
+    """The frame's film format (a core.film_formats key) or None: the one
+    picked for it in the Crop panel, else what auto crop found, else what
+    its crop's proportions say."""
+    fmt = film_formats.film_key(getattr(img, "film_format", None))
+    if fmt:
+        return fmt
+    last = getattr(img, "auto_crop_last", None)
+    fmt = film_formats.film_key(getattr(last, "fmt", "") if last is not None else "")
+    if fmt:
+        return fmt
+    rect = getattr(img, "crop_rect", None)
+    prev = getattr(img, "resized_preview", None)
+    if rect is not None and prev is not None and not prev.isNull():
+        return film_formats.from_ratio((rect[2] - rect[0]) * prev.width(),
+                                       (rect[3] - rect[1]) * prev.height())
+    return None
+
+
 def film_columns(imgs):
-    """Frames per row: 6 for 35mm (a cut strip), 4 for medium format. Read
-    from the crops (or what auto crop found); with nothing to go on, 6 for a
-    long roll and 4 for a short one."""
-    votes = []
-    for img in imgs:
-        last = getattr(img, "auto_crop_last", None)
-        fmt = getattr(last, "fmt", "") if last is not None else ""
-        rect = getattr(img, "crop_rect", None)
-        if fmt:
-            votes.append(fmt.startswith("35mm") or fmt == "half-frame")
-        elif rect is not None:
-            prev = getattr(img, "resized_preview", None)
-            if prev is not None and not prev.isNull():
-                bw = (rect[2] - rect[0]) * prev.width()
-                bh = (rect[3] - rect[1]) * prev.height()
-                ar = max(bw, bh) / max(1e-6, min(bw, bh))
-                votes.append(abs(math.log(ar / 1.5)) < 0.06)
-    if votes:
-        return 6 if sum(votes) * 2 >= len(votes) else 4
+    """Frames per row, as the film is cut into strips: 6 for 35mm, 4 for
+    6x4.5, 3 for 6x6 / 6x7, 2 for 6x9 ... from the roll's most common format.
+    With nothing to go on, 6 for a long roll and 4 for a short one."""
+    fmts = [f for f in (frame_format(i) for i in imgs) if f]
+    if fmts:
+        return film_formats.strip_length(max(set(fmts), key=fmts.count))
     return 6 if len(imgs) > 12 else 4
+
+
+def format_summary(imgs):
+    """'35mm: 36x24 · 120: 6x4.5 ×3' for the footer (most common first)."""
+    fmts = [f for f in (frame_format(i) for i in imgs) if f]
+    if not fmts:
+        return ""
+    counts = sorted({f: fmts.count(f) for f in fmts}.items(), key=lambda kv: -kv[1])
+    if len(counts) == 1:
+        return film_formats.label(counts[0][0])
+    return " · ".join(f"{film_formats.label(k)} ×{n}" for k, n in counts)
 
 
 def decode_negative(img):
@@ -270,6 +288,7 @@ class ContactSheet(QObject):
         self._image = None
         self._layout = None
         self._sigs = []
+        self._footer = None
         self._neg_cache = {}          # id(img) -> (img, QImage, epoch): scans seen unconverted
         self._loader = _NegativeLoader()
         self.redrawn = []             # frames redrawn by the last update (tests, timing)
@@ -325,30 +344,37 @@ class ContactSheet(QObject):
             self._image = QImage(layout.width, layout.height, QImage.Format_RGB888)
             self._image.fill(QColor(*BG))
             self._sigs = [None] * len(imgs)
-            self._draw_footer()
+            self._footer = None
         p = QPainter(self._image)
         p.setRenderHint(QPainter.Antialiasing)
         p.setRenderHint(QPainter.SmoothPixmapTransform)
         p.setRenderHint(QPainter.TextAntialiasing)
         for i, img in enumerate(imgs):
             src, detail = crop_source(img)
+            fmt = frame_format(img)
             sig = (id(img), getattr(img, "_render_epoch", 0),
                    tuple(img.crop_rect) if img.crop_rect else None,
                    round(float(getattr(img, "crop_angle", 0.0) or 0.0), 4),
-                   src, detail, _name(img), self.negatives,
+                   src, detail, _name(img), fmt, self.negatives,
                    self._neg_state(img) if self.negatives else None)
             if self._sigs[i] == sig:
                 continue
             self._sigs[i] = sig
-            self._draw_cell(p, i, img, src, detail)
+            self._draw_cell(p, i, img, src, detail, fmt)
             self.redrawn.append(i)
         p.end()
+        summary = format_summary(imgs)
+        if summary != self._footer:
+            self._draw_footer(summary)
+            if not self.redrawn:
+                self.changed.emit()
+                return True
         if self.redrawn:
             self.changed.emit()
             return True
         return False
 
-    def _draw_cell(self, p, i, img, src, detail):
+    def _draw_cell(self, p, i, img, src, detail, fmt=None):
         lay = self._layout
         cell = lay.cell(i)
         p.fillRect(cell.adjusted(-2, -2, 2, 2), QColor(*BG))
@@ -379,14 +405,27 @@ class ContactSheet(QObject):
                    p.fontMetrics().elidedText(_name(img), Qt.ElideMiddle, int(name_rect.width())))
         f.setPixelSize(max(9, int(3.9 * u)))
         p.setFont(f)
-        p.setPen(QColor(*SOURCES[src][0]))
         cap = QRectF(cell.x(), top.bottom(), cell.width(), 6.0 * u)
-        p.drawText(cap, Qt.AlignLeft | Qt.AlignVCenter,
-                   p.fontMetrics().elidedText(_caption(src, detail), Qt.ElideRight, int(cap.width())))
+        x = cap.x()
+        if fmt:
+            # the film format, then where the crop came from in its colour
+            text = film_formats.label(fmt) + "  ·  "
+            p.setPen(QColor(205, 205, 205))
+            p.drawText(QRectF(x, cap.y(), cap.width(), cap.height()),
+                       Qt.AlignLeft | Qt.AlignVCenter, text)
+            x += p.fontMetrics().horizontalAdvance(text)
+        p.setPen(QColor(*SOURCES[src][0]))
+        rest = QRectF(x, cap.y(), cap.right() - x, cap.height())
+        p.drawText(rest, Qt.AlignLeft | Qt.AlignVCenter,
+                   p.fontMetrics().elidedText(_caption(src, detail), Qt.ElideRight,
+                                              int(rest.width())))
 
-    def _draw_footer(self):
+    def _draw_footer(self, summary=""):
         lay = self._layout
+        self._footer = summary
         p = QPainter(self._image)
+        band = QRectF(0, lay.height - MARGIN - lay.foot_h, lay.width, lay.foot_h)
+        p.fillRect(band, QColor(*BG))
         p.setRenderHint(QPainter.Antialiasing)
         p.setRenderHint(QPainter.TextAntialiasing)
         u = lay.cell_w / 100.0
@@ -398,8 +437,9 @@ class ContactSheet(QObject):
         n = lay.n
         th = 6.0 * u
         p.setPen(QColor(150, 150, 150))
-        p.drawText(QRectF(MARGIN, y - th / 2, lay.width / 2, th), Qt.AlignLeft | Qt.AlignVCenter,
-                   f"{n} frame{'s' if n != 1 else ''} · " + time.strftime("%d %b %Y"))
+        p.drawText(QRectF(MARGIN, y - th / 2, lay.width * 0.6, th), Qt.AlignLeft | Qt.AlignVCenter,
+                   f"{n} frame{'s' if n != 1 else ''} · "
+                   + (summary + " · " if summary else "") + time.strftime("%d %b %Y"))
         x = lay.width - MARGIN
         for key in reversed(LEGEND):
             label = SOURCES[key][1]

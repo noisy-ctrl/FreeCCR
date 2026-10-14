@@ -2659,7 +2659,7 @@ class CCRBackend:
                         return False          # a creative re-crop, not the frame
             img.auto_crop_example = mem.record(
                 key, final, w, h, det=det_record(det), strip=det.strip,
-                fmt=det.fmt, ex_id=prev)
+                fmt=getattr(img, "film_format", None) or det.fmt, ex_id=prev)
             return True
         except Exception as e:                    # learning must never break a crop
             print(f"Could not learn the crop of {getattr(img, 'file_path', '?')}: {e}")

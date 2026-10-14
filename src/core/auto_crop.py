@@ -87,7 +87,8 @@ class FrameCrop:
     def summary(self) -> str:
         if self.rect is None:
             return self.reason or "no frame found"
-        bits = [self.fmt or "frame", f"{self.angle:+.2f}°"]
+        from core import film_formats
+        bits = [film_formats.label(self.fmt) or self.fmt or "frame", f"{self.angle:+.2f}°"]
         if self.strip:
             bits.append("35mm strip")
         if self.soft:

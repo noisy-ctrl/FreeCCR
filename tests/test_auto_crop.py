@@ -317,7 +317,7 @@ def test_auto_crop_button_hints(panel, backend, monkeypatch):
     ok = FrameCrop((0.1, 0.1, 0.9, 0.9), angle=0.3, confidence="high", fmt="645")
     monkeypatch.setattr(backend, "auto_crop_one", lambda img: (ok, True))
     panel._on_auto_crop_current()
-    assert hints[-1].startswith("Auto crop: 645, +0.30°") and "Ctrl+Z" in hints[-1]
+    assert hints[-1].startswith("Auto crop: 120: 6x4.5, +0.30°") and "Ctrl+Z" in hints[-1]
     no = FrameCrop(None, reason="no border found: the picture fills the scan")
     monkeypatch.setattr(backend, "auto_crop_one", lambda img: (no, False))
     panel._on_auto_crop_current()
