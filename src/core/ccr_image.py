@@ -28,6 +28,7 @@ from core.ccr_processor import (adjust_image, adjust_image_opencl,
                                 renders_monochrome,
                                 positive_base_curve_points)
 from core import color_management
+from core import load_progress
 
 # Import optional libraries with fallbacks
 try:
@@ -433,6 +434,7 @@ class CCRImage:
         self.original_full_size: Optional[tuple[int, int]] = None  # (height, width) of the full-res source, set by read_image
 
         self.info = self.get_camera_and_lens_for_lensfun(self.file_path)  # Extract camera and lens info for lensfun
+        load_progress.step(0.05)        # (spec/load-progress.md: no-op unless loading)
 
         # Read image from file and populate resized_raw (downsized to 1080
         # long side inside the reader, before white-level scaling). Slicing
@@ -446,6 +448,7 @@ class CCRImage:
                 img = img.copy()
         else:
             img = self.read_image(self.file_path, max_long_side=1080)
+        load_progress.step(0.8)
         if img is not None:
             self.resized_raw = img
             #correct lens distortion and vignetting if possible
@@ -461,6 +464,7 @@ class CCRImage:
 
             # Populate thumbnail and preview
             self.update_thumbnail_and_preview()
+            load_progress.step(0.95)
         else:
             # Chained, not swallowed: the loader classifies the ROOT cause (a
             # LibRaw "unsupported format" vs a missing file) to tell the user
@@ -949,6 +953,7 @@ class CCRImage:
                 start_time = time.time()
                 
                 with rawpy.imread(file_path) as raw:
+                    load_progress.step(0.3)     # the file is read; now decode it
                     # Capture sensor ceiling before postprocess (e.g. 16383 for 14-bit)
                     white_level = raw.white_level
                     # As-shot white-balance multipliers (for the DCP apply path,
@@ -1096,6 +1101,7 @@ class CCRImage:
                             **self._raw_color_postprocess_kwargs(
                                 positive_decode, preview, no_icc_default))
 
+                    load_progress.step(0.7)     # decoded
                     # Field correction (flat-field) on the FULL frame, before the
                     # slice chain crops it — a monochrome decode gets the neutral
                     # (channel-averaged) gain so it stays colourless, and a

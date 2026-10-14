@@ -479,9 +479,13 @@ def merge_raw_channels(sources: Sequence[str], preview: bool = False,
     white_levels: List[float] = []
     monos: List[bool] = []
     sensor_full: Optional[Tuple[int, int]] = None
+    from core import load_progress
     for frame_pos, path in enumerate(sources):       # 0=red, 1=green, 2=blue
         plane, white_level, mono, sfull = _decode_frame_plane(
             path, frame_pos, preview, demosaic=demosaic, mono=mono)
+        # each of the three RAWs is most of a merge's load time: report each
+        # (spec/load-progress.md; a no-op outside a load)
+        load_progress.step(0.05 + 0.7 * (frame_pos + 1) / MERGE_GROUP_SIZE)
         planes.append(plane)
         white_levels.append(white_level)
         monos.append(mono)

@@ -1,4 +1,4 @@
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QListWidget, QListWidgetItem, QLabel, QDialog, QApplication, QPushButton, QMenu, QComboBox, QToolButton
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QListWidget, QListWidgetItem, QLabel, QDialog, QApplication, QPushButton, QMenu, QComboBox, QToolButton, QProgressBar
 from PySide6.QtGui import QPixmap, QIcon, QTransform, QPainter
 from PySide6.QtCore import Qt, QSize, QTimer
 import os
@@ -16,12 +16,22 @@ class LoadingDialog(QDialog):
         self.setWindowModality(Qt.ApplicationModal)  # Block all input to the app
         # Remove close, minimize, maximize buttons
         self.setWindowFlags(Qt.Dialog | Qt.CustomizeWindowHint | Qt.WindowTitleHint)
-        self.setFixedSize(400, 100)  # Wider and taller for button
+        self.setFixedSize(400, 130)  # Wider and taller for the bar and button
 
         layout = QVBoxLayout()
         self.label = QLabel("Loading images, please wait")
         self.label.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.label)
+        # Files load in parallel and finish in waves, so the count alone can
+        # sit at 0 for a long first wave; the bar also counts files part-way
+        # through (each RAW of a 3-way merge, decode, preview). See
+        # spec/load-progress.md.
+        self.bar = QProgressBar()
+        self.bar.setRange(0, 1000)
+        self.bar.setValue(0)
+        self.bar.setTextVisible(False)
+        self.bar.setFixedHeight(8)
+        layout.addWidget(self.bar)
 
         # Add Cancel button
         self.cancel_button = QPushButton("Cancel")
@@ -49,7 +59,13 @@ class LoadingDialog(QDialog):
         if not total:
             count = ccr_backend.get_image_count()
             total = ccr_backend.get_total_file_paths()
-        self.label.setText("Loading images, please wait" + "." * self.dot_count + f" ({count}/{total})")
+        merging = bool(getattr(ccr_backend, "rgb_merge_mode", False))
+        what = "Merging RGB frames" if merging else "Loading images"
+        self.label.setText(f"{what}, please wait" + "." * self.dot_count
+                           + f" ({count}/{total} done)")
+        if hasattr(ccr_backend, "get_load_fraction"):
+            frac = ccr_backend.get_load_fraction()
+            self.bar.setValue(max(self.bar.value(), int(round(frac * 1000))))
 
     def closeEvent(self, event):
         # Prevent closing by user
