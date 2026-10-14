@@ -24,10 +24,10 @@ is.)
 
 ## The image
 
-- Frames in roll order on near-black, **6 across for 35mm** (a cut strip) and
-  **4 for medium format**. Which: the majority of what auto crop found (its
-  format) or of the crops' proportions (3:2 = 35mm); with nothing to go on, 6
-  for more than 12 frames, else 4.
+- Frames in roll order on near-black, in rows cut like the film's strips:
+  6 for 35mm, 4 for 6x4.5, 3 for 6x6 / 6x7, 2 for 6x9 (the roll's most common
+  format; see `spec/film-formats.md`). With nothing to go on, 6 for more than
+  12 frames, else 4.
 - Each frame **uncropped and as scanned** (no rotation or flips: as on the
   film, which also keeps every cell the same shape), fitted in a cell of the
   scans' shape, 480 px wide (360 px for rolls over 48 frames).
@@ -37,9 +37,10 @@ is.)
   line; a red dashed outline round a frame auto crop looked at and wasn't sure
   of.
 - **Edge print** under each frame: its number in a warm edge-print tone, the
-  file name, and the source (with auto crop's confidence, or why it wasn't
-  sure). Lettering scales with the cell so it reads with the sheet fitted.
-- A footer: frame count and date, and the colour key.
+  file name, its film format ("120: 6x4.5") and the source (with auto crop's
+  confidence, or why it wasn't sure). Lettering scales with the cell so it
+  reads with the sheet fitted.
+- A footer: frame count, the roll's film formats, date, and the colour key.
 - Frames show as they currently are (negative before converting, positive
   after). **Negatives** shows every frame as its scan: an unconverted frame's
   preview is remembered when seen; a converted frame's scan is otherwise read

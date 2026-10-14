@@ -4187,6 +4187,13 @@ class ImagePreview(QWidget):
                     img_obj.fine_rotation_angle = 0
                 applied = True
                 cleared = True
+        # The film format picked in the Crop panel's list belongs to the frame
+        # (contact sheet label, what auto crop learns): spec/film-formats.md.
+        panel = self._crop_panel
+        film = (panel.active_film_format()
+                if panel is not None and hasattr(panel, "active_film_format") else None)
+        if img_obj is not None and film and not cleared and not too_small:
+            img_obj.film_format = film
         self._exit_crop_mode()
         # A confirmed frame teaches auto crop this setup's frame (only when auto
         # crop looked at this image; spec/auto-crop-learning.md).

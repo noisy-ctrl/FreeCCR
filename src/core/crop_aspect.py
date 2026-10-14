@@ -9,11 +9,19 @@ ratio onto the un-rotated image space the crop box lives in (90/270 coarse
 rotation swaps width<->height).
 """
 
+from core import film_formats
+
 # (label, key, base_ratio): base_ratio is width/height for Landscape, or None
-# for Free, or the sentinel "original" (resolve from the image's own aspect).
+# for Free, or the sentinel "original" (resolve from the image's own aspect),
+# or HEADING for a group title in the list (not selectable). Film formats come
+# first (spec/film-formats.md); print and screen ratios follow.
+HEADING = "heading"
 ASPECT_PRESETS = [
     ("Free", "free", None),
     ("Original", "original", "original"),
+    ("Film formats", "#film", HEADING),
+] + [(label, key, r) for key, label, r, _cols in film_formats.FILM_FORMATS] + [
+    ("Print and screen", "#print", HEADING),
     ("1:1", "1:1", 1.0),
     ("5:4", "5:4", 5.0 / 4.0),
     ("4:3", "4:3", 4.0 / 3.0),
@@ -32,14 +40,16 @@ ASPECT_PRESETS = [
 ]
 
 # Keys for which the Landscape/Portrait toggle is meaningless.
-ORIENTATION_FIXED_KEYS = {"free", "original", "1:1", "custom"}
+ORIENTATION_FIXED_KEYS = {"free", "original", "1:1", "6x6", "custom"}
+FILM_KEYS = {k for k, _l, _r, _c in film_formats.FILM_FORMATS}
 
 
 def preset_for_key(key):
-    """Return the (label, key, base_ratio) tuple for `key`, or None."""
+    """Return the (label, key, base_ratio) tuple for `key`, or None (also for
+    a group heading, which is not a preset)."""
     for entry in ASPECT_PRESETS:
         if entry[1] == key:
-            return entry
+            return None if entry[2] == HEADING else entry
     return None
 
 

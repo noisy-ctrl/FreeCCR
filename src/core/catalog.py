@@ -239,6 +239,9 @@ def serialize_image(img) -> dict:
         "auto_crop_rect": (list(img.auto_crop_rect)
                            if getattr(img, "auto_crop_rect", None) else None),
         "auto_crop_example": getattr(img, "auto_crop_example", None),
+        # The film format picked for the frame in the Crop panel
+        # (spec/film-formats.md). Additive: absent = not set.
+        "film_format": getattr(img, "film_format", None),
         "rotation_angle": int(img.rotation_angle),
         "fine_rotation_angle": int(img.fine_rotation_angle),
         "horizontal_mirrored": bool(img.horizontal_mirrored),
@@ -708,6 +711,7 @@ def _restore_image(file_path: str, state: dict, live_merge_sources=None,
     auto = state.get("auto_crop_rect")
     img.auto_crop_rect = tuple(auto) if auto else None
     img.auto_crop_example = state.get("auto_crop_example")
+    img.film_format = state.get("film_format")
     img.tint_balance_factor = state.get("tint_balance_factor",
                                         getattr(img, "tint_balance_factor", 1.0))
 
