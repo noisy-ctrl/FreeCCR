@@ -3042,7 +3042,10 @@ class SlidersPanel(QWidget):
             if getattr(ccr_backend, "auto_black_point", False):
                 # The raw was just reloaded above (when converted).
                 auto_res = ccr_backend.detect_frame_black_point(img, reload=False)
-                black, auto_source = ccr_backend.resolve_auto_black_point(auto_res)
+                # The roll fallback is the base the other frames measured when
+                # they were converted (spec/auto-black-point-always.md §3).
+                black, auto_source = ccr_backend.resolve_auto_black_point(
+                    auto_res, ccr_backend.recorded_roll_black(img))
                 if black is None and not self._confirm_no_anchor_convert(
                         auto_res.summary()):
                     self.set_temporary_hint(

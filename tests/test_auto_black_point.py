@@ -126,6 +126,23 @@ def test_roll_check_flags_a_whole_frame_jump():
     assert [r.confidence for i, r in enumerate(rs) if i != 2] == [HIGH] * 3
 
 
+def test_roll_check_keeps_a_frame_scanned_brighter():
+    """A frame scanned at a different exposure: its own border is the base
+    (its picture is clearer than the roll's base, but not than its own), so it
+    keeps it. Light round the film reads brighter than the picture allows, so
+    that frame is still flagged."""
+    from core.auto_black_point import clearer_share
+    rs = [_res(BASE), _res(BASE * 1.01), _res(BASE * 2.2), _res(BASE * 0.99), _res(BASE * 2.2)]
+    brighter_scan = frame(base=BASE * 2.2, seed=7)          # the whole frame 2.2x
+    leak = frame(seed=8)                                    # an ordinary picture...
+    raws = [frame(seed=1), frame(seed=2), brighter_scan, frame(seed=3), leak]
+    assert clearer_share(brighter_scan, BASE) > 0.01
+    assert clearer_share(brighter_scan, BASE * 2.2) <= 0.01
+    roll_check(rs, raws)
+    assert rs[2].confidence == HIGH and "clearer than the roll's base" in rs[2].reason
+    assert rs[4].confidence == LOW                          # ...with a 2.2x "border"
+
+
 # --------------------------------------------------------------------------- #
 # backend
 # --------------------------------------------------------------------------- #
@@ -260,3 +277,19 @@ def test_unanchored_confirm_leads_with_the_reason(monkeypatch, backend):
     panel = sp.SlidersPanel()
     assert panel._confirm_no_anchor_convert("no clear border found (none visible)") is True
     assert box.shown == 1 and "none visible" in texts[-1]
+
+
+def test_convert_current_falls_back_to_the_bases_other_frames_measured(backend, monkeypatch):
+    class Done:
+        def __init__(self, black, source="auto"):
+            self.conversion_inputs = {"bw": (black, None), "auto_bp": {"source": source}}
+    me = Done(None)
+    monkeypatch.setattr(backend, "images", [me, Done((10.0, 20.0, 30.0))])
+    assert backend.recorded_roll_black(me) is None              # one frame is not a roll
+    monkeypatch.setattr(backend, "images", [me, Done((10.0, 20.0, 30.0)),
+                                            Done((12.0, 22.0, 32.0)),
+                                            Done((99.0, 99.0, 99.0), source="roll")])
+    assert backend.recorded_roll_black(me) == pytest.approx((11.0, 21.0, 31.0))
+    low = RebateResult(None, LOW, reason="none")
+    assert backend.resolve_auto_black_point(low, backend.recorded_roll_black(me)) == \
+        ((11.0, 21.0, 31.0), "roll")
