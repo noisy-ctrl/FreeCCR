@@ -106,6 +106,10 @@ class CCRBackend:
         # area becomes its white point, guarded so a sunset keeps its colour.
         # Only in place of the default slope. Restored by MainWindow.
         self.auto_white_point: bool = True
+        # Auto tone (spec/auto-tone.md): each conversion measures a toe/shoulder
+        # for the frame; rendering applies it while this is on. Restored by
+        # MainWindow (adjust/auto_tone).
+        self.auto_tone: bool = True
         # Auto crop (spec/auto-crop.md, spec/auto-crop-buttons.md) is its own
         # action now, not part of Convert: see auto_crop_one / auto_crop_all.
         # Learn from the crops you confirm (spec/auto-crop-learning.md).
@@ -1498,6 +1502,7 @@ class CCRBackend:
                     if inherited_tbf:
                         img.tint_balance_factor = tbf
                     self._reconvert_in_place(img)       # replays bw in the new mode
+                    self.measure_auto_tone(img)         # a new base: re-measure
                     img.update_thumbnail_and_preview()
                 except Exception as e:
                     print(f"Density reprocess failed for "
@@ -2313,6 +2318,8 @@ class CCRBackend:
                         input_scale=getattr(img_obj, "profile_headroom", 1.0))
                     child_ci = {"mode": "bw", "bw": parent_ci["bw"], "fine_rot": 0,
                                 "density": bw_density, "slopes": bw_slopes}
+                    if parent_ci.get("auto_tone"):         # spec/auto-tone.md
+                        child_ci["auto_tone"] = dict(parent_ci["auto_tone"])
 
                 index = len(children) + 1
                 child = CCRImage(
@@ -2562,6 +2569,8 @@ class CCRBackend:
             parent.conversion_inputs = {"mode": "bw", "bw": bw_points,
                                         "fine_rot": 0, "density": bw_density,
                                         "slopes": bw_slopes}
+            if ci and ci.get("auto_tone"):              # spec/auto-tone.md
+                parent.conversion_inputs["auto_tone"] = dict(ci["auto_tone"])
         parent.tint_balance_factor = template.tint_balance_factor
         parent.contrast_base = template.contrast_base
         parent.temperature_base = template.temperature_base
@@ -2911,17 +2920,61 @@ class CCRBackend:
         fc = self.detect_frame_crop(img, raw=raw)
         return tuple(fc.rect) if fc is not None and fc.usable else None
 
-    def frame_highlight(self, img, raw, black):
+    _FIND = object()
+
+    def frame_highlight(self, img, raw, black, rect=_FIND):
         """The frame's brightest-area density above `black` (core.
-        auto_white_point.highlight_density), or None."""
+        auto_white_point.highlight_density), or None. `rect` is the picture
+        area when the caller has it (None = not found: the middle is used)."""
         from core.auto_white_point import highlight_density
         if raw is None or black is None:
             return None
         try:
-            return highlight_density(raw, black, self.frame_picture_rect(img, raw))
+            if rect is CCRBackend._FIND:
+                rect = self.frame_picture_rect(img, raw)
+            return highlight_density(raw, black, rect)
         except Exception as e:                  # never let it stop a convert
             print(f"Auto white point failed for {getattr(img, 'file_path', '?')}: {e}")
             return None
+
+    # --- Auto tone (spec/auto-tone.md) ---------------------------------------
+    def measure_auto_tone(self, img, rect=None):
+        """Measure the frame's toe/shoulder on its just-converted base and keep
+        it in conversion_inputs["auto_tone"] (replaced, or dropped when the
+        frame needs none). `rect` is the picture area; without one (and none
+        recorded or known) nothing is measured, since the rebate and holder
+        would read as crushed shadows and blown highlights."""
+        import numpy as np
+        from core.auto_tone import measure
+        from core.ccr_processor import (WS_B, _WS_INV_WIDTH, _master_gain_divisor,
+                                        compute_auto_gain_offset)
+        ci = getattr(img, "conversion_inputs", None)
+        if not ci:
+            return None
+        base = getattr(img, "resized_raw", None)
+        if base is None or not getattr(img, "_ws_windowed", False):
+            ci.pop("auto_tone", None)
+            return None
+        if rect is None:
+            rect = (tuple(ci["picture"]) if ci.get("picture")
+                    else self._known_picture_rect(img))
+        if rect is None:
+            return ci.get("auto_tone")        # nothing to measure in: keep what it had
+        ci.pop("auto_tone", None)
+        try:
+            gain = 1.0
+            if self.auto_gain:
+                gain = 1.0 / _master_gain_divisor(compute_auto_gain_offset(base, True))
+            d = base.astype(np.float32)
+            d -= np.float32(WS_B)
+            d *= np.float32(_WS_INV_WIDTH * gain)
+            params = measure(d, rect)
+        except Exception as e:                  # never let it stop a convert
+            print(f"Auto tone failed for {getattr(img, 'file_path', '?')}: {e}")
+            return None
+        if params:
+            ci["auto_tone"] = params
+        return params
 
     @staticmethod
     def recorded_highlight(img):
@@ -3016,6 +3069,8 @@ class CCRBackend:
                 # Ensure we start from original (unprocessed) scan data
                 if img.converted:
                     img.reload_image()
+                rect = (self.frame_picture_rect(img, img.resized_raw)
+                        if self.auto_tone else self._known_picture_rect(img))
                 processed = ccr_normalize_with_bwpoint(
                     img, self.black_point_bgr, self.white_point_bgr,
                     density=self.density_bwpoint, slopes_bgr=slopes
@@ -3037,6 +3092,9 @@ class CCRBackend:
                     "density": bool(self.density_bwpoint),
                     "slopes": slopes,
                 }
+                if rect is not None:
+                    img.conversion_inputs["picture"] = [float(v) for v in rect]
+                self.measure_auto_tone(img, rect)
                 self.maybe_auto_awb(img)
                 img.update_thumbnail_and_preview()
             except Exception as e:
@@ -3073,12 +3131,15 @@ class CCRBackend:
         consensus = roll_check([r for r, _ in kept], [raw for _, raw in kept])
         resolved = [self.resolve_auto_black_point(res, consensus) for res in results]
         highlights = [None] * total
+        rects = [self._FIND] * total
         if use_awp:
             for i, (img, res, (black, _src)) in enumerate(zip(self.images, results, resolved)):
                 if black is not None:
                     if res is None and img.converted:
                         img.reload_image()
-                    highlights[i] = self.frame_highlight(img, img.resized_raw, black)
+                    rects[i] = self.frame_picture_rect(img, img.resized_raw)
+                    highlights[i] = self.frame_highlight(img, img.resized_raw, black,
+                                                         rects[i])
                 step(1, i)                                # white points
         summary = {"high": 0, "medium": 0, "fallback": 0, "unanchored": 0,
                    "skipped": 0, "auto_wp": 0, "notes": []}
@@ -3115,6 +3176,10 @@ class CCRBackend:
                 # whose detection failed outright may still hold a conversion.
                 if res is None and img.converted:
                     img.reload_image()
+                rect = rects[i]
+                if rect is self._FIND:
+                    rect = (self.frame_picture_rect(img, img.resized_raw)
+                            if self.auto_tone else self._known_picture_rect(img))
                 processed = ccr_normalize_with_bwpoint(
                     img, black, white, density=self.density_bwpoint, slopes_bgr=slopes)
                 if processed is not None:
@@ -3131,6 +3196,9 @@ class CCRBackend:
                 }
                 if awp_rec is not None:
                     img.conversion_inputs["auto_wp"] = awp_rec
+                if rect is not None:
+                    img.conversion_inputs["picture"] = [float(v) for v in rect]
+                self.measure_auto_tone(img, rect)
                 self.maybe_auto_awb(img)
                 img.update_thumbnail_and_preview()
             except Exception as e:

@@ -3055,11 +3055,17 @@ class SlidersPanel(QWidget):
                     return
                 white = ccr_backend.auto_white_point_for(black)
             awp_rec = None
+            # The picture area, found on the fresh raw (reloaded above): the
+            # white point and auto tone measure inside it.
+            rect = (ccr_backend.frame_picture_rect(img, img.resized_raw)
+                    if (getattr(ccr_backend, "auto_tone", False)
+                        or (black is not None and ccr_backend.uses_auto_white_point()))
+                    else ccr_backend._known_picture_rect(img))
             if black is not None and ccr_backend.uses_auto_white_point():
                 # This frame's brightest area, checked against the rest of the
-                # roll (spec/auto-white-point.md). The raw is fresh: reloaded above.
+                # roll (spec/auto-white-point.md).
                 white, awp_rec = ccr_backend.auto_white_point_from(
-                    black, ccr_backend.frame_highlight(img, img.resized_raw, black),
+                    black, ccr_backend.frame_highlight(img, img.resized_raw, black, rect),
                     ccr_backend.roll_highlight_reference(img))
             # Film-stock slopes apply only in black-point-only mode — a sampled
             # white point wins, and with no black point there is nothing for a
@@ -3091,6 +3097,9 @@ class SlidersPanel(QWidget):
                     auto_res, auto_source)
             if awp_rec is not None:
                 img.conversion_inputs["auto_wp"] = awp_rec
+            if rect is not None:
+                img.conversion_inputs["picture"] = [float(v) for v in rect]
+            ccr_backend.measure_auto_tone(img, rect)
             ccr_backend.maybe_auto_awb(img)
             img.update_thumbnail_and_preview()
             mw = self.parent().parent()
