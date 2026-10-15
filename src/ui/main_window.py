@@ -271,6 +271,9 @@ class MainWindow(QMainWindow):
         # spec/auto-gain.md.
         ccr_backend.auto_gain = self._settings.value(
             "adjust/auto_gain", True, type=bool)
+        # Auto tone (spec/auto-tone.md), default on.
+        ccr_backend.auto_tone = self._settings.value(
+            "adjust/auto_tone", True, type=bool)
         # Auto white point per frame (spec/auto-white-point.md), default on.
         ccr_backend.auto_white_point = self._settings.value(
             "convert/auto_white_point", True, type=bool)
@@ -1116,6 +1119,17 @@ class MainWindow(QMainWindow):
             "Auto gain on — highlights auto-placed at the top of the window."
             if checked else
             "Auto gain off — Master Gain alone controls exposure.")
+
+    def on_auto_tone_toggled(self, checked: bool):
+        """Auto tone on / off (spec/auto-tone.md). Each converted frame keeps
+        its measured toe/shoulder either way; this only decides whether the
+        render applies it, so it re-renders without re-converting."""
+        ccr_backend.auto_tone = bool(checked)
+        self._settings.setValue("adjust/auto_tone", bool(checked))
+        self._rerender_all_for_global_mode(
+            "Auto tone on — shadows and highlights rolled into range where a "
+            "lot would clip." if checked else
+            "Auto tone off — black and white clip as converted.")
 
     # --- No-anchor convert warning (global, persistent) ------------------
     def on_auto_crop_learn_toggled(self, checked: bool):

@@ -1628,7 +1628,8 @@ def _apply_working_space_recovery(img16: np.ndarray, exposure: float,
                                   balance_r: float = 0.0, balance_g: float = 0.0,
                                   balance_b: float = 0.0,
                                   cineon_log: bool = False,
-                                  look_lut=None) -> np.ndarray:
+                                  look_lut=None,
+                                  auto_tone=None) -> np.ndarray:
     """De-window a windowed base, apply the highlight-recovery controls UN-clamped
     (so headroom can be pulled back below white), then clamp to the display window
     and return a normal full-range [0,65535] positive for the look chain. This
@@ -1713,6 +1714,13 @@ def _apply_working_space_recovery(img16: np.ndarray, exposure: float,
     if exposure != 0.0:
         white_val = 1.0 - np.clip(exposure, -200.0, 200.0) / 300.0
         d *= np.float32(1.0 / white_val)        # un-clamped: recovers overshoot
+    # Auto tone (spec/auto-tone.md): the frame's own toe/shoulder, measured at
+    # conversion, right before the clamp it exists to soften - after every
+    # gain, so a user's Master Gain / White Point move pushes content into or
+    # out of a fixed curve, like exposing onto paper.
+    if auto_tone:
+        from core.auto_tone import apply as _auto_tone_apply
+        _auto_tone_apply(d, auto_tone)
     np.clip(d, 0.0, 1.0, out=d)                  # window clamp: enter display range
     d *= np.float32(65535.0)
     return d.astype(np.uint16)
@@ -3300,6 +3308,9 @@ def adjust_image(
     # Highlights/Shadows range + keep-endpoint shape
     # (spec/highlights-shadows-range.md); None/default = today's curve.
     tone_shape=None,
+    # Auto tone (spec/auto-tone.md): the frame's measured toe/shoulder, applied
+    # in the windowed pre-stage. Appended last for the positional reason above.
+    auto_tone=None,
 ) -> np.ndarray:
     """
     Apply temperature, tint, exposure, brightness, blackpoint, whitepoint, highlights, shadows,
@@ -3320,7 +3331,7 @@ def adjust_image(
                                               ch_g_shift, ch_g_gain, ch_g_blackpoint,
                                               ch_b_shift, ch_b_gain, ch_b_blackpoint,
                                               balance_r, balance_g, balance_b,
-                                              cineon_log, look_lut)
+                                              cineon_log, look_lut, auto_tone)
         look_lut = None      # decoded inside the recovery, in Cineon's slot
         exposure = 0.0       # consumed by the recovery pre-stage
         whitepoint = 0.0     # White Point is the headroom-recovery control here
@@ -3795,6 +3806,8 @@ def adjust_image_opencl(
     look_lut=None,
     # Highlights/Shadows shape — appended last, see adjust_image.
     tone_shape=None,
+    # Auto tone — appended last, see adjust_image.
+    auto_tone=None,
 ) -> np.ndarray:
     """
     GPU-accelerated (OpenCL) version of adjust_image.
@@ -3815,7 +3828,7 @@ def adjust_image_opencl(
                                               ch_g_shift, ch_g_gain, ch_g_blackpoint,
                                               ch_b_shift, ch_b_gain, ch_b_blackpoint,
                                               balance_r, balance_g, balance_b,
-                                              cineon_log, look_lut)
+                                              cineon_log, look_lut, auto_tone)
         look_lut = None
         exposure = 0.0
         whitepoint = 0.0

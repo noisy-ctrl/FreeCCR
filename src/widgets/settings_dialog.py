@@ -112,6 +112,13 @@ class SettingsDialog(QDialog):
             "of the in-range highlights are set to 99.8% of full. Pixels outside "
             "the sampled clear/dense film range are ignored. Turn off to control "
             "exposure with Master Gain alone."))
+        self._cb_auto_tone = QCheckBox("Auto tone (keep shadow and highlight detail)")
+        g.addWidget(self._cb_auto_tone)
+        g.addWidget(self._muted(
+            "When a lot of a frame would go to pure black or pure white, roll "
+            "the shadows and highlights into the range instead: a gentle toe "
+            "and shoulder measured for each frame when it is converted. A "
+            "frame that loses little is left as it is."))
         lay.addWidget(grp)
 
         grp_conv = QGroupBox("Conversion")
@@ -604,6 +611,7 @@ class SettingsDialog(QDialog):
                          getattr(ccr_backend, "rgb_merge_replace", False)),
                         (self._cb_density, ccr_backend.density_bwpoint),
                         (self._cb_auto_gain, ccr_backend.auto_gain),
+                        (self._cb_auto_tone, getattr(ccr_backend, "auto_tone", True)),
                         (self._cb_auto_wp,
                          getattr(ccr_backend, "auto_white_point", True)),
                         (self._cb_warn_no_anchor,
@@ -681,6 +689,9 @@ class SettingsDialog(QDialog):
             self._mw.on_density_bwpoint_toggled(bool(self._cb_density.isChecked()))
         if bool(self._cb_auto_gain.isChecked()) != bool(ccr_backend.auto_gain):
             self._mw.on_auto_gain_toggled(bool(self._cb_auto_gain.isChecked()))
+        if (bool(self._cb_auto_tone.isChecked())
+                != bool(getattr(ccr_backend, "auto_tone", True))):
+            self._mw.on_auto_tone_toggled(bool(self._cb_auto_tone.isChecked()))
         if (bool(self._cb_auto_wp.isChecked())
                 != bool(getattr(ccr_backend, "auto_white_point", True))):
             self._mw.on_auto_white_point_toggled(bool(self._cb_auto_wp.isChecked()))

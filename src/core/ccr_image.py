@@ -2013,6 +2013,13 @@ class CCRImage:
             ag = _cached_auto_gain(self, base_in, ws, s if xt_on else None,
                                    processed=image)
         eb_eff = 0.0 if (auto_on or look is not None) else eb   # no double-apply
+        # Auto tone (spec/auto-tone.md): the toe/shoulder measured for this
+        # frame at conversion, applied in the windowed pre-stage. A look owns
+        # its own tone, like Auto Gain.
+        at = None
+        if (getattr(ccr_backend, "auto_tone", True) and ws and self.converted
+                and look is None):
+            at = (getattr(self, "conversion_inputs", None) or {}).get("auto_tone")
         if look is not None:
             # The negative-look brightness baseline (bb = -8, a darkening power
             # curve) is part of the DEFAULT render; the look already is the
@@ -2024,7 +2031,7 @@ class CCRImage:
             # has to be de-windowed + window-clamped to a normal full-range image
             # before display/export (the base itself is not directly renderable).
             if ws:
-                image = _apply_working_space_recovery(image, 0.0)
+                image = _apply_working_space_recovery(image, 0.0, auto_tone=at)
             # Black & White still has to map the image to a single luminance channel.
             return self._to_grayscale(image) if profile == "bw" else image
         adjusted = adjust_image_opencl(image,
@@ -2093,7 +2100,8 @@ class CCRImage:
                      look_lut=look,
                      # Windowed working-space base → de-window + Gain/Exposure
                      # recovery happens inside the adjustment call.
-                     ws_windowed=ws)
+                     ws_windowed=ws,
+                     auto_tone=at)
         # Gamma slider: a center-point tone curve driven through the SAME
         # monotone-cubic path as the Curves editor (a single 'rgb' point moving
         # diagonally from center). Applied before the user's manual curves so the
