@@ -115,6 +115,28 @@ def scan_leader():
     return _to_raw(v), (x0, y0, x0 + fw, y0 + fh)
 
 
+def scan_holder_35mm():
+    """One 35mm frame in a holder, like a trichrome copy-stand scan: sprocket
+    holes along the top, the bottom row half hidden by the holder, a picture
+    that is thin (near base) along its bottom, and only a few px of rebate
+    between the picture and a blurred holder edge on the right."""
+    v = np.full((H, W), HOLDER, np.float32)
+    v[70:726, 90:1040] = BASE                            # the film the holder shows
+    for x in range(140, 1040, 117):
+        v[72:90, x:x + 46] = 1.0                         # top holes, whole
+        v[716:726, x:x + 46] = 1.0                       # bottom holes, cut off at 726
+    fy0, fy1 = 100, 700
+    fw = int(round((fy1 - fy0) * 1.51))
+    fx1 = 1031                                           # 9 px of rebate, then holder
+    fx0 = fx1 - fw
+    pic = _picture(fy1 - fy0, fw, seed=21)
+    pic[-90:] = BASE * 0.88                              # thin along the bottom
+    v[fy0:fy1, fx0:fx1] = pic
+    for i in range(14):                                  # light spills past the holder's
+        v[70:726, 1040 + i] = BASE * 10 ** (-0.22 * (i + 1))   # edge: a soft ramp
+    return _to_raw(v, blur=1.6), (fx0, fy0, fx1, fy1)
+
+
 def _inside(det_rect, truth, tol):
     """det inside truth, missing at most `tol` (fraction) on each side."""
     x0, y0, x1, y1 = det_rect
@@ -150,6 +172,39 @@ def test_strip_with_an_invisible_gate_edge():
     fc = detect_frame(raw)
     assert fc.usable and fc.strip
     assert _inside(fc.debug["deskewed_rect"], truth, 0.03), (fc.debug["deskewed_rect"], truth)
+
+
+def test_35mm_in_a_holder_with_half_hidden_holes_and_a_narrow_rebate():
+    """The bottom sprocket row is half hidden by the holder: it must still count
+    as a sprocket row, so the bottom gate is found between the rows instead of
+    the box running down to the holder. The few px of rebate before the holder
+    on the right are peeled off. spec/auto-crop.md, 35mm in a holder."""
+    from core.auto_crop import sprocket_bands
+    raw, truth = scan_holder_35mm()
+    fc = detect_frame(raw)
+    L = cv2.GaussianBlur(log_luminance(raw), (0, 0), 1.0)
+    assert sprocket_bands(L, float(L.max()))[1] is not None
+    assert fc.usable and fc.strip and not fc.soft, (fc.soft, fc.reason)
+    assert _inside(fc.debug["deskewed_rect"], truth, 0.02), (fc.debug["deskewed_rect"], truth)
+
+
+def test_peel_sees_a_holder_whose_edge_is_a_slow_ramp():
+    """Measured off a real scan's right edge (x = 1030..1061): picture, 8 px of
+    rebate, then a holder edge that takes ~12 px to go dark. The search puts the
+    edge at the top of the ramp (1047), where the nearest outside samples are
+    only half-way down; the darkest of them still shows the holder, so the
+    rebate is peeled off down to the picture (~1038)."""
+    from core.auto_crop import _peel
+    prof = [-0.84, -0.84, -0.84, -0.85, -0.86, -0.86, -0.82, -0.74, -0.65, -0.61,
+            -0.6, -0.6, -0.6, -0.6, -0.61, -0.63, -0.67, -0.72, -0.79, -0.89,
+            -1.02, -1.19, -1.43, -1.74, -2.07, -2.35, -2.55, -2.69, -2.77, -2.83,
+            -2.87, -2.91]
+    L = np.full((400, 1100), -0.85, np.float32)
+    L[:, 1030:1030 + len(prof)] = prof
+    L[:, 1030 + len(prof):] = -2.95
+    rect, moved, soft, _ = _peel(L, (100, 50, 1047, 350))
+    assert not soft["R"] and 7 <= moved["R"] <= 12, moved
+    assert rect[2] <= 1039
 
 
 def test_thin_strip_frame_is_placed_by_the_gap():

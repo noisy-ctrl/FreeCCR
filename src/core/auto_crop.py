@@ -43,6 +43,8 @@ GAP_PENALTY = 0.6         # strip: inter-frame gap inside a side edge
 # Gaps between frames place a strip frame's side edges outright (bare, flat
 # film base over the picture rows). Gap-to-gap width measured 1.48-1.54 x height
 # on 24 strip scans from two cameras.
+HOLE_MIN_ROWS = 6         # rows of sprocket holes for a band: a holder can hide
+                          # half of a row of holes, leaving ~10 of ~17 rows
 STRIP_RATIO = 1.51
 STRIP_W_TOL = 0.03        # two gaps this close to one frame width apart = the frame
 GAP_LEVEL = 0.02          # log10 from the rebate's base level
@@ -263,7 +265,7 @@ def sprocket_bands(L, clip):
 
     def find(rows):
         idx = [y for y in rows if hole_row[y]]
-        if len(idx) < 12:
+        if len(idx) < HOLE_MIN_ROWS:
             return None
         lo, hi = min(idx), max(idx) + 1
         return (lo, hi) if _periodic_holes(bright[lo:hi].mean(axis=0)) else None
@@ -566,7 +568,9 @@ def _peel(L, rect, max_frac=0.05, flat=0.05, step=0.12):
         dim = (x1 - x0) if side in ("L", "R") else (y1 - y0)
         reach = max(12, int(dim * max_frac))
         p = _normal_profile(L, rect, side, reach)
-        out = float(np.median(p[:4]))
+        # The darkest of the outside samples: a holder edge is blurred over
+        # several px, so the nearest ones can still be half-way up the ramp.
+        out = float(np.min(p[:4]))
         k = 6
         while k + 2 < len(p) and abs(p[k + 2] - p[k]) > 0.04:
             k += 1
