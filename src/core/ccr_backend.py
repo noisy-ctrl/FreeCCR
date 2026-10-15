@@ -97,8 +97,10 @@ class CCRBackend:
         # unanchored. Global, persisted by MainWindow. See spec/no-anchor-convert.md.
         self.warn_no_anchor_convert: bool = True
         # Auto black point (spec/auto-black-point.md): measure each frame's film
-        # base from its own clear border at Convert time. Restored by the panel.
-        self.auto_black_point: bool = False
+        # base from its own clear border at Convert time. Always on: there is no
+        # switch in the UI any more (spec/auto-black-point-always.md). Kept as an
+        # attribute so scripts and tests can still run the single-anchor loop.
+        self.auto_black_point: bool = True
         self.last_auto_bp_summary = None
         # Auto crop (spec/auto-crop.md, spec/auto-crop-buttons.md) is its own
         # action now, not part of Convert: see auto_crop_one / auto_crop_all.
@@ -2944,24 +2946,29 @@ class CCRBackend:
             if progress_callback:
                 progress_callback(i + 1, 2 * total)      # detection = first half
         consensus = roll_check([r for r in results if r is not None])
-        summary = {"high": 0, "medium": 0, "fallback": 0, "skipped": 0, "notes": []}
+        summary = {"high": 0, "medium": 0, "fallback": 0, "unanchored": 0,
+                   "skipped": 0, "notes": []}
         for i, (img, res) in enumerate(zip(self.images, results)):
             try:
                 black, source = self.resolve_auto_black_point(res, consensus)
                 if black is None:
-                    summary["skipped"] += 1
+                    # Nothing on this frame or the roll to anchor to, and no
+                    # sampled Black Point: convert it with the fixed-constant
+                    # density invert rather than leave it out, and say which
+                    # (spec/auto-black-point-always.md §3).
+                    summary["unanchored"] += 1
                     summary["notes"].append(
                         f"{os.path.basename(getattr(img, 'file_path', '') or str(i))}: "
                         f"{res.reason if res else 'detection failed'}")
-                    continue
-                if source == "auto":
+                elif source == "auto":
                     summary[res.confidence] += 1
                 else:
                     summary["fallback"] += 1
                     if res is not None and res.reason:
                         summary["notes"].append(res.reason)
                 white = self.auto_white_point_for(black)
-                slopes = self.film_stock_slopes if white is None else None
+                slopes = (self.film_stock_slopes
+                          if (white is None and black is not None) else None)
                 # The detection pass already reloaded the raw; only a frame
                 # whose detection failed outright may still hold a conversion.
                 if res is None and img.converted:
@@ -2973,7 +2980,8 @@ class CCRBackend:
                 img.converted = True
                 img.conversion_inputs = {
                     "mode": "bw",
-                    "bw": (tuple(black), tuple(white) if white is not None else None),
+                    "bw": (tuple(black) if black is not None else None,
+                           tuple(white) if white is not None else None),
                     "fine_rot": img.fine_rotation_angle,
                     "density": bool(self.density_bwpoint),
                     "slopes": slopes,

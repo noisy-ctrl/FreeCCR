@@ -11,6 +11,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+sys.path.insert(0, os.path.dirname(__file__))
 
 from core.auto_black_point import (find_rebate, roll_check, RebateResult,  # noqa: E402
                                    HIGH, MEDIUM, LOW)
@@ -197,35 +198,62 @@ def test_convert_all_uses_each_frames_own_base(backend, monkeypatch):
     assert s["high"] == 3 and s["fallback"] == 1 and s["skipped"] == 0
 
 
-def test_convert_all_skips_a_frame_with_no_border_and_no_fallback(backend, monkeypatch):
+def test_convert_all_converts_a_frame_with_nothing_to_anchor_to_unanchored(backend, monkeypatch):
+    """spec/auto-black-point-always.md §3: no border, no sampled Black Point and
+    no roll to fall back on -> the fixed density invert, named in the summary
+    (it used to be left out of the batch)."""
     import core.ccr_backend as mod
     imgs = [_Img(frame(edges=(), seed=5))]
-    monkeypatch.setattr(mod, "ccr_normalize_with_bwpoint",
-                        lambda img, b, w, density=False, slopes_bgr=None: img.resized_raw)
+    calls = []
+
+    def fake(img, b, w, density=False, slopes_bgr=None):
+        calls.append((b, w, slopes_bgr))
+        return img.resized_raw
+
+    monkeypatch.setattr(mod, "ccr_normalize_with_bwpoint", fake)
     monkeypatch.setattr(backend, "images", imgs)
-    monkeypatch.setattr(backend, "auto_black_point", True)
+    monkeypatch.setattr(backend, "film_stock_slopes", (1.0, 1.0, 1.0))
     backend.apply_bwpoint_to_all_images()
-    assert imgs[0].converted is False
-    assert backend.last_auto_bp_summary["skipped"] == 1
+    assert calls == [(None, None, None)]          # no anchor: no slopes either
+    assert imgs[0].converted is True
+    assert imgs[0].conversion_inputs["bw"] == (None, None)
+    assert imgs[0].conversion_inputs["auto_bp"]["source"] == "none"
+    s = backend.last_auto_bp_summary
+    assert s["unanchored"] == 1 and s["skipped"] == 0 and len(s["notes"]) == 1
 
 
 # --------------------------------------------------------------------------- #
 # panel
 # --------------------------------------------------------------------------- #
 
-def test_panel_checkbox_label_and_warning(monkeypatch, backend):
+def test_auto_black_point_is_always_on_with_no_tickbox(monkeypatch, backend):
+    """spec/auto-black-point-always.md: no tickbox, the old setting is dropped,
+    and the label says each frame is measured."""
     from PySide6.QtWidgets import QApplication
     QApplication.instance() or QApplication([])
     from widgets.sliders_panel import SlidersPanel
+    monkeypatch.setattr(backend, "auto_black_point", False)    # even if a script turned it off
     panel = SlidersPanel()
-    saved = {}
-    monkeypatch.setattr(panel._settings, "setValue", lambda k, v: saved.__setitem__(k, v))
-    panel.auto_bp_checkbox.setChecked(False)
-    panel.auto_bp_checkbox.setChecked(True)
+    assert not hasattr(panel, "auto_bp_checkbox")
     assert backend.auto_black_point is True
-    assert saved["convert/auto_black_point"] is True
+    assert not panel._settings.contains("convert/auto_black_point")
+    panel._update_bwp_mode_label()
     assert "auto black point per frame" in panel.bwp_mode_label.text()
-    # no sampled black point, but auto is on: no "convert unanchored?" prompt
-    assert panel._confirm_no_anchor_convert() is True
-    panel.auto_bp_checkbox.setChecked(False)
-    assert backend.auto_black_point is False
+    monkeypatch.setattr(backend, "black_point_bgr", (9.0, 8.0, 7.0))
+    panel._update_bwp_mode_label()
+    assert "used for frames whose clear border" in panel.bwp_mode_label.toolTip()
+
+
+def test_unanchored_confirm_leads_with_the_reason(monkeypatch, backend):
+    from PySide6.QtWidgets import QApplication
+    QApplication.instance() or QApplication([])
+    import widgets.sliders_panel as sp
+    import test_no_anchor_convert_ui as tui
+    box = tui._install_fake_box(monkeypatch)
+    texts = []
+    monkeypatch.setattr(tui._FakeBox, "setText", lambda self, t: texts.append(t))
+    box.answer_proceed = True
+    monkeypatch.setattr(backend, "warn_no_anchor_convert", True)
+    panel = sp.SlidersPanel()
+    assert panel._confirm_no_anchor_convert("no clear border found (none visible)") is True
+    assert box.shown == 1 and "none visible" in texts[-1]

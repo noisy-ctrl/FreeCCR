@@ -63,10 +63,10 @@ def test_default_only_combo_and_gating(panel):
     assert panel.film_stock_combo.isEnabled()          # selectable pre-sampling
     assert not panel.save_film_stock_btn.isEnabled()   # needs BOTH points
     assert not panel.delete_film_stock_btn.isEnabled() # Default not deletable
-    # With no black point the label now names the no-anchor state rather than
-    # showing nothing — converting unanchored is allowed (fixed-constant density
-    # invert). See spec/no-anchor-convert.md.
-    assert "density invert" in panel.bwp_mode_label.text().lower()
+    # Auto black point is always on (spec/auto-black-point-always.md): with
+    # nothing sampled each frame is still measured, with the default slope.
+    assert panel.bwp_mode_label.text() == \
+        "Anchor source: auto black point per frame, default slope"
 
 
 def test_black_only_states_and_label(panel):
@@ -77,14 +77,14 @@ def test_black_only_states_and_label(panel):
     # Name last: the label elides from the right (it sits in a fixed-width
     # panel), so the mode has to come first or a long stock name eats it.
     assert panel.bwp_mode_label.text() == \
-        'Anchor source: film stock (black point only) — Portra 400'
+        'Anchor source: auto black point per frame, film stock — Portra 400'
     assert not panel.save_film_stock_btn.isEnabled()
     assert panel.delete_film_stock_btn.isEnabled()
     # Back to Default: backend cleared, label reverts, delete gated off.
     panel.film_stock_combo.setCurrentIndex(0)
     assert ccr_backend.film_stock_slopes is None
     assert panel.bwp_mode_label.text() == \
-        "Anchor source: default slope (black point only)"
+        "Anchor source: auto black point per frame, default slope"
     assert not panel.delete_film_stock_btn.isEnabled()
 
 
@@ -93,7 +93,8 @@ def test_white_point_overrides_and_disables_selector(panel):
     ccr_backend.set_black_point(BASE_BGR)
     ccr_backend.set_white_point(WHITE_BGR)
     panel._update_bwp_mode_label()
-    assert panel.bwp_mode_label.text() == "Anchor source: white point (two-point)"
+    assert panel.bwp_mode_label.text() == \
+        "Anchor source: auto black point per frame, white point (scaled per frame)"
     assert not panel.film_stock_combo.isEnabled()
     assert panel.save_film_stock_btn.isEnabled()       # both points → can save
     assert not panel.delete_film_stock_btn.isEnabled()
@@ -169,7 +170,7 @@ def test_delete_falls_back_to_default(panel, monkeypatch):
     assert decode_film_stocks(
         panel._settings.value("convert/film_stocks", "", type=str)) == []
     assert panel.bwp_mode_label.text() == \
-        "Anchor source: default slope (black point only)"
+        "Anchor source: auto black point per frame, default slope"
 
 
 if __name__ == "__main__":
