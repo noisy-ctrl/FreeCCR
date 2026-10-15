@@ -138,6 +138,8 @@ def backend(monkeypatch):
     monkeypatch.setattr(ccr_backend, "film_stock_slopes", None)
     monkeypatch.setattr(ccr_backend, "density_bwpoint", False)
     monkeypatch.setattr(ccr_backend, "auto_awb", False, raising=False)
+    # These are about the black point: spec/auto-white-point.md has its own tests.
+    monkeypatch.setattr(ccr_backend, "auto_white_point", False, raising=False)
     return ccr_backend
 
 
@@ -238,7 +240,8 @@ def test_auto_black_point_is_always_on_with_no_tickbox(monkeypatch, backend):
     assert backend.auto_black_point is True
     assert not panel._settings.contains("convert/auto_black_point")
     panel._update_bwp_mode_label()
-    assert "auto black point per frame" in panel.bwp_mode_label.text()
+    assert panel.bwp_mode_label.text().startswith("Anchor source: auto black")
+    assert "per frame" in panel.bwp_mode_label.text()
     monkeypatch.setattr(backend, "black_point_bgr", (9.0, 8.0, 7.0))
     panel._update_bwp_mode_label()
     assert "used for frames whose clear border" in panel.bwp_mode_label.toolTip()

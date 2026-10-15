@@ -66,7 +66,7 @@ def test_default_only_combo_and_gating(panel):
     # Auto black point is always on (spec/auto-black-point-always.md): with
     # nothing sampled each frame is still measured, with the default slope.
     assert panel.bwp_mode_label.text() == \
-        "Anchor source: auto black point per frame, default slope"
+        "Anchor source: auto black + white point per frame"
 
 
 def test_black_only_states_and_label(panel):
@@ -84,7 +84,7 @@ def test_black_only_states_and_label(panel):
     panel.film_stock_combo.setCurrentIndex(0)
     assert ccr_backend.film_stock_slopes is None
     assert panel.bwp_mode_label.text() == \
-        "Anchor source: auto black point per frame, default slope"
+        "Anchor source: auto black + white point per frame"
     assert not panel.delete_film_stock_btn.isEnabled()
 
 
@@ -170,7 +170,7 @@ def test_delete_falls_back_to_default(panel, monkeypatch):
     assert decode_film_stocks(
         panel._settings.value("convert/film_stocks", "", type=str)) == []
     assert panel.bwp_mode_label.text() == \
-        "Anchor source: auto black point per frame, default slope"
+        "Anchor source: auto black + white point per frame"
 
 
 if __name__ == "__main__":

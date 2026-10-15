@@ -2736,9 +2736,12 @@ class SlidersPanel(QWidget):
         wp_set = ccr_backend.white_point_bgr is not None
         stock = ccr_backend.film_stock_name
         if getattr(ccr_backend, "auto_black_point", False):
-            slope = ("white point (scaled per frame)" if (wp_set and bp_set)
-                     else f"film stock — {stock}" if stock else "default slope")
-            text = f"Anchor source: auto black point per frame, {slope}"
+            if not wp_set and not stock and getattr(ccr_backend, "auto_white_point", False):
+                text = "Anchor source: auto black + white point per frame"
+            else:
+                slope = ("white point (scaled per frame)" if (wp_set and bp_set)
+                         else f"film stock — {stock}" if stock else "default slope")
+                text = f"Anchor source: auto black point per frame, {slope}"
         elif not bp_set:
             # No anchor sampled: converting is still allowed, and runs the
             # fixed-constant density inversion (spec/no-anchor-convert.md). Say so
@@ -3048,6 +3051,13 @@ class SlidersPanel(QWidget):
                         duration=8000)
                     return
                 white = ccr_backend.auto_white_point_for(black)
+            awp_rec = None
+            if black is not None and ccr_backend.uses_auto_white_point():
+                # This frame's brightest area, checked against the rest of the
+                # roll (spec/auto-white-point.md). The raw is fresh: reloaded above.
+                white, awp_rec = ccr_backend.auto_white_point_from(
+                    black, ccr_backend.frame_highlight(img, img.resized_raw, black),
+                    ccr_backend.roll_highlight_reference(img))
             # Film-stock slopes apply only in black-point-only mode — a sampled
             # white point wins, and with no black point there is nothing for a
             # slope to act on (spec/film-stock-slopes.md).
@@ -3076,6 +3086,8 @@ class SlidersPanel(QWidget):
             if auto_source is not None:
                 img.conversion_inputs["auto_bp"] = ccr_backend.auto_bp_record(
                     auto_res, auto_source)
+            if awp_rec is not None:
+                img.conversion_inputs["auto_wp"] = awp_rec
             ccr_backend.maybe_auto_awb(img)
             img.update_thumbnail_and_preview()
             mw = self.parent().parent()
@@ -3084,9 +3096,13 @@ class SlidersPanel(QWidget):
             mw.image_preview._update_unconvert_action_state()
             ccr_backend.save_catalog()
             if auto_source == "auto":
+                wp_note = ""
+                if awp_rec is not None:
+                    wp_note = (" and its brightest area as white"
+                               + (" (checked against the roll)" if awp_rec["ref"] == "roll" else ""))
                 self.set_temporary_hint(
                     f"Converted with auto black point: {auto_res.summary()}, "
-                    f"{auto_res.confidence} confidence (outlined).", duration=6000)
+                    f"{auto_res.confidence} confidence (outlined){wp_note}.", duration=6000)
                 if hasattr(mw.image_preview, "flash_auto_bp_strip"):
                     mw.image_preview.flash_auto_bp_strip(auto_res.rect)
             elif auto_source == "none":
@@ -3145,6 +3161,8 @@ class SlidersPanel(QWidget):
                    f"{summ['high']} high, {summ['medium']} medium confidence")
             if summ["fallback"]:
                 msg += f"; {summ['fallback']} fell back"
+            if summ.get("auto_wp"):
+                msg += f"; auto white point on {summ['auto_wp']}"
             if summ.get("unanchored"):
                 msg += (f"; {summ['unanchored']} had no film base to measure "
                         "(fixed density invert)")
