@@ -3687,6 +3687,7 @@ class ImagePreview(QWidget):
         self._pending_crop_local = QRectF(x1 * w, y1 * h, (x2 - x1) * w, (y2 - y1) * h)
         self._pending_crop_angle = float(res.angle)
         self._crop_box_is_seed = False
+        self.match_crop_orientation_to_box()
         self._draw_crop_overlay()
         self._sync_crop_panel()
         return res
@@ -3727,6 +3728,15 @@ class ImagePreview(QWidget):
         self._draw_crop_overlay()
         self._sync_crop_panel()
 
+    def match_crop_orientation_to_box(self):
+        """Point the panel's Landscape/Portrait toggle the way the pending box
+        already points on screen, without reshaping it. True if it changed."""
+        panel, sel = self._crop_panel, self._pending_crop_local
+        match = getattr(panel, "match_box_orientation", None)
+        if match is None or sel is None or sel.width() < 2 or sel.height() < 2:
+            return False
+        return bool(match(sel.width(), sel.height(), self.current_rotation))
+
     def seed_crop_ratio_on_entry(self):
         """On entering crop with a remembered ratio: seed a centered ratio box
         when there is no user crop yet (None, or a fold-seeded full-frame box).
@@ -3737,12 +3747,14 @@ class ImagePreview(QWidget):
         has_user_box = (sel is not None and sel.width() >= 2 and sel.height() >= 2
                         and not self._crop_box_is_seed)
         if has_user_box:
+            self.match_crop_orientation_to_box()
             return
         self.reapply_crop_ratio(seed_if_empty=True)
 
     # ---- Crop drag interaction: new rect + 10 control handles -----------
-    # 4 corners (resize), 4 edge midpoints (move that edge), a rotate knob
-    # above the top edge, and a center handle (move the whole box).
+    # 4 corners (resize), 4 edges (move that edge; grabbed anywhere along it),
+    # a rotate knob above the top edge, and the inside of the box (move the
+    # whole box; the centre glyph just marks it). Outside draws a new box.
 
     HANDLE_VIEW_PX = 14.0          # hit tolerance, in view pixels
     HANDLE_DRAW_PX = 9.0           # handle glyph size, in view pixels
@@ -3763,7 +3775,14 @@ class ImagePreview(QWidget):
         return t
 
     def _crop_handle_at(self, p):
-        """Return the handle name under local image point p, or None."""
+        """Return the handle name under local image point p, or None.
+
+        Corners and edges are grabbed anywhere near them: a corner within the
+        tolerance of its point, an edge anywhere along its length (not only at
+        its midpoint glyph). Anywhere else INSIDE the box moves it; only
+        outside the box draws a new one. Inside the box the grab zones are
+        held to the outer quarter of each dimension, so a small box can still
+        be moved from its middle. spec/crop-tool-handling.md."""
         sel = self._pending_crop_local
         if sel is None or sel.width() < 2 or sel.height() < 2:
             return None
@@ -3771,30 +3790,41 @@ class ImagePreview(QWidget):
         unrot = QTransform()
         unrot.rotate(-self._pending_crop_angle)
         q = unrot.map(QPointF(p.x() - c.x(), p.y() - c.y()))
+        x, y = q.x(), q.y()
         hw, hh = sel.width() / 2.0, sel.height() / 2.0
         tol = self.HANDLE_VIEW_PX / self._view_scale()
         rot_off = self.ROTATE_HANDLE_VIEW_PX / self._view_scale()
-        # Corners first (most specific), then the rotate knob, edges, center.
-        handles = [
-            ("corner-tl", -hw, -hh), ("corner-tr", hw, -hh),
-            ("corner-bl", -hw, hh), ("corner-br", hw, hh),
-            ("rotate", 0.0, -hh - rot_off),
-            ("edge-t", 0.0, -hh), ("edge-b", 0.0, hh),
-            ("edge-l", -hw, 0.0), ("edge-r", hw, 0.0),
-            ("move", 0.0, 0.0),
-        ]
-        # Pick the NEAREST handle among all within tolerance — on small boxes
-        # the zones overlap, and first-match priority would shadow the center
-        # move handle behind corners/edges.
-        best = None
-        best_d2 = None
-        for name, hx, hy in handles:
-            dx, dy = q.x() - hx, q.y() - hy
-            if abs(dx) <= tol and abs(dy) <= tol:
-                d2 = dx * dx + dy * dy
-                if best_d2 is None or d2 < best_d2:
-                    best, best_d2 = name, d2
-        return best
+        if abs(x) <= tol and abs(y + hh + rot_off) <= tol:
+            return "rotate"
+        tin_x, tin_y = min(tol, hw * 0.5), min(tol, hh * 0.5)
+
+        def near(v, edge, out, tin):
+            d = (v - edge) * out          # > 0 outside the box, < 0 inside
+            return -tin <= d <= tol
+
+        left, right = near(x, -hw, -1, tin_x), near(x, hw, 1, tin_x)
+        top, bottom = near(y, -hh, -1, tin_y), near(y, hh, 1, tin_y)
+        if top and left:
+            return "corner-tl"
+        if top and right:
+            return "corner-tr"
+        if bottom and left:
+            return "corner-bl"
+        if bottom and right:
+            return "corner-br"
+        if abs(y) <= hh + tol:
+            if left:
+                return "edge-l"
+            if right:
+                return "edge-r"
+        if abs(x) <= hw + tol:
+            if top:
+                return "edge-t"
+            if bottom:
+                return "edge-b"
+        if abs(x) <= hw and abs(y) <= hh:
+            return "move"
+        return None
 
     # Base orientation (deg) of each handle's resize axis on an un-rotated box
     _HANDLE_BASE_ANGLE = {
@@ -3849,6 +3879,11 @@ class ImagePreview(QWidget):
         }
         # Any interaction makes the box user-owned (no longer an auto-seed).
         self._crop_box_is_seed = False
+        if mode.startswith(("corner-", "edge-")) and sel is not None:
+            # Resize in the orientation the box already has, not the one the
+            # panel remembered from the last crop — that mismatch is what made
+            # a landscape box jump to portrait on the first drag.
+            self.match_crop_orientation_to_box()
         if mode != "new":
             self.view.setCursor(self._cursor_for_handle(mode))
         self.update_crop_drag(scene_pos)
