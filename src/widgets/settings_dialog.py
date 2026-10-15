@@ -117,6 +117,14 @@ class SettingsDialog(QDialog):
         grp_conv = QGroupBox("Conversion")
         gc = QVBoxLayout(grp_conv)
         gc.setSpacing(theme.GAP_ROW)
+        self._cb_auto_wp = QCheckBox("Auto white point (per frame)")
+        gc.addWidget(self._cb_auto_wp)
+        gc.addWidget(self._muted(
+            "Convert makes each frame's brightest area its white point, as "
+            "sampling the White Point on a near-clipping highlight does, and "
+            "checks it against the rest of the roll so a sunset or a blue sky "
+            "keeps its colour. Used only when no White Point is sampled and no "
+            "film stock is chosen."))
         self._cb_warn_no_anchor = QCheckBox(
             "Warn when converting without a black point")
         gc.addWidget(self._cb_warn_no_anchor)
@@ -596,6 +604,8 @@ class SettingsDialog(QDialog):
                          getattr(ccr_backend, "rgb_merge_replace", False)),
                         (self._cb_density, ccr_backend.density_bwpoint),
                         (self._cb_auto_gain, ccr_backend.auto_gain),
+                        (self._cb_auto_wp,
+                         getattr(ccr_backend, "auto_white_point", True)),
                         (self._cb_warn_no_anchor,
                          getattr(ccr_backend, "warn_no_anchor_convert", True)),
                         (self._cb_crop_learn,
@@ -671,6 +681,9 @@ class SettingsDialog(QDialog):
             self._mw.on_density_bwpoint_toggled(bool(self._cb_density.isChecked()))
         if bool(self._cb_auto_gain.isChecked()) != bool(ccr_backend.auto_gain):
             self._mw.on_auto_gain_toggled(bool(self._cb_auto_gain.isChecked()))
+        if (bool(self._cb_auto_wp.isChecked())
+                != bool(getattr(ccr_backend, "auto_white_point", True))):
+            self._mw.on_auto_white_point_toggled(bool(self._cb_auto_wp.isChecked()))
         if (bool(self._cb_warn_no_anchor.isChecked())
                 != bool(getattr(ccr_backend, "warn_no_anchor_convert", True))):
             self._mw.on_warn_no_anchor_toggled(

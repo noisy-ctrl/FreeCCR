@@ -271,6 +271,10 @@ class MainWindow(QMainWindow):
         # spec/auto-gain.md.
         ccr_backend.auto_gain = self._settings.value(
             "adjust/auto_gain", True, type=bool)
+        # Auto white point per frame (spec/auto-white-point.md), default on.
+        ccr_backend.auto_white_point = self._settings.value(
+            "convert/auto_white_point", True, type=bool)
+        self.sliders_panel._update_bwp_mode_label()
         # Confirm before a no-anchor conversion (spec/no-anchor-convert.md).
         ccr_backend.warn_no_anchor_convert = self._settings.value(
             "convert/warn_no_anchor", True, type=bool)
@@ -1119,6 +1123,17 @@ class MainWindow(QMainWindow):
         Off also stops using what was learned; nothing is forgotten."""
         ccr_backend.auto_crop_learn = bool(checked)
         self._settings.setValue("crop/learn", bool(checked))
+
+    def on_auto_white_point_toggled(self, checked: bool):
+        """Auto white point on / off (spec/auto-white-point.md). Affects the
+        next Convert only: nothing already converted changes."""
+        ccr_backend.auto_white_point = bool(checked)
+        self._settings.setValue("convert/auto_white_point", bool(checked))
+        self.sliders_panel._update_bwp_mode_label()
+        self.sliders_panel.set_temporary_hint(
+            "Auto white point on: Convert makes each frame's brightest area white."
+            if checked else
+            "Auto white point off: Convert uses the default slope.", duration=5000)
 
     def on_warn_no_anchor_toggled(self, checked: bool):
         """Flip the confirm-before-unanchored-conversion flag and persist it.

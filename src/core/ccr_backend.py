@@ -102,6 +102,10 @@ class CCRBackend:
         # attribute so scripts and tests can still run the single-anchor loop.
         self.auto_black_point: bool = True
         self.last_auto_bp_summary = None
+        # Auto white point (spec/auto-white-point.md): each frame's brightest
+        # area becomes its white point, guarded so a sunset keeps its colour.
+        # Only in place of the default slope. Restored by MainWindow.
+        self.auto_white_point: bool = True
         # Auto crop (spec/auto-crop.md, spec/auto-crop-buttons.md) is its own
         # action now, not part of Convert: see auto_crop_one / auto_crop_all.
         # Learn from the crops you confirm (spec/auto-crop-learning.md).
@@ -2863,6 +2867,99 @@ class CCRBackend:
         return tuple(float(w) * float(b) / max(float(s), 1e-9)
                      for w, b, s in zip(self.white_point_bgr, black, self.black_point_bgr))
 
+    # --- Auto white point (spec/auto-white-point.md) -------------------------
+    def uses_auto_white_point(self) -> bool:
+        """Auto white point applies in place of the default slope only: a
+        sampled White Point or a chosen film stock is the user saying what
+        white is."""
+        return (bool(self.auto_white_point) and self.white_point_bgr is None
+                and self.film_stock_slopes is None)
+
+    @staticmethod
+    def _known_picture_rect(img):
+        rect = getattr(img, "crop_rect", None)
+        if rect is not None:
+            return tuple(rect)
+        fc = getattr(img, "auto_crop_last", None)
+        if fc is not None and getattr(fc, "usable", False):
+            return tuple(fc.rect)
+        return None
+
+    def frame_picture_rect(self, img, raw):
+        """The picture area to measure a white point in: the crop, the auto
+        crop found this session, else a fresh detection; None = the middle."""
+        rect = self._known_picture_rect(img)
+        if rect is not None:
+            return rect
+        fc = self.detect_frame_crop(img, raw=raw)
+        return tuple(fc.rect) if fc is not None and fc.usable else None
+
+    def frame_highlight(self, img, raw, black):
+        """The frame's brightest-area density above `black` (core.
+        auto_white_point.highlight_density), or None."""
+        from core.auto_white_point import highlight_density
+        if raw is None or black is None:
+            return None
+        try:
+            return highlight_density(raw, black, self.frame_picture_rect(img, raw))
+        except Exception as e:                  # never let it stop a convert
+            print(f"Auto white point failed for {getattr(img, 'file_path', '?')}: {e}")
+            return None
+
+    @staticmethod
+    def recorded_highlight(img):
+        ci = getattr(img, "conversion_inputs", None) or {}
+        d = (ci.get("auto_wp") or {}).get("dmax")
+        return tuple(float(v) for v in d) if d else None
+
+    def _quick_highlight(self, img):
+        """An unconverted frame with a known picture area: its border and that
+        area, no crop detection. Cached against the raw it was measured on."""
+        from core.auto_black_point import find_rebate
+        from core.auto_white_point import highlight_density
+        raw = getattr(img, "resized_raw", None)
+        rect = self._known_picture_rect(img)
+        if raw is None or rect is None or getattr(img, "converted", False):
+            return None
+        cache = getattr(img, "_awp_quick", None)
+        if cache is not None and cache[0] is raw and cache[1] == rect:
+            return cache[2]
+        d = None
+        try:
+            black, _src = self.resolve_auto_black_point(find_rebate(raw))
+            if black is not None:
+                d = highlight_density(raw, black, rect)
+        except Exception:
+            d = None
+        img._awp_quick = (raw, rect, d)
+        return d
+
+    def roll_highlight_reference(self, img):
+        """The other frames' typical highlight colour for Convert Current:
+        their recorded estimates, or a quick one for unconverted frames."""
+        from core.auto_white_point import roll_reference
+        ests = []
+        for other in self.images:
+            if other is img:
+                continue
+            d = self.recorded_highlight(other)
+            if d is None:
+                d = self._quick_highlight(other)
+            if d is not None:
+                ests.append(d)
+        return roll_reference(ests)
+
+    @staticmethod
+    def auto_white_point_from(black, dmax, reference):
+        """(white_point, record) for one frame, or (None, None)."""
+        from core.auto_white_point import guarded_dmax, white_point
+        if black is None or dmax is None:
+            return None, None
+        used, info = guarded_dmax(dmax, reference)
+        rec = {"dmax": [float(v) for v in dmax], "used": [float(v) for v in used]}
+        rec.update(info)
+        return white_point(black, used), rec
+
     @staticmethod
     def auto_bp_record(result, source):
         return {"source": source,
@@ -2933,9 +3030,20 @@ class CCRBackend:
     def _apply_auto_bwpoint_to_all(self, progress_callback=None):
         """Convert All with a per-frame black point: detect every frame first,
         check them against the roll, then convert each with its own base (or a
-        stated fallback). See spec/auto-black-point.md."""
+        stated fallback). With auto white point, every frame's brightest area
+        is measured in between, so each frame's white point can be checked
+        against the rest of the roll. See spec/auto-black-point.md and
+        spec/auto-white-point.md."""
         from core.auto_black_point import roll_check
+        from core.auto_white_point import roll_reference
         total = len(self.images)
+        use_awp = self.uses_auto_white_point()
+        stages = 3 if use_awp else 2
+
+        def step(stage, i):
+            if progress_callback:
+                progress_callback(stage * total + i + 1, stages * total)
+
         results = []
         for i, img in enumerate(self.images):
             try:
@@ -2943,14 +3051,22 @@ class CCRBackend:
             except Exception as e:
                 print(f"Auto black point detection failed for image {i}: {e}")
                 results.append(None)
-            if progress_callback:
-                progress_callback(i + 1, 2 * total)      # detection = first half
+            step(0, i)                                    # detection
         consensus = roll_check([r for r in results if r is not None])
+        resolved = [self.resolve_auto_black_point(res, consensus) for res in results]
+        highlights = [None] * total
+        if use_awp:
+            for i, (img, res, (black, _src)) in enumerate(zip(self.images, results, resolved)):
+                if black is not None:
+                    if res is None and img.converted:
+                        img.reload_image()
+                    highlights[i] = self.frame_highlight(img, img.resized_raw, black)
+                step(1, i)                                # white points
         summary = {"high": 0, "medium": 0, "fallback": 0, "unanchored": 0,
-                   "skipped": 0, "notes": []}
+                   "skipped": 0, "auto_wp": 0, "notes": []}
         for i, (img, res) in enumerate(zip(self.images, results)):
             try:
-                black, source = self.resolve_auto_black_point(res, consensus)
+                black, source = resolved[i]
                 if black is None:
                     # Nothing on this frame or the roll to anchor to, and no
                     # sampled Black Point: convert it with the fixed-constant
@@ -2966,7 +3082,15 @@ class CCRBackend:
                     summary["fallback"] += 1
                     if res is not None and res.reason:
                         summary["notes"].append(res.reason)
-                white = self.auto_white_point_for(black)
+                awp_rec = None
+                if use_awp:
+                    others = [h for j, h in enumerate(highlights) if j != i]
+                    white, awp_rec = self.auto_white_point_from(
+                        black, highlights[i], roll_reference(others))
+                    if awp_rec is not None:
+                        summary["auto_wp"] += 1
+                else:
+                    white = self.auto_white_point_for(black)
                 slopes = (self.film_stock_slopes
                           if (white is None and black is not None) else None)
                 # The detection pass already reloaded the raw; only a frame
@@ -2987,13 +3111,14 @@ class CCRBackend:
                     "slopes": slopes,
                     "auto_bp": self.auto_bp_record(res, source),
                 }
+                if awp_rec is not None:
+                    img.conversion_inputs["auto_wp"] = awp_rec
                 self.maybe_auto_awb(img)
                 img.update_thumbnail_and_preview()
             except Exception as e:
                 print(f"Auto black point conversion failed for image {i}: {e}")
                 summary["skipped"] += 1
-            if progress_callback:
-                progress_callback(total + i + 1, 2 * total)
+            step(stages - 1, i)                           # conversion
         self.last_auto_bp_summary = summary
 
 
