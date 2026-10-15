@@ -15,6 +15,8 @@ cover/restore pattern as DustRemovalPanel). Exposes "all the crop options":
 The committed result is still just CCRImage.crop_rect / crop_angle — this panel
 only changes how they are produced interactively. See spec/crop-panel.md.
 """
+
+import math
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                                QPushButton, QComboBox, QRadioButton,
                                QButtonGroup, QSpinBox, QDoubleSpinBox,
@@ -377,6 +379,32 @@ class CropPanel(QWidget):
 
     def _landscape(self):
         return self.landscape_radio.isChecked()
+
+    SQUARE_TOL = 0.02             # |log(w/h)| below this: neither way round
+
+    def match_box_orientation(self, box_w, box_h, rotation=0):
+        """Set Landscape/Portrait to the way a box of box_w x box_h (un-rotated
+        image space) points ON SCREEN, without reshaping it, and remember it.
+        No-op for presets that have no orientation and for a near-square box.
+        True when the toggle changed. spec/crop-tool-handling.md §3."""
+        if self._active_key() in crop_aspect.ORIENTATION_FIXED_KEYS:
+            return False
+        if box_w <= 0 or box_h <= 0:
+            return False
+        if rotation % 180 == 90:
+            box_w, box_h = box_h, box_w
+        if abs(math.log(box_w / box_h)) < self.SQUARE_TOL:
+            return False
+        landscape = box_w > box_h
+        if landscape == self._landscape():
+            return False
+        self._suppress = True
+        try:
+            (self.landscape_radio if landscape else self.portrait_radio).setChecked(True)
+        finally:
+            self._suppress = False
+        self._save_prefs()
+        return True
 
     def _apply_ratio_now(self):
         if self._suppress:
