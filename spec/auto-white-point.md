@@ -1,5 +1,8 @@
 # Auto white point (per frame)
 
+> Superseded in part by `spec/white-point-choice.md`: the brightest *near-grey*
+> area, a choice per frame, and the White Point sampled per frame.
+
 ## 1. Problem
 
 Conversions often come out tinted (a magenta/violet cast is the common

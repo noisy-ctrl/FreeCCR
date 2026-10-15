@@ -242,6 +242,12 @@ def serialize_image(img) -> dict:
         # The film format picked for the frame in the Crop panel
         # (spec/film-formats.md). Additive: absent = not set.
         "film_format": getattr(img, "film_format", None),
+        # The frame's white point choice and its hand-sampled White Point
+        # (spec/white-point-choice.md). Additive: absent = the defaults.
+        "wp_choice": getattr(img, "wp_choice", None),
+        "wp_sample": (list(img.wp_sample) if getattr(img, "wp_sample", None) else None),
+        "wp_sample_rect": (list(img.wp_sample_rect)
+                           if getattr(img, "wp_sample_rect", None) else None),
         "rotation_angle": int(img.rotation_angle),
         "fine_rotation_angle": int(img.fine_rotation_angle),
         "horizontal_mirrored": bool(img.horizontal_mirrored),
@@ -712,6 +718,11 @@ def _restore_image(file_path: str, state: dict, live_merge_sources=None,
     img.auto_crop_rect = tuple(auto) if auto else None
     img.auto_crop_example = state.get("auto_crop_example")
     img.film_format = state.get("film_format")
+    img.wp_choice = state.get("wp_choice")
+    ws = state.get("wp_sample")
+    img.wp_sample = tuple(ws) if ws else None
+    wr = state.get("wp_sample_rect")
+    img.wp_sample_rect = tuple(wr) if wr else None
     img.tint_balance_factor = state.get("tint_balance_factor",
                                         getattr(img, "tint_balance_factor", 1.0))
 

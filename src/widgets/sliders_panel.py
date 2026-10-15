@@ -804,7 +804,7 @@ class SlidersPanel(QWidget):
         self.clear_white_point_btn.setFixedWidth(theme.GLYPH_W)
         self.clear_white_point_btn.setFixedHeight(theme.CONTROL_H)
         self.clear_white_point_btn.setToolTip(
-            "Clear the white point — use the calibrated default slope instead")
+            "Clear the sampled Black Point and this frame's sampled White Point")
         theme.style_button(self.clear_white_point_btn, "danger", glyph_only=True)
         self.black_point_btn = QPushButton("Set Black Point")
         self.black_point_btn.setFixedHeight(theme.CONTROL_H)
@@ -849,6 +849,39 @@ class SlidersPanel(QWidget):
         stock_row.addWidget(self.save_film_stock_btn)
         stock_row.addWidget(self.delete_film_stock_btn)
         scroll_layout.addLayout(stock_row)
+
+        # The white point, per frame (spec/white-point-choice.md): this frame's
+        # brightest near-grey area, the roll's average, off, or the White Point
+        # sampled on this frame. Show outlines the area it came from.
+        wp_label = QLabel("White Point")
+        wp_label.setFixedWidth(theme.LABEL_COL_W)
+        wp_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        wp_label.setFixedHeight(theme.CONTROL_H)
+        wp_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.wp_combo = theme.ElidingComboBox()
+        self.wp_combo.setFixedHeight(theme.CONTROL_H)
+        theme.shrinkable_combo(self.wp_combo)
+        for text, key in self.WP_ITEMS:
+            self.wp_combo.addItem(text, key)
+        self.wp_combo.setToolTip(
+            "This frame's white point.\n"
+            "Frame highlight: this frame's brightest near-grey area (checked "
+            "against the rest of the roll, so a sunset or blue sky keeps its "
+            "colour).\nRoll average: the roll's typical white.\n"
+            "Off: no white point (the film stock or the default slope).\n"
+            "Sampled by hand: the White Point you sampled on this frame.\n"
+            "Changing it converts this frame again.")
+        self.wp_combo.currentIndexChanged.connect(self._on_wp_choice_changed)
+        self.wp_show_btn = QPushButton("Show")
+        self.wp_show_btn.setFixedHeight(theme.CONTROL_H)
+        self.wp_show_btn.setToolTip("Outline the area this frame's white point came from")
+        self.wp_show_btn.clicked.connect(self._on_show_wp_area)
+        wp_row = QHBoxLayout()
+        wp_row.setSpacing(theme.GAP_TIGHT)
+        wp_row.addWidget(wp_label, alignment=Qt.AlignVCenter)
+        wp_row.addWidget(self.wp_combo, 1)
+        wp_row.addWidget(self.wp_show_btn)
+        scroll_layout.addLayout(wp_row)
         # Presets + last selection persist across sessions (same QSettings
         # store as the persisted B/W points themselves).
         self._settings = QSettings("FreeCCR", "FreeCCR")
@@ -882,6 +915,7 @@ class SlidersPanel(QWidget):
         # so keep it hidden until it has something to say (_update_bwp_mode_label).
         self.bwp_mode_label.setVisible(False)
         scroll_layout.addWidget(self.bwp_mode_label)
+        self._sync_wp_combo()
         self.convert_current_bwp_btn = QPushButton("Convert Current")
         self.convert_all_bwp_btn = QPushButton("Convert All")
         # Convert Current is the section's primary (core single-image action);
@@ -1524,12 +1558,12 @@ class SlidersPanel(QWidget):
         for btn in (self.white_point_btn, self.black_point_btn,
                     self.convert_current_bwp_btn, self.convert_all_bwp_btn,
                     self.film_stock_combo, self.save_film_stock_btn,
-                    self.delete_film_stock_btn):
+                    self.delete_film_stock_btn, self.wp_combo, self.wp_show_btn):
             btn.setEnabled(enabled)
         if enabled:
-            # Leaving Positive mode: re-apply the conditional film-stock
-            # gating (save needs both points, selector needs no white point).
-            self._update_bwp_mode_label()
+            # Leaving Positive mode: re-apply the conditional gating (film
+            # stock save, the white point row).
+            self._sync_wp_combo()
 
     def save_slider_values(self, image_id):
         pass
@@ -1620,6 +1654,7 @@ class SlidersPanel(QWidget):
         # Reflect this image's color profile (independent of the slider dict,
         # so it must be synced on both the empty and populated paths below).
         self._sync_color_profile_combo(idx)
+        self._sync_wp_combo(idx)
         # Rebuild the Layers list only when its structure actually changed
         # (image switch, area added/removed/toggled/selected) — set_current_idx
         # is re-entered on every preview refresh (incl. each slider tick), and
@@ -2714,17 +2749,25 @@ class SlidersPanel(QWidget):
                 "<b>Black Point:</b> Draw a rect over the transparent/clear film base.", duration=6000)
 
     def _on_clear_white_point(self):
-        """Clear BOTH sampled B/W points (black film base + white dense point),
-        resetting the Film B/W Point section."""
+        """Clear the sampled Black Point and this frame's hand-sampled White
+        Point (spec/white-point-choice.md §4)."""
         ccr_backend.clear_black_point()
-        ccr_backend.clear_white_point()
-        mw = self.parent().parent()
+        ccr_backend.clear_white_point()          # a roll-wide one, from code
+        img = (ccr_backend.get_image_by_index(self.current_idx)
+               if self.current_idx is not None else None)
+        if img is not None and getattr(img, "wp_sample", None):
+            img.wp_sample = None
+            img.wp_sample_rect = None
+            if getattr(img, "wp_choice", None) == "sampled":
+                img.wp_choice = None
+            ccr_backend.save_catalog()
+        mw = self.parent().parent() if self.parent() is not None else None
         if hasattr(mw, "persist_bwpoint"):
             mw.persist_bwpoint()
-        self._update_bwp_mode_label()
+        self._sync_wp_combo()
         self.set_temporary_hint(
-            "B/W points cleared. Set a <b>Black Point</b> (film base) to anchor "
-            "the conversion, or convert as-is for the fixed density invert.",
+            "Black Point and this frame's White Point cleared. Each frame's own "
+            "border and brightest near-grey area are used when you convert.",
             duration=6000)
 
     def _update_bwp_mode_label(self):
@@ -2780,7 +2823,8 @@ class SlidersPanel(QWidget):
             "use a film-stock slope" if wp_set else
             "Slope preset for black-point-only conversion: a saved film "
             "stock's per-channel slopes, or the built-in default")
-        self.save_film_stock_btn.setEnabled(bp_set and wp_set and not positive)
+        self.save_film_stock_btn.setEnabled(
+            self._film_stock_pair() is not None and not positive)
         self.delete_film_stock_btn.setEnabled(
             not wp_set and not positive
             and self.film_stock_combo.currentIndex() > 0)
@@ -2834,10 +2878,10 @@ class SlidersPanel(QWidget):
         """Save the sampled B/W pair's per-channel density slopes as a named
         film stock, and select it — so clearing the white point (✕) switches
         the roll straight onto the new preset."""
-        black = ccr_backend.black_point_bgr
-        white = ccr_backend.white_point_bgr
-        if black is None or white is None:
+        pair = self._film_stock_pair()
+        if pair is None:
             return
+        black, white = pair
         slopes = compute_density_slopes(black, white)
         if slopes is None:
             QMessageBox.warning(
@@ -2872,8 +2916,8 @@ class SlidersPanel(QWidget):
         self._save_film_stocks_to_settings()
         self._reload_film_stock_combo(select=name)
         self.set_temporary_hint(
-            f'Film stock "{name}" saved — clear the White Point (✕) to '
-            "convert future rolls of this stock from just a black point.",
+            f'Film stock "{name}" saved and selected: frames whose white point '
+            "is this frame's highlight or the roll's now use its slopes.",
             duration=8000)
 
     def _on_delete_film_stock(self):
@@ -3055,18 +3099,19 @@ class SlidersPanel(QWidget):
                     return
                 white = ccr_backend.auto_white_point_for(black)
             awp_rec = None
+            per_frame_wp = black is not None and ccr_backend.white_point_bgr is None
             # The picture area, found on the fresh raw (reloaded above): the
             # white point and auto tone measure inside it.
             rect = (ccr_backend.frame_picture_rect(img, img.resized_raw)
-                    if (getattr(ccr_backend, "auto_tone", False)
-                        or (black is not None and ccr_backend.uses_auto_white_point()))
+                    if (getattr(ccr_backend, "auto_tone", False) or per_frame_wp)
                     else ccr_backend._known_picture_rect(img))
-            if black is not None and ccr_backend.uses_auto_white_point():
-                # This frame's brightest area, checked against the rest of the
-                # roll (spec/auto-white-point.md).
-                white, awp_rec = ccr_backend.auto_white_point_from(
-                    black, ccr_backend.frame_highlight(img, img.resized_raw, black, rect),
-                    ccr_backend.roll_highlight_reference(img))
+            if per_frame_wp:
+                # This frame's white point from its choice: its brightest
+                # near-grey area, the roll's, off, or sampled by hand
+                # (spec/white-point-choice.md).
+                hl = ccr_backend.frame_highlights(img, img.resized_raw, black, rect)
+                white, awp_rec = ccr_backend.resolve_white_point(
+                    img, black, hl, lambda: ccr_backend.roll_highlight_reference(img))
             # Film-stock slopes apply only in black-point-only mode — a sampled
             # white point wins, and with no black point there is nothing for a
             # slope to act on (spec/film-stock-slopes.md).
@@ -3107,16 +3152,15 @@ class SlidersPanel(QWidget):
             mw.image_preview.update_preview(self.current_idx)
             mw.image_preview._update_unconvert_action_state()
             ccr_backend.save_catalog()
+            self._sync_wp_combo()
+            wp_note = self._wp_note(awp_rec, white)
             if auto_source == "auto":
-                wp_note = ""
-                if awp_rec is not None:
-                    wp_note = (" and its brightest area as white"
-                               + (" (checked against the roll)" if awp_rec["ref"] == "roll" else ""))
                 self.set_temporary_hint(
                     f"Converted with auto black point: {auto_res.summary()}, "
-                    f"{auto_res.confidence} confidence (outlined){wp_note}.", duration=6000)
+                    f"{auto_res.confidence} confidence (outlined){wp_note}.", duration=7000)
                 if hasattr(mw.image_preview, "flash_auto_bp_strip"):
                     mw.image_preview.flash_auto_bp_strip(auto_res.rect)
+                self._flash_wp_areas(awp_rec)
             elif auto_source == "none":
                 self.set_temporary_hint(
                     f"Auto black point: {auto_res.summary()} — converted with the "
@@ -3126,11 +3170,127 @@ class SlidersPanel(QWidget):
                 self.set_temporary_hint(
                     f"Auto black point: {auto_res.summary()} — used the "
                     f"{'sampled black point' if auto_source == 'sampled' else 'roll'} "
-                    "instead.", duration=8000)
+                    f"instead{wp_note}.", duration=8000)
+                self._flash_wp_areas(awp_rec)
             else:
-                self.set_temporary_hint("Current image converted!", duration=3000)
+                self.set_temporary_hint(f"Current image converted{wp_note}.", duration=4000)
+                self._flash_wp_areas(awp_rec)
         except Exception as e:
             QMessageBox.critical(self, "Conversion Error", str(e))
+
+    # --- The white point per frame (spec/white-point-choice.md) ------------
+    WP_ITEMS = (("Frame highlight", "frame"), ("Roll average", "roll"),
+                ("Off", "off"), ("Sampled by hand", "sampled"))
+
+    @staticmethod
+    def _wp_note(rec, white):
+        """', with … as white' for the conversion hint."""
+        if not rec:
+            return ""
+        c = rec.get("choice")
+        if c == "sampled":
+            return ", with your sampled White Point"
+        if white is None:
+            if rec.get("ref") == "film stock":
+                return ", with the film stock's slopes"
+            return ", white point off" if c == "off" else ""
+        if c == "roll":
+            return ", with the roll's average white"
+        if rec.get("neutral"):
+            return ", with its brightest near-grey area as white (blue outline)"
+        return ", with its brightest area as white"
+
+    def _flash_wp_areas(self, rec=None):
+        """Outline the area the current frame's white point came from."""
+        try:
+            ip = self.parent().parent().image_preview
+        except AttributeError:
+            return False
+        if rec is None:
+            img = ccr_backend.get_image_by_index(self.current_idx)
+            ci = (getattr(img, "conversion_inputs", None) or {}) if img else {}
+            rec = ci.get("auto_wp")
+        areas = (rec or {}).get("areas") or []
+        if not areas or not hasattr(ip, "flash_areas"):
+            return False
+        ip.flash_areas(areas, color=(40, 140, 255), ms=5000)
+        return True
+
+    def _on_show_wp_area(self):
+        if not self._flash_wp_areas():
+            img = ccr_backend.get_image_by_index(self.current_idx)
+            c = ccr_backend.wp_choice_for(img) if img is not None else None
+            why = ("Convert the frame first." if img is None or not img.converted else
+                   "The roll's average has no area on this frame." if c == "roll" else
+                   "The white point is off for this frame." if c == "off" else
+                   "No near-grey area was found on this frame: its brightest area "
+                   "was used, with the roll's check.")
+            self.set_temporary_hint(why, duration=5000)
+
+    def _sync_wp_combo(self, idx=None):
+        """Show the current frame's white point choice; 'Sampled by hand' is
+        listed only once the frame has a sample."""
+        if not hasattr(self, "wp_combo"):
+            return
+        idx = self.current_idx if idx is None else idx
+        img = ccr_backend.get_image_by_index(idx) if idx is not None else None
+        combo = self.wp_combo
+        combo.blockSignals(True)
+        try:
+            has_sample = bool(getattr(img, "wp_sample", None)) if img is not None else False
+            item = combo.model().item(combo.findData("sampled"))
+            if item is not None:
+                item.setEnabled(has_sample)
+            choice = ccr_backend.wp_choice_for(img) if img is not None else \
+                ("frame" if ccr_backend.auto_white_point else "off")
+            combo.setCurrentIndex(max(0, combo.findData(choice)))
+        finally:
+            combo.blockSignals(False)
+        enabled = (img is not None and not ccr_backend.positive_mode
+                   and ccr_backend.white_point_bgr is None)
+        combo.setEnabled(enabled)
+        self.wp_show_btn.setEnabled(enabled)
+        self._update_bwp_mode_label()
+
+    def _on_wp_choice_changed(self, _i):
+        img = ccr_backend.get_image_by_index(self.current_idx)
+        if img is None:
+            return
+        img.wp_choice = self.wp_combo.currentData()
+        ccr_backend.save_catalog()
+        if img.converted and not ccr_backend.positive_mode:
+            self._on_convert_current_bwpoint()       # straight away, this frame only
+        else:
+            self.set_temporary_hint(
+                "White point choice kept for this frame: it applies when you convert.",
+                duration=4000)
+
+    def on_white_point_sampled(self, values, rect=None):
+        """Set White Point: the sample is THIS frame's white point, and the
+        frame converts with it straight away (spec/white-point-choice.md §4)."""
+        img = ccr_backend.get_image_by_index(self.current_idx)
+        if img is None:
+            return
+        img.wp_sample = tuple(float(v) for v in values)
+        img.wp_sample_rect = tuple(float(v) for v in rect) if rect else None
+        img.wp_choice = "sampled"
+        self._sync_wp_combo()
+        if ccr_backend.positive_mode:
+            return
+        self._on_convert_current_bwpoint()
+
+    def _film_stock_pair(self):
+        """(black, white) to save a film stock from: a roll-wide pair (from
+        code), else this frame's hand sample and the base it converted with."""
+        if ccr_backend.black_point_bgr is not None and ccr_backend.white_point_bgr is not None:
+            return ccr_backend.black_point_bgr, ccr_backend.white_point_bgr
+        img = ccr_backend.get_image_by_index(self.current_idx) if self.current_idx is not None else None
+        white = getattr(img, "wp_sample", None) if img is not None else None
+        if not white:
+            return None
+        ci = getattr(img, "conversion_inputs", None) or {}
+        black = (ci.get("bw") or (None, None))[0] or ccr_backend.black_point_bgr
+        return (tuple(black), tuple(white)) if black is not None else None
 
     def _on_convert_all_bwpoint(self):
         # Auto black point anchors each frame on its own border; a frame with
