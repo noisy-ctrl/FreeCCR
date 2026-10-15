@@ -854,6 +854,15 @@ class ImagePreview(QWidget):
         self.toolbar.insertWidget(self.export_action, zoom_spacer_l)
         self.toolbar.insertWidget(self.export_action, self.zoom_combo)
         self.toolbar.insertWidget(self.export_action, zoom_spacer_r)
+        # Export sits at the far right, next to the histogram: everything before
+        # it stays left-aligned and this spacer takes up the slack.
+        self.export_push = QWidget()
+        self.export_push.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.toolbar.insertWidget(self.export_action, self.export_push)
+        export_margin = QWidget()
+        export_margin.setFixedWidth(6)
+        export_margin.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+        self.toolbar.addWidget(export_margin)
 
         self.layout.addWidget(self.toolbar)
 
