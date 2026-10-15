@@ -47,6 +47,27 @@ only mode, both buttons keep that conversion reachable:
   frame shows a border at all — which then converts consistently, all
   unanchored.
 
+### 3.1 Convert Current gets a roll fallback too
+
+Convert All falls back to the roll's consensus base; Convert Current had
+none. It now uses the median base of the other frames that were converted
+with their own measured border (`recorded_roll_black`, at least 2), so a
+frame with no border converts against the roll before asking about an
+unanchored conversion.
+
+### 3.2 A frame scanned at a different exposure keeps its own base
+
+`roll_check` flags a frame whose base differs from the roll's in every
+channel the same way, as light round the film. A frame scanned brighter or
+darker than the others looks the same, and forcing the roll's base on it put
+its picture below black (a night frame scanned at twice the exposure: 84 % of
+its picture under black, flat). The film base is the clearest thing on the
+film, so a base the picture is clearer than cannot be this frame's base. With
+the raws passed in, a frame keeps its own base when more than 1 % of its
+middle is clearer than the roll's base but not more than 1 % clearer than its
+own (`clearer_share`, 3 % grain margin); light round the film reads brighter
+than the picture allows, so it is still flagged.
+
 ## 4. Data / integration
 
 - `ccr_backend.auto_black_point` defaults to `True` and is set `True` by the

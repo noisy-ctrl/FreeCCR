@@ -2857,6 +2857,23 @@ class CCRBackend:
             return tuple(consensus), "roll"
         return None, "none"
 
+    def recorded_roll_black(self, img, min_frames=2):
+        """For Convert Current: the median film base of the OTHER frames that
+        were converted with their own measured border, or None. It is the
+        roll fallback Convert All gets from roll_check."""
+        import numpy as np
+        vals = []
+        for other in self.images:
+            if other is img:
+                continue
+            ci = getattr(other, "conversion_inputs", None) or {}
+            if (ci.get("auto_bp") or {}).get("source") == "auto" and ci.get("bw"):
+                if ci["bw"][0] is not None:
+                    vals.append(ci["bw"][0])
+        if len(vals) < min_frames:
+            return None
+        return tuple(float(v) for v in np.median(np.array(vals, float), axis=0))
+
     def auto_white_point_for(self, black):
         """A sampled white point was measured under the light of the frame the
         black point came from; scale it by the per-channel light change this
@@ -3052,7 +3069,8 @@ class CCRBackend:
                 print(f"Auto black point detection failed for image {i}: {e}")
                 results.append(None)
             step(0, i)                                    # detection
-        consensus = roll_check([r for r in results if r is not None])
+        kept = [(r, img.resized_raw) for r, img in zip(results, self.images) if r is not None]
+        consensus = roll_check([r for r, _ in kept], [raw for _, raw in kept])
         resolved = [self.resolve_auto_black_point(res, consensus) for res in results]
         highlights = [None] * total
         if use_awp:

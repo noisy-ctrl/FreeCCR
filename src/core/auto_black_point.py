@@ -179,20 +179,47 @@ def find_rebate(raw) -> RebateResult:
                         pick.rect, reason, bands)
 
 
-def roll_check(results):
+CLEARER_MARGIN = 1.03     # grain: a pixel this much brighter than a base is clearer
+CLEARER_MAX = 0.01        # more than 1 % of the picture clearer -> not its base
+
+
+def clearer_share(raw, base):
+    """Share of the frame's middle (the picture, away from the border) that is
+    clearer than `base`. The film base is the clearest thing on the film, so a
+    real base leaves this near 0."""
+    raw = np.asarray(raw)
+    if raw is None or raw.ndim != 3 or base is None:
+        return 0.0
+    h, w = raw.shape[:2]
+    mid = raw[h // 6:h - h // 6, w // 6:w - w // 6, :3].reshape(-1, 3)[::5]
+    lum = mid.astype(np.float64).sum(axis=1)
+    return float(np.mean(lum > CLEARER_MARGIN * float(np.sum(base[:3]))))
+
+
+def roll_check(results, raws=None):
     """Downgrade frames whose base jumps against the roll in EVERY channel the
     same way (light round the film, not a drifting LED). Returns the roll
-    consensus (or None) and updates results in place."""
+    consensus (or None) and updates results in place.
+
+    `raws` (aligned with `results`) lets a frame keep its own base when the
+    roll's cannot be its base: its picture is clearer than the roll's base
+    but not than its own. That is a frame scanned at a different exposure,
+    not light round the film (which reads brighter than the picture allows)."""
     good = [np.array(r.black_point) for r in results
             if r.black_point is not None and r.confidence in (HIGH, MEDIUM)]
     if len(good) < 3:
         return (tuple(float(v) for v in np.median(good, 0)) if good else None)
     cons = np.median(good, 0)
-    for r in results:
+    for i, r in enumerate(results):
         if r.black_point is None or r.confidence == LOW:
             continue
         ratio = np.array(r.black_point) / np.maximum(cons, 1e-9) - 1
         if np.all(ratio > ROLL_JUMP) or np.all(ratio < -ROLL_JUMP):
+            raw = raws[i] if raws is not None else None
+            if (raw is not None and clearer_share(raw, cons) > CLEARER_MAX
+                    and clearer_share(raw, r.black_point) <= CLEARER_MAX):
+                r.reason += "; differs from the roll, but the picture is clearer than the roll's base"
+                continue
             r.confidence = LOW
             r.reason = "differs from the rest of the roll in every channel"
     good = [np.array(r.black_point) for r in results
