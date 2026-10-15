@@ -171,3 +171,19 @@ confirmed crops, never from unchecked guesses.
   frame; one more kept 17 px of gap. With it all 20 crop cleanly (16 high);
   the first 30 are unchanged. The IT8 slide crops to the whole target film,
   not the patch grid inside it.
+- Third set (trichrome 35mm in a holder: four frames, three of them the same
+  picture re-scanned). Two failures, both on the holder's edge rather than
+  the picture:
+  - **Half-hidden sprocket row.** The holder covered the lower half of the
+    bottom holes, leaving ~10 rows; a sprocket band needed 12, so only the top
+    row was found, the bottom gate had no mirrored candidate, and the box ran
+    down past the holes to the holder (its film-edge-to-holder box happened to
+    be 3:2). The bottom then peeled only partly and was reported soft. A band
+    now needs `HOLE_MIN_ROWS` = 6 rows; the periodic-holes check (≥ 4 evenly
+    sized, evenly spaced holes) is what rejects anything else.
+  - **Slow holder ramp.** Light spilling past the holder's edge takes ~12 px to
+    go dark, and the search puts the edge at the top of that ramp, so the
+    nearest outside samples were only half-way down and the "far darker
+    outside = holder" test failed by a hair; 8 px of rebate stayed in. The
+    peel now reads the outside level from the darkest of its four samples.
+  Both changes leave the 50 earlier scans exactly as they were.
