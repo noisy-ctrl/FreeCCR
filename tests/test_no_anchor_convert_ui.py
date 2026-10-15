@@ -113,8 +113,15 @@ def test_no_warning_when_a_black_point_is_set(panel, monkeypatch):
 
 
 # --- the mode label ---------------------------------------------------------
+# These are the single-anchor states, reachable now only with auto black point
+# switched off from code (the panel always runs it: spec/auto-black-point-always.md).
 
-def test_label_names_the_no_anchor_state(panel):
+@pytest.fixture
+def single_anchor(monkeypatch):
+    monkeypatch.setattr(ccr_backend, "auto_black_point", False)
+
+
+def test_label_names_the_no_anchor_state(panel, single_anchor):
     ccr_backend.black_point_bgr = None
     ccr_backend.white_point_bgr = None
     panel._update_bwp_mode_label()
@@ -123,7 +130,7 @@ def test_label_names_the_no_anchor_state(panel):
     assert panel.bwp_mode_label.isVisibleTo(panel)
 
 
-def test_label_still_names_the_anchored_states(panel):
+def test_label_still_names_the_anchored_states(panel, single_anchor):
     ccr_backend.white_point_bgr = None
     ccr_backend.black_point_bgr = (30000.0,) * 3
     panel._update_bwp_mode_label()

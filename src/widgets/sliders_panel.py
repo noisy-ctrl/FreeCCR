@@ -861,21 +861,11 @@ class SlidersPanel(QWidget):
         self._settings.remove("convert/film_stock_selected")
         self._reload_film_stock_combo(select="")
 
-        # Auto black point: measure each frame's film base from its own clear
-        # border at Convert time (spec/auto-black-point.md). Persisted.
-        self.auto_bp_checkbox = QCheckBox("Auto black point (per frame)")
-        self.auto_bp_checkbox.setToolTip(
-            "Convert measures each frame's film base from its own clear border "
-            "(the even strip between the holder and the image), so a light "
-            "that drifts between frames no longer shifts the colour. A frame "
-            "whose border can't be measured with confidence (none visible, "
-            "clipped, or edges that disagree with the roll) falls back to the "
-            "sampled Black Point, or the rest of the roll's, and says so.")
-        ccr_backend.auto_black_point = self._settings.value(
-            "convert/auto_black_point", False, type=bool)
-        self.auto_bp_checkbox.setChecked(ccr_backend.auto_black_point)
-        self.auto_bp_checkbox.toggled.connect(self._on_auto_bp_toggled)
-        scroll_layout.addWidget(self.auto_bp_checkbox)
+        # Auto black point is always on: Convert measures each frame's film base
+        # from its own clear border, falling back to a sampled Black Point, then
+        # the roll's (spec/auto-black-point-always.md). The tickbox is gone.
+        ccr_backend.auto_black_point = True
+        self._settings.remove("convert/auto_black_point")
 
         # The old "Auto crop" Convert tickbox is gone: auto crop is its own
         # pair of buttons below the Convert row (spec/auto-crop-buttons.md).
@@ -2765,6 +2755,12 @@ class SlidersPanel(QWidget):
         else:
             text = "Anchor source: default slope (black point only)"
         self.bwp_mode_label.setText(text)
+        if getattr(ccr_backend, "auto_black_point", False) and bp_set:
+            # Not in the line itself (it elides from the right): the one thing a
+            # sampled black point does now. spec/auto-black-point-always.md §2.
+            self.bwp_mode_label.setToolTip(
+                text + "\nThe sampled Black Point is used for frames whose clear "
+                "border can't be measured.")
         # Always has something to say now that the no-anchor state is named, so
         # it is always visible. (The setVisible stays: it is the one guard if a
         # future state maps to an empty string.)
@@ -2922,15 +2918,6 @@ class SlidersPanel(QWidget):
             self.set_temporary_hint(
                 "White Point sampled! Now set the <b>Black Point</b> (film base).", duration=5000)
 
-    def _on_auto_bp_toggled(self, checked):
-        ccr_backend.auto_black_point = bool(checked)
-        self._settings.setValue("convert/auto_black_point", bool(checked))
-        self._update_bwp_mode_label()
-        if checked:
-            self.set_temporary_hint(
-                "Auto black point on: Convert measures each frame's film base "
-                "from its clear border.", duration=5000)
-
     def _refresh_after_crop(self):
         try:
             mw = self.parent().parent()
@@ -2998,21 +2985,22 @@ class SlidersPanel(QWidget):
         self._refresh_after_crop()
         self.set_temporary_hint(self._auto_crop_summary_text(summ), duration=10000)
 
-    def _confirm_no_anchor_convert(self) -> bool:
-        """True when the conversion may proceed. With no black point sampled the
-        conversion is a plain per-channel flip with nothing normalised, so ask
-        first — unless the user switched the warning off in Settings.
-        See spec/no-anchor-convert.md."""
+    def _confirm_no_anchor_convert(self, reason=None) -> bool:
+        """True when the conversion may proceed. With no black point the
+        conversion is the fixed-constant density invert with nothing
+        normalised, so ask first — unless the user switched the warning off in
+        Settings. `reason` is why auto black point found no film base on this
+        frame; the dialog leads with it. See spec/no-anchor-convert.md and
+        spec/auto-black-point-always.md."""
         if ccr_backend.black_point_bgr is not None:
             return True
-        if getattr(ccr_backend, "auto_black_point", False):
-            return True          # each frame measures its own base
         if not getattr(ccr_backend, "warn_no_anchor_convert", True):
             return True
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Warning)
         box.setWindowTitle("Convert without a black point?")
-        box.setText("<b>No film base has been sampled.</b>")
+        box.setText(f"<b>No film base found on this frame:</b> {reason}." if reason
+                    else "<b>No film base has been sampled.</b>")
         box.setInformativeText(
             "The conversion will use fixed density constants instead of "
             "measuring your film base, so the frame keeps its own cast and "
@@ -3030,7 +3018,11 @@ class SlidersPanel(QWidget):
         return box.clickedButton() is proceed
 
     def _on_convert_current_bwpoint(self):
-        if not self._confirm_no_anchor_convert():
+        # With auto black point the frame is measured first, and only a frame
+        # with no border (and no sampled fallback) asks about converting
+        # unanchored — below, once we know.
+        if (not getattr(ccr_backend, "auto_black_point", False)
+                and not self._confirm_no_anchor_convert()):
             return
         if self.current_idx is None:
             return
@@ -3048,10 +3040,12 @@ class SlidersPanel(QWidget):
                 # The raw was just reloaded above (when converted).
                 auto_res = ccr_backend.detect_frame_black_point(img, reload=False)
                 black, auto_source = ccr_backend.resolve_auto_black_point(auto_res)
-                if black is None:
+                if black is None and not self._confirm_no_anchor_convert(
+                        auto_res.summary()):
                     self.set_temporary_hint(
-                        "Auto black point: " + auto_res.summary()
-                        + " — set a Black Point by hand for this frame.", duration=8000)
+                        "Not converted: set a <b>Black Point</b> by hand for this "
+                        "frame (it becomes the fallback for frames with no border).",
+                        duration=8000)
                     return
                 white = ccr_backend.auto_white_point_for(black)
             # Film-stock slopes apply only in black-point-only mode — a sampled
@@ -3095,6 +3089,11 @@ class SlidersPanel(QWidget):
                     f"{auto_res.confidence} confidence (outlined).", duration=6000)
                 if hasattr(mw.image_preview, "flash_auto_bp_strip"):
                     mw.image_preview.flash_auto_bp_strip(auto_res.rect)
+            elif auto_source == "none":
+                self.set_temporary_hint(
+                    f"Auto black point: {auto_res.summary()} — converted with the "
+                    "fixed density invert. Grade it with Channel Levels, or set a "
+                    "Black Point and convert again.", duration=8000)
             elif auto_source is not None:
                 self.set_temporary_hint(
                     f"Auto black point: {auto_res.summary()} — used the "
@@ -3106,7 +3105,10 @@ class SlidersPanel(QWidget):
             QMessageBox.critical(self, "Conversion Error", str(e))
 
     def _on_convert_all_bwpoint(self):
-        if not self._confirm_no_anchor_convert():
+        # Auto black point anchors each frame on its own border; a frame with
+        # nothing to anchor to is converted unanchored and named in the summary.
+        if (not getattr(ccr_backend, "auto_black_point", False)
+                and not self._confirm_no_anchor_convert()):
             return
         n = len(ccr_backend.images)
         if n == 0:
@@ -3143,6 +3145,9 @@ class SlidersPanel(QWidget):
                    f"{summ['high']} high, {summ['medium']} medium confidence")
             if summ["fallback"]:
                 msg += f"; {summ['fallback']} fell back"
+            if summ.get("unanchored"):
+                msg += (f"; {summ['unanchored']} had no film base to measure "
+                        "(fixed density invert)")
             if summ["skipped"]:
                 msg += f"; {summ['skipped']} not converted"
             if summ["notes"]:
