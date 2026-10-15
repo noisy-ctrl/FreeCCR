@@ -524,7 +524,7 @@ class MainWindow(QMainWindow):
             self.contact_sheet.activate()
             self._sheet_timer.setInterval(400)
             sp.set_sliders_enabled(False)
-            for btn in ("convert_current_bwp_btn", "auto_crop_btn"):
+            for btn in ("convert_current_bwp_btn", "auto_crop_btn", "wp_combo", "wp_show_btn"):
                 if hasattr(sp, btn):
                     getattr(sp, btn).setEnabled(False)
         else:
@@ -1139,15 +1139,17 @@ class MainWindow(QMainWindow):
         self._settings.setValue("crop/learn", bool(checked))
 
     def on_auto_white_point_toggled(self, checked: bool):
-        """Auto white point on / off (spec/auto-white-point.md). Affects the
-        next Convert only: nothing already converted changes."""
+        """Auto white point on / off: the starting choice for frames that
+        have none of their own (spec/white-point-choice.md). Affects the next
+        Convert only: nothing already converted changes."""
         ccr_backend.auto_white_point = bool(checked)
         self._settings.setValue("convert/auto_white_point", bool(checked))
-        self.sliders_panel._update_bwp_mode_label()
+        self.sliders_panel._sync_wp_combo()
         self.sliders_panel.set_temporary_hint(
-            "Auto white point on: Convert makes each frame's brightest area white."
-            if checked else
-            "Auto white point off: Convert uses the default slope.", duration=5000)
+            "Auto white point on: frames start on Frame highlight, their brightest "
+            "near-grey area." if checked else
+            "Auto white point off: frames start with no white point (the default "
+            "slope).", duration=5000)
 
     def on_warn_no_anchor_toggled(self, checked: bool):
         """Flip the confirm-before-unanchored-conversion flag and persist it.
@@ -2087,19 +2089,19 @@ class MainWindow(QMainWindow):
                 ccr_backend.images.index(lead))
         self.image_preview.set_bwpoint_mode("black")
         self.sliders_panel.set_temporary_hint(
-            "<b>Black Point:</b> draw a rectangle over the clear film base, then "
-            "set the White Point on the dense / exposed area.", duration=9000)
+            "<b>Black Point:</b> draw a rectangle over the clear film base.",
+            duration=9000)
 
     def _restore_bwpoint(self):
-        """Restore a persisted global B/W point into the backend at startup."""
+        """Restore a persisted global black point into the backend at startup.
+        The roll-wide white point is retired: the White Point is sampled per
+        frame now, so an old session's one is dropped rather than overriding
+        every frame (spec/white-point-choice.md §4)."""
         bp = decode_bwpoint(
             self._settings.value("convert/black_point_bgr", "", type=str))
-        wp = decode_bwpoint(
-            self._settings.value("convert/white_point_bgr", "", type=str))
+        self._settings.remove("convert/white_point_bgr")
         if bp is not None:
             ccr_backend.set_black_point(bp)
-        if wp is not None:
-            ccr_backend.set_white_point(wp)
 
     # --- Replacing the session ------------------------------------------------
     def _confirm_replace_session(self) -> bool:

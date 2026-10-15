@@ -2922,22 +2922,73 @@ class CCRBackend:
 
     _FIND = object()
 
-    def frame_highlight(self, img, raw, black, rect=_FIND):
-        """The frame's brightest-area density above `black` (core.
-        auto_white_point.highlight_density), or None. `rect` is the picture
-        area when the caller has it (None = not found: the middle is used)."""
-        from core.auto_white_point import highlight_density
+    def frame_highlights(self, img, raw, black, rect=_FIND):
+        """The frame's bright areas above `black` (core.auto_white_point.
+        measure_highlights), or None. `rect` is the picture area when the
+        caller has it (None = not found: the middle is used)."""
+        from core.auto_white_point import measure_highlights
         if raw is None or black is None:
             return None
         try:
             if rect is CCRBackend._FIND:
                 rect = self.frame_picture_rect(img, raw)
-            return highlight_density(raw, black, rect)
+            return measure_highlights(raw, black, rect)
         except Exception as e:                  # never let it stop a convert
             print(f"Auto white point failed for {getattr(img, 'file_path', '?')}: {e}")
             return None
 
-    # --- Auto tone (spec/auto-tone.md) ---------------------------------------
+    def frame_highlight(self, img, raw, black, rect=_FIND):
+        """The brightest area's density alone (see frame_highlights)."""
+        hl = self.frame_highlights(img, raw, black, rect)
+        return hl.dmax if hl is not None else None
+
+    # --- The white point per frame (spec/white-point-choice.md) -------------
+    WP_CHOICES = ("frame", "roll", "off", "sampled")
+
+    def wp_choice_for(self, img) -> str:
+        """The frame's white point choice: its own, else the Settings default
+        (this frame's highlight with Auto white point on, else off). A hand
+        sample that is gone falls back to the default."""
+        c = getattr(img, "wp_choice", None)
+        if c == "sampled" and not getattr(img, "wp_sample", None):
+            c = None
+        if c in self.WP_CHOICES:
+            return c
+        return "frame" if self.auto_white_point else "off"
+
+    def resolve_white_point(self, img, black, hl, reference_fn=None):
+        """(white point, record) for one frame from its choice. `hl` is its
+        measured Highlights (or None); `reference_fn()` gives the roll's
+        neutral and is only called when the choice needs it. A roll-wide
+        sampled white point (backend only now) still wins, as before."""
+        from core.auto_white_point import frame_white_dmax, roll_white_dmax, white_point
+        if black is None:
+            return None, None
+        if self.white_point_bgr is not None:
+            return self.auto_white_point_for(black), None
+        choice = self.wp_choice_for(img)
+        rec = {"choice": choice}
+        if hl is not None:
+            rec["dmax"] = [float(v) for v in hl.dmax]
+        if choice == "sampled":
+            rect = getattr(img, "wp_sample_rect", None)
+            rec["areas"] = [list(rect)] if rect else []
+            return tuple(float(v) for v in img.wp_sample), rec
+        if choice == "off" or hl is None:
+            return None, rec
+        if self.film_stock_slopes is not None:
+            rec["ref"] = "film stock"           # the stock's slopes are the white
+            return None, rec
+        reference = reference_fn() if reference_fn is not None else None
+        if choice == "roll":
+            used, info = roll_white_dmax(hl.level, reference)
+        else:
+            used, info = frame_white_dmax(hl, reference)
+        rec.update(info)
+        rec["used"] = [float(v) for v in used]
+        return white_point(black, used), rec
+
+        # --- Auto tone (spec/auto-tone.md) ---------------------------------------
     def measure_auto_tone(self, img, rect=None):
         """Measure the frame's toe/shoulder on its just-converted base and keep
         it in conversion_inputs["auto_tone"] (replaced, or dropped when the
@@ -2978,50 +3029,62 @@ class CCRBackend:
 
     @staticmethod
     def recorded_highlight(img):
+        """(brightest-area Dmax, near-grey ratio or None) recorded when the
+        frame was converted, or None."""
         ci = getattr(img, "conversion_inputs", None) or {}
-        d = (ci.get("auto_wp") or {}).get("dmax")
-        return tuple(float(v) for v in d) if d else None
-
-    def _quick_highlight(self, img):
-        """An unconverted frame with a known picture area: its border and that
-        area, no crop detection. Cached against the raw it was measured on."""
-        from core.auto_black_point import find_rebate
-        from core.auto_white_point import highlight_density
-        raw = getattr(img, "resized_raw", None)
-        rect = self._known_picture_rect(img)
-        if raw is None or rect is None or getattr(img, "converted", False):
+        rec = ci.get("auto_wp") or {}
+        d = rec.get("dmax")
+        if not d:
             return None
+        n = rec.get("neutral")
+        return (tuple(float(v) for v in d),
+                tuple(float(v) for v in n) if n else None)
+
+    def _quick_highlights(self, img):
+        """An unconverted frame: its border and its picture area (its crop, the
+        auto crop found this session, else the middle of the scan), no crop
+        detection. Cached against the raw it was measured on."""
+        from core.auto_black_point import find_rebate
+        from core.auto_white_point import measure_highlights
+        raw = getattr(img, "resized_raw", None)
+        if raw is None or getattr(img, "converted", False):
+            return None
+        rect = self._known_picture_rect(img)
         cache = getattr(img, "_awp_quick", None)
         if cache is not None and cache[0] is raw and cache[1] == rect:
             return cache[2]
-        d = None
+        hl = None
         try:
             black, _src = self.resolve_auto_black_point(find_rebate(raw))
             if black is not None:
-                d = highlight_density(raw, black, rect)
+                hl = measure_highlights(raw, black, rect)
         except Exception:
-            d = None
-        img._awp_quick = (raw, rect, d)
-        return d
+            hl = None
+        img._awp_quick = (raw, rect, hl)
+        return hl
 
     def roll_highlight_reference(self, img):
-        """The other frames' typical highlight colour for Convert Current:
-        their recorded estimates, or a quick one for unconverted frames."""
+        """The roll's neutral for Convert Current, from the OTHER frames: the
+        near-grey colour (or else the brightest area) each recorded when it was
+        converted, or a quick measure of an unconverted one."""
         from core.auto_white_point import roll_reference
         ests = []
         for other in self.images:
             if other is img:
                 continue
-            d = self.recorded_highlight(other)
-            if d is None:
-                d = self._quick_highlight(other)
-            if d is not None:
-                ests.append(d)
+            rec = self.recorded_highlight(other)
+            if rec is not None:
+                ests.append(rec[1] if rec[1] is not None else rec[0])
+                continue
+            hl = self._quick_highlights(other)
+            if hl is not None:
+                ests.append(hl.dmax)
         return roll_reference(ests)
 
     @staticmethod
     def auto_white_point_from(black, dmax, reference):
-        """(white_point, record) for one frame, or (None, None)."""
+        """(white_point, record) for one frame from a brightest-area Dmax
+        alone (the guarded rule), or (None, None)."""
         from core.auto_white_point import guarded_dmax, white_point
         if black is None or dmax is None:
             return None, None
@@ -3112,7 +3175,10 @@ class CCRBackend:
         from core.auto_black_point import roll_check
         from core.auto_white_point import roll_reference
         total = len(self.images)
-        use_awp = self.uses_auto_white_point()
+        # Every frame's bright areas are measured when it may need a white
+        # point of its own (spec/white-point-choice.md): its choice, and the
+        # roll's neutral, which the others' measurements make.
+        use_awp = self.white_point_bgr is None
         stages = 3 if use_awp else 2
 
         def step(stage, i):
@@ -3138,8 +3204,8 @@ class CCRBackend:
                     if res is None and img.converted:
                         img.reload_image()
                     rects[i] = self.frame_picture_rect(img, img.resized_raw)
-                    highlights[i] = self.frame_highlight(img, img.resized_raw, black,
-                                                         rects[i])
+                    highlights[i] = self.frame_highlights(img, img.resized_raw, black,
+                                                          rects[i])
                 step(1, i)                                # white points
         summary = {"high": 0, "medium": 0, "fallback": 0, "unanchored": 0,
                    "skipped": 0, "auto_wp": 0, "notes": []}
@@ -3163,10 +3229,11 @@ class CCRBackend:
                         summary["notes"].append(res.reason)
                 awp_rec = None
                 if use_awp:
-                    others = [h for j, h in enumerate(highlights) if j != i]
-                    white, awp_rec = self.auto_white_point_from(
-                        black, highlights[i], roll_reference(others))
-                    if awp_rec is not None:
+                    others = [h.dmax for j, h in enumerate(highlights)
+                              if j != i and h is not None]
+                    white, awp_rec = self.resolve_white_point(
+                        img, black, highlights[i], lambda o=others: roll_reference(o))
+                    if white is not None and awp_rec and awp_rec.get("choice") in ("frame", "roll"):
                         summary["auto_wp"] += 1
                 else:
                     white = self.auto_white_point_for(black)

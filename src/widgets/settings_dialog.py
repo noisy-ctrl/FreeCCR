@@ -127,11 +127,12 @@ class SettingsDialog(QDialog):
         self._cb_auto_wp = QCheckBox("Auto white point (per frame)")
         gc.addWidget(self._cb_auto_wp)
         gc.addWidget(self._muted(
-            "Convert makes each frame's brightest area its white point, as "
-            "sampling the White Point on a near-clipping highlight does, and "
-            "checks it against the rest of the roll so a sunset or a blue sky "
-            "keeps its colour. Used only when no White Point is sampled and no "
-            "film stock is chosen."))
+            "New frames start on \"Frame highlight\": Convert makes the "
+            "frame's brightest near-grey area its white point, as sampling the "
+            "White Point on a white highlight does, and checks it against the "
+            "rest of the roll so a sunset or a blue sky keeps its colour. Off: "
+            "new frames start with no white point. Each frame can be changed "
+            "under Film B/W Point → White Point."))
         self._cb_warn_no_anchor = QCheckBox(
             "Warn when converting without a black point")
         gc.addWidget(self._cb_warn_no_anchor)

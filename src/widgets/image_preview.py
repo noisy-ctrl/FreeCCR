@@ -514,12 +514,20 @@ class GraphicsImageView(QGraphicsView):
                             bgr_tuple = (float(means[0]), float(means[1]), float(means[2]))
                             if mode == "black":
                                 ccr_backend.set_black_point(bgr_tuple)
+                                try:
+                                    pw.parent().parent().sliders_panel.on_bwpoint_sampled(mode)
+                                except AttributeError:
+                                    pass
                             else:
-                                ccr_backend.set_white_point(bgr_tuple)
-                            try:
-                                pw.parent().parent().sliders_panel.on_bwpoint_sampled(mode)
-                            except AttributeError:
-                                pass
+                                # The White Point is THIS frame's: the panel keeps
+                                # it on the image and converts the frame with it
+                                # (spec/white-point-choice.md §4).
+                                rect_n = (x1 / w, y1 / h, x2 / w, y2 / h)
+                                try:
+                                    pw.parent().parent().sliders_panel.on_white_point_sampled(
+                                        bgr_tuple, rect_n)
+                                except AttributeError:
+                                    pass
             return
 
         if self.drawing_reference and event.button() == Qt.RightButton:
@@ -2730,6 +2738,44 @@ class ImagePreview(QWidget):
                     sc.removeItem(item)
             except RuntimeError:
                 pass          # the scene was rebuilt and took the item with it
+        QTimer.singleShot(ms, _remove)
+
+    def flash_areas(self, rects_norm, color=(40, 140, 255), ms=5000):
+        """Outline, for a few seconds, areas of the frame given as normalised
+        (x1, y1, x2, y2) rects of the raw preview (full-image space), e.g. the
+        area a white point came from (spec/white-point-choice.md)."""
+        if not rects_norm or self.current_idx is None:
+            return
+        img = ccr_backend.get_image_by_index(self.current_idx)
+        base = getattr(img, "resized_raw", None) if img is not None else None
+        if base is None:
+            return
+        h, w = base.shape[:2]
+        inv = None
+        if self._crop_display_transform is not None:
+            inv, ok = self._crop_display_transform.inverted()
+            if not ok:
+                return
+        items = []
+        for x1, y1, x2, y2 in rects_norm:
+            corners = [(x1 * w, y1 * h), (x2 * w, y1 * h), (x2 * w, y2 * h), (x1 * w, y2 * h)]
+            if inv is not None:
+                corners = [(p.x(), p.y()) for p in (inv.map(QPointF(*c)) for c in corners)]
+            item = QGraphicsPolygonItem(QPolygonF([QPointF(*c) for c in corners]))
+            item.setPen(QPen(QColor(*color, 235), 2))
+            item.setZValue(50)
+            item.setTransform(self.view._display_transform())
+            self.view.scene().addItem(item)
+            items.append(item)
+
+        def _remove():
+            for it in items:
+                try:
+                    sc = it.scene()
+                    if sc is not None:
+                        sc.removeItem(it)
+                except RuntimeError:
+                    pass      # the scene was rebuilt and took the item with it
         QTimer.singleShot(ms, _remove)
 
     def map_displayed_to_full(self, x, y):

@@ -205,7 +205,11 @@ def test_what_turns_it_off(backend, monkeypatch, setup):
         monkeypatch.setattr(backend, "auto_white_point", False)
     assert not backend.uses_auto_white_point()
     backend.apply_bwpoint_to_all_images()
-    assert all("auto_wp" not in i.conversion_inputs for i in imgs)
+    if setup == "sampled white":                 # a roll-wide pair, from code: as before
+        assert all("auto_wp" not in i.conversion_inputs for i in imgs)
+    else:                                        # recorded, but no white point used
+        assert all(w is None for _n, _b, w, _s in backend._calls)
+        assert all(i.conversion_inputs["auto_wp"].get("used") is None for i in imgs)
 
 
 def test_convert_current_uses_the_other_frames_records(backend, monkeypatch):
