@@ -176,6 +176,10 @@ def _initialize_opencl_locked():
             float vibrance        = params[25];
             float sat_rolloff     = params[26];   // spec/saturation-rolloff.md
             float colour_organics = params[27];   // spec/colour-organics.md
+            // Colour Organics families (right-click popup): params[28] = number
+            // of anchors, params[29..33] = anchors + the first one + 360,
+            // params[34] = reach (the warp's width).
+            int org_n = (int)params[28];
 
             int idx = gid * 3;
             float r = img[idx];
@@ -537,7 +541,7 @@ def _initialize_opencl_locked():
             // (never reorders hues), realised at the same luma and chroma,
             // then fitted into gamut towards the grey. Mirrors
             // _apply_colour_organics exactly.
-            if (colour_organics > 0.0f) {
+            if (colour_organics > 0.0f && org_n > 0) {
                 float o_r = clamp(r / 65535.0f, 0.0f, 1.0f);
                 float o_g = clamp(g / 65535.0f, 0.0f, 1.0f);
                 float o_b = clamp(b / 65535.0f, 0.0f, 1.0f);
@@ -552,15 +556,15 @@ def _initialize_opencl_locked():
                     if (omx == o_r)      hue = 60.0f * fmod((o_g - o_b) / oc + 6.0f, 6.0f);
                     else if (omx == o_g) hue = 60.0f * ((o_b - o_r) / oc + 2.0f);
                     else                 hue = 60.0f * ((o_r - o_g) / oc + 4.0f);
-                    float hh = (hue < ORG_ANCHORS[0]) ? hue + 360.0f : hue;
+                    float hh = (hue < params[29]) ? hue + 360.0f : hue;
                     int oi = 0;
-                    for (int k = 1; k < ORG_N; k++) {
-                        if (hh >= ORG_ANCHORS[k]) oi = k;
+                    for (int k = 1; k < org_n; k++) {
+                        if (hh >= params[29 + k]) oi = k;
                     }
-                    float a0 = ORG_ANCHORS[oi];
-                    float span = ORG_ANCHORS[oi + 1] - a0;
+                    float a0 = params[29 + oi];
+                    float span = params[29 + oi + 1] - a0;
                     float t = (hh - a0) / span;
-                    float w = ORG_WIDTH;
+                    float w = params[34];
                     float m1 = fmin(t, w);
                     float m2 = fmin(1.0f - t, w);
                     float e1 = 0.5f * (m1 + (w / M_PI_F) * sin(M_PI_F * m1 / w));
@@ -760,10 +764,7 @@ def _initialize_opencl_locked():
                        .replace("ROLLOFF_KNEE_DROP", f"{ROLLOFF_KNEE_DROP:.6f}f")
                        .replace("ROLLOFF_CEIL_DROP", f"{ROLLOFF_CEIL_DROP:.6f}f")
                        .replace("ROLLOFF_GAMMA", f"{ROLLOFF_GAMMA:.6f}f")
-                       .replace("ORG_STRENGTH", f"{ORGANICS_STRENGTH:.6f}f")
-                       .replace("ORG_WIDTH", f"{ORGANICS_WIDTH:.6f}f")
-                       .replace("ORG_N", str(len(ORGANICS_ANCHORS)))
-                       .replace("__kernel void adjust(", _organics_anchor_table() + "\n__kernel void adjust("))
+                       .replace("ORG_STRENGTH", f"{ORGANICS_STRENGTH:.6f}f"))
 
         # Compile the program
         program = cl.Program(ctx, kernel_code).build()
@@ -3366,29 +3367,88 @@ def _apply_sat_rolloff(img_norm: np.ndarray, amount: float) -> np.ndarray:
 # that follows the structure measured in Ember's film rendering; replace them
 # with measured Noritsu anchors when scan pairs exist. The OpenCL kernel
 # substitutes these constants (and the anchor table) textually.
-ORGANICS_ANCHORS = (25.0, 100.0, 200.0, 265.0)  # HSV degrees, ascending:
-                                                # warm, foliage, sky/water, blue-violet
+# The families: (key, name, what they hold, default HSV hue). Each can be
+# switched off or nudged by +-ORGANICS_SHIFT_MAX degrees in the right-click
+# popup; the ranges can't overlap, so the anchors always stay in order.
+ORGANICS_FAMILIES = (
+    ("warm", "Warm", "skin, wood, brick", 25.0),
+    ("foliage", "Foliage", "leaves, grass", 100.0),
+    ("sky", "Sky and water", "sky, sea", 200.0),
+    ("violet", "Blue-violet", "deep blue, purple", 265.0),
+)
+ORGANICS_ANCHORS = tuple(h for *_rest, h in ORGANICS_FAMILIES)
 ORGANICS_STRENGTH = 0.85       # slope at an anchor at full: 1 - 0.85 (1 - w) = 0.40
 ORGANICS_WIDTH = 0.3           # each anchor's pull reaches 30 % into its spans
+ORGANICS_SHIFT_MAX = 20        # popup: hue nudge per family, degrees
+ORGANICS_REACH_MIN, ORGANICS_REACH_MAX = 10, 45   # popup: reach, percent
 _ORG_GATE_LO, _ORG_GATE_HI = 0.06, 0.20     # the colour bands' grey gate
-_ORG_A = np.array(ORGANICS_ANCHORS + (ORGANICS_ANCHORS[0] + 360.0,), np.float32)
+
+ORGANICS_SHAPE_DEFAULT = {"reach": int(round(ORGANICS_WIDTH * 100))}
+for _key, *_rest in ORGANICS_FAMILIES:
+    ORGANICS_SHAPE_DEFAULT[f"{_key}_on"] = True
+    ORGANICS_SHAPE_DEFAULT[f"{_key}_shift"] = 0
 
 
-def _organics_anchor_table() -> str:
-    vals = ", ".join(f"{v:.6f}f" for v in _ORG_A)
-    return f"__constant float ORG_ANCHORS[{len(_ORG_A)}] = {{{vals}}};"
+def normalize_organics_shape(shape):
+    """A clean Colour Organics shape dict, or None when absent / not a dict /
+    all default (None means: the default families, byte-identical)."""
+    if not isinstance(shape, dict):
+        return None
+    out = {}
+    for k, dflt in ORGANICS_SHAPE_DEFAULT.items():
+        v = shape.get(k, dflt)
+        if isinstance(dflt, bool):
+            out[k] = bool(v)
+            continue
+        lo, hi = ((ORGANICS_REACH_MIN, ORGANICS_REACH_MAX) if k == "reach"
+                  else (-ORGANICS_SHIFT_MAX, ORGANICS_SHIFT_MAX))
+        try:
+            out[k] = int(round(float(np.clip(float(v), lo, hi))))
+        except (TypeError, ValueError):
+            out[k] = dflt
+    return None if out == ORGANICS_SHAPE_DEFAULT else out
 
 
-def organics_hue_map(hue_deg, strength):
+def organics_anchors(shape=None):
+    """The switched-on families' hues (ascending) for a shape (None = default)."""
+    shape = normalize_organics_shape(shape) or ORGANICS_SHAPE_DEFAULT
+    return [h + shape[f"{k}_shift"] for k, _n, _w, h in ORGANICS_FAMILIES
+            if shape[f"{k}_on"]]
+
+
+def organics_width(shape=None):
+    shape = normalize_organics_shape(shape) or ORGANICS_SHAPE_DEFAULT
+    return shape["reach"] / 100.0
+
+
+def _organics_table(anchors):
+    return np.array(list(anchors) + [anchors[0] + 360.0], np.float32)
+
+
+def _organics_params(shape):
+    """Kernel params[28..34]: anchor count, anchors + wrap padded to 5, reach."""
+    anchors = organics_anchors(shape)
+    table = list(_organics_table(anchors)) if anchors else []
+    table += [0.0] * (5 - len(table))
+    return [float(len(anchors))] + [float(v) for v in table] + [organics_width(shape)]
+
+
+def organics_hue_map(hue_deg, strength, anchors=None, width=None):
     """New HSV hue (degrees) for `hue_deg` at warp strength `strength`
-    (0 = identity, ORGANICS_STRENGTH = full; scalar or per-pixel array)."""
+    (0 = identity, ORGANICS_STRENGTH = full; scalar or per-pixel array).
+    `anchors` (ascending HSV degrees) and `width` default to the standard
+    families; no anchors = identity."""
+    anchors = ORGANICS_ANCHORS if anchors is None else anchors
     h = np.asarray(hue_deg, np.float32)
-    hh = np.where(h < _ORG_A[0], h + np.float32(360.0), h)
-    i = np.clip(np.searchsorted(_ORG_A, hh, side="right") - 1, 0, len(_ORG_A) - 2)
-    a0 = _ORG_A[i]
-    span = _ORG_A[i + 1] - a0
+    if len(anchors) == 0:
+        return h
+    A = _organics_table(anchors)
+    hh = np.where(h < A[0], h + np.float32(360.0), h)
+    i = np.clip(np.searchsorted(A, hh, side="right") - 1, 0, len(A) - 2)
+    a0 = A[i]
+    span = A[i + 1] - a0
     t = (hh - a0) / span
-    w = np.float32(ORGANICS_WIDTH)
+    w = np.float32(ORGANICS_WIDTH if width is None else width)
 
     def _e(u):
         m = np.minimum(u, w)
@@ -3399,11 +3459,14 @@ def organics_hue_map(hue_deg, strength):
     return np.mod(a0 + t2 * span, np.float32(360.0)).astype(np.float32)
 
 
-def _apply_colour_organics(img_norm: np.ndarray, amount: float) -> np.ndarray:
-    """Colour Organics on a normalised [0,1] float RGB image. Returns a new
-    float32 array in [0,1]. Mirrors the OpenCL kernel block exactly."""
+def _apply_colour_organics(img_norm: np.ndarray, amount: float,
+                           shape=None) -> np.ndarray:
+    """Colour Organics on a normalised [0,1] float RGB image, with the
+    families in `shape` (None = default). Returns a new float32 array in
+    [0,1]. Mirrors the OpenCL kernel block exactly."""
     x = np.clip(img_norm, 0.0, 1.0).astype(np.float32)
-    if not amount or amount <= 0:
+    anchors = organics_anchors(shape)
+    if not amount or amount <= 0 or not anchors:
         return x
     mx = x.max(axis=-1)
     mn = x.min(axis=-1)
@@ -3420,7 +3483,8 @@ def _apply_colour_organics(img_norm: np.ndarray, amount: float) -> np.ndarray:
     hue = np.where(ms == r, 60.0 * np.mod((g - b) / cs + 6.0, 6.0),
           np.where(ms == g, 60.0 * ((b - r) / cs + 2.0),
                             60.0 * ((r - g) / cs + 4.0))).astype(np.float32)
-    h2 = organics_hue_map(hue, np.float32(amount / 100.0 * ORGANICS_STRENGTH) * gate[sel])
+    h2 = organics_hue_map(hue, np.float32(amount / 100.0 * ORGANICS_STRENGTH) * gate[sel],
+                          anchors, organics_width(shape))
     # the fully saturated colour of hue h2
     hp = h2 / np.float32(60.0)
     xx = np.float32(1.0) - np.abs(np.mod(hp, np.float32(2.0)) - np.float32(1.0))
@@ -3596,6 +3660,9 @@ def adjust_image(
     sat_rolloff: float = 0.0,
     # Colour Organics (spec/colour-organics.md), 0..100. Appended last.
     colour_organics: float = 0.0,
+    # Colour Organics families / reach from the right-click popup; None =
+    # default. Appended last.
+    organics_shape=None,
 ) -> np.ndarray:
     """
     Apply temperature, tint, exposure, brightness, blackpoint, whitepoint, highlights, shadows,
@@ -3808,7 +3875,8 @@ def adjust_image(
     # Colour Organics: draw hues into print families (hue only), before the
     # roll-off so that stays the last limit on strong colours.
     if colour_organics and colour_organics > 0:
-        img = _apply_colour_organics(img / 65535.0, colour_organics) * 65535.0
+        img = _apply_colour_organics(img / 65535.0, colour_organics,
+                                     organics_shape) * 65535.0
 
     # Saturation Roll-off: a soft ceiling on strong colours, after everything
     # that can push saturation up, before the per-colour bands.
@@ -4107,6 +4175,7 @@ def adjust_image_opencl(
     sat_rolloff: float = 0.0,
     # Colour Organics — appended last, see adjust_image.
     colour_organics: float = 0.0,
+    organics_shape=None,
 ) -> np.ndarray:
     """
     GPU-accelerated (OpenCL) version of adjust_image.
@@ -4283,7 +4352,8 @@ def adjust_image_opencl(
                           balance_b=balance_b, cineon_log=cineon_log,
                           vibrance=vibrance, look_lut=look_lut,
                           tone_shape=tone_shape, sat_rolloff=sat_rolloff,
-                          colour_organics=colour_organics)
+                          colour_organics=colour_organics,
+                          organics_shape=organics_shape)
 
     try:
       # Serialize GPU submissions: the hi-res zoom worker may run this
@@ -4316,7 +4386,8 @@ def adjust_image_opencl(
         # params[11..22] channel levels, params[23] subtractive saturation,
         # params[24] per-color-band enable flag, params[25] vibrance — kept
         # after the band flag so no existing index moves — params[26]
-        # Saturation Roll-off, params[27] Colour Organics)
+        # Saturation Roll-off, params[27] Colour Organics, params[28..34] its
+        # families: count, anchors + wrap (5 slots), reach)
         params = np.array([
             kelvin_shift, tint_shift, exposure, brightness,
             blackpoint, whitepoint, contrast, saturation, balance_factor,
@@ -4330,6 +4401,7 @@ def adjust_image_opencl(
             vibrance,
             sat_rolloff,
             colour_organics,
+            *_organics_params(organics_shape),
         ], dtype=np.float32)
 
         params_buf = cl_array.to_device(queue, params)
@@ -4361,7 +4433,8 @@ def adjust_image_opencl(
                           balance_b=balance_b, cineon_log=cineon_log,
                           vibrance=vibrance, look_lut=look_lut,
                           tone_shape=tone_shape, sat_rolloff=sat_rolloff,
-                          colour_organics=colour_organics)
+                          colour_organics=colour_organics,
+                          organics_shape=organics_shape)
 
 
 

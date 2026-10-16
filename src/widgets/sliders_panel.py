@@ -9,7 +9,8 @@ from PySide6.QtGui import (QKeySequence, QShortcut, QPainter, QColor,
 from core.ccr_backend import ccr_backend
 from core.ccr_processor import (COLOR_BANDS, BAND_PARAMS, BAND_ADJUSTMENT_KEYS,
                                 compute_density_slopes, CHROMA_NR_RADIUS_DEFAULT,
-                                normalize_tone_shape, TONE_SHAPE_DEFAULT)
+                                normalize_tone_shape, TONE_SHAPE_DEFAULT,
+                                normalize_organics_shape)
 from core.film_stocks import (decode_film_stocks, encode_film_stocks,
                               find_film_stock, upsert_film_stock,
                               remove_film_stock)
@@ -250,6 +251,10 @@ def paste_options(clip, default_for):
         from widgets.tone_range_popup import describe_shape
         rows.append(("Adjustments", "tone_shape", "Highlights/Shadows range  ("
                      + describe_shape(normalize_tone_shape(clip["tone_shape"])) + ")"))
+    if normalize_organics_shape(clip.get("organics_shape")):
+        from widgets.organics_popup import describe_organics
+        rows.append(("Adjustments", "organics_shape", "Colour Organics families  ("
+                     + describe_organics(clip["organics_shape"]) + ")"))
     xt = [(k, adj.get(k, 0)) for k in _XT_KEYS if adj.get(k, 0)]
     if xt:
         arrows = {"xt_rg": "R\u2190G", "xt_rb": "R\u2190B", "xt_gr": "G\u2190R",
@@ -1156,8 +1161,15 @@ class SlidersPanel(QWidget):
         # spec/colour-organics.md
         self.colour_organics_slider_layout = self.create_slider(
             "Colour Organics", min_value=0, max_value=100)
-        self.colour_organics_slider_layout.itemAt(0).widget().setToolTip(
-            self.COLOUR_ORGANICS_HINT)
+        # Right-click the label for the families and their reach
+        # (spec/colour-organics.md, popup revision).
+        self._organics_shape = None      # active layer's shape (None = default)
+        self._organics_popup = None
+        self._organics_label = self.colour_organics_slider_layout.itemAt(0).widget()
+        self._organics_label.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._organics_label.customContextMenuRequested.connect(
+            lambda pos: self._open_organics_popup(self._organics_label.mapToGlobal(pos)))
+        self._update_organics_label()
 
         scroll_layout.addLayout(self.color_profile_row)
         scroll_layout.addLayout(self.temperature_slider_layout)
@@ -1656,6 +1668,9 @@ class SlidersPanel(QWidget):
         self._tone_shape = normalize_tone_shape(
             adjustment.get("tone_shape") if adjustment else None)
         self._update_tone_labels()
+        self._organics_shape = normalize_organics_shape(
+            adjustment.get("organics_shape") if adjustment else None)
+        self._update_organics_label()
         for i, key in enumerate(self.adjustment_keys):
             if i < len(self.sliders):
                 val = adjustment.get(key, self._default_for(key)) if adjustment \
@@ -2026,6 +2041,9 @@ class SlidersPanel(QWidget):
         # curves; it rides every slider -> dict rebuild the same way.
         if self._tone_shape:
             adjustment["tone_shape"] = dict(self._tone_shape)
+        # Colour Organics families: nested and non-slider in the same way.
+        if getattr(self, "_organics_shape", None):
+            adjustment["organics_shape"] = dict(self._organics_shape)
         return adjustment
 
     def _attach_cineon(self, adjustment: dict) -> dict:
@@ -2264,6 +2282,50 @@ class SlidersPanel(QWidget):
             self._tone_popup = None
             self.end_undo_burst()
 
+    # --- Colour Organics families (spec/colour-organics.md) -------------------
+    ORGANICS_LABEL_TIP = "Right-click: families and reach"
+
+    def _update_organics_label(self):
+        lbl = getattr(self, "_organics_label", None)
+        if lbl is None:
+            return
+        from widgets.organics_popup import describe_organics
+        custom = self._organics_shape is not None
+        f = lbl.font()
+        f.setUnderline(custom)
+        lbl.setFont(f)
+        lines = [self.COLOUR_ORGANICS_HINT]
+        if custom:
+            lines.append("Families: " + describe_organics(self._organics_shape))
+        lines.append(self.ORGANICS_LABEL_TIP)
+        lbl.setToolTip("\n".join(lines))
+
+    def _open_organics_popup(self, global_pos):
+        if self.current_idx is None:
+            return
+        from widgets.organics_popup import OrganicsPopup
+        self.end_undo_burst()
+        pop = OrganicsPopup(self._organics_shape, self)
+        pop.changed.connect(self._on_organics_shape_changed)
+        pop.closed.connect(self._on_organics_popup_closed)
+        self._organics_popup = pop
+        pop.adjustSize()
+        pop.move(global_pos)
+        pop.show()
+
+    def _on_organics_shape_changed(self, shape):
+        self._organics_shape = normalize_organics_shape(shape)
+        self._update_organics_label()
+        # Same store / preview / debounced-reprocess path as a slider move;
+        # its undo burst is held open until the popup closes (one undo step).
+        self.on_slider_changed()
+        self._undo_burst_timer.stop()
+
+    def _on_organics_popup_closed(self):
+        if self._organics_popup is not None:
+            self._organics_popup = None
+            self.end_undo_burst()
+
     # --- Film Look (spec/film-look-lut.md) -----------------------------------
     def _populate_look_combo(self, select=None):
         from core.look_lut import list_looks
@@ -2467,6 +2529,9 @@ class SlidersPanel(QWidget):
         # is the curve-only path). set_curves does not emit, so it won't start a
         # competing undo burst here.
         self.curve_editor.set_curves(None)
+        # ... and the Colour Organics families go back to the standard four.
+        self._organics_shape = None
+        self._update_organics_label()
         # Save adjustment to the ACTIVE layer (global or selected area) and
         # update the preview. Resetting an area zeroes that area's settings;
         # resetting the Whole Image layer zeroes the global sliders (areas keep
@@ -2569,8 +2634,10 @@ class SlidersPanel(QWidget):
         sync_profile = bool(selection.get("profile"))
         sync_curves = bool(selection.get("curves"))
         sync_orientation = bool(selection.get("orientation"))
-        # The Highlights/Shadows shape rides the Tone group (its two sliders).
+        # The Highlights/Shadows shape rides the Tone group (its two sliders);
+        # the Colour Organics families ride the Saturation group.
         sync_tone_shape = bool(selection.get("tone"))
+        sync_org_shape = bool(selection.get("sat"))
         # Sync always copies the SOURCE image's GLOBAL (whole-image) layer, not
         # the live sliders — those may currently reflect an active area, and
         # areas are per-image (never synced). Read from the global dict.
@@ -2578,6 +2645,7 @@ class SlidersPanel(QWidget):
         src_global = dict(src.adjustment_settings) if src is not None else {}
         src_curves = src_global.get("curves")  # None when identity/absent
         src_shape = normalize_tone_shape(src_global.get("tone_shape"))
+        src_org = normalize_organics_shape(src_global.get("organics_shape"))
         current_adjustment = src_global
         crop_rect = src.crop_rect if src is not None else None
         crop_angle = getattr(src, "crop_angle", 0.0) if src is not None else 0.0
@@ -2596,8 +2664,11 @@ class SlidersPanel(QWidget):
             orient_changes = sync_orientation and _orientation_of(img) != src_orientation
             own_shape = normalize_tone_shape(img.adjustment_settings.get("tone_shape"))
             shape_changes = sync_tone_shape and own_shape != src_shape
+            own_org = normalize_organics_shape(img.adjustment_settings.get("organics_shape"))
+            org_changes = sync_org_shape and own_org != src_org
             if (not adj_changes and not crop_changes and not profile_changes
-                    and not curves_changes and not orient_changes and not shape_changes):
+                    and not curves_changes and not orient_changes and not shape_changes
+                    and not org_changes):
                 continue  # nothing to change — and no dead undo snapshot
             img.push_undo_state()
             if adj_changes:
@@ -2617,6 +2688,8 @@ class SlidersPanel(QWidget):
                 if own_shape and not shape_changes:
                     # not synced, or already equal to the source's: keep it
                     merged["tone_shape"] = dict(own_shape)
+                if own_org and not org_changes:
+                    merged["organics_shape"] = dict(own_org)
                 # Same for the Cineon flag when the channels group (which
                 # carries it) is NOT being synced — the rebuild from
                 # adjustment_keys would silently drop it otherwise.
@@ -2629,6 +2702,11 @@ class SlidersPanel(QWidget):
                     img.adjustment_settings["tone_shape"] = dict(src_shape)
                 else:
                     img.adjustment_settings.pop("tone_shape", None)
+            if org_changes:
+                if src_org:
+                    img.adjustment_settings["organics_shape"] = dict(src_org)
+                else:
+                    img.adjustment_settings.pop("organics_shape", None)
             if curves_changes:
                 if src_curves:
                     img.adjustment_settings["curves"] = copy.deepcopy(src_curves)
@@ -2644,7 +2722,7 @@ class SlidersPanel(QWidget):
                 # update_preview below re-apply it from these attributes.
                 _apply_orientation(img, src_orientation)
             if (adj_changes or profile_changes or curves_changes or crop_changes
-                    or shape_changes):
+                    or shape_changes or org_changes):
                 # Adjustments, curves, and the color profile all change pixels;
                 # a crop change moves the region the histogram is computed over
                 # (it samples only the cropped area). Any of these needs a
@@ -3459,6 +3537,8 @@ class SlidersPanel(QWidget):
                 live["curves"] = g["curves"]
             if g.get("tone_shape"):
                 live["tone_shape"] = g["tone_shape"]
+            if g.get("organics_shape"):
+                live["organics_shape"] = g["organics_shape"]
             for flag in GLOBAL_FLAG_KEYS:
                 if g.get(flag):
                     live[flag] = g[flag]
@@ -3468,6 +3548,8 @@ class SlidersPanel(QWidget):
             "cineon_log": bool(live.get("cineon_log")),
             "look_lut": live.get("look_lut") or None,
             "tone_shape": copy.deepcopy(normalize_tone_shape(live.get("tone_shape"))),
+            "organics_shape": copy.deepcopy(
+                normalize_organics_shape(live.get("organics_shape"))),
             # Bypass-until-export flags ride with their section's paste row.
             "flags": {f: bool(live.get(f)) for f in GLOBAL_FLAG_KEYS
                       if f not in ("cineon_log", "look_lut")},
@@ -3584,7 +3666,8 @@ class SlidersPanel(QWidget):
         # Section -> its bypass flag (pasted with the section's row).
         flag_for = {"noise": "chroma_nr_export_only", "sharpen": "sharpen_export_only"}
         touch_adj = (bool(adj_keys) or "curves" in chosen or "cineon_log" in chosen
-                     or "look_lut" in chosen or "tone_shape" in chosen)
+                     or "look_lut" in chosen or "tone_shape" in chosen
+                     or "organics_shape" in chosen)
         merged = None
         if touch_adj:
             # Build a COMPLETE dict from the target (missing keys filled with
@@ -3605,6 +3688,10 @@ class SlidersPanel(QWidget):
                 merged["tone_shape"] = copy.deepcopy(clip["tone_shape"])
             elif normalize_tone_shape(target.get("tone_shape")):
                 merged["tone_shape"] = target["tone_shape"]
+            if "organics_shape" in chosen and clip.get("organics_shape"):
+                merged["organics_shape"] = copy.deepcopy(clip["organics_shape"])
+            elif normalize_organics_shape(target.get("organics_shape")):
+                merged["organics_shape"] = target["organics_shape"]
             if "cineon_log" in chosen or target.get("cineon_log"):
                 merged["cineon_log"] = True
             if "look_lut" in chosen and clip.get("look_lut"):
@@ -3631,6 +3718,8 @@ class SlidersPanel(QWidget):
                         self.slider_value_labels[i].setText(
                             self.sliders[i].value_text())
                 self.curve_editor.set_curves(merged.get("curves"))
+                self._organics_shape = normalize_organics_shape(merged.get("organics_shape"))
+                self._update_organics_label()
 
         pixels = touch_adj
         if "profile" in chosen:
