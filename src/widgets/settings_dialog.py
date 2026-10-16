@@ -224,8 +224,9 @@ class SettingsDialog(QDialog):
         gw.addWidget(self._muted(
             "When a negative is converted, automatically estimate the color "
             "cast and set the Temperature/Tint sliders — only for images with "
-            "no white balance already set. The AWB button applies the same "
-            "estimate on demand."))
+            "no white balance already set, and not for frames converted with a "
+            "white point (it already sets the neutral). The AWB button applies "
+            "the same estimate on demand."))
         algo_row = QHBoxLayout()
         algo_row.setSpacing(theme.GAP_ROW)
         algo_row.addWidget(QLabel("Algorithm"))

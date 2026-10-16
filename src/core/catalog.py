@@ -248,6 +248,9 @@ def serialize_image(img) -> dict:
         "wp_sample": (list(img.wp_sample) if getattr(img, "wp_sample", None) else None),
         "wp_sample_rect": (list(img.wp_sample_rect)
                            if getattr(img, "wp_sample_rect", None) else None),
+        # Temperature/Tint the after-conversion AWB wrote, so a later white
+        # point conversion can undo them (spec/auto-white-balance.md §10).
+        "awb_auto": (list(img.awb_auto) if getattr(img, "awb_auto", None) else None),
         "rotation_angle": int(img.rotation_angle),
         "fine_rotation_angle": int(img.fine_rotation_angle),
         "horizontal_mirrored": bool(img.horizontal_mirrored),
@@ -723,6 +726,8 @@ def _restore_image(file_path: str, state: dict, live_merge_sources=None,
     img.wp_sample = tuple(ws) if ws else None
     wr = state.get("wp_sample_rect")
     img.wp_sample_rect = tuple(wr) if wr else None
+    aa = state.get("awb_auto")
+    img.awb_auto = tuple(aa) if aa else None
     img.tint_balance_factor = state.get("tint_balance_factor",
                                         getattr(img, "tint_balance_factor", 1.0))
 
