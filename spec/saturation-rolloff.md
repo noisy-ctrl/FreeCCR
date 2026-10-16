@@ -70,3 +70,30 @@ like Vibrance's. Guarded on `max > 1e-6` (black has no saturation).
 - Linear-light luminance kept (pure blue does not go dark).
 - numpy and OpenCL agree (where OpenCL is available).
 - Slider position, range 0..100, sync group, label.
+
+## Revision 2026-10-16: centred, -50..+50
+
+- The slider is **-50..+50 with 0 in the middle**, like the other colour
+  sliders. `a = clamp(value / 50, -1, 1)`, so +50 is the old 100.
+- **Right (a > 0)**: the roll-off above, unchanged.
+- **Left (a < 0)**: strong colours made punchier. Same knee
+  `K = 1 - 0.5 |a|`; above it `s' = s + 0.9 |a| (1 - K) u^2 (1 - u)` with
+  `u = (s - K) / (1 - K)`: slope 1 at the knee, `1 - 0.9 |a|` (>= 0.1) at
+  `s = 1`, which stays fixed, so the curve is monotone with no plateau. The
+  largest push is `0.9 |a| (1 - K) 4/27`, about 0.07 at full: gentle by
+  design, since strong colours already sit near clipping. Realised by the
+  same two steps; lowering the other channels raises the luminance factor
+  `f` above 1, so it is capped at `1 / max`: hue and saturation exact,
+  luminance exact unless the brightest channel would pass 1, never clips.
+- Why two-sided makes sense: muted colours and greys are untouched either
+  way, so it is the strong-colour counterpart of Vibrance (which works on
+  muted ones), and Ember's chroma compression is two-sided the same way.
+- Values set while the slider was 0..100 now act twice as strong (anything
+  above 50 clamps to 50).
+- `params[26]` carries the signed value; `ROLLOFF_SCALE`/`ROLLOFF_PUNCH` are
+  substituted into the kernel like the other constants.
+
+Tests: the left curve is monotone, untouched below the knee, fixed at 1 and
+no stronger than 0.067; hue kept, never clips, luminance kept unless capped;
+out-of-range values clamp; OpenCL matches on both sides; the slider range is
+-50..+50 at 0.
