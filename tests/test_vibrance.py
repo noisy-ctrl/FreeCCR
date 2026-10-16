@@ -96,9 +96,12 @@ class TestVibrance:
 
 class TestVibranceUI:
     def test_key_sits_after_saturation(self):
+        # Saturation Roll-off now sits directly under Saturation, then Vibrance
+        # (spec/saturation-rolloff.md).
         from widgets.sliders_panel import SlidersPanel
         keys = SlidersPanel.ADJUSTMENT_KEYS
-        assert keys.index("vibrance") == keys.index("saturation") + 1
+        assert keys.index("sat_rolloff") == keys.index("saturation") + 1
+        assert keys.index("vibrance") == keys.index("sat_rolloff") + 1
 
     def test_in_saturation_sync_group(self):
         from widgets.sliders_panel import SYNC_GROUPS

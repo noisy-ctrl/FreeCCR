@@ -39,7 +39,7 @@ SYNC_GROUPS = [
     ("tone", "Tone (brightness, contrast, ...)",
      ("brightness", "gamma", "highlights", "white_point",
       "shadows", "black_point", "contrast")),
-    ("sat", "Saturation", ("saturation", "vibrance", "sub_saturation")),
+    ("sat", "Saturation", ("saturation", "sat_rolloff", "vibrance", "sub_saturation")),
     ("crop", "Crop", ()),
     # Coarse 90-degree rotation + the mirror flags, synced like crop (whole-image
     # properties, not adjustment keys). fine_rotation_angle is deliberately NOT
@@ -164,7 +164,8 @@ _BASIC_LABELS = {
     "temperature": "Temperature", "tint": "Tint", "brightness": "Brightness",
     "gamma": "Gamma", "highlights": "Highlights", "white_point": "White Point",
     "shadows": "Shadows", "black_point": "Black Point", "contrast": "Contrast",
-    "saturation": "Saturation", "vibrance": "Vibrance",
+    "saturation": "Saturation", "sat_rolloff": "Saturation Roll-off",
+    "vibrance": "Vibrance",
     "sub_saturation": "Subtracted Sat", "exposure": "Exposure",
     "ch_input_gain": "Input Gain", "ch_master_shift": "Master Shift",
     "ch_master_gain": "Master Gain",
@@ -614,8 +615,10 @@ class SlidersPanel(QWidget):
         # auto-exposure and for area layers — it just has no slider to zip to.
         "temperature", "tint", "brightness", "gamma", "highlights",
         "white_point", "shadows", "black_point", "contrast", "saturation",
-        # Vibrance sits directly under Saturation; its create_slider() call is
-        # right after Saturation's to keep the positional zip. spec/vibrance.md.
+        # Saturation Roll-off sits directly under Saturation (its
+        # create_slider() call is right after Saturation's), then Vibrance.
+        # spec/saturation-rolloff.md, spec/vibrance.md.
+        "sat_rolloff",
         "vibrance",
         "sub_saturation",
         # Per-channel levels controls (collapsible section)
@@ -1127,6 +1130,15 @@ class SlidersPanel(QWidget):
         self.black_point_slider_layout = self.create_slider("Black Point")
         self.contrast_slider_layout = self.create_slider("Contrast")
         self.saturation_slider_layout = self.create_slider("Saturation")
+        # Saturation Roll-off: a soft ceiling on strong colours, 0..100.
+        # Created right after Saturation (ADJUSTMENT_KEYS zip).
+        # spec/saturation-rolloff.md
+        self.sat_rolloff_slider_layout = self.create_slider(
+            "Sat Roll-off", min_value=0, max_value=100)
+        self.sat_rolloff_slider_layout.itemAt(0).widget().setToolTip(
+            "Saturation Roll-off: eases back the strongest colours so they don't "
+            "go neon or clip. Muted colours and greys are untouched; brightness "
+            "is kept.")
         # Vibrance: saturation weighted towards muted colours, skin tones partly
         # protected. Created right after Saturation (ADJUSTMENT_KEYS zip).
         self.vibrance_slider_layout = self.create_slider("Vibrance")
@@ -1143,6 +1155,7 @@ class SlidersPanel(QWidget):
         scroll_layout.addLayout(self.black_point_slider_layout)
         scroll_layout.addLayout(self.contrast_slider_layout)
         scroll_layout.addLayout(self.saturation_slider_layout)
+        scroll_layout.addLayout(self.sat_rolloff_slider_layout)
         scroll_layout.addLayout(self.vibrance_slider_layout)
         scroll_layout.addLayout(self.sub_saturation_slider_layout)
 
