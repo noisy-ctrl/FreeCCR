@@ -327,6 +327,57 @@ def test_hook_skips_unconverted(backend, tmp_path):
     assert img.adjustment_settings == {}
 
 
+# --- no AWB on a frame with a white point (spec/auto-white-balance.md §10) -----
+
+def _with_white(img, white=(3000.0, 2600.0, 2100.0)):
+    img.conversion_inputs = {"mode": "bw", "bw": ((30000.0, 26000.0, 21000.0),
+                                                  white)}
+    return img
+
+
+def test_hook_leaves_a_white_point_frame_alone(backend, tmp_path):
+    backend.auto_awb = True
+    backend.awb_algorithm = "gray_world"
+    img = _with_white(_real_image(tmp_path, _u16(_cast_scene(np.random.default_rng(6)))))
+    backend.maybe_auto_awb(img)
+    assert img.adjustment_settings == {}
+    _with_white(img, white=None)                    # converted without one: as before
+    backend.maybe_auto_awb(img)
+    assert any(img.adjustment_settings.get(k, 0) for k in ("temperature", "tint"))
+    assert img.awb_auto == (img.adjustment_settings.get("temperature", 0),
+                            img.adjustment_settings.get("tint", 0))
+
+
+def test_white_point_reconvert_undoes_only_untouched_awb(backend, tmp_path):
+    backend.auto_awb = True
+    backend.awb_algorithm = "gray_world"
+    img = _real_image(tmp_path, _u16(_cast_scene(np.random.default_rng(6))))
+    backend.maybe_auto_awb(img)                     # no white point: AWB writes
+    assert img.awb_auto is not None
+    _with_white(img)
+    backend.maybe_auto_awb(img)                     # now with one: AWB's pair goes
+    assert img.adjustment_settings == {} and img.awb_auto is None
+
+    _with_white(img, white=None)
+    backend.maybe_auto_awb(img)
+    img.adjustment_settings["temperature"] += 3     # then you moved it by hand
+    hand = dict(img.adjustment_settings)
+    _with_white(img)
+    backend.maybe_auto_awb(img)
+    assert img.adjustment_settings == hand          # yours stays
+
+
+def test_awb_record_round_trips_through_the_catalog(tmp_path):
+    import json
+    from core.catalog import serialize_image, _restore_image
+    img = _real_image(tmp_path, _u16(_cast_scene(np.random.default_rng(6))))
+    img.awb_auto = (12, -4)
+    state = json.loads(json.dumps(serialize_image(img)))
+    assert _restore_image(img.file_path, state).awb_auto == (12, -4)
+    del state["awb_auto"]                           # an older catalog
+    assert _restore_image(img.file_path, state).awb_auto is None
+
+
 # --- registry / defaults -------------------------------------------------------
 
 def test_algorithm_registry():

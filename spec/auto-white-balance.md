@@ -409,3 +409,25 @@ Wiring (the Auto Gain 4-point pattern):
   (False, "gray_world"); toggling handlers persist and update flags.
 
 ## 9. Open questions — RESOLVED (see §0 for the locked answers)
+
+## 10. Revision 2026-10-16: no auto AWB on a frame with a white point
+
+With the per-frame auto white point (`spec/white-point-choice.md`) the white
+point already decides what is neutral; the after-conversion AWB then moved
+Temperature/Tint on top of it, and the frames looked best with both at 0.
+
+- `maybe_auto_awb` does nothing when the conversion used a white point
+  (`conversion_inputs["bw"][1]` is set: auto "frame"/"roll", or sampled).
+  Reference-frame conversions, "Off", film stocks without a white point and
+  Positive mode keep the AWB exactly as before.
+- When the hook writes, it records the pair on the frame (`img.awb_auto`,
+  saved in the catalog, additive). A later conversion WITH a white point
+  clears Temperature/Tint back to 0 only if they still equal that record —
+  i.e. AWB set them and nobody has touched them since. Hand-set values and
+  the AWB / WB Picker buttons are never affected.
+- Frames converted before this have no record, so their AWB values stay
+  until reset by hand (they can't be told apart from hand-set ones).
+
+Tests: no write with a white point; written as before without one; an
+auto-written pair is cleared on a white-point re-convert, a hand-changed one
+is kept; the record round-trips through the catalog.

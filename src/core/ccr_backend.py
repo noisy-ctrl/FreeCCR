@@ -1073,19 +1073,34 @@ class CCRBackend:
     def maybe_auto_awb(self, image_obj):
         """One-shot auto white balance at conversion: writes the AWB-estimated
         temperature/tint into the image's whole-image settings when the toggle
-        is on and neither is already set (never clobbers a saved value). Called
+        is on and neither is already set (never clobbers a saved value), and
+        not when the conversion used a white point. Called
         only from fresh-conversion sites, not replay/reconvert paths. Pure
         numpy + a dict write, so it is safe from the auto-frame worker threads.
         See spec/auto-white-balance.md and spec/white-balance-restore.md."""
         if not self.auto_awb or not image_obj.converted:
             return
         ci = image_obj.adjustment_settings
+        conv = getattr(image_obj, "conversion_inputs", None) or {}
+        bw = conv.get("bw")
+        if bw and bw[1] is not None:
+            # The frame's white point already sets the neutral; AWB on top
+            # double-corrects (spec/auto-white-balance.md §10). Undo a pair
+            # this hook wrote earlier, if it is still untouched.
+            rec = getattr(image_obj, "awb_auto", None)
+            if rec is not None and (ci.get("temperature", 0),
+                                    ci.get("tint", 0)) == tuple(rec):
+                ci.pop("temperature", None)
+                ci.pop("tint", None)
+            image_obj.awb_auto = None
+            return
         if ci.get("temperature", 0) or ci.get("tint", 0):
             return
         from core.awb import compute_awb_wb
         res = compute_awb_wb(image_obj)
         if res is not None and any(res):
             ci["temperature"], ci["tint"] = res
+            image_obj.awb_auto = tuple(res)
 
     def convert_negative_by_index(self, idx: int):
         """
