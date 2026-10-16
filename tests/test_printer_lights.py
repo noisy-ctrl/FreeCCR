@@ -65,6 +65,7 @@ def test_shift_click_moves_one_point_and_readout_is_dcmy(panel, monkeypatch):
     panel._pl_buttons[("D", "-")].click()
     assert _val(panel, "ch_master_shift") == 1.5
     assert panel._pl_readout.text().startswith("D −0.5   C +2.5   M 0   Y 0")
+    assert panel._pl_readout.text().endswith("·   γ 0")
 
 
 def test_pad_is_density_first_with_no_step_row(panel):
@@ -76,9 +77,10 @@ def test_pad_is_density_first_with_no_step_row(panel):
         if isinstance(item.layout(), QGridLayout):
             lay = item.layout()
     assert lay is not None and lay.rowCount() == 2
-    for col, ch in enumerate("DCMY"):
+    for col, ch in enumerate("DGCMY"):              # γ right after D
         assert lay.itemAtPosition(0, col).widget() is panel._pl_buttons[(ch, "-")]
         assert lay.itemAtPosition(1, col).widget() is panel._pl_buttons[(ch, "+")]
+    assert panel._pl_buttons[("G", "+")].text() == "γ+"
     assert not hasattr(panel, "_pl_step_group")
 
 
@@ -173,3 +175,36 @@ def test_wheel_moves_a_whole_unit_and_double_click_resets(panel):
                       Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
     sl.mouseDoubleClickEvent(dbl)
     assert sl.value() == 0
+
+
+# --- the γ (Gamma) pair -----------------------------------------------------------
+
+def test_gamma_buttons_move_the_gamma_slider_in_its_own_direction(panel, monkeypatch):
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QApplication
+    panel._pl_buttons[("G", "+")].click()
+    assert _val(panel, "gamma") == 2                    # + lifts the midtones
+    panel._pl_buttons[("G", "-")].click()
+    panel._pl_buttons[("G", "-")].click()
+    assert _val(panel, "gamma") == -2
+    monkeypatch.setattr(QApplication, "keyboardModifiers",
+                        staticmethod(lambda: Qt.ShiftModifier))
+    panel._pl_buttons[("G", "+")].click()
+    assert _val(panel, "gamma") == 2                    # Shift: 4
+    assert panel._pl_readout.text().endswith("γ +2")
+    assert all(_val(panel, k) == 0 for k in
+               ("ch_r_shift", "ch_g_shift", "ch_b_shift", "ch_master_shift"))
+
+
+def test_gamma_limit_and_reset(panel, monkeypatch):
+    hints = []
+    monkeypatch.setattr(panel, "set_temporary_hint", lambda m, duration=0: hints.append(m))
+    sl = panel.sliders[panel.adjustment_keys.index("gamma")]
+    sl.setValue(99)
+    panel._pl_buttons[("G", "+")].click()
+    assert sl.value() == 100
+    panel._pl_buttons[("G", "+")].click()
+    assert sl.value() == 100 and "Gamma is at its limit" in hints[-1]
+    panel._pl_buttons[("D", "+")].click()
+    panel._printer_lights_reset()                       # the pad's reset includes γ
+    assert sl.value() == 0 and _val(panel, "ch_master_shift") == 0
