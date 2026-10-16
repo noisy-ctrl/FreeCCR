@@ -1142,15 +1142,15 @@ class SlidersPanel(QWidget):
         self.black_point_slider_layout = self.create_slider("Black Point")
         self.contrast_slider_layout = self.create_slider("Contrast")
         self.saturation_slider_layout = self.create_slider("Saturation")
-        # Saturation Roll-off: two-sided on strong colours, -50..+50.
+        # Saturation Roll-off: a soft ceiling on strong colours, 0..100.
         # Created right after Saturation (ADJUSTMENT_KEYS zip).
         # spec/saturation-rolloff.md
         self.sat_rolloff_slider_layout = self.create_slider(
-            "Sat Roll-off", min_value=-50, max_value=50)
+            "Sat Roll-off", min_value=0, max_value=100)
         self.sat_rolloff_slider_layout.itemAt(0).widget().setToolTip(
-            "Saturation Roll-off, for strong colours only. Right eases them back "
-            "so they don't go neon or clip; left makes them punchier. Muted "
-            "colours and greys are untouched; brightness is kept.")
+            "Saturation Roll-off: eases back the strongest colours so they don't "
+            "go neon or clip. Muted colours and greys are untouched; brightness "
+            "is kept.")
         # Vibrance: saturation weighted towards muted colours, skin tones partly
         # protected. Created right after Saturation (ADJUSTMENT_KEYS zip).
         self.vibrance_slider_layout = self.create_slider("Vibrance")

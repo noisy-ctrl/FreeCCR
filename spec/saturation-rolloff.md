@@ -97,3 +97,13 @@ Tests: the left curve is monotone, untouched below the knee, fixed at 1 and
 no stronger than 0.067; hue kept, never clips, luminance kept unless capped;
 out-of-range values clamp; OpenCL matches on both sides; the slider range is
 -50..+50 at 0.
+
+## Revision 2026-10-16 (later): back to one-sided, 0..100
+
+Tried centred at -50..+50 (above) and returned to the original design at
+Miles's request: 0 is "normal" and the slider only eases strong colours
+back, which reads more naturally than a centred handle. The maths, knee,
+ceiling, kernel slot and tests are exactly the original 0..100 version; the
+left-side "punch" is gone. Only the roll-off part was undone: the Colour
+Organics helper line stays a tooltip. Values set while the slider was
+centred act half as strong now (and negative ones do nothing).
