@@ -16,7 +16,7 @@ stop). On FreeCCR's density base (`d = 0.8·log10(base/scan)`) that is
 `0.8 × 0.025 = 0.02` density, i.e. **3 units** of a Channel Levels Shift slider
 (`CH_SLIDER_DIV = 150`).
 
-| Button | Channel Levels change (× step) | Result |
+| Button | Channel Levels change (per point) | Result |
 |---|---|---|
 | C+ / C− | R Shift −3 / +3 | more cyan / more red |
 | M+ / M− | G Shift −3 / +3 | more magenta / more green |
@@ -48,6 +48,34 @@ convention.
 
 *Revised 2026-10-09:* the first version had a +1/+2/+4/0 step row under the pad
 and C M Y D order; replaced by Shift-click / right-click and D C M Y.
+
+## Half points (revised 2026-10-16)
+
+- A click moves **half a printer point**; **Shift-click moves one point**
+  (was: one, and four). Right-click still resets.
+- Half a point is 1.5 Shift-slider units, and a `QSlider` holds integers, so
+  the four Shift sliders (Master, R, G, B) now step in **half units**:
+  `HalfStepSlider` keeps the integer position at twice the value (range
+  ±200 for ±100) and its `value()` / `setValue()` speak value units, so every
+  caller that reads or writes a slider is unchanged. `value()` returns an
+  `int` for whole values and a float only for x.5, so settings, catalogs and
+  undo snapshots of existing edits are byte-identical; the pipeline already
+  takes these parameters as floats (`/ CH_SLIDER_DIV`).
+- Consequences on those four sliders, and only those: the value column can
+  read `-4.5`; Shift-drag (fine) and the arrow keys reach halves; the mouse
+  wheel and a plain drag still move whole units.
+- Raw-position code inside the slider class (drag state, the style option)
+  uses `QSlider.value(self)`, never the overridden `value()`.
+- The readout already printed one decimal for non-whole points, so a half
+  point reads `C +0.5`.
+
+### Tests
+
+- Click = ±1.5 units, Shift-click = ±3; two clicks = one point exactly.
+- The half value survives slider → settings → slider (`get_slider_values`,
+  `_load_active_layer`), whole values stay `int`, the label shows `-1.5`.
+- Limits clamp at ±100 in value units; wheel moves one whole unit;
+  double-click resets; other sliders are untouched (range ±100, int steps).
 
 ## Tests
 
