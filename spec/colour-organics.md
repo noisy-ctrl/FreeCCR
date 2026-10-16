@@ -88,3 +88,36 @@ fallbacks, `apply_adjustments` + the area path, `ADJUSTMENT_KEYS` right after
   anchor).
 - numpy and OpenCL agree.
 - Slider position, range, helper text, sync group, label.
+
+## Revision 2026-10-16: families and reach from a right-click popup
+
+- Right-click the **Colour Organics** label (as Highlights/Shadows): a popup
+  (`widgets/organics_popup.py`) with the four families, each a tick box
+  (off = no anchor there, its colours are left to the neighbouring families'
+  spans), a colour swatch and a hue nudge of +-20 degrees (disabled while
+  off), plus **Reach** 10..45 % (the warp's `w`, default 30) and Reset. The
+  slider stays the strength. The label is underlined when the families are
+  not the default, and its tooltip lists what changed.
+- Stored per layer as `adjustment_settings["organics_shape"]`
+  (`warm_on`/`warm_shift`, ..., `reach`); `normalize_organics_shape` returns
+  None for the default, so default renders are unchanged. The nudge ranges
+  can't overlap, so the anchors always stay in order.
+- Travels like the Highlights/Shadows shape: re-attached on every slider
+  rebuild (`_attach_curves`), loaded with the layer, one undo step per popup
+  visit, synced with the **Saturation** group, its own paste row ("Colour
+  Organics families (...)"), carried by copy; Reset All restores the default
+  families.
+- Pipeline: `organics_shape` appended last to `adjust_image` /
+  `adjust_image_opencl`; the anchors and reach are no longer compiled into
+  the kernel but passed in `params[28..34]` (count, anchors + wrap padded to
+  5, reach), so any combination renders identically on both paths. With
+  every family off it is the identity; with one, its span is the whole
+  circle.
+
+Tests (`tests/test_colour_organics_popup.py`): default is None, clamping,
+anchors follow the families and stay ordered, a nudged centre is the new
+fixed point, all-off is the identity, one family stays monotone round the
+circle, the shape reaches the render (numpy = OpenCL), apply_adjustments
+and area layers pass it, the popup writes it (one undo, survives a slider
+move, Reset removes it), loading picks it up, paste row / paste / copy,
+sync with and without the Saturation group.
