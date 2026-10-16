@@ -13,6 +13,14 @@ import threading
 _local = threading.local()
 
 
+class Interrupted(BaseException):
+    """Raised by a bound callback to stop the decode it is reporting from
+    (the background detail render giving up; spec/background-yields.md).
+    `step` lets it through; anything else a callback raises is swallowed.
+    A BaseException, like KeyboardInterrupt, so the decode's own
+    `except Exception` handlers don't log it as a failed read."""
+
+
 class bound:
     """`with bound(callback):` route this thread's steps to `callback(f)`."""
 
@@ -36,5 +44,7 @@ def step(fraction):
         return
     try:
         cb(float(fraction))
+    except Interrupted:
+        raise
     except Exception:            # progress must never break a load
         pass

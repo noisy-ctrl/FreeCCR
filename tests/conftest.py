@@ -29,3 +29,19 @@ import tempfile as _tempfile
 _os.environ.setdefault(
     "FREECCR_CROP_MEMORY",
     _os.path.join(_tempfile.mkdtemp(prefix="freeccr-crop-memory-"), "auto_crop_memory.json"))
+
+
+# Background renders give way while the UI is busy (spec/background-yields.md).
+# One test switching frames must not leave the next one's detail render
+# deferred, so every test starts with the UI idle.
+import sys as _sys
+
+import pytest as _pytest
+
+
+@_pytest.fixture(autouse=True)
+def _ui_idle():
+    mod = _sys.modules.get("core.ui_activity")
+    if mod is not None:
+        mod._last = -1e9
+    yield

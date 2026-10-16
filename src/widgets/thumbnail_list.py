@@ -194,6 +194,10 @@ class ThumbnailList(QWidget):
         # Right-click menu: duplicate / remove the selected image(s)
         self.thumbnail_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.thumbnail_list.customContextMenuRequested.connect(self.show_context_menu)
+        # Scrolling tells background renders to give way (spec/background-yields.md).
+        from core import ui_activity
+        self.thumbnail_list.verticalScrollBar().valueChanged.connect(
+            lambda _v: ui_activity.touch())
         self.layout.addWidget(self.thumbnail_list)
 
         self.count_label = QLabel("Total: 0 image(s)")
