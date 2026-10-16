@@ -83,3 +83,25 @@ and C M Y D order; replaced by Shift-click / right-click and D C M Y.
   D moves Master Shift. Columns are D C M Y; there is no step row.
 - Readout reflects slider values (including hand-set fractions); 0 resets.
 - Limit handling; the pad changes the active layer (area) like the sliders.
+
+## Gamma pair (revised 2026-10-16)
+
+- A **γ− / γ+** column right after D (columns D γ C M Y), in neutral slate
+  (darker for γ−), so it doesn't read as a colour key.
+- It drives the tone section's **Gamma** slider (the pinned-endpoint midtone
+  bend, spec/gamma-slider.md) in that slider's own direction: γ+ lifts the
+  midtones, γ− lowers them; black and white stay put. 2 slider units per
+  click (about 2/255 at mid-grey), 4 per Shift-click, clamped at ±100 with
+  the same "at its limit" hint.
+- Note the sign: unlike D (where + adds density, i.e. darker), γ+ is
+  lighter, because it follows the Gamma slider the buttons move. Flip
+  `PL_GAMMA_*` signs in `_printer_light` if the density convention is
+  wanted instead.
+- The readout ends with the Gamma value: `... Y 0   points   ·   γ +4`.
+  The pad's right-click reset also returns Gamma to 0.
+- Nothing new is stored: it is the existing `gamma` key, so undo, copy/paste,
+  the Tone sync group, catalogs and area layers are unchanged.
+
+Tests: γ moves only the Gamma slider (+2 / Shift +4, + lifts), the readout
+shows it, the limit hint, the pad reset includes it, the column order is
+D γ C M Y.

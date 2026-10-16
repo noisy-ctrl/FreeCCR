@@ -2117,18 +2117,24 @@ class SlidersPanel(QWidget):
     # --- Printer Lights (spec/printer-lights.md) ------------------------------
     PRINTER_POINT_UNITS = 3     # Shift-slider units per printer point (0.02 density)
     _PL_KEYS = {"C": "ch_r_shift", "M": "ch_g_shift", "Y": "ch_b_shift",
-                "D": "ch_master_shift"}
+                "D": "ch_master_shift",
+                "G": "gamma"}            # the γ column drives the tone Gamma slider
     # Saturated, one hue per press: "+" adds that colour (or density), "−" its
     # complement. Dark text on the light hues (cyan, yellow, light grey).
     _PL_COLOURS = {("D", "-"): ("#d9d9d9", "#141414"), ("D", "+"): ("#101010", "#ffffff"),
                    ("C", "-"): ("#e5261f", "#ffffff"), ("C", "+"): ("#00c3d9", "#06282c"),
                    ("M", "-"): ("#12a83c", "#ffffff"), ("M", "+"): ("#e3168c", "#ffffff"),
-                   ("Y", "-"): ("#1f58ea", "#ffffff"), ("Y", "+"): ("#ffd000", "#1e1a00")}
+                   ("Y", "-"): ("#1f58ea", "#ffffff"), ("Y", "+"): ("#ffd000", "#1e1a00"),
+                   # γ: neutral slate, darker for "lower the midtones"
+                   ("G", "-"): ("#4f4f5a", "#ffffff"), ("G", "+"): ("#b6b6c2", "#16161a")}
     _PL_TIPS = {"C": ("cyan", "red", "red"), "M": ("magenta", "green", "green"),
                 "Y": ("yellow", "blue", "blue")}
     _PL_ORDER = "DCMY"           # density first, as on a lab printer's keypad
+    _PL_COLUMNS = "DGCMY"        # ... with the γ (Gamma) pair right after D
     PL_CLICK_POINTS = 0.5        # points per click (half points: 1.5 units)
     PL_SHIFT_POINTS = 1          # points per Shift-click
+    PL_GAMMA_CLICK = 2           # Gamma slider units per γ click (~2/255 at mid-grey)
+    PL_GAMMA_SHIFT = 4           # ... per Shift-click
 
     def _build_printer_lights(self):
         from PySide6.QtWidgets import QGridLayout
@@ -2136,8 +2142,8 @@ class SlidersPanel(QWidget):
         grid.setSpacing(theme.GAP_TIGHT)
         self._pl_buttons = {}
         for row, sign in enumerate(("-", "+")):
-            for col, ch in enumerate(self._PL_ORDER):
-                b = QPushButton(f"{ch}{'−' if sign == '-' else '+'}")
+            for col, ch in enumerate(self._PL_COLUMNS):
+                b = QPushButton(f"{'γ' if ch == 'G' else ch}{'−' if sign == '-' else '+'}")
                 bg, fg = self._PL_COLOURS[(ch, sign)]
                 pressed = QColor(bg).darker(130).name()
                 # D+ is near-black: outline it so it doesn't vanish on the panel
@@ -2149,19 +2155,28 @@ class SlidersPanel(QWidget):
                     f"QPushButton:pressed {{ background: {pressed}; }}"
                     f"QPushButton:disabled {{ background: {theme.SURFACE}; "
                     f"color: {theme.TEXT_DISABLED}; }}")
-                if ch == "D":
+                if ch == "G":
+                    step = f"{self.PL_GAMMA_CLICK} per click, Shift-click {self.PL_GAMMA_SHIFT}"
+                    tip = ((f"γ+: lifts the midtones (Gamma slider +{step})"
+                            if sign == "+" else
+                            f"γ−: lowers the midtones (Gamma slider −{step})")
+                           + ". Black and white stay put.\n"
+                           "Right-click: reset all printer lights to 0.")
+                elif ch == "D":
                     tip = ("Darker: more density, as on a printer's D key"
                            if sign == "+" else "Lighter: less density")
                 else:
                     more, less, chan = self._PL_TIPS[ch]
                     tip = (f"More {more} (less {less})" if sign == "+"
                            else f"Less {more} (more {less})")
-                b.setToolTip(f"{tip}, half a printer point per click "
-                             "(Shift-click: one point). One point is about "
-                             "1/12 stop; it moves the Channel Levels "
-                             f"{'Master' if ch == 'D' else chan.capitalize()} Shift "
-                             f"slider by {self.PRINTER_POINT_UNITS}.\n"
-                             "Right-click: reset all printer lights to 0.")
+                if ch != "G":
+                    tip = (f"{tip}, half a printer point per click "
+                           "(Shift-click: one point). One point is about "
+                           "1/12 stop; it moves the Channel Levels "
+                           f"{'Master' if ch == 'D' else chan.capitalize()} Shift "
+                           f"slider by {self.PRINTER_POINT_UNITS}.\n"
+                           "Right-click: reset all printer lights to 0.")
+                b.setToolTip(tip)
                 b.clicked.connect(lambda _=False, c=ch, sg=sign: self._printer_light(c, sg))
                 b.setContextMenuPolicy(Qt.CustomContextMenu)
                 b.customContextMenuRequested.connect(
@@ -2195,19 +2210,27 @@ class SlidersPanel(QWidget):
             return
         from PySide6.QtWidgets import QApplication
         big = bool(QApplication.keyboardModifiers() & Qt.ShiftModifier)
-        delta = self.PRINTER_POINT_UNITS * (self.PL_SHIFT_POINTS if big
-                                            else self.PL_CLICK_POINTS)
+        if ch == "G":
+            # γ follows the Gamma slider's own sign: + lifts the midtones.
+            delta = self.PL_GAMMA_SHIFT if big else self.PL_GAMMA_CLICK
+            step = delta if sign == "+" else -delta
+        else:
+            # "+" adds that colour / density = a NEGATIVE Shift.
+            delta = self.PRINTER_POINT_UNITS * (self.PL_SHIFT_POINTS if big
+                                                else self.PL_CLICK_POINTS)
+            step = -delta if sign == "+" else delta
         lo, hi = sl.value_range()
-        new = max(lo, min(hi, sl.value() + (-delta if sign == "+" else delta)))
+        new = max(lo, min(hi, sl.value() + step))
         if new == sl.value():
-            self.set_temporary_hint(f"{ch} printer light is at its limit.", duration=3000)
+            name = "Gamma" if ch == "G" else f"{ch} printer light"
+            self.set_temporary_hint(f"{name} is at its limit.", duration=3000)
             return
         sl.setValue(new)            # -> on_slider_changed: store, preview, undo burst
 
     def _printer_lights_reset(self):
         if self.current_idx is None:
             return
-        for ch in self._PL_ORDER:
+        for ch in self._PL_COLUMNS:
             sl = self._pl_slider(ch)
             if sl is not None and sl.isEnabled() and sl.value() != 0:
                 sl.setValue(0)
@@ -2228,7 +2251,10 @@ class SlidersPanel(QWidget):
             sl = self._pl_slider(ch)
             v = sl.value() if sl is not None else 0
             parts.append(f"{ch} {self._fmt_points(-v / self.PRINTER_POINT_UNITS)}")
-        self._pl_readout.setText("   ".join(parts) + "   points")
+        g = self._pl_slider("G")
+        gv = g.value() if g is not None else 0
+        gamma = f"γ {'+' if gv > 0 else '−' if gv < 0 else ''}{abs(gv)}"
+        self._pl_readout.setText("   ".join(parts) + "   points   ·   " + gamma)
 
     # --- Highlights / Shadows range (spec/highlights-shadows-range.md) --------
     TONE_LABEL_TIP = "Right-click: range and endpoint options"
