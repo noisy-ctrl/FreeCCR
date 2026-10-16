@@ -1012,6 +1012,15 @@ class ImagePreview(QWidget):
         self._hires_timer = QTimer(self)
         self._hires_timer.setSingleShot(True)
         self._hires_timer.timeout.connect(self._maybe_request_hires)
+        # spec/background-yields.md: a deferred fitted-view request, and a
+        # finished render held while you scroll.
+        self._hires_defer_timer = QTimer(self)
+        self._hires_defer_timer.setSingleShot(True)
+        self._hires_defer_timer.timeout.connect(self._maybe_request_hires)
+        self._hires_land_timer = QTimer(self)
+        self._hires_land_timer.setSingleShot(True)
+        self._hires_land_timer.timeout.connect(self._land_pending_hires)
+        self._hires_pending = None
         # Identity of the displayed image — indices shift when images are
         # removed, so "same image?" must never be answered by index alone.
         self._current_image_ref = None
@@ -1148,6 +1157,12 @@ class ImagePreview(QWidget):
         img_obj_now = ccr_backend.images[idx]
         same_image = (idx == self.current_idx
                       and img_obj_now is self._current_image_ref)
+        if not same_image:
+            # Moving between frames: background detail renders give way, and
+            # the ones for other frames stop (spec/background-yields.md).
+            from core import ui_activity
+            ui_activity.touch()
+            self._stop_other_hires(img_obj_now)
         # Area-edit mode PERSISTS across same-image refreshes (so editing the
         # area's sliders/feather/geometry keeps the overlay visible); an image
         # switch leaves it, and so does the active area disappearing (e.g. an
@@ -2051,6 +2066,15 @@ class ImagePreview(QWidget):
                     and w.req_sig == sig and w.req_adj_sig == adj_sig
                     and getattr(w, "req_res", 0) >= target):
                 return
+        # A fresh decode just for the fitted view waits until you have stopped
+        # scrolling / clicking for a moment (spec/background-yields.md); the
+        # retry re-validates everything, so a frame you moved past never starts.
+        from core import ui_activity
+        if base is None and self._fit_only_request():
+            wait = self.HIRES_QUIET_S - ui_activity.idle_for()
+            if wait > 0:
+                self._hires_defer_timer.start(int(wait * 1000) + 20)
+                return
         worker = HiResDetailWorker(img, sig, adj_sig, base, target,
                                    sprocket_alpha=sprocket_alpha,
                                    preview=preview_decode, res=res)
@@ -2059,8 +2083,26 @@ class ImagePreview(QWidget):
         self._hires_workers.add(worker)
         worker.start()
 
+    HIRES_QUIET_S = 0.6        # quiet time before a fitted-view detail render
+
+    def _stop_other_hires(self, img):
+        """Ask every in-flight detail render for another image to stop at its
+        next safe point (you have left that frame)."""
+        for w in list(self._hires_workers):
+            if w.isRunning() and w.req_img is not img:
+                w.requestInterruption()
+
     def _on_hires_ready(self, img_obj, sig, adj_sig, base, sprocket_alpha,
                         display8, res=0):
+        # Swapping a big image in mid-scroll is a hitch of its own: hold the
+        # result until the UI is quiet (spec/background-yields.md).
+        from core import ui_activity
+        if ui_activity.busy():
+            self._hires_pending = (img_obj, sig, adj_sig, base, sprocket_alpha,
+                                   display8, res)
+            self._hires_land_timer.start(120)
+            return
+        self._hires_pending = None
         # Accept by validating against CURRENT state (not a generation
         # counter): the result is useful iff the same image object is still
         # displayed, its conversion snapshot still matches, and we are still
@@ -2089,6 +2131,11 @@ class ImagePreview(QWidget):
                        "display_pm": None, "crop_sig": None}
         self._refresh_item_pixmap()
         self.apply_transformations()
+
+    def _land_pending_hires(self):
+        pending = getattr(self, "_hires_pending", None)
+        if pending is not None:
+            self._on_hires_ready(*pending)     # re-checks busy and validity
 
     def shutdown_workers(self):
         """Quiesce in-flight hi-res render threads (app close). A running
@@ -5057,21 +5104,40 @@ class HiResDetailWorker(QThread):
         ci = getattr(img_obj, "conversion_inputs", None)
         self._conversion_inputs = dict(ci) if ci else None
 
+    YIELD_STEP_MS = 40
+
+    def checkpoint(self, _fraction=None):
+        """A safe point (spec/background-yields.md): stop if asked to, and
+        wait while the user is scrolling or switching frames. Bound to the
+        decode's load_progress milestones, and called before the adjustments."""
+        from core import load_progress, ui_activity
+        while True:
+            if self.isInterruptionRequested():
+                raise load_progress.Interrupted()
+            if not ui_activity.busy():
+                return
+            self.msleep(self.YIELD_STEP_MS)
+
     def run(self):
+        from core import load_progress
         try:
             import time as _time
             import cv2 as _cv2
             import numpy as _np
+            self.setPriority(QThread.LowPriority)    # the GUI comes first
+            self.checkpoint()
             t0 = _time.perf_counter()
             base = self._base
             sprocket_alpha = self._sprocket_alpha
             if base is None:
-                base, sprocket_alpha = self._img.render_hires_base(
-                    max_long_side=self._cap,
-                    conversion_inputs=self._conversion_inputs,
-                    preview=self._preview)
+                with load_progress.bound(self.checkpoint):
+                    base, sprocket_alpha = self._img.render_hires_base(
+                        max_long_side=self._cap,
+                        conversion_inputs=self._conversion_inputs,
+                        preview=self._preview)
             if base is None or self.isInterruptionRequested():
                 return
+            self.checkpoint()
             t1 = _time.perf_counter()
             display = self._img.apply_adjustments(
                 base, settings=self._settings,
@@ -5102,6 +5168,8 @@ class HiResDetailWorker(QThread):
             self.finished_hires.emit(self.req_img, self.req_sig,
                                      self.req_adj_sig, base, sprocket_alpha,
                                      display8, self.req_res)
+        except load_progress.Interrupted:
+            return          # a frame you left, or the app closing
         except Exception as e:
             print(f"Hi-res detail render failed: {e}")
 
