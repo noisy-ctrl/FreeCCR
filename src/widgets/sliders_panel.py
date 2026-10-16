@@ -39,7 +39,8 @@ SYNC_GROUPS = [
     ("tone", "Tone (brightness, contrast, ...)",
      ("brightness", "gamma", "highlights", "white_point",
       "shadows", "black_point", "contrast")),
-    ("sat", "Saturation", ("saturation", "sat_rolloff", "vibrance", "sub_saturation")),
+    ("sat", "Saturation", ("saturation", "sat_rolloff", "vibrance", "sub_saturation",
+                            "colour_organics")),
     ("crop", "Crop", ()),
     # Coarse 90-degree rotation + the mirror flags, synced like crop (whole-image
     # properties, not adjustment keys). fine_rotation_angle is deliberately NOT
@@ -166,7 +167,8 @@ _BASIC_LABELS = {
     "shadows": "Shadows", "black_point": "Black Point", "contrast": "Contrast",
     "saturation": "Saturation", "sat_rolloff": "Saturation Roll-off",
     "vibrance": "Vibrance",
-    "sub_saturation": "Subtracted Sat", "exposure": "Exposure",
+    "sub_saturation": "Subtracted Sat", "colour_organics": "Colour Organics",
+    "exposure": "Exposure",
     "ch_input_gain": "Input Gain", "ch_master_shift": "Master Shift",
     "ch_master_gain": "Master Gain",
     "chroma_nr": "Chroma NR Amount", "chroma_nr_radius": "Chroma NR Radius",
@@ -621,6 +623,8 @@ class SlidersPanel(QWidget):
         "sat_rolloff",
         "vibrance",
         "sub_saturation",
+        # Colour Organics, the last of the colour sliders (spec/colour-organics.md)
+        "colour_organics",
         # Per-channel levels controls (collapsible section)
         "ch_input_gain", "ch_master_shift", "ch_master_gain",
         "ch_r_shift", "ch_r_gain", "ch_r_blackpoint",
@@ -697,6 +701,9 @@ class SlidersPanel(QWidget):
 
     def _default_for(self, key):
         return self.SLIDER_DEFAULTS.get(key, 0)
+
+    COLOUR_ORGANICS_HINT = ("Constrains colours for print, the way lab scanners "
+                            "do. The result is often more natural.")
 
     # Color Profile combo: row index -> CCRImage.color_profile value.
     COLOR_PROFILES = ("color", "bw")
@@ -1143,6 +1150,18 @@ class SlidersPanel(QWidget):
         # protected. Created right after Saturation (ADJUSTMENT_KEYS zip).
         self.vibrance_slider_layout = self.create_slider("Vibrance")
         self.sub_saturation_slider_layout = self.create_slider("Subtracted Sat")
+        # Colour Organics: hues drawn into print families, 0..100, with a muted
+        # helper line under it. Created right after Subtracted Sat
+        # (ADJUSTMENT_KEYS zip). spec/colour-organics.md
+        self.colour_organics_slider_layout = self.create_slider(
+            "Colour Organics", min_value=0, max_value=100)
+        self.colour_organics_hint = QLabel(self.COLOUR_ORGANICS_HINT)
+        self.colour_organics_hint.setWordWrap(True)
+        self.colour_organics_hint.setStyleSheet(
+            f"color: {theme.TEXT_MUTED}; font-size: 11px; "
+            f"margin-left: {theme.LABEL_COL_W + theme.GAP_TIGHT}px;")
+        self.colour_organics_slider_layout.itemAt(0).widget().setToolTip(
+            self.COLOUR_ORGANICS_HINT)
 
         scroll_layout.addLayout(self.color_profile_row)
         scroll_layout.addLayout(self.temperature_slider_layout)
@@ -1158,6 +1177,8 @@ class SlidersPanel(QWidget):
         scroll_layout.addLayout(self.sat_rolloff_slider_layout)
         scroll_layout.addLayout(self.vibrance_slider_layout)
         scroll_layout.addLayout(self.sub_saturation_slider_layout)
+        scroll_layout.addLayout(self.colour_organics_slider_layout)
+        scroll_layout.addWidget(self.colour_organics_hint)
 
         # --- Reset / Compare / Sync buttons ---
         buttons_layout = theme.apply_button_row(QHBoxLayout())
