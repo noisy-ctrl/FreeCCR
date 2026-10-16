@@ -601,22 +601,29 @@ def _initialize_opencl_locked():
                 }
             }
 
-            // Saturation Roll-off (spec/saturation-rolloff.md): a soft knee on
-            // HSV saturation, realised by moving towards the grey of the same
-            // LINEAR-light luminance. Mirrors _apply_sat_rolloff exactly.
-            if (sat_rolloff > 0.0f) {
+            // Saturation Roll-off (spec/saturation-rolloff.md): two-sided on
+            // strong colours (right eases back above a knee, left pushes out),
+            // hue kept, linear-light luminance kept (capped so nothing clips).
+            // Mirrors _apply_sat_rolloff exactly.
+            if (sat_rolloff != 0.0f) {
                 float xr = clamp(r / 65535.0f, 0.0f, 1.0f);
                 float xg = clamp(g / 65535.0f, 0.0f, 1.0f);
                 float xb = clamp(b / 65535.0f, 0.0f, 1.0f);
                 float rmx = fmax(xr, fmax(xg, xb));
                 float rmn = fmin(xr, fmin(xg, xb));
-                float ra = sat_rolloff / 100.0f;
-                float rk = 1.0f - ROLLOFF_KNEE_DROP * ra;
+                float ra = clamp(sat_rolloff / ROLLOFF_SCALE, -1.0f, 1.0f);
+                float rk = 1.0f - ROLLOFF_KNEE_DROP * fabs(ra);
                 float rw = (1.0f - ROLLOFF_CEIL_DROP * ra) - rk;
-                if (rmx > 1e-6f && rw > 1e-6f) {
+                if (rmx > 1e-6f && (ra < 0.0f || rw > 1e-6f)) {
                     float rs = (rmx - rmn) / rmx;
                     if (rs > rk) {
-                        float s2 = rk + rw * (1.0f - exp(-(rs - rk) / rw));
+                        float s2;
+                        if (ra > 0.0f) {
+                            s2 = rk + rw * (1.0f - exp(-(rs - rk) / rw));
+                        } else {
+                            float u = clamp((rs - rk) / (1.0f - rk), 0.0f, 1.0f);
+                            s2 = rs + ROLLOFF_PUNCH * (-ra) * (1.0f - rk) * u * u * (1.0f - u);
+                        }
                         // 1. saturation -> s2 with the brightest channel and hue fixed
                         float sc = s2 / rs;
                         float cr = rmx - (rmx - xr) * sc;
@@ -628,6 +635,7 @@ def _initialize_opencl_locked():
                         float y1 = 0.2126f * pow(cr, ROLLOFF_GAMMA) + 0.7152f * pow(cg, ROLLOFF_GAMMA)
                                  + 0.0722f * pow(cb, ROLLOFF_GAMMA);
                         float f = (y1 > 1e-12f) ? pow(y0 / y1, 1.0f / ROLLOFF_GAMMA) : 1.0f;
+                        f = fmin(f, 1.0f / rmx);
                         r = clamp(cr * f, 0.0f, 1.0f) * 65535.0f;
                         g = clamp(cg * f, 0.0f, 1.0f) * 65535.0f;
                         b = clamp(cb * f, 0.0f, 1.0f) * 65535.0f;
@@ -747,6 +755,8 @@ def _initialize_opencl_locked():
                        .replace("VIBRANCE_SKIN_HUE", f"{VIBRANCE_SKIN_HUE:.6f}f")
                        .replace("VIBRANCE_SKIN_WIDTH", f"{VIBRANCE_SKIN_WIDTH:.6f}f")
                        .replace("VIBRANCE_SKIN_PROTECT", f"{VIBRANCE_SKIN_PROTECT:.6f}f")
+                       .replace("ROLLOFF_SCALE", f"{ROLLOFF_SCALE:.6f}f")
+                       .replace("ROLLOFF_PUNCH", f"{ROLLOFF_PUNCH:.6f}f")
                        .replace("ROLLOFF_KNEE_DROP", f"{ROLLOFF_KNEE_DROP:.6f}f")
                        .replace("ROLLOFF_CEIL_DROP", f"{ROLLOFF_CEIL_DROP:.6f}f")
                        .replace("ROLLOFF_GAMMA", f"{ROLLOFF_GAMMA:.6f}f")
@@ -3279,37 +3289,49 @@ def _apply_vibrance(img_norm: np.ndarray, vibrance: float) -> np.ndarray:
 
 
 # --- Saturation Roll-off (spec/saturation-rolloff.md) ---
-# A soft ceiling on strong colours: HSV saturation above a knee is eased
-# towards a ceiling (slope 1 at the knee), muted colours and greys untouched.
-# Two exact steps: lower the saturation with the brightest channel and the
-# hue fixed, then scale the whole colour (which keeps hue and saturation) so
-# its LINEAR-light luminance is the original's. Desaturating towards a
-# luma-on-display-values grey would turn a strong blue nearly black; mixing
-# with a grey in linear light shifts the hue. The OpenCL kernel substitutes
-# these constants textually.
-ROLLOFF_KNEE_DROP = 0.5        # knee at 1 - 0.5 a  (0.5 at full)
-ROLLOFF_CEIL_DROP = 0.25       # ceiling at 1 - 0.25 a (0.75 at full)
+# A two-sided control on strong colours, slider -50..+50. Right: HSV
+# saturation above a knee is eased towards a ceiling (slope 1 at the knee).
+# Left: it is pushed gently outwards, s = 1 staying put. Muted colours and
+# greys are untouched either way. Two exact steps: set the saturation with the
+# brightest channel and the hue fixed, then scale the whole colour (which
+# keeps hue and saturation) to the original LINEAR-light luminance, capped so
+# nothing clips. Desaturating towards a luma-on-display-values grey would turn
+# a strong blue nearly black; mixing with a grey in linear light shifts the
+# hue. The OpenCL kernel substitutes these constants textually.
+ROLLOFF_SCALE = 50.0           # slider units for the full effect, each way
+ROLLOFF_KNEE_DROP = 0.5        # knee at 1 - 0.5 |a|  (0.5 at full)
+ROLLOFF_CEIL_DROP = 0.25       # right: ceiling at 1 - 0.25 a (0.75 at full)
+ROLLOFF_PUNCH = 0.9            # left: push of e (1-K) u^2 (1-u), slope >= 0.1
 ROLLOFF_GAMMA = 2.2            # display <-> linear for the luminance
 
 
+def _rolloff_a(amount) -> float:
+    return float(np.clip(float(amount) / ROLLOFF_SCALE, -1.0, 1.0))
+
+
 def rolloff_curve(s, amount: float):
-    """Output HSV saturation for input saturation `s` (scalar or array)."""
-    a = float(amount) / 100.0
-    k = 1.0 - ROLLOFF_KNEE_DROP * a
-    w = (1.0 - ROLLOFF_CEIL_DROP * a) - k
+    """Output HSV saturation for input saturation `s` (scalar or array) at
+    slider value `amount` (-50..+50)."""
+    a = _rolloff_a(amount)
     s = np.asarray(s, np.float32)
-    if a <= 0 or w <= 1e-6:
-        return s
-    return np.where(s > k, k + w * (1.0 - np.exp(-(s - k) / w)), s).astype(np.float32)
+    k = 1.0 - ROLLOFF_KNEE_DROP * abs(a)
+    if a > 0:
+        w = (1.0 - ROLLOFF_CEIL_DROP * a) - k
+        return np.where(s > k, k + w * (1.0 - np.exp(-(s - k) / w)), s).astype(np.float32)
+    if a < 0:
+        u = np.clip((s - k) / (1.0 - k), 0.0, 1.0)
+        push = ROLLOFF_PUNCH * (-a) * (1.0 - k) * u * u * (1.0 - u)
+        return np.where(s > k, s + push, s).astype(np.float32)
+    return s
 
 
 def _apply_sat_rolloff(img_norm: np.ndarray, amount: float) -> np.ndarray:
     """Saturation Roll-off on a normalised [0,1] float RGB image. Returns a
     new float32 array in [0,1]. Mirrors the OpenCL kernel block exactly."""
     x = np.clip(img_norm, 0.0, 1.0).astype(np.float32)
-    a = float(amount) / 100.0
-    knee = np.float32(1.0 - ROLLOFF_KNEE_DROP * a)
-    if a <= 0:
+    a = _rolloff_a(amount)
+    knee = np.float32(1.0 - ROLLOFF_KNEE_DROP * abs(a))
+    if a == 0:
         return x
     mx = x.max(axis=-1)
     mn = x.min(axis=-1)
@@ -3320,14 +3342,17 @@ def _apply_sat_rolloff(img_norm: np.ndarray, amount: float) -> np.ndarray:
     xs = x[sel]
     ss = s[sel]
     m = mx[sel][:, None]
-    # 1. saturation -> s2, brightest channel and hue fixed (raises the others)
+    # 1. saturation -> s2, brightest channel and hue fixed
     c1 = m - (m - xs) * (rolloff_curve(ss, amount) / ss)[:, None]
-    # 2. scale back to the original linear-light luminance (c1 >= x, so f <= 1)
+    # 2. scale to the original linear-light luminance. Easing back raises the
+    # other channels (c1 >= x, f <= 1); pushing out lowers them (f >= 1), so
+    # f is capped where the brightest channel would pass 1: never clips.
     g = np.float32(ROLLOFF_GAMMA)
     w = np.array([0.2126, 0.7152, 0.0722], np.float32)
     y0 = (xs ** g) @ w
     y1 = (c1 ** g) @ w
     f = np.where(y1 > 1e-12, (y0 / np.maximum(y1, np.float32(1e-12))) ** np.float32(1.0 / ROLLOFF_GAMMA), 1.0)
+    f = np.minimum(f, np.float32(1.0) / m[:, 0])
     out = x.copy()
     out[sel] = np.clip(c1 * f[:, None].astype(np.float32), 0.0, 1.0)
     return out
@@ -3567,7 +3592,7 @@ def adjust_image(
     # Auto tone (spec/auto-tone.md): the frame's measured toe/shoulder, applied
     # in the windowed pre-stage. Appended last for the positional reason above.
     auto_tone=None,
-    # Saturation Roll-off (spec/saturation-rolloff.md), 0..100. Appended last.
+    # Saturation Roll-off (spec/saturation-rolloff.md), -50..+50. Appended last.
     sat_rolloff: float = 0.0,
     # Colour Organics (spec/colour-organics.md), 0..100. Appended last.
     colour_organics: float = 0.0,
@@ -3787,7 +3812,7 @@ def adjust_image(
 
     # Saturation Roll-off: a soft ceiling on strong colours, after everything
     # that can push saturation up, before the per-colour bands.
-    if sat_rolloff and sat_rolloff > 0:
+    if sat_rolloff:
         img = _apply_sat_rolloff(img / 65535.0, sat_rolloff) * 65535.0
 
     # (Channel Levels used to run here, post-clamp. It is now the FIRST stage —

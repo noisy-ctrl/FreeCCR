@@ -24,9 +24,10 @@ When Noritsu scan pairs arrive, the anchors are replaced with measured ones.
 ## UX
 
 - Slider **Colour Organics**, 0..100, default 0, after Subtracted Sat (the
-  last of the colour sliders), followed by a muted helper line: "Constrains
-  colours for print, the way lab scanners do. The result is often more
-  natural." Same text in the tooltip.
+  last of the colour sliders). Its label's tooltip: "Constrains colours for
+  print, the way lab scanners do. The result is often more natural." (It
+  first shipped as a muted line under the slider; removed 2026-10-16 to save
+  space.)
 - Syncs and pastes with the **Saturation** group; works on area layers.
 
 ## Maths

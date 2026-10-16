@@ -121,5 +121,6 @@ def test_slider_helper_text_and_group():
     p = SlidersPanel()
     sl = p.sliders[keys.index("colour_organics")]
     assert sl.value_range() == (0, 100) and sl.value() == 0
-    assert "lab scanners" in p.colour_organics_hint.text()
-    assert "print" in p.colour_organics_hint.text()
+    tip = p.colour_organics_slider_layout.itemAt(0).widget().toolTip()
+    assert "lab scanners" in tip and "print" in tip
+    assert not hasattr(p, "colour_organics_hint")     # no line in the panel
