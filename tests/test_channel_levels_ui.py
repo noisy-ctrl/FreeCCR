@@ -187,8 +187,11 @@ def test_no_slider_spans_the_old_gain_range(panel):
     for key, slider in zip(panel.adjustment_keys, panel.sliders):
         if key.startswith("band_") or key == "band_feather":
             continue
-        assert slider.minimum() >= -100, key
-        assert slider.maximum() <= 100, key
+        # In value units: the Shift sliders step in halves, so their integer
+        # positions span +-200 for +-100 (spec/printer-lights.md, half points).
+        lo, hi = slider.value_range()
+        assert lo >= -100, key
+        assert hi <= 100, key
 
 
 def test_exposure_dropped_from_the_tone_sync_group():

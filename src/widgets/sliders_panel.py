@@ -425,6 +425,18 @@ class ResettableSlider(QSlider):
     # Hold Shift while dragging for fine control: the handle moves this much
     # slower than the mouse, so single-unit steps are easy to hit.
     FINE_DRAG_FACTOR = 0.1
+    # Integer positions per value unit (HalfStepSlider: 2). value()/setValue()
+    # speak value units; code here that needs the raw position uses
+    # QSlider.value(self).
+    SCALE = 1
+
+    def value_range(self):
+        """(minimum, maximum) in value units."""
+        return self.minimum() / self.SCALE, self.maximum() / self.SCALE
+
+    def value_text(self):
+        v = self.value()
+        return str(v) if float(v).is_integer() else f"{v:.1f}"
 
     def mousePressEvent(self, event):
         option = QStyleOptionSlider()
@@ -441,7 +453,7 @@ class ResettableSlider(QSlider):
             # absolute position, so pressing or releasing Shift mid-drag never
             # makes it jump.
             self._drag_x = self._event_x(event)
-            self._drag_value = float(self.value())
+            self._drag_value = float(QSlider.value(self))     # raw position
         else:
             event.ignore()
 
@@ -505,7 +517,7 @@ class ResettableSlider(QSlider):
         option.minimum = self.minimum()
         option.maximum = self.maximum()
         option.sliderPosition = self.sliderPosition()
-        option.sliderValue = self.value()
+        option.sliderValue = QSlider.value(self)             # raw position
         option.singleStep = self.singleStep()
         option.pageStep = self.pageStep()
         option.upsideDown = False
@@ -525,6 +537,23 @@ class ResettableSlider(QSlider):
         elif delta < 0:
             self.setValue(self.value() - 1)
         event.accept()
+
+
+class HalfStepSlider(ResettableSlider):
+    """A slider whose value moves in halves (spec/printer-lights.md, half
+    points): the Channel Levels Shift sliders, where half a printer point is
+    1.5 units. The integer position is twice the value; value() returns an int
+    for whole values (so settings and catalogs of existing edits are
+    unchanged) and a float only for x.5."""
+
+    SCALE = 2
+
+    def value(self):
+        raw = QSlider.value(self)
+        return raw // 2 if raw % 2 == 0 else raw / 2
+
+    def setValue(self, v):
+        QSlider.setValue(self, int(round(float(v) * self.SCALE)))
 
 
 class GradientSlider(ResettableSlider):
@@ -1172,7 +1201,7 @@ class SlidersPanel(QWidget):
         master_label.setAlignment(Qt.AlignCenter)
         self.od_section.add_widget(master_label)
         self.od_section.add_layout(self.create_slider("Input Gain"))
-        self.od_section.add_layout(self.create_slider("Master Shift"))
+        self.od_section.add_layout(self.create_slider("Master Shift", half_steps=True))
         # Created HERE (third, so the ADJUSTMENT_KEYS zip is unchanged) but placed
         # OUTSIDE the collapsible, in the slot reserved above — always visible,
         # and BELOW Channel Balance, where the render applies it. Creation order
@@ -1185,7 +1214,7 @@ class SlidersPanel(QWidget):
         r_label.setStyleSheet(f"color: {theme.CH_R}; font-size: 11px; margin-top: 4px;")
         r_label.setAlignment(Qt.AlignCenter)
         self.od_section.add_widget(r_label)
-        self.od_section.add_layout(self.create_slider("R Shift"))
+        self.od_section.add_layout(self.create_slider("R Shift", half_steps=True))
         self.od_section.add_layout(self.create_slider("R Gain"))
         self.od_section.add_layout(self.create_slider("R Blackpoint"))
 
@@ -1194,7 +1223,7 @@ class SlidersPanel(QWidget):
         g_label.setStyleSheet(f"color: {theme.CH_G}; font-size: 11px; margin-top: 4px;")
         g_label.setAlignment(Qt.AlignCenter)
         self.od_section.add_widget(g_label)
-        self.od_section.add_layout(self.create_slider("G Shift"))
+        self.od_section.add_layout(self.create_slider("G Shift", half_steps=True))
         self.od_section.add_layout(self.create_slider("G Gain"))
         self.od_section.add_layout(self.create_slider("G Blackpoint"))
 
@@ -1203,7 +1232,7 @@ class SlidersPanel(QWidget):
         b_label.setStyleSheet(f"color: {theme.CH_B}; font-size: 11px; margin-top: 4px;")
         b_label.setAlignment(Qt.AlignCenter)
         self.od_section.add_widget(b_label)
-        self.od_section.add_layout(self.create_slider("B Shift"))
+        self.od_section.add_layout(self.create_slider("B Shift", half_steps=True))
         self.od_section.add_layout(self.create_slider("B Gain"))
         self.od_section.add_layout(self.create_slider("B Blackpoint"))
 
@@ -1417,19 +1446,23 @@ class SlidersPanel(QWidget):
             self.histogram.set_caption("")
 
     def create_slider(self, label_text, min_value=-100, max_value=100,
-                      default_value=0, gradient=None):
+                      default_value=0, gradient=None, half_steps=False):
         # `gradient` (a (left, right) colour pair) gives a custom-painted
         # gradient groove — e.g. Temperature blue->amber, Tint green->magenta.
+        # `half_steps`: the value moves in halves (the Channel Levels Shift
+        # sliders, for half printer points; spec/printer-lights.md).
         if gradient is not None:
             slider = GradientSlider(gradient, Qt.Horizontal)
+        elif half_steps:
+            slider = HalfStepSlider(Qt.Horizontal)
         else:
             slider = ResettableSlider(Qt.Horizontal)
-        slider.setMinimum(min_value)
-        slider.setMaximum(max_value)
+        slider.setMinimum(min_value * slider.SCALE)
+        slider.setMaximum(max_value * slider.SCALE)
         slider.setValue(default_value)
         slider.reset_value = default_value     # double-click target
         slider.setOrientation(Qt.Horizontal)
-        slider.setTickInterval(10)
+        slider.setTickInterval(10 * slider.SCALE)
         slider.setFixedHeight(theme.CONTROL_H)
 
         label = QLabel(label_text)
@@ -1438,13 +1471,13 @@ class SlidersPanel(QWidget):
         label.setFixedHeight(theme.CONTROL_H)
         label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
 
-        value_label = QLabel(str(slider.value()))
+        value_label = QLabel(slider.value_text())
         value_label.setFixedWidth(theme.VALUE_COL_W)
         value_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
 
         # Directly call on_slider_changed without debounce
-        def handle_slider_change(val, lbl=value_label):
-            lbl.setText(str(val))
+        def handle_slider_change(_raw, lbl=value_label, sl=slider):
+            lbl.setText(sl.value_text())
             self.on_slider_changed()
 
         slider.valueChanged.connect(handle_slider_change)
@@ -1601,7 +1634,7 @@ class SlidersPanel(QWidget):
                 self.sliders[i].blockSignals(True)
                 self.sliders[i].setValue(val)
                 self.sliders[i].blockSignals(False)
-                self.slider_value_labels[i].setText(str(val))
+                self.slider_value_labels[i].setText(self.sliders[i].value_text())
         # Cineon display conversion is whole-image: the checkbox always shows
         # the GLOBAL flag and is only editable when the global layer is active.
         img = ccr_backend.get_image_by_index(idx) if idx is not None else None
@@ -2047,7 +2080,8 @@ class SlidersPanel(QWidget):
     _PL_TIPS = {"C": ("cyan", "red", "red"), "M": ("magenta", "green", "green"),
                 "Y": ("yellow", "blue", "blue")}
     _PL_ORDER = "DCMY"           # density first, as on a lab printer's keypad
-    PL_BIG_STEP = 4              # points per Shift-click
+    PL_CLICK_POINTS = 0.5        # points per click (half points: 1.5 units)
+    PL_SHIFT_POINTS = 1          # points per Shift-click
 
     def _build_printer_lights(self):
         from PySide6.QtWidgets import QGridLayout
@@ -2075,8 +2109,8 @@ class SlidersPanel(QWidget):
                     more, less, chan = self._PL_TIPS[ch]
                     tip = (f"More {more} (less {less})" if sign == "+"
                            else f"Less {more} (more {less})")
-                b.setToolTip(f"{tip}, one printer point per click "
-                             f"(Shift-click: {self.PL_BIG_STEP}). One point is about "
+                b.setToolTip(f"{tip}, half a printer point per click "
+                             "(Shift-click: one point). One point is about "
                              "1/12 stop; it moves the Channel Levels "
                              f"{'Master' if ch == 'D' else chan.capitalize()} Shift "
                              f"slider by {self.PRINTER_POINT_UNITS}.\n"
@@ -2114,9 +2148,10 @@ class SlidersPanel(QWidget):
             return
         from PySide6.QtWidgets import QApplication
         big = bool(QApplication.keyboardModifiers() & Qt.ShiftModifier)
-        delta = self.PRINTER_POINT_UNITS * (self.PL_BIG_STEP if big else 1)
-        new = sl.value() + (-delta if sign == "+" else delta)
-        new = max(sl.minimum(), min(sl.maximum(), new))
+        delta = self.PRINTER_POINT_UNITS * (self.PL_SHIFT_POINTS if big
+                                            else self.PL_CLICK_POINTS)
+        lo, hi = sl.value_range()
+        new = max(lo, min(hi, sl.value() + (-delta if sign == "+" else delta)))
         if new == sl.value():
             self.set_temporary_hint(f"{ch} printer light is at its limit.", duration=3000)
             return
@@ -2398,7 +2433,7 @@ class SlidersPanel(QWidget):
             slider.blockSignals(True)
             slider.setValue(default)
             slider.blockSignals(False)
-            self.slider_value_labels[i].setText(str(default))
+            self.slider_value_labels[i].setText(slider.value_text())
         # Full reset clears tone curves too (the dedicated "Reset Curve" button
         # is the curve-only path). set_curves does not emit, so it won't start a
         # competing undo burst here.
@@ -2463,7 +2498,7 @@ class SlidersPanel(QWidget):
             self.sliders[i].blockSignals(True)
             self.sliders[i].setValue(val)
             self.sliders[i].blockSignals(False)
-            self.slider_value_labels[i].setText(str(val))
+            self.slider_value_labels[i].setText(self.sliders[i].value_text())
         if rendered:
             self._show_rendered()      # no second render (spec/slider-speed.md)
         else:
@@ -3564,7 +3599,8 @@ class SlidersPanel(QWidget):
                         self.sliders[i].blockSignals(True)
                         self.sliders[i].setValue(merged[key])
                         self.sliders[i].blockSignals(False)
-                        self.slider_value_labels[i].setText(str(merged[key]))
+                        self.slider_value_labels[i].setText(
+                            self.sliders[i].value_text())
                 self.curve_editor.set_curves(merged.get("curves"))
 
         pixels = touch_adj
