@@ -127,6 +127,25 @@ def _clip(**over):
 # --- paste_options (pure) -----------------------------------------------------
 
 class TestPasteOptions:
+    def test_sharpening_row_when_any_part_differs(self):
+        # Sharpening defaults ON (amount 25), so the row must not depend on the
+        # amount alone: radius, masking or the bypass flag are changes too.
+        for over in ({"sharpen_masking": 30}, {"sharpen_radius": 40},
+                     {"sharpen_amount": 60}, {"sharpen_amount": 0}):
+            rows = paste_options(_clip(adj=over), _default)
+            assert [r[1] for r in rows] == ["sharpen"], over
+            assert rows[0][0] == "Detail"
+        rows = paste_options(_clip(flags={"sharpen_export_only": True}), _default)
+        assert [r[1] for r in rows] == ["sharpen"]
+        assert "amount 25" in rows[0][2] and "bypass until export" in rows[0][2]
+        assert paste_options(_clip(), _default) == []
+
+    def test_noise_row_still_follows_the_amount(self):
+        # Chroma NR defaults OFF: a radius on a frame with NR off is not offered.
+        assert paste_options(_clip(adj={"chroma_nr_radius": 80}), _default) == []
+        rows = paste_options(_clip(adj={"chroma_nr": 30}), _default)
+        assert [r[1] for r in rows] == ["noise"]
+
     def test_all_default_offers_nothing(self):
         assert paste_options(_clip(), _default) == []
         assert paste_options(None, _default) == []
@@ -271,6 +290,17 @@ class TestPasteAdjustments:
         _paste(panel, monkeypatch, chosen={"adj:temperature"})
         assert _val(tgt, "temperature") == 40
         assert _val(tgt, "contrast") == -30
+
+    def test_sharpening_masking_alone_pastes(self, tmp_path, monkeypatch):
+        src, tgt = _images(tmp_path)
+        panel = _panel()
+        self._copy_from_0(panel, sharpen_masking=30)   # amount left at its default 25
+        assert "sharpen" in {r[1] for r in paste_options(panel.clipboard,
+                                                         panel._default_for)}
+        _set(panel, "sharpen_amount", 60)
+        _paste(panel, monkeypatch)
+        assert _val(tgt, "sharpen_masking") == 30
+        assert _val(tgt, "sharpen_amount") == 25       # the row's values travel together
 
     def test_default_source_values_do_not_reset_target(self, tmp_path, monkeypatch):
         src, tgt = _images(tmp_path)

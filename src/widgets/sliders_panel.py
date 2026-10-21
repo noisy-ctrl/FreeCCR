@@ -276,8 +276,13 @@ def paste_options(clip, default_for):
         bypass = ", bypass until export" if flags.get("chroma_nr_export_only") else ""
         rows.append(("Detail", "noise",
                      f"Chroma Noise Reduction  (amount {_n(nr)}, radius {_n(rad)}{bypass})"))
+    # Sharpening is on by default (amount 25), so unlike noise reduction its
+    # row must not hang off the amount alone: a frame left at 25 with its
+    # radius or masking changed, or with "bypass until export" ticked, has
+    # still changed its sharpening, and the row offers all of it together.
     sh = adj.get("sharpen_amount", default_for("sharpen_amount"))
-    if sh != default_for("sharpen_amount"):
+    if (any(adj.get(k, default_for(k)) != default_for(k) for k in _SHARPEN_KEYS)
+            or flags.get("sharpen_export_only")):
         rad = adj.get("sharpen_radius", default_for("sharpen_radius"))
         msk = adj.get("sharpen_masking", default_for("sharpen_masking"))
         bypass = ", bypass until export" if flags.get("sharpen_export_only") else ""

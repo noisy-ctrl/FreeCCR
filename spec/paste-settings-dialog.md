@@ -20,7 +20,7 @@ Sync to All is unchanged.
 ## UX
 
 Dialog sections: Adjustments, Channel Levels, Channel Balance, Colour,
-Geometry. Select All / Deselect All, Cancel / Paste. Rows un-ticked at the
+Detail, Geometry. Select All / Deselect All, Cancel / Paste. Rows un-ticked at the
 last paste stay un-ticked while the app is open. If the copied image has no
 changes from default, Paste says so instead of opening an empty dialog.
 
@@ -28,6 +28,14 @@ changes from default, Paste says so instead of opening an empty dialog.
 
 - Settings at their default on the copied image are not offered, so they never
   reset the target.
+- The **Detail** section has one row each for Chroma Noise Reduction and
+  Sharpening; each row pastes its whole set together (amount, radius,
+  masking, and its "bypass until export" flag). Noise reduction defaults off,
+  so its row appears when the amount is not 0. Sharpening defaults **on**
+  (amount 25), so its row appears when **any** of amount, radius, masking or
+  the bypass flag differs from default. It used to follow the amount alone,
+  which hid a frame left at 25 with its radius or masking changed. Pasting
+  that row sets the target's amount to the copied 25 as part of the set.
 - Un-ticked items are left exactly as they are on each target.
 - Flips paste as "flipped": they never toggle a target that is already flipped.
 - **Fine rotation is skipped on cropped targets**: a crop holds its own
