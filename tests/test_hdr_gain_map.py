@@ -143,8 +143,9 @@ def test_reference_decoder_rebuilds_the_intended_hdr(metadata):
 def test_sdr_base_is_the_plain_jpeg_picture():
     sdr, over = _ramp()
     data = hg.encode_gainmap_jpeg(sdr, hg.glow_stops(over, 2.0), 2.0, quality=90)
+    from core.jpeg_params import jpeg_params
     ok, plain = cv2.imencode(".jpg", cv2.cvtColor(sdr, cv2.COLOR_RGB2BGR),
-                             [cv2.IMWRITE_JPEG_QUALITY, 90])
+                             jpeg_params(90))
     a = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
     b = cv2.imdecode(plain, cv2.IMREAD_COLOR)
     assert np.array_equal(a, b)

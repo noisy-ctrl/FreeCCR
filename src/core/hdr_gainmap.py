@@ -258,8 +258,9 @@ def encode_gainmap_jpeg(sdr_rgb8: np.ndarray, glow: np.ndarray, headroom: float,
         raise ValueError("glow must match the picture's height and width")
     h = clamp_headroom(headroom)
 
+    from core.jpeg_params import jpeg_params     # same settings as the plain JPEG
     ok, prim = cv2.imencode(".jpg", cv2.cvtColor(sdr, cv2.COLOR_RGB2BGR),
-                            [cv2.IMWRITE_JPEG_QUALITY, int(quality)])
+                            jpeg_params(quality))
     if not ok:
         raise IOError("failed to encode the SDR picture")
     ok, gm = cv2.imencode(".jpg", gainmap_levels(glow, h),

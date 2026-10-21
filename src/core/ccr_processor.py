@@ -2597,8 +2597,9 @@ def write_export_image(ccr_image, rgb_u16, output_path, jpg_out, jpg_quality,
         # 1-component JFIF); colour needs the RGB -> BGR swap for cv2.
         img_8 = (to_8bit(out_u16) if mono
                  else cv2.cvtColor(to_8bit(out_u16), cv2.COLOR_RGB2BGR))
-        ok, buf = cv2.imencode(".jpg", img_8,
-                               [cv2.IMWRITE_JPEG_QUALITY, int(jpg_quality)])
+        # Full-resolution colour at quality 90+ (spec/jpeg-chroma-444.md).
+        from core.jpeg_params import jpeg_params
+        ok, buf = cv2.imencode(".jpg", img_8, jpeg_params(jpg_quality))
         if not ok:
             raise IOError(f"Failed to encode JPEG for {output_path}")
         # cv2 can't embed ICC, so inject an APP2 ICC_PROFILE segment and write

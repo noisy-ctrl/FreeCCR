@@ -86,7 +86,8 @@ def jpeg_bytes_per_pixel(sample_rgb16: np.ndarray, quality: int):
     try:
         img8 = (np.clip(sample_rgb16, 0, 65535) / 257).astype(np.uint8)
         img8 = cv2.cvtColor(img8, cv2.COLOR_RGB2BGR)
-        ok, buffer = cv2.imencode(".jpg", img8, [cv2.IMWRITE_JPEG_QUALITY, int(quality)])
+        from core.jpeg_params import jpeg_params   # match what export writes
+        ok, buffer = cv2.imencode(".jpg", img8, jpeg_params(quality))
         if not ok:
             return None
         pixels = img8.shape[0] * img8.shape[1]
