@@ -730,6 +730,77 @@ class CenteringSlider(QSlider):
         else:
             event.ignore()
 
+# --- Rotate / flip several frames (spec/multi-frame-orientation.md) --------
+
+ORIENTATION_KINDS = ("left", "right", "hflip", "vflip")
+
+_ORIENTATION_TITLES = {"left": "Rotate Left", "right": "Rotate Right",
+                       "hflip": "Flip Horizontal", "vflip": "Flip Vertical"}
+_ORIENTATION_QUESTIONS = {
+    "left": "Rotate all {n} selected frames left?",
+    "right": "Rotate all {n} selected frames right?",
+    "hflip": "Flip all {n} selected frames horizontally?",
+    "vflip": "Flip all {n} selected frames vertically?",
+}
+
+
+def next_orientation(kind, rotation, hflip, vflip, mode="each"):
+    """The (rotation, hflip, vflip) a frame ends up with after one orientation
+    control. Rotations turn 90 degrees from where the frame is. A flip toggles
+    its own flag (mode "each"), or with mode "rest" sets it, so a frame
+    already flipped that way stays as it is."""
+    rotation = int(rotation or 0) % 360
+    hflip, vflip = bool(hflip), bool(vflip)
+    if kind == "left":
+        rotation = (rotation - 90) % 360
+    elif kind == "right":
+        rotation = (rotation + 90) % 360
+    elif kind == "hflip":
+        hflip = True if mode == "rest" else not hflip
+    elif kind == "vflip":
+        vflip = True if mode == "rest" else not vflip
+    else:
+        raise ValueError(f"unknown orientation control {kind!r}")
+    return rotation, hflip, vflip
+
+
+def flipped_count(kind, frames):
+    """How many of ``frames`` are already flipped the way ``kind`` flips
+    (0 for the rotations, which have no 'already' state)."""
+    attr = {"hflip": "horizontal_mirrored", "vflip": "vertical_mirrored"}.get(kind)
+    if attr is None:
+        return 0
+    return sum(1 for f in frames if f is not None and getattr(f, attr, False))
+
+
+def orientation_prompt(kind, frames):
+    """What the 'apply to all selected' box says, as a dict: ``title``,
+    ``text``, ``note`` (may be empty), ``choices`` [(mode, button label)] and
+    ``cancel`` (the cancelling button's label). A flip over a MIXED selection
+    (some already flipped that way, some not) offers both "Flip Each" and
+    "Flip the Other N"; anything else is a plain Yes / No, since there the
+    two would give the same result."""
+    n = len(frames)
+    k = flipped_count(kind, frames)
+    prompt = {"title": _ORIENTATION_TITLES[kind],
+              "text": _ORIENTATION_QUESTIONS[kind].format(n=n),
+              "note": "", "choices": [("each", "Yes")], "cancel": "No"}
+    if kind in ("hflip", "vflip") and 0 < k < n:
+        rest = n - k
+        if k == 1:
+            note = ("1 of them is already flipped this way. Flip Each turns it "
+                    f"back to normal; Flip the Other {rest} leaves it as it is, "
+                    f"so all {n} end up flipped.")
+        else:
+            note = (f"{k} of them are already flipped this way. Flip Each turns "
+                    f"those {k} back to normal; Flip the Other {rest} leaves them "
+                    f"as they are, so all {n} end up flipped.")
+        prompt.update(note=note,
+                      choices=[("each", "Flip Each"), ("rest", f"Flip the Other {rest}")],
+                      cancel="Cancel")
+    return prompt
+
+
 class ImagePreview(QWidget):
     ccr_converted = Signal(str, str)
 
@@ -766,20 +837,29 @@ class ImagePreview(QWidget):
         self.toolbar.addAction(rotate_right_action)
         add_spacer()
 
-        mirror_v_icon = theme.load_tinted_icon(resource_path("icons/vertical-mirror-icon.png"))
+        # The mirror actions are checkable so they light up (brighter symbol on
+        # the checked background) while the frame on screen is mirrored that
+        # way. Their state is always set from the image by
+        # _sync_mirror_actions, never left to the click's own toggle
+        # (spec/multi-frame-orientation.md).
+        mirror_v_icon = theme.load_tinted_icon(resource_path("icons/vertical-mirror-icon.png"),
+                                               on_color=theme.ICON_ON)
         if mirror_v_icon.isNull():
             mirror_v_icon = QIcon.fromTheme("view-refresh")
-        mirror_v_action = QAction(mirror_v_icon, "Mirror Vertical", self)
-        mirror_v_action.triggered.connect(self.mirror_vertical)
-        self.toolbar.addAction(mirror_v_action)
+        self.mirror_v_action = QAction(mirror_v_icon, "Mirror Vertical", self)
+        self.mirror_v_action.setCheckable(True)
+        self.mirror_v_action.triggered.connect(lambda _checked=False: self.mirror_vertical())
+        self.toolbar.addAction(self.mirror_v_action)
         add_spacer()
 
-        mirror_h_icon = theme.load_tinted_icon(resource_path("icons/horizontal-mirror-icon.png"))
+        mirror_h_icon = theme.load_tinted_icon(resource_path("icons/horizontal-mirror-icon.png"),
+                                               on_color=theme.ICON_ON)
         if mirror_h_icon.isNull():
             mirror_h_icon = QIcon.fromTheme("view-refresh")
-        mirror_h_action = QAction(mirror_h_icon, "Mirror Horizontal", self)
-        mirror_h_action.triggered.connect(self.mirror_horizontal)
-        self.toolbar.addAction(mirror_h_action)
+        self.mirror_h_action = QAction(mirror_h_icon, "Mirror Horizontal", self)
+        self.mirror_h_action.setCheckable(True)
+        self.mirror_h_action.triggered.connect(lambda _checked=False: self.mirror_horizontal())
+        self.toolbar.addAction(self.mirror_h_action)
         add_spacer()
 
         # Area-editing mask pickers — create a local masked adjustment area
@@ -1093,6 +1173,10 @@ class ImagePreview(QWidget):
         self._zoom = 1.0
         self._item_prescale = 1.0
         self.rotation_slider.setEnabled(False)
+        self.current_rotation = 0
+        self.current_vertical_flip = False
+        self.current_horizontal_flip = False
+        self._sync_mirror_actions()
         self._scope_timer.stop()
         self._scopes_dirty = False
         self._probe_qimage = None
@@ -1270,6 +1354,7 @@ class ImagePreview(QWidget):
         self.current_rotation = ccr_backend.get_image_rotation_by_index(idx)
         self.current_vertical_flip = ccr_backend.get_image_vertical_flip_by_index(idx)
         self.current_horizontal_flip = ccr_backend.get_image_horizontal_flip_by_index(idx)
+        self._sync_mirror_actions()
 
         self.scene.clear()
         self.pixmap_item = None
@@ -1536,39 +1621,144 @@ class ImagePreview(QWidget):
         if img is not None:
             img.push_undo_state()
 
+    # --- Orientation controls (spec/multi-frame-orientation.md) -----------
     def rotate_left(self):
-        self._push_undo_for_current()
-        self._crop_drag = None  # base transform change invalidates an active crop drag
-        self._reset_zoom()      # orientation change returns to the fitted view
-        self.current_rotation = (self.current_rotation - 90) % 360
-        ccr_backend.set_image_rotation_by_index(self.current_idx, self.current_rotation)
-        self.apply_transformations()
+        self._change_orientation("left")
 
     def rotate_right(self):
-        self._push_undo_for_current()
-        self._crop_drag = None  # base transform change invalidates an active crop drag
-        self._reset_zoom()      # orientation change returns to the fitted view
-        self.current_rotation = (self.current_rotation + 90) % 360
-        ccr_backend.set_image_rotation_by_index(self.current_idx, self.current_rotation)
-        self.apply_transformations()
+        self._change_orientation("right")
 
     def mirror_vertical(self):
-        self._push_undo_for_current()
-        self._crop_drag = None  # base transform change invalidates an active crop drag
-        self._reset_zoom()      # orientation change returns to the fitted view
-        flip = ccr_backend.get_image_vertical_flip_by_index(self.current_idx)
-        ccr_backend.set_image_vertical_flip_by_index(self.current_idx, not flip)
-        self.current_vertical_flip = not flip
-        self.apply_transformations()
+        self._change_orientation("vflip")
 
     def mirror_horizontal(self):
-        self._push_undo_for_current()
-        self._crop_drag = None  # base transform change invalidates an active crop drag
-        self._reset_zoom()      # orientation change returns to the fitted view
-        flip = ccr_backend.get_image_horizontal_flip_by_index(self.current_idx)
-        ccr_backend.set_image_horizontal_flip_by_index(self.current_idx, not flip)
-        self.current_horizontal_flip = not flip
-        self.apply_transformations()
+        self._change_orientation("hflip")
+
+    def _thumbnail_list_widget(self):
+        """The main window's ThumbnailList, or None outside one."""
+        parent = self.parent()
+        for host in ((parent.parent() if parent is not None else None), self.window()):
+            tl = getattr(host, "thumbnail_list", None)
+            if tl is not None:
+                return tl
+        return None
+
+    def _orientation_targets(self):
+        """Frames a rotate/flip acts on: every selected thumbnail when more
+        than one is selected, otherwise just the frame on screen."""
+        tl = self._thumbnail_list_widget()
+        selected = []
+        if tl is not None and hasattr(tl, "selected_indices"):
+            try:
+                selected = [i for i in tl.selected_indices()
+                            if 0 <= i < len(ccr_backend.images)]
+            except RuntimeError:  # list mid-rebuild
+                selected = []
+        if len(selected) > 1:
+            return selected
+        if self.current_idx is not None and 0 <= self.current_idx < len(ccr_backend.images):
+            return [self.current_idx]
+        return []
+
+    def _ask_orientation_all(self, prompt):
+        """Show the 'apply to all selected' box built by orientation_prompt.
+        Returns the chosen mode ("each" / "rest"), or None if cancelled. The
+        first choice is the default (Return); Esc and closing cancel."""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Question)
+        box.setWindowTitle(prompt["title"])
+        box.setText(prompt["text"])
+        if prompt["note"]:
+            box.setInformativeText(prompt["note"])
+        modes = {}
+        for i, (mode, label) in enumerate(prompt["choices"]):
+            button = box.addButton(label, QMessageBox.YesRole if i == 0
+                                   else QMessageBox.AcceptRole)
+            modes[button] = mode
+            if i == 0:
+                box.setDefaultButton(button)
+        cancel = box.addButton(prompt["cancel"], QMessageBox.NoRole
+                               if prompt["cancel"] == "No" else QMessageBox.RejectRole)
+        box.setEscapeButton(cancel)
+        box.exec()
+        return modes.get(box.clickedButton())
+
+    def _change_orientation(self, kind):
+        """One rotate/flip control. Several frames selected: ask first, then
+        change each one (with its own undo snapshot). One frame: change it."""
+        targets = self._orientation_targets()
+        if not targets:
+            self._sync_mirror_actions()
+            return
+        mode = "each"
+        if len(targets) > 1:
+            mode = self._ask_orientation_all(
+                orientation_prompt(kind, [ccr_backend.get_image_by_index(i) for i in targets]))
+            if mode is None:
+                # Cancelled: nothing changes. The click already toggled the
+                # checkable mirror action, so put it back.
+                self._sync_mirror_actions()
+                return
+        on_screen = self.current_idx in targets
+        if on_screen:
+            self._crop_drag = None  # base transform change invalidates an active crop drag
+            self._reset_zoom()      # orientation change returns to the fitted view
+        changed = []
+        for idx in targets:
+            img = ccr_backend.get_image_by_index(idx)
+            if img is None:
+                continue
+            old = (img.rotation_angle, img.horizontal_mirrored, img.vertical_mirrored)
+            new = next_orientation(kind, *old, mode=mode)
+            if new == (int(old[0] or 0) % 360, bool(old[1]), bool(old[2])):
+                continue  # already that way ("Flip the Other N")
+            img.push_undo_state()
+            img.rotation_angle, img.horizontal_mirrored, img.vertical_mirrored = new
+            changed.append(idx)
+        if on_screen:
+            self.current_rotation = ccr_backend.get_image_rotation_by_index(self.current_idx)
+            self.current_horizontal_flip = ccr_backend.get_image_horizontal_flip_by_index(self.current_idx)
+            self.current_vertical_flip = ccr_backend.get_image_vertical_flip_by_index(self.current_idx)
+            self.apply_transformations()
+        self._sync_mirror_actions()
+        if len(targets) > 1:
+            tl = self._thumbnail_list_widget()
+            if tl is not None and hasattr(tl, "update_thumbnail"):
+                for idx in changed:
+                    tl.update_thumbnail(idx)
+            if changed:
+                ccr_backend.save_catalog()
+            self._orientation_hint(kind, len(changed), len(targets))
+
+    def _orientation_hint(self, kind, changed, total):
+        parent = self.parent()
+        host = parent.parent() if parent is not None else None
+        sliders = getattr(host, "sliders_panel", None)
+        if sliders is None or not hasattr(sliders, "set_temporary_hint"):
+            return
+        what = {"left": "Rotated {n} left.", "right": "Rotated {n} right.",
+                "hflip": "Flipped {n} horizontally.", "vflip": "Flipped {n} vertically."}[kind]
+        n = f"{changed} frame" + ("" if changed == 1 else "s")
+        text = what.format(n=n)
+        if kind in ("hflip", "vflip") and changed < total:
+            text += f" All {total} selected are now flipped."
+        sliders.set_temporary_hint(text, duration=3000)
+
+    def _sync_mirror_actions(self):
+        """Light the mirror icons for the frame on screen (checked = that frame
+        is mirrored that way). Signals are blocked: this only shows state."""
+        img = (ccr_backend.get_image_by_index(self.current_idx)
+               if self.current_idx is not None else None)
+        h = bool(getattr(img, "horizontal_mirrored", False)) if img is not None else False
+        v = bool(getattr(img, "vertical_mirrored", False)) if img is not None else False
+        for action, on, name in ((getattr(self, "mirror_h_action", None), h, "Mirror Horizontal"),
+                                 (getattr(self, "mirror_v_action", None), v, "Mirror Vertical")):
+            if action is None:
+                continue
+            was = action.blockSignals(True)
+            action.setChecked(on)
+            action.blockSignals(was)
+            action.setToolTip(f"{name} (this frame is mirrored)" if on else name)
 
     def convert_ccr(self):
         if self.current_idx is None:

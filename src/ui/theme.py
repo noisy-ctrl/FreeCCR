@@ -76,6 +76,7 @@ EDGE_PRINT = "#b8954a"      # the contact sheet's entry border (film edge-print 
 # 3.6 Icons
 ICON = "#cfcfcf"
 ICON_DISABLED = "#6a6a6a"
+ICON_ON = "#ffffff"         # a checkable toolbar icon that is on (spec/multi-frame-orientation.md)
 
 # 3.7 Spacing / radius / type
 SPACE_XS, SPACE_SM, SPACE_MD, SPACE_LG, SPACE_XL = 2, 4, 6, 8, 12
@@ -347,12 +348,15 @@ def global_qss(chevron_path=None) -> str:
 
 
 def load_tinted_icon(abs_path: str, color: str = ICON,
-                     disabled_color: str = ICON_DISABLED) -> QIcon:
+                     disabled_color: str = ICON_DISABLED,
+                     on_color: str = None) -> QIcon:
     """Load a monochrome PNG and recolor it using its alpha as a mask.
 
     The toolbar icons are pure-black line art on transparency (invisible on a
     dark theme); this paints them ``color`` (and a dimmer ``disabled_color`` for
-    the disabled state) so they read on dark surfaces.
+    the disabled state) so they read on dark surfaces. ``on_color``, when
+    given, is the symbol's colour while a checkable action is on (e.g.
+    ``ICON_ON``, a little brighter than ``color``).
     """
     base = QPixmap(abs_path)
     if base.isNull():
@@ -371,6 +375,9 @@ def load_tinted_icon(abs_path: str, color: str = ICON,
     icon = QIcon()
     icon.addPixmap(_tint(base, color), QIcon.Normal)
     icon.addPixmap(_tint(base, disabled_color), QIcon.Disabled)
+    if on_color is not None:
+        icon.addPixmap(_tint(base, on_color), QIcon.Normal, QIcon.On)
+        icon.addPixmap(_tint(base, disabled_color), QIcon.Disabled, QIcon.On)
     return icon
 
 
