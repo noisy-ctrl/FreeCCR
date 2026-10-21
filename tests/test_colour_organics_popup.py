@@ -205,3 +205,56 @@ def test_sync_removes_the_shape_when_the_source_has_none(panel, monkeypatch):
     dst = _Img({"colour_organics": 50, "organics_shape": dict(SHAPE)})
     _sync(panel, monkeypatch, src, dst, sat=True)
     assert "organics_shape" not in dst.adjustment_settings
+
+
+# --- Reach to 60 % with the depth held (revision 2026-10-21) -------------------
+
+def _hdiff2(a, b):
+    return (np.asarray(a, np.float64) - np.asarray(b, np.float64) + 180.0) % 360.0 - 180.0
+
+
+def test_reach_range_is_10_to_60():
+    from core.ccr_processor import ORGANICS_REACH_MIN, ORGANICS_REACH_MAX
+    assert (ORGANICS_REACH_MIN, ORGANICS_REACH_MAX) == (10, 60)
+    assert normalize_organics_shape({"reach": 99})["reach"] == 60
+
+
+def test_strength_scale_is_exactly_one_at_the_default():
+    from core.ccr_processor import organics_strength_scale
+    assert organics_strength_scale(None) == 1.0
+    assert organics_strength_scale({"reach": 30}) == 1.0
+    assert organics_strength_scale({"reach": 45}) > 1.0
+    assert organics_strength_scale({"reach": 10}) < 1.0
+
+
+def test_more_reach_is_wider_and_stronger_and_stays_monotone():
+    from core.ccr_processor import (organics_anchors, organics_hue_map,
+                                    organics_strength_scale, organics_width)
+    h = np.linspace(0, 360, 36001)[:-1].astype(np.float32)
+    pulls = []
+    for reach in (10, 30, 45, 60):
+        shape = {"reach": reach}
+        s = ORGANICS_STRENGTH * organics_strength_scale(shape)
+        m = organics_hue_map(h, s, organics_anchors(shape), organics_width(shape))
+        step = _hdiff2(np.roll(m, -1), m)[:-1] / 0.01
+        assert step.min() > 0                                  # never reorders hues
+        assert step.min() == pytest.approx(1 - ORGANICS_STRENGTH * (1 - 0.3), abs=0.02)
+        pulls.append(np.abs(_hdiff2(m, h)).mean())
+    assert pulls == sorted(pulls) and pulls[-1] > 1.3 * pulls[1]
+
+
+def test_reach_60_gpu_matches_cpu():
+    img = _img(5)
+    shape = {"reach": 60}
+    cpu = adjust_image(img, colour_organics=100, organics_shape=shape)
+    gpu = adjust_image_opencl(img, colour_organics=100, organics_shape=shape)
+    np.testing.assert_allclose(cpu.astype(np.int64), gpu.astype(np.int64), atol=3)
+
+
+def test_default_reach_renders_exactly_as_before():
+    """The depth-holding scale is exactly 1 at the default reach, so the
+    amount reaching the warp is the same float as before."""
+    img = _img(5)
+    a = adjust_image(img, colour_organics=70)
+    b = adjust_image(img, colour_organics=70, organics_shape={"reach": 30})
+    assert np.array_equal(a, b)

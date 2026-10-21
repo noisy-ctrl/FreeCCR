@@ -121,3 +121,23 @@ circle, the shape reaches the render (numpy = OpenCL), apply_adjustments
 and area layers pass it, the popup writes it (one undo, survives a slider
 move, Reset removes it), loading picks it up, paste row / paste / copy,
 sync with and without the Saturation group.
+
+
+## Revision 2026-10-21: Reach to 60 %, with the depth held
+
+Asked for a longer Reach slider. Measured first: with a fixed strength the
+warp's slope at an anchor is `1 - s (1 - w)`, so a wider reach also made the
+pull shallower. The mean hue move peaked around w = 0.45, fell beyond 0.5
+(the two neighbours' windows overlap and pull against each other) and was
+zero at w = 1. Simply raising the maximum would have made the top of the
+slider do less.
+
+So the strength is now scaled by `(1 - W0) / (1 - w)` (`organics_strength_scale`,
+W0 = the default 0.30), holding the anchor slope at 0.40 at full for every
+reach, and the range is **10–60 %**. The warp stays monotone (its minimum
+slope is that anchor slope); the maximum hue move grows from 0.069 of a span
+at 30 % to about 0.095 at 50 % and 0.100 at 60 % (it flattens past ~60 %,
+hence the cap). The scale is exactly 1.0 at the default reach, so default
+renders are byte-identical; frames with a custom reach render somewhat
+stronger than before (the user's choice). The kernel gets the scale folded
+into the amount (`params[27]`), matching `_apply_colour_organics`.

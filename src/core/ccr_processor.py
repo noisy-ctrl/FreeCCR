@@ -3522,7 +3522,10 @@ ORGANICS_ANCHORS = tuple(h for *_rest, h in ORGANICS_FAMILIES)
 ORGANICS_STRENGTH = 0.85       # slope at an anchor at full: 1 - 0.85 (1 - w) = 0.40
 ORGANICS_WIDTH = 0.3           # each anchor's pull reaches 30 % into its spans
 ORGANICS_SHIFT_MAX = 20        # popup: hue nudge per family, degrees
-ORGANICS_REACH_MIN, ORGANICS_REACH_MAX = 10, 45   # popup: reach, percent
+# Popup: reach, percent. Up to 60 since the depth is held constant (see
+# organics_strength_scale); with the old fixed strength anything past ~45 made
+# the pull WEAKER (and it vanished at 100), because a wider window thinned it.
+ORGANICS_REACH_MIN, ORGANICS_REACH_MAX = 10, 60
 _ORG_GATE_LO, _ORG_GATE_HI = 0.06, 0.20     # the colour bands' grey gate
 
 ORGANICS_SHAPE_DEFAULT = {"reach": int(round(ORGANICS_WIDTH * 100))}
@@ -3561,6 +3564,22 @@ def organics_anchors(shape=None):
 def organics_width(shape=None):
     shape = normalize_organics_shape(shape) or ORGANICS_SHAPE_DEFAULT
     return shape["reach"] / 100.0
+
+
+def organics_strength_scale(shape=None) -> float:
+    """Reach widens each family's pull without thinning it. The warp's slope
+    at an anchor is 1 - s (1 - w): with a fixed strength s a wider reach w
+    made the pull shallower, so past ~45 % more reach meant LESS effect. The
+    strength is scaled by (1 - W0) / (1 - w), holding the depth at its value
+    for the default reach W0, so more reach is always wider AND stronger
+    (spec/colour-organics.md, revision 2026-10-21). Exactly 1.0 at the
+    default, so default renders are unchanged; the warp stays monotone (the
+    minimum slope is that same anchor slope, 0.40 at full) for any w < 1."""
+    w = np.float32(organics_width(shape))
+    w0 = np.float32(ORGANICS_WIDTH)
+    if w == w0:
+        return 1.0
+    return float((np.float32(1.0) - w0) / (np.float32(1.0) - w))
 
 
 def _organics_table(anchors):
@@ -3625,7 +3644,9 @@ def _apply_colour_organics(img_norm: np.ndarray, amount: float,
     hue = np.where(ms == r, 60.0 * np.mod((g - b) / cs + 6.0, 6.0),
           np.where(ms == g, 60.0 * ((b - r) / cs + 2.0),
                             60.0 * ((r - g) / cs + 4.0))).astype(np.float32)
-    h2 = organics_hue_map(hue, np.float32(amount / 100.0 * ORGANICS_STRENGTH) * gate[sel],
+    scale = organics_strength_scale(shape)
+    h2 = organics_hue_map(hue, np.float32(amount / 100.0 * ORGANICS_STRENGTH * scale)
+                          * gate[sel],
                           anchors, organics_width(shape))
     # the fully saturated colour of hue h2
     hp = h2 / np.float32(60.0)
@@ -4542,7 +4563,9 @@ def adjust_image_opencl(
             band_active,
             vibrance,
             sat_rolloff,
-            colour_organics,
+            # The amount carries the reach's depth-holding scale (exactly 1 at
+            # the default reach), matching _apply_colour_organics.
+            colour_organics * organics_strength_scale(organics_shape),
             *_organics_params(organics_shape),
         ], dtype=np.float32)
 
