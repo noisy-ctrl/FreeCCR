@@ -381,6 +381,46 @@ def load_tinted_icon(abs_path: str, color: str = ICON,
     return icon
 
 
+def status_icon_pixmap(kind: str = "done", size: int = 48, dpr: float = 2.0) -> QPixmap:
+    """A drawn status badge for message boxes: "done" is a white tick on a
+    green disc, "problem" a white exclamation mark on amber. Drawn rather
+    than taken from the platform style, because on macOS a message box's
+    standard icon is the application's icon, which for a from-source run is
+    Python's or a generic question mark."""
+    from PySide6.QtCore import QPointF, QRectF
+    from PySide6.QtGui import QPainterPath
+    px = max(1, int(round(size * dpr)))
+    pm = QPixmap(px, px)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing, True)
+    s = float(px)
+    disc = qcolor(SUCCESS if kind == "done" else "#d08a1e")
+    p.setPen(Qt.NoPen)
+    p.setBrush(disc)
+    p.drawEllipse(QRectF(s * 0.04, s * 0.04, s * 0.92, s * 0.92))
+    pen = QPen(QColor("#ffffff"))
+    pen.setWidthF(s * 0.09)
+    pen.setCapStyle(Qt.RoundCap)
+    pen.setJoinStyle(Qt.RoundJoin)
+    p.setPen(pen)
+    p.setBrush(Qt.NoBrush)
+    if kind == "done":
+        path = QPainterPath(QPointF(s * 0.29, s * 0.52))
+        path.lineTo(QPointF(s * 0.44, s * 0.67))
+        path.lineTo(QPointF(s * 0.72, s * 0.36))
+        p.drawPath(path)
+    else:
+        p.drawLine(QPointF(s * 0.5, s * 0.26), QPointF(s * 0.5, s * 0.58))
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor("#ffffff"))
+        r = s * 0.06
+        p.drawEllipse(QPointF(s * 0.5, s * 0.74), r, r)
+    p.end()
+    pm.setDevicePixelRatio(dpr)
+    return pm
+
+
 _BTN_ROLE_QSS = {
     # Primary = the weighty commit on a surface. NEUTRAL elevation (no hue) so it
     # leads without adding colour to a colour-critical UI.

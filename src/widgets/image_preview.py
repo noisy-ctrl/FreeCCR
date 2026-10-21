@@ -5282,7 +5282,17 @@ class ImagePreview(QWidget):
         if result.get("cancelled"):
             lines.append("Export was stopped before completion.")
         lines.append(f"\nFolder: {plan.destination}")
-        QMessageBox.information(self, "Export Complete", "\n".join(lines))
+        # A drawn tick (or an amber "!" when something failed or was stopped)
+        # rather than the platform's information icon, which on a macOS
+        # from-source run shows up as a question mark.
+        problem = bool(result.get("failed")) or bool(result.get("cancelled"))
+        box = QMessageBox(self)
+        box.setWindowTitle("Export Complete")
+        box.setText("\n".join(lines))
+        box.setIconPixmap(theme.status_icon_pixmap(
+            "problem" if problem else "done", 48, max(2.0, self.devicePixelRatioF())))
+        box.setStandardButtons(QMessageBox.Ok)
+        box.exec()
         ccr_backend.save_catalog()
         if plan.open_folder:
             QDesktopServices.openUrl(QUrl.fromLocalFile(plan.destination))
