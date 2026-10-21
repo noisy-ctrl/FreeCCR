@@ -2515,11 +2515,13 @@ def hdr_geometry(cap, ccr_image, fine_angle, h_flip, v_flip):
                              h_flip, v_flip)
 
 
-# HDR glow preview tint (spec/hdr-gain-map-export.md): magenta reads as an
-# overlay on film highlights. Drawn by the canvas as its OWN layer over the
-# picture, never baked into it, so the scopes, the colour probe and the
-# histogram only ever see the real picture. No tint below HDR_TINT_MIN_STOPS
-# of glow, then an opacity of HDR_TINT_ALPHA0 + HDR_TINT_ALPHA_SPAN * glow / H.
+# HDR glow preview (spec/hdr-gain-map-export.md, spec/false-colour.md). Drawn by
+# the canvas as its OWN layer over the picture, never baked into it, so the
+# scopes, the colour probe and the histogram only ever see the real picture.
+# Nothing below HDR_TINT_MIN_STOPS of glow, then a strength of
+# HDR_TINT_ALPHA0 + HDR_TINT_ALPHA_SPAN * glow / H, which the canvas turns into
+# a density of dots (it was a magenta tint before False colour, whose scale
+# uses pink). HDR_TINT_RGB is that original magenta, kept for reference.
 HDR_TINT_RGB = (255, 64, 200)
 HDR_TINT_MIN_STOPS = 0.05
 HDR_TINT_ALPHA0 = 0.30

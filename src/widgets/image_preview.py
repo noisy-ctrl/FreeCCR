@@ -607,6 +607,9 @@ class GraphicsImageView(QGraphicsView):
         # Let the parent widget handle the fitting to avoid conflicts
         if self.parent_widget and self.parent_widget.pixmap_item:
             self.parent_widget._fit_view_to_content()
+        place = getattr(self.parent_widget, "_place_fc_legend", None)
+        if place is not None:
+            place()
 
     def drawForeground(self, painter, rect):
         super().drawForeground(painter, rect)
@@ -888,11 +891,26 @@ class ImagePreview(QWidget):
         self.hdr_tint_action = QAction("☀ HDR", self)
         self.hdr_tint_action.setCheckable(True)
         self.hdr_tint_action.setToolTip(
-            "Tint the highlights that will glow on an HDR screen in a "
-            "'JPEG + HDR gain map' export. Stronger tint = more glow, up to "
+            "Dot the highlights that will glow on an HDR screen in a "
+            "'JPEG + HDR gain map' export. Denser dots = more glow, up to "
             "the export's HDR headroom. Preview only.")
         self.hdr_tint_action.triggered.connect(self.set_hdr_tint)
         self.toolbar.addAction(self.hdr_tint_action)
+        add_spacer()
+
+        # False colour: the classic classic exposure scale over a greyscale view.
+        # A display mode only, off at startup, never saved
+        # (spec/false-colour.md).
+        # Icon only (the stripes of its scale): the toolbar has no room for
+        # another text label without pushing Export off the end.
+        self.fc_action = QAction(theme.false_colour_icon(), "False colour", self)
+        self.fc_action.setCheckable(True)
+        self.fc_action.setToolTip(
+            "Show the picture in greyscale with the classic false-colour exposure "
+            "bands: purple/blue near black, green mid grey, pink one stop "
+            "over, yellow/red near and at white. Preview only.")
+        self.fc_action.triggered.connect(self.set_false_colour)
+        self.toolbar.addAction(self.fc_action)
         add_spacer()
 
         # Dust removal: opens the Dust Removal panel (covers the sliders) and a
@@ -1134,6 +1152,11 @@ class ImagePreview(QWidget):
         # child of the picture item, so nothing that reads the picture sees it.
         self._glow_item = None
         self._glow_cache = None          # (id of the alpha map, full-size pixmap)
+        # False colour (spec/false-colour.md): its own layer under the glow.
+        self._false_colour = False
+        self._fc_item = None
+        self._fc_cache = None            # (cacheKey of the shown pixmap, layer)
+        self._fc_legend = None
         self._probe_qimage_key = None    # its QPixmap.cacheKey()
         self.scopes_panel.expanded_changed.connect(self._on_scopes_expanded)
         self.scopes_panel.sample_reference_changed.connect(self._on_sample_area_changed)
@@ -1195,6 +1218,8 @@ class ImagePreview(QWidget):
         self.current_horizontal_flip = False
         self._glow_item = None           # scene.clear() above deleted it
         self._glow_cache = None
+        self._fc_item = None
+        self._fc_cache = None
         self._sync_mirror_actions()
         self._scope_timer.stop()
         self._scopes_dirty = False
@@ -1397,6 +1422,7 @@ class ImagePreview(QWidget):
         self._dust_stroke_item = None
         self._dust_cursor_item = None
         self._glow_item = None
+        self._fc_item = None
         for _slice_line in self._slice_lines:
             _slice_line["item"] = None
 
@@ -1609,7 +1635,9 @@ class ImagePreview(QWidget):
         # dim region and handles aligned after rotates/flips.)
         self._fit_view_to_content()
 
-        # HDR glow overlay follows whatever pixmap is now displayed.
+        # The false-colour and HDR glow layers follow whatever pixmap is now
+        # displayed.
+        self._refresh_fc_overlay()
         self._refresh_glow_overlay()
 
         # The displayed image content/orientation may have changed (rotate,
@@ -1618,16 +1646,21 @@ class ImagePreview(QWidget):
         self._schedule_scope_update()
 
     def _glow_full_pixmap(self, alpha):
-        """The magenta overlay at full preview size for an opacity map,
-        cached on the map's identity (a new render makes a new map)."""
-        from core.ccr_processor import HDR_TINT_RGB
+        """The HDR glow as a halftone of dots at full preview size for an
+        opacity map, cached on the map's identity (a new render makes a new
+        map). Dots, not a colour, so the glow reads over False colour too,
+        whose scale already uses pink (spec/false-colour.md)."""
+        from core.ccr_processor import HDR_TINT_ALPHA0, HDR_TINT_ALPHA_SPAN
+        from core.false_colour import glow_dots_rgba
         key = id(alpha)
         if self._glow_cache is not None and self._glow_cache[0] == key:
             return self._glow_cache[1]
         h, w = alpha.shape[:2]
-        rgba = np.empty((h, w, 4), np.uint8)
-        rgba[..., 0], rgba[..., 1], rgba[..., 2] = HDR_TINT_RGB
-        rgba[..., 3] = alpha
+        a = alpha.astype(np.float32) / 255.0
+        strength = np.where(alpha > 0,
+                            np.clip((a - HDR_TINT_ALPHA0) / HDR_TINT_ALPHA_SPAN,
+                                    0.02, 1.0), 0.0)
+        rgba = np.ascontiguousarray(glow_dots_rgba(strength))
         qimg = QImage(rgba.data, w, h, 4 * w, QImage.Format_RGBA8888).copy()
         pm = QPixmap.fromImage(qimg)
         self._glow_cache = (key, pm, alpha)      # keep the map alive with its key
@@ -1667,12 +1700,120 @@ class ImagePreview(QWidget):
             return
         if self._glow_item is None:
             self._glow_item = QGraphicsPixmapItem(item)
-            self._glow_item.setTransformationMode(Qt.SmoothTransformation)
+            # Nearest-neighbour keeps the dots crisp at any zoom; above the
+            # false-colour layer.
+            self._glow_item.setTransformationMode(Qt.FastTransformation)
+            self._glow_item.setZValue(2)
         self._glow_item.setPixmap(overlay)
         t = QTransform()
         t.scale(target.width() / overlay.width(), target.height() / overlay.height())
         self._glow_item.setTransform(t)
         self._glow_item.setVisible(True)
+
+    # --- False colour (spec/false-colour.md) -----------------------------
+    FC_MAX_LONG = 4096      # cap for the layer's own resolution (GUI-thread cost)
+
+    def set_false_colour(self, on):
+        """Show or hide the false-colour view: the displayed picture in
+        greyscale with the classic classic exposure bands, as its own layer, plus
+        a legend in the corner. Display only, off at startup, never saved."""
+        self._false_colour = bool(on)
+        action = getattr(self, "fc_action", None)
+        if action is not None and action.isChecked() != self._false_colour:
+            was = action.blockSignals(True)
+            action.setChecked(self._false_colour)
+            action.blockSignals(was)
+        self._refresh_fc_overlay()
+
+    def _fc_pixmap_for(self, target):
+        """The false-colour layer for a displayed pixmap, cached on its
+        cacheKey; computed at up to FC_MAX_LONG on the long side."""
+        from core.false_colour import false_colour
+        key = target.cacheKey()
+        if self._fc_cache is not None and self._fc_cache[0] == key:
+            return self._fc_cache[1]
+        src = target
+        long_side = max(src.width(), src.height())
+        if long_side > self.FC_MAX_LONG:
+            src = src.scaled(src.size() * (self.FC_MAX_LONG / long_side),
+                             Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        qimg = src.toImage().convertToFormat(QImage.Format_RGB888)
+        w, h = qimg.width(), qimg.height()
+        buf = np.frombuffer(qimg.constBits(), np.uint8)
+        rgb = buf.reshape(h, qimg.bytesPerLine())[:, :w * 3].reshape(h, w, 3)
+        fc = np.ascontiguousarray(false_colour(rgb))
+        pm = QPixmap.fromImage(QImage(fc.data, w, h, 3 * w,
+                                      QImage.Format_RGB888).copy())
+        self._fc_cache = (key, pm)
+        return pm
+
+    def _refresh_fc_overlay(self):
+        """Show, update or hide the false-colour layer: a child of the
+        picture item (so it inherits every transform), covering the picture
+        exactly, computed from the pixmap actually displayed (preview or
+        hi-res tile) so it stays sharp when zoomed. The scopes, colour probe
+        and histogram read the picture itself, never this."""
+        item = self.pixmap_item
+        on = (getattr(self, "_false_colour", False) and item is not None
+              and self.current_pixmap is not None)
+        target = item.pixmap() if item is not None else None
+        if not on or target is None or target.isNull():
+            if self._fc_item is not None:
+                self._fc_item.setVisible(False)
+            self._place_fc_legend()
+            return
+        layer = self._fc_pixmap_for(target)
+        if self._fc_item is None:
+            self._fc_item = QGraphicsPixmapItem(item)
+            self._fc_item.setTransformationMode(Qt.FastTransformation)
+            self._fc_item.setZValue(1)
+        self._fc_item.setPixmap(layer)
+        t = QTransform()
+        t.scale(target.width() / layer.width(), target.height() / layer.height())
+        self._fc_item.setTransform(t)
+        self._fc_item.setVisible(True)
+        self._place_fc_legend()
+
+    def _fc_legend_widget(self):
+        from PySide6.QtWidgets import QLabel
+        from core.false_colour import BANDS
+        if self._fc_legend is None:
+            rows = []
+            for _lo, _hi, (r, g, b), label, meaning in BANDS:
+                rows.append(
+                    f'<tr><td style="background-color: rgb({r},{g},{b});">'
+                    f'&nbsp;&nbsp;&nbsp;&nbsp;</td><td>&nbsp;{label}</td>'
+                    f'<td>&nbsp;{meaning}</td></tr>')
+            rows.append('<tr><td style="color:#ffffff;">&#9679;</td>'
+                        '<td colspan="2">&nbsp;dots: glows on an HDR screen</td></tr>')
+            lab = QLabel(self.view.viewport())
+            lab.setTextFormat(Qt.RichText)
+            lab.setText('<table cellspacing="2" cellpadding="0">'
+                        + "".join(rows) + "</table>")
+            lab.setStyleSheet(
+                f"QLabel {{ background-color: rgba(20, 20, 20, 210); "
+                f"color: {theme.TEXT}; font-size: 11px; padding: 6px; "
+                f"border-radius: {theme.RADIUS_MD}px; }}")
+            lab.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            lab.adjustSize()
+            self._fc_legend = lab
+        return self._fc_legend
+
+    def _place_fc_legend(self):
+        """The legend sits in the canvas's bottom-left corner while False
+        colour is on."""
+        on = getattr(self, "_false_colour", False)
+        if not on:
+            legend = getattr(self, "_fc_legend", None)   # may run mid-__init__
+            if legend is not None:
+                legend.hide()
+            return
+        lab = self._fc_legend_widget()
+        vp = self.view.viewport()
+        lab.adjustSize()
+        lab.move(8, max(0, vp.height() - lab.height() - 8))
+        lab.show()
+        lab.raise_()
 
     def _end_fine_rot_burst(self):
         self._fine_rot_burst_active = False
@@ -1741,7 +1882,7 @@ class ImagePreview(QWidget):
         sliders = getattr(self.window(), "sliders_panel", None)
         if on and sliders is not None and hasattr(sliders, "set_temporary_hint"):
             sliders.set_temporary_hint(
-                f"HDR glow shown in magenta, scaled to "
+                f"HDR glow shown as dots, scaled to "
                 f"{ccr_backend.hdr_tint_headroom:g} stops of headroom.",
                 duration=4000)
 

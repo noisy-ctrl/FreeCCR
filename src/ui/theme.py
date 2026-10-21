@@ -381,6 +381,36 @@ def load_tinted_icon(abs_path: str, color: str = ICON,
     return icon
 
 
+def false_colour_icon(size: int = 24, dpr: float = 2.0) -> QIcon:
+    """A small toolbar icon for False colour: the scale's six band colours as
+    stripes, so the button is recognisable without a text label (the toolbar
+    has no room for one). Colours mirror core/false_colour.BANDS."""
+    from PySide6.QtCore import QRectF
+    from PySide6.QtGui import QPainterPath
+    colours = ((148, 50, 210), (40, 110, 240), (40, 200, 70),
+               (255, 125, 200), (255, 230, 40), (240, 30, 30))
+    px = max(1, int(round(size * dpr)))
+    pm = QPixmap(px, px)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing, True)
+    s = float(px)
+    box = QRectF(s * 0.12, s * 0.22, s * 0.76, s * 0.56)
+    clip = QPainterPath()
+    clip.addRoundedRect(box, s * 0.08, s * 0.08)
+    p.setClipPath(clip)
+    stripe = box.width() / len(colours)
+    for i, (r, g, b) in enumerate(colours):
+        p.fillRect(QRectF(box.left() + i * stripe, box.top(), stripe + 0.5,
+                          box.height()), QColor(r, g, b))
+    p.end()
+    pm.setDevicePixelRatio(dpr)
+    icon = QIcon()
+    icon.addPixmap(pm, QIcon.Normal, QIcon.Off)
+    icon.addPixmap(pm, QIcon.Normal, QIcon.On)
+    return icon
+
+
 def status_icon_pixmap(kind: str = "done", size: int = 48, dpr: float = 2.0) -> QPixmap:
     """A drawn status badge for message boxes: "done" is a white tick on a
     green disc, "problem" a white exclamation mark on amber. Drawn rather

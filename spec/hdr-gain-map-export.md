@@ -62,10 +62,12 @@ A checkable toolbar action, **☀ HDR**, after the area buttons. Tooltip:
 map' export. Stronger tint = more glow, up to the export's HDR headroom.
 Preview only." Off at startup, not saved.
 
-When on, the canvas draws a magenta (`#ff40c8`) layer over the glowing
-pixels: no tint below 0.05 stops of glow, then an opacity of 0.30 + 0.55 ×
-glow/H. Magenta is rarely a real highlight colour on film, so it reads as an
-overlay.
+When on, the canvas draws a layer over the glowing pixels: nothing below
+0.05 stops of glow, then a strength of 0.30 + 0.55 × glow/H. It was a magenta
+(`#ff40c8`) tint at that opacity; since False colour (spec/false-colour.md),
+whose scale uses pink, it is a halftone of black-and-white dots whose density
+follows the strength, always (the user's choice), so both views can be on at
+once.
 
 Revision 2: the layer is its **own graphics item**, a child of the picture
 item (so it inherits orientation, fine rotation and the hi-res prescale) and
