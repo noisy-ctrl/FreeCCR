@@ -2295,7 +2295,9 @@ class SlidersPanel(QWidget):
         pop.closed.connect(self._on_tone_popup_closed)
         self._tone_popup = pop
         pop.adjustSize()
-        pop.move(global_pos)
+        # Kept on screen, flipping up/left near the edges like a menu does.
+        from utils.popup_placement import place_on_screen
+        place_on_screen(pop, global_pos)
         pop.show()
 
     def _on_tone_shape_changed(self, tool, keep, rng):
@@ -2342,7 +2344,9 @@ class SlidersPanel(QWidget):
         pop.closed.connect(self._on_organics_popup_closed)
         self._organics_popup = pop
         pop.adjustSize()
-        pop.move(global_pos)
+        # Kept on screen, flipping up/left near the edges like a menu does.
+        from utils.popup_placement import place_on_screen
+        place_on_screen(pop, global_pos)
         pop.show()
 
     def _on_organics_shape_changed(self, shape):
