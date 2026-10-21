@@ -10,14 +10,16 @@ from typing import List, Optional, Tuple
 
 from PySide6.QtCore import Qt, QSettings, QTimer
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QFormLayout,
-    QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
-    QRadioButton, QSlider, QVBoxLayout,
+    QCheckBox, QColorDialog, QComboBox, QDialog, QDoubleSpinBox, QFileDialog,
+    QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
+    QPushButton, QRadioButton, QSlider, QSpinBox, QVBoxLayout,
 )
+from PySide6.QtGui import QColor
 
 from core.ccr_backend import ccr_backend
 from core import export_estimator
 from core import hdr_gainmap
+from core import export_canvas
 from ui import theme
 from utils.export_naming import build_export_names, build_filename, resolve_conflicts
 from utils.unicode_path_utils import normalize_unicode_path, validate_unicode_path
@@ -41,6 +43,9 @@ class ExportPlan:
     # "JPEG + HDR gain map": the headroom in stops, else None (a plain
     # format). See spec/hdr-gain-map-export.md.
     hdr_headroom: Optional[float] = None
+    # Border / canvas: an export_canvas.Canvas, else None (no border).
+    # See spec/export-canvas-border.md.
+    canvas: Optional[object] = None
 
 
 class ExportSettingsDialog(QDialog):
@@ -229,6 +234,57 @@ class ExportSettingsDialog(QDialog):
         form.addRow("If file exists:", self.conflict_combo)
         layout.addLayout(form)
 
+        # Border / canvas (spec/export-canvas-border.md): the finished frame,
+        # centred on a canvas of a chosen size and colour.
+        self.canvas_group = QGroupBox("Border")
+        canvas_layout = QVBoxLayout(self.canvas_group)
+        self.canvas_check = QCheckBox("Place on a canvas")
+        self.canvas_check.toggled.connect(self._on_canvas_toggled)
+        canvas_layout.addWidget(self.canvas_check)
+        canvas_form = QFormLayout()
+        canvas_form.setHorizontalSpacing(theme.GAP_BTN)
+        canvas_form.setVerticalSpacing(theme.GAP_ROW)
+
+        def _px_spin(value):
+            spin = QSpinBox()
+            spin.setRange(export_canvas.CANVAS_MIN, export_canvas.CANVAS_MAX)
+            spin.setSuffix(" px")
+            spin.setValue(value)
+            spin.valueChanged.connect(self._schedule_estimate)
+            return spin
+
+        size_row = QHBoxLayout()
+        size_row.setSpacing(theme.GAP_BTN)
+        self.canvas_w_spin = _px_spin(export_canvas.DEFAULT_WIDTH)
+        self.canvas_h_spin = _px_spin(export_canvas.DEFAULT_HEIGHT)
+        size_row.addWidget(self.canvas_w_spin)
+        size_row.addWidget(QLabel("×"))
+        size_row.addWidget(self.canvas_h_spin)
+        size_row.addStretch(1)
+        canvas_form.addRow("Canvas:", size_row)
+        self.canvas_edge_spin = _px_spin(export_canvas.DEFAULT_LONG_EDGE)
+        self.canvas_edge_spin.setToolTip(
+            "The frame's longer side in pixels; the other side follows the "
+            "frame's ratio. A frame that would not fit the canvas is shrunk "
+            "to fit.")
+        canvas_form.addRow("Image long edge:", self.canvas_edge_spin)
+        self._canvas_colour = tuple(export_canvas.DEFAULT_COLOUR)
+        self.canvas_colour_btn = QPushButton()
+        self.canvas_colour_btn.setToolTip("Choose the border colour")
+        self.canvas_colour_btn.clicked.connect(self._on_pick_canvas_colour)
+        colour_row = QHBoxLayout()
+        colour_row.addWidget(self.canvas_colour_btn)
+        colour_row.addStretch(1)
+        canvas_form.addRow("Colour:", colour_row)
+        canvas_layout.addLayout(canvas_form)
+        canvas_hint = QLabel("Each frame is centred on the canvas.")
+        canvas_hint.setStyleSheet(f"color: {theme.TEXT_MUTED};")
+        canvas_layout.addWidget(canvas_hint)
+        layout.addWidget(self.canvas_group)
+        self._canvas_inputs = (self.canvas_w_spin, self.canvas_h_spin,
+                               self.canvas_edge_spin, self.canvas_colour_btn)
+        self._show_canvas_colour()
+
         self.open_folder_checkbox = QCheckBox("Open folder when done")
         layout.addWidget(self.open_folder_checkbox)
 
@@ -300,6 +356,15 @@ class ExportSettingsDialog(QDialog):
         if conflict_index >= 0:
             self.conflict_combo.setCurrentIndex(conflict_index)
         self.open_folder_checkbox.setChecked(s.value("export/open_folder", False, type=bool))
+        self.canvas_w_spin.setValue(s.value("export/canvas_w", export_canvas.DEFAULT_WIDTH, type=int))
+        self.canvas_h_spin.setValue(s.value("export/canvas_h", export_canvas.DEFAULT_HEIGHT, type=int))
+        self.canvas_edge_spin.setValue(
+            s.value("export/canvas_long_edge", export_canvas.DEFAULT_LONG_EDGE, type=int))
+        self._canvas_colour = export_canvas.colour_from_hex(
+            s.value("export/canvas_colour", "#ffffff", type=str))
+        self._show_canvas_colour()
+        self.canvas_check.setChecked(s.value("export/canvas_on", False, type=bool))
+        self._update_canvas_controls()
         self._update_quality_visibility()
 
     def _save_settings(self):
@@ -321,6 +386,11 @@ class ExportSettingsDialog(QDialog):
             s.setValue("export/resize", self.resize_combo.currentData())
         s.setValue("export/jpeg_quality", self.quality_slider.value())
         s.setValue("export/hdr_headroom", float(self.hdr_headroom_spin.value()))
+        s.setValue("export/canvas_on", self.canvas_check.isChecked())
+        s.setValue("export/canvas_w", self.canvas_w_spin.value())
+        s.setValue("export/canvas_h", self.canvas_h_spin.value())
+        s.setValue("export/canvas_long_edge", self.canvas_edge_spin.value())
+        s.setValue("export/canvas_colour", export_canvas.colour_to_hex(self._canvas_colour))
         s.setValue("export/conflict", self.conflict_combo.currentData())
         s.setValue("export/open_folder", self.open_folder_checkbox.isChecked())
 
@@ -331,6 +401,48 @@ class ExportSettingsDialog(QDialog):
 
     def _is_hdr(self) -> bool:
         return self.format_combo.currentData() == "hdr_jpeg"
+
+    def _canvas_active(self) -> bool:
+        return self.canvas_check.isChecked() and not self._is_linear()
+
+    def _canvas_spec(self):
+        if not self._canvas_active():
+            return None
+        return export_canvas.Canvas(self.canvas_w_spin.value(),
+                                    self.canvas_h_spin.value(),
+                                    self.canvas_edge_spin.value(),
+                                    tuple(self._canvas_colour))
+
+    def _show_canvas_colour(self):
+        hexcode = export_canvas.colour_to_hex(self._canvas_colour)
+        r, g, b = self._canvas_colour
+        ink = "#000000" if (0.299 * r + 0.587 * g + 0.114 * b) > 140 else "#ffffff"
+        self.canvas_colour_btn.setText(hexcode)
+        self.canvas_colour_btn.setStyleSheet(
+            f"QPushButton {{ background-color: {hexcode}; color: {ink}; "
+            f"border: 1px solid {theme.BORDER_STRONG}; padding: 3px 14px; }}")
+
+    def _on_pick_canvas_colour(self):
+        chosen = QColorDialog.getColor(QColor(*self._canvas_colour), self,
+                                       "Border colour")
+        if chosen.isValid():
+            self._canvas_colour = (chosen.red(), chosen.green(), chosen.blue())
+            self._show_canvas_colour()
+
+    def _on_canvas_toggled(self, _checked=False):
+        self._update_canvas_controls()
+        self._schedule_estimate()
+
+    def _update_canvas_controls(self):
+        """Border inputs follow the tick box; the linear-merge format has no
+        border at all; and while a canvas is on it sets the output size, so
+        Resize steps aside."""
+        linear = self._is_linear()
+        self.canvas_group.setEnabled(not linear)
+        on = self.canvas_check.isChecked() and not linear
+        for w in self._canvas_inputs:
+            w.setEnabled(on)
+        self.resize_combo.setEnabled(not linear and not on)
 
     def _is_jpeg_family(self) -> bool:
         return self.format_combo.currentData() in ("jpeg", "hdr_jpeg")
@@ -429,19 +541,27 @@ class ExportSettingsDialog(QDialog):
         colour-space choice (untagged camera-native data) and force the
         resize to Original size WITHOUT clobbering the user's stored resize
         preference for the normal formats."""
+        self._update_linear_resize()
+        self._update_canvas_controls()
+
+    def _update_linear_resize(self):
+        # Tracked with its own flag rather than the combo's enabled state,
+        # because a ticked Border disables the combo too
+        # (spec/export-canvas-border.md).
         linear = self._is_linear()
         self.colorspace_row_label.setVisible(not linear)
         self.colorspace_combo.setVisible(not linear)
-        if linear:
-            if self.resize_combo.isEnabled():
-                self._resize_index_before_linear = self.resize_combo.currentIndex()
+        parked = getattr(self, "_linear_parked", False)
+        if linear and not parked:
+            self._resize_index_before_linear = self.resize_combo.currentIndex()
+            self._linear_parked = True
             self.resize_combo.setCurrentIndex(0)  # "Original size"
-            self.resize_combo.setEnabled(False)
-        elif not self.resize_combo.isEnabled():
-            self.resize_combo.setEnabled(True)
+        elif not linear and parked:
+            self._linear_parked = False
             restore = getattr(self, "_resize_index_before_linear", None)
             if restore is not None:
                 self.resize_combo.setCurrentIndex(restore)
+        self.resize_combo.setEnabled(not linear and not self._canvas_active())
 
     def _on_colorspace_changed(self):
         self._update_colorspace_hint()
@@ -515,7 +635,14 @@ class ExportSettingsDialog(QDialog):
             if bpp is None:
                 self.estimate_label.setText("Estimated total size: —")
                 return
-        dims_list = [export_estimator.get_original_dims(ccr_backend.images[i]) for i in indices]
+        canvas = self._canvas_spec()
+        if canvas is not None:
+            # Every file is the canvas size (spec/export-canvas-border.md).
+            dims_list = [(canvas.height, canvas.width)] * len(indices)
+            max_long_side = None
+        else:
+            dims_list = [export_estimator.get_original_dims(ccr_backend.images[i])
+                         for i in indices]
         total = export_estimator.estimate_total_bytes(dims_list, fmt, bpp=bpp,
                                                       max_long_side=max_long_side)
         count = len(indices)
@@ -572,7 +699,8 @@ class ExportSettingsDialog(QDialog):
             items=items,
             jpg_output=self._is_jpeg_family(),
             jpg_quality=self.quality_slider.value(),
-            max_long_side=None if self._is_linear() else self._selected_max_long_side(),
+            max_long_side=(None if (self._is_linear() or self._canvas_active())
+                           else self._selected_max_long_side()),
             output_colorspace=self.colorspace_combo.currentData(),
             open_folder=self.open_folder_checkbox.isChecked(),
             destination=destination,
@@ -580,6 +708,7 @@ class ExportSettingsDialog(QDialog):
             linear_merge=self._is_linear(),
             hdr_headroom=(float(self.hdr_headroom_spin.value())
                           if self._is_hdr() else None),
+            canvas=self._canvas_spec(),
         )
         self._save_settings()
         if self._is_hdr() and ccr_backend.hdr_tint_headroom is not None:

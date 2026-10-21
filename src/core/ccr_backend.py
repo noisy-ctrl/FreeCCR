@@ -1794,14 +1794,17 @@ class CCRBackend:
                               jpg_quality: int = 95, max_long_side: int = None,
                               output_colorspace: str = "srgb",
                               linear_merge: bool = False,
-                              hdr_headroom: float = None) -> bool:
+                              hdr_headroom: float = None,
+                              canvas=None) -> bool:
         """
         Exports the processed image at the given index to the specified output path.
         Routes to bwpoint or reference-frame pipeline depending on how the image was converted.
         linear_merge=True (trichrome only) bypasses ALL of that and writes the
         raw channel combination as a linear TIFF.
         hdr_headroom (stops) writes a "JPEG + HDR gain map" instead of the
-        plain format (spec/hdr-gain-map-export.md).
+        plain format (spec/hdr-gain-map-export.md). canvas (an
+        export_canvas.Canvas) centres the frame on a coloured canvas
+        (spec/export-canvas-border.md).
         Returns True on success.
         """
         if idx is not None and 0 <= idx < len(self.images):
@@ -1819,7 +1822,7 @@ class CCRBackend:
                                         jpg_out=jpg_output, jpg_quality=jpg_quality,
                                         max_long_side=max_long_side,
                                         output_colorspace=output_colorspace,
-                                                 hdr=hdr_headroom)
+                                                 hdr=hdr_headroom, canvas=canvas)
                     return True
                 ci = getattr(image_obj, "conversion_inputs", None)
                 if ci is not None and ci.get("mode") == "ref_params":
@@ -1830,7 +1833,7 @@ class CCRBackend:
                                                  jpg_out=jpg_output, jpg_quality=jpg_quality,
                                                  max_long_side=max_long_side,
                                                  output_colorspace=output_colorspace,
-                                                 hdr=hdr_headroom)
+                                                 hdr=hdr_headroom, canvas=canvas)
                 elif ci is not None and ci.get("mode") == "bw":
                     # Use the anchors BAKED at convert time — resampling the
                     # global points later must not change this image's export.
@@ -1840,7 +1843,7 @@ class CCRBackend:
                                                jpg_out=jpg_output, jpg_quality=jpg_quality,
                                                max_long_side=max_long_side,
                                                output_colorspace=output_colorspace,
-                                               hdr=hdr_headroom,
+                                               hdr=hdr_headroom, canvas=canvas,
                                                density=ci.get("density", False),
                                                slopes_bgr=ci.get("slopes"))
                 elif ci is not None and ci.get("mode") == "ref":
@@ -1856,7 +1859,7 @@ class CCRBackend:
                                                  jpg_quality=jpg_quality,
                                                  max_long_side=max_long_side,
                                                  output_colorspace=output_colorspace,
-                                                 hdr=hdr_headroom,
+                                                 hdr=hdr_headroom, canvas=canvas,
                                                  reference_rect=ci["ref"],
                                                  fine_rot=ci.get("fine_rot", 0))
                 elif image_obj.reference_frame is None and self.black_point_bgr is not None:
@@ -1868,7 +1871,7 @@ class CCRBackend:
                                                jpg_out=jpg_output, jpg_quality=jpg_quality,
                                                max_long_side=max_long_side,
                                                output_colorspace=output_colorspace,
-                                               hdr=hdr_headroom,
+                                               hdr=hdr_headroom, canvas=canvas,
                                                density=self.density_bwpoint,
                                                slopes_bgr=(self.film_stock_slopes
                                                            if self.white_point_bgr is None
@@ -1878,7 +1881,7 @@ class CCRBackend:
                                                  jpg_out=jpg_output,
                                                  jpg_quality=jpg_quality, max_long_side=max_long_side,
                                                  output_colorspace=output_colorspace,
-                                                 hdr=hdr_headroom)
+                                                 hdr=hdr_headroom, canvas=canvas)
                 return True
             except Exception as e:
                 # Keep the real reason: the bundled app has no visible stdout,
@@ -1894,7 +1897,8 @@ class CCRBackend:
                      max_long_side: int = None, output_colorspace: str = "srgb",
                      progress_callback=None, cancel_check=None,
                      linear_merge: bool = False,
-                     hdr_headroom: float = None) -> dict:
+                     hdr_headroom: float = None,
+                     canvas=None) -> dict:
         """
         Exports specific images to explicit output paths using parallel processing.
 
@@ -1931,7 +1935,8 @@ class CCRBackend:
                                                  jpg_quality=jpg_quality, max_long_side=max_long_side,
                                                  output_colorspace=output_colorspace,
                                                  linear_merge=linear_merge,
-                                                 hdr_headroom=hdr_headroom)
+                                                 hdr_headroom=hdr_headroom,
+                                                 canvas=canvas)
             elapsed = time.time() - start_time
             base_name = os.path.basename(output_path)
             if success:

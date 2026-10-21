@@ -922,7 +922,7 @@ def apply_orientation(img: np.ndarray, rotation_angle: int = 0,
     return img
 
 
-def ccr_normalize_with_reference(ccr_image,output_path=None,jpg_out=False,jpg_quality=95,max_long_side=None,output_colorspace="srgb",reference_rect=None,fine_rot=None,hdr=None) -> np.ndarray:
+def ccr_normalize_with_reference(ccr_image,output_path=None,jpg_out=False,jpg_quality=95,max_long_side=None,output_colorspace="srgb",reference_rect=None,fine_rot=None,hdr=None,canvas=None) -> np.ndarray:
     """
     Normalize and align the image using the CCR algorithm, using a reference rectangle
     for percentile calculations instead of a crop factor.
@@ -1209,7 +1209,8 @@ def ccr_normalize_with_reference(ccr_image,output_path=None,jpg_out=False,jpg_qu
         step_start = time.time()
         write_export_image(ccr_image, rgb_brightness_normalized, output_path,
                            jpg_out, jpg_quality, max_long_side, output_colorspace,
-                           hdr_headroom=hdr, hdr_over=hdr_over)
+                           hdr_headroom=hdr, hdr_over=hdr_over,
+                           canvas=canvas)
         print(f"File saving: {time.time() - step_start:.3f}s")
         #debug ----------------------v
 
@@ -2181,7 +2182,7 @@ def ccr_normalize_with_bwpoint(ccr_image, black_point_bgr=None, white_point_bgr=
                                output_path=None, jpg_out=False,
                                jpg_quality=95, max_long_side=None,
                                output_colorspace="srgb", density=False,
-                               slopes_bgr=None, hdr=None):
+                               slopes_bgr=None, hdr=None, canvas=None):
     """
     Film negative conversion using the same pipeline as ccr_normalize_with_reference
     but with explicit per-channel B/W points instead of auto-detected percentiles.
@@ -2372,7 +2373,8 @@ def ccr_normalize_with_bwpoint(ccr_image, black_point_bgr=None, white_point_bgr=
         # Write file
         write_export_image(ccr_image, rgb_result, output_path, jpg_out,
                            jpg_quality, max_long_side, output_colorspace,
-                           hdr_headroom=hdr, hdr_over=hdr_over)
+                           hdr_headroom=hdr, hdr_over=hdr_over,
+                           canvas=canvas)
         print(f"TOTAL bwpoint normalization time: {time.time() - total_start_time:.3f}s")
         gc.collect()
         return None
@@ -2383,7 +2385,7 @@ def ccr_normalize_with_bwpoint(ccr_image, black_point_bgr=None, white_point_bgr=
 
 def ccr_export_positive(ccr_image, output_path=None, jpg_out=False,
                         jpg_quality=95, max_long_side=None, output_colorspace="srgb",
-                        hdr=None):
+                        hdr=None, canvas=None):
     """Positive-mode processing/export: NO negative inversion.
 
     The image is already a normal positive (decoded in sRGB; see
@@ -2423,7 +2425,8 @@ def ccr_export_positive(ccr_image, output_path=None, jpg_out=False,
 
     write_export_image(ccr_image, rgb_result, output_path, jpg_out,
                        jpg_quality, max_long_side, output_colorspace,
-                       hdr_headroom=hdr, hdr_over=hdr_over)
+                       hdr_headroom=hdr, hdr_over=hdr_over,
+                           canvas=canvas)
     print(f"TOTAL positive export time: {time.time() - total_start_time:.3f}s")
     gc.collect()
     return None
@@ -2432,7 +2435,7 @@ def ccr_export_positive(ccr_image, output_path=None, jpg_out=False,
 def ccr_normalize_with_refparams(ccr_image, p_lo, p_hi, od_factors,
                                  output_path=None, jpg_out=False,
                                  jpg_quality=95, max_long_side=None,
-                                 output_colorspace="srgb", hdr=None):
+                                 output_colorspace="srgb", hdr=None, canvas=None):
     """
     Conversion/export pipeline for sliced children carrying precomputed
     reference-conversion constants (conversion_inputs mode "ref_params").
@@ -2469,7 +2472,8 @@ def ccr_normalize_with_refparams(ccr_image, p_lo, p_hi, od_factors,
 
     write_export_image(ccr_image, rgb_result, output_path, jpg_out,
                        jpg_quality, max_long_side, output_colorspace,
-                       hdr_headroom=hdr, hdr_over=hdr_over)
+                       hdr_headroom=hdr, hdr_over=hdr_over,
+                           canvas=canvas)
     print(f"TOTAL ref-params normalization time: {time.time() - total_start_time:.3f}s")
     gc.collect()
     return None
@@ -2547,7 +2551,7 @@ def apply_hdr_tint(rgb8: np.ndarray, over: np.ndarray, headroom: float) -> np.nd
 
 def write_export_image(ccr_image, rgb_u16, output_path, jpg_out, jpg_quality,
                        max_long_side, output_colorspace="srgb",
-                       hdr_headroom=None, hdr_over=None):
+                       hdr_headroom=None, hdr_over=None, canvas=None):
     """Single export write chokepoint shared by all three conversion pipelines.
 
     Resizes to the requested long edge, maps the (sRGB-encoded) result into the
@@ -2561,12 +2565,21 @@ def write_export_image(ccr_image, rgb_u16, output_path, jpg_out, jpg_quality,
     1-component JPEG, and a grey ICC profile in both — so other software reads
     it as greyscale. See spec/monochrome-raw-mode.md §4.3.
     """
-    if max_long_side:
+    if canvas is not None:
+        # Border / canvas (spec/export-canvas-border.md): the finished frame,
+        # centred on the canvas, replaces the long-edge resize. Composed
+        # BEFORE the colour-space step so the border is converted with it;
+        # the HDR map is placed the same way and padded with no glow.
+        from core.export_canvas import compose
+        rgb_u16, hdr_over = compose(rgb_u16, canvas, hdr_over)
+    elif max_long_side:
         rgb_u16 = ccr_image.resize_image_to_max_pixel(rgb_u16, max_long_side)
     if hdr_headroom is not None:
         return _write_hdr_jpeg(rgb_u16, output_path, jpg_quality,
                                output_colorspace, hdr_headroom, hdr_over)
-    mono = renders_monochrome(ccr_image)
+    # A coloured border needs three channels, so a monochrome frame keeps its
+    # single-channel file only on a neutral canvas.
+    mono = renders_monochrome(ccr_image) and (canvas is None or canvas.neutral)
     if mono:
         # Collapse to one sample per pixel with Rec.601 — the same weights, at
         # the same point relative to the tone curve, as the render's

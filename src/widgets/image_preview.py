@@ -5548,6 +5548,7 @@ class ExportItemsWorker(WorkerThread):
                 cancel_check=lambda: self._stop_requested,
                 linear_merge=getattr(self.plan, "linear_merge", False),
                 hdr_headroom=getattr(self.plan, "hdr_headroom", None),
+                canvas=getattr(self.plan, "canvas", None),
             )
         except Exception as e:
             print(f"Failed to export images: {e}")
