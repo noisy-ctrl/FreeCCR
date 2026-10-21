@@ -1412,9 +1412,10 @@ class CCRImage:
                           ws_windowed=snap["ws_windowed"])
         if work is not base:
             kwargs["auto_gain_override"] = self._auto_gain_for_base(base, snap)
-        # HDR glow preview tint (spec/hdr-gain-map-export.md): capture what sits
-        # above white during the normal render; only the PREVIEW pixels are
-        # tinted below (never the thumbnail, the histogram or an export).
+        # HDR glow preview tint (spec/hdr-gain-map-export.md): capture what is
+        # pushed past white during the normal render; the glow (that plus the
+        # bright end of the finished preview) becomes an opacity map the canvas
+        # draws as its own layer. The pixels themselves are never tinted.
         if live:
             from core.ccr_backend import ccr_backend as _bk
             hdr_tint = getattr(_bk, "hdr_tint_headroom", None)
@@ -1494,13 +1495,17 @@ class CCRImage:
         counts = np.empty((3, 256), dtype=np.float32)
         for i in range(3):   # 0=R, 1=G, 2=B
             counts[i] = cv2.calcHist([hist_source], [i], None, [256], [0, 256]).flatten()
-        if hdr_cap is not None and hdr_cap.over is not None:
-            # After the histogram, on the preview only. apply_hdr_tint resizes
-            # the map to the preview (it was captured at the render size).
-            from core.ccr_processor import apply_hdr_tint
-            preview_img_8bit = apply_hdr_tint(preview_img_8bit, hdr_cap.over, hdr_tint)
+        hdr_alpha = None
+        if hdr_tint is not None and (converted or positive):
+            # On the pre-mask picture: the reversal-look white is not a highlight.
+            from core.hdr_gainmap import glow_map
+            from core.ccr_processor import hdr_tint_alpha
+            hdr_alpha = hdr_tint_alpha(
+                glow_map(hist_base_8bit, hdr_cap.over if hdr_cap else None, hdr_tint),
+                hdr_tint)
         return {"thumb8": thumb_img_8, "preview8": preview_img_8bit,
-                "hist": counts, "draft": bool(draft_long), "hdr_tint": hdr_tint}
+                "hist": counts, "draft": bool(draft_long), "hdr_tint": hdr_tint,
+                "hdr_alpha": hdr_alpha}
 
     def _apply_preview_pixels(self, result: dict) -> None:
         """Store a render_preview_pixels result and advance the render epoch
@@ -1527,6 +1532,8 @@ class CCRImage:
         # frame you return to after toggling it is re-rendered to match
         # (spec/hdr-gain-map-export.md).
         self._preview_hdr_tint = result.get("hdr_tint")
+        # The glow overlay's opacity at preview size (uint8), or None.
+        self._preview_hdr_alpha = result.get("hdr_alpha")
         self._render_epoch = getattr(self, "_render_epoch", 0) + 1
 
     # --- Live-render helpers (spec/slider-speed.md) ---------------------------

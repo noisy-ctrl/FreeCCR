@@ -1130,6 +1130,10 @@ class ImagePreview(QWidget):
         self._scope_timer.timeout.connect(self._update_scopes_now)
         self._scopes_dirty = False       # refresh deferred while collapsed
         self._probe_qimage = None        # cached QImage of current_pixmap
+        # HDR glow overlay (spec/hdr-gain-map-export.md): its own layer, a
+        # child of the picture item, so nothing that reads the picture sees it.
+        self._glow_item = None
+        self._glow_cache = None          # (id of the alpha map, full-size pixmap)
         self._probe_qimage_key = None    # its QPixmap.cacheKey()
         self.scopes_panel.expanded_changed.connect(self._on_scopes_expanded)
         self.scopes_panel.sample_reference_changed.connect(self._on_sample_area_changed)
@@ -1189,6 +1193,8 @@ class ImagePreview(QWidget):
         self.current_rotation = 0
         self.current_vertical_flip = False
         self.current_horizontal_flip = False
+        self._glow_item = None           # scene.clear() above deleted it
+        self._glow_cache = None
         self._sync_mirror_actions()
         self._scope_timer.stop()
         self._scopes_dirty = False
@@ -1261,11 +1267,12 @@ class ImagePreview(QWidget):
             from core import ui_activity
             ui_activity.touch()
             self._stop_other_hires(img_obj_now)
-            # A frame whose stored preview was rendered with a different HDR
-            # glow tint state is re-rendered first (spec/hdr-gain-map-export.md).
-            # Free when the tint has never been used: both sides are None.
-            if (getattr(img_obj_now, "_preview_hdr_tint", None)
-                    != getattr(ccr_backend, "hdr_tint_headroom", None)
+            # With the HDR glow tint on, a frame whose stored preview has no
+            # glow map for it is re-rendered first (spec/hdr-gain-map-export.md).
+            # Free when the tint is off.
+            want_tint = getattr(ccr_backend, "hdr_tint_headroom", None)
+            if (want_tint is not None
+                    and getattr(img_obj_now, "_preview_hdr_tint", None) != want_tint
                     and getattr(img_obj_now, "resized_raw", None) is not None):
                 img_obj_now.update_thumbnail_and_preview()
         # Area-edit mode PERSISTS across same-image refreshes (so editing the
@@ -1389,6 +1396,7 @@ class ImagePreview(QWidget):
         # later removeItem() can't touch freed C++ objects.
         self._dust_stroke_item = None
         self._dust_cursor_item = None
+        self._glow_item = None
         for _slice_line in self._slice_lines:
             _slice_line["item"] = None
 
@@ -1601,10 +1609,70 @@ class ImagePreview(QWidget):
         # dim region and handles aligned after rotates/flips.)
         self._fit_view_to_content()
 
+        # HDR glow overlay follows whatever pixmap is now displayed.
+        self._refresh_glow_overlay()
+
         # The displayed image content/orientation may have changed (rotate,
         # flip, fine rotation, hi-res pixmap swap) — refresh the scopes.
         # Zoom/pan paths never come through here, so they don't retrigger.
         self._schedule_scope_update()
+
+    def _glow_full_pixmap(self, alpha):
+        """The magenta overlay at full preview size for an opacity map,
+        cached on the map's identity (a new render makes a new map)."""
+        from core.ccr_processor import HDR_TINT_RGB
+        key = id(alpha)
+        if self._glow_cache is not None and self._glow_cache[0] == key:
+            return self._glow_cache[1]
+        h, w = alpha.shape[:2]
+        rgba = np.empty((h, w, 4), np.uint8)
+        rgba[..., 0], rgba[..., 1], rgba[..., 2] = HDR_TINT_RGB
+        rgba[..., 3] = alpha
+        qimg = QImage(rgba.data, w, h, 4 * w, QImage.Format_RGBA8888).copy()
+        pm = QPixmap.fromImage(qimg)
+        self._glow_cache = (key, pm, alpha)      # keep the map alive with its key
+        return pm
+
+    def _refresh_glow_overlay(self):
+        """Show, update or hide the HDR glow layer (spec/hdr-gain-map-export.md).
+        It is a child of the picture item, so it inherits every transform
+        (orientation, fine rotation, hi-res prescale), and it is cropped exactly
+        like the displayed preview. Never part of the picture's pixels, so the
+        scopes, the colour probe and the histogram cannot see it."""
+        item = self.pixmap_item
+        img = (ccr_backend.get_image_by_index(self.current_idx)
+               if self.current_idx is not None else None)
+        alpha = getattr(img, "_preview_hdr_alpha", None) if img is not None else None
+        on = (getattr(ccr_backend, "hdr_tint_headroom", None) is not None
+              and alpha is not None and item is not None
+              and self.current_pixmap is not None)
+        if not on:
+            if self._glow_item is not None:
+                self._glow_item.setVisible(False)
+            return
+        overlay = self._glow_full_pixmap(alpha)
+        if self._crop_display_transform is not None:
+            crop = getattr(img, "crop_rect", None)
+            if crop is not None and self._crop_display_angle:
+                extracted = self._extract_rotated_crop(overlay, crop,
+                                                       self._crop_display_angle)
+                overlay = extracted[0] if extracted is not None else None
+            elif crop is not None:
+                px_rect = self._crop_rect_to_pixels(crop, overlay)
+                overlay = overlay.copy(px_rect) if px_rect is not None else None
+        target = item.pixmap()
+        if overlay is None or overlay.isNull() or target.isNull():
+            if self._glow_item is not None:
+                self._glow_item.setVisible(False)
+            return
+        if self._glow_item is None:
+            self._glow_item = QGraphicsPixmapItem(item)
+            self._glow_item.setTransformationMode(Qt.SmoothTransformation)
+        self._glow_item.setPixmap(overlay)
+        t = QTransform()
+        t.scale(target.width() / overlay.width(), target.height() / overlay.height())
+        self._glow_item.setTransform(t)
+        self._glow_item.setVisible(True)
 
     def _end_fine_rot_burst(self):
         self._fine_rot_burst_active = False
@@ -1663,17 +1731,19 @@ class ImagePreview(QWidget):
         img = ccr_backend.get_image_by_index(idx) if idx is not None else None
         if img is None:
             return
-        img.update_thumbnail_and_preview()
-        self.update_preview(idx)
-        self._invalidate_hires_display()
+        if on and getattr(img, "_preview_hdr_tint", None) != ccr_backend.hdr_tint_headroom:
+            # The glow map comes out of a preview render; the picture itself
+            # is unchanged, so the hi-res tile stays as it is.
+            img.update_thumbnail_and_preview()
+            self.update_preview(idx)
+        else:
+            self._refresh_glow_overlay()
         sliders = getattr(self.window(), "sliders_panel", None)
         if on and sliders is not None and hasattr(sliders, "set_temporary_hint"):
-            text = (f"HDR glow shown in magenta, scaled to "
-                    f"{ccr_backend.hdr_tint_headroom:g} stops of headroom.")
-            if img.converted and not getattr(img, "_ws_windowed", False):
-                text += (" This frame has no headroom above white (reference-frame "
-                         "or positive), so nothing on it glows.")
-            sliders.set_temporary_hint(text, duration=5000)
+            sliders.set_temporary_hint(
+                f"HDR glow shown in magenta, scaled to "
+                f"{ccr_backend.hdr_tint_headroom:g} stops of headroom.",
+                duration=4000)
 
     # --- Orientation controls (spec/multi-frame-orientation.md) -----------
     def rotate_left(self):
@@ -2225,9 +2295,6 @@ class ImagePreview(QWidget):
                 # Reversal-look sprocket mask is composited last in the hi-res
                 # tile — a toggle must invalidate it (spec/sprocket-hole-mask.md).
                 bool(getattr(ccr_backend, "sprocket_mask_white", False)),
-                # HDR glow preview tint is baked into the tile too
-                # (spec/hdr-gain-map-export.md).
-                getattr(ccr_backend, "hdr_tint_headroom", None),
                 areas_sig, dust_sig)
 
     # Legacy cap for the detail decode. Also the FLOOR the zoom-driven tier
@@ -5349,9 +5416,6 @@ class HiResDetailWorker(WorkerThread):
         # Snapshot the reversal-look toggle so a mid-render flip can't bleed in
         # (the flag is also in _current_adj_sig, so a flip invalidates the tile).
         self._sprocket_white = bool(getattr(ccr_backend, "sprocket_mask_white", False))
-        # HDR glow preview tint (spec/hdr-gain-map-export.md): None = off. In
-        # _current_adj_sig too, so a toggle invalidates the tile.
-        self._hdr_tint = getattr(ccr_backend, "hdr_tint_headroom", None)
         ci = getattr(img_obj, "conversion_inputs", None)
         self._conversion_inputs = dict(ci) if ci else None
 
@@ -5390,16 +5454,14 @@ class HiResDetailWorker(WorkerThread):
                 return
             self.checkpoint()
             t1 = _time.perf_counter()
-            from core.ccr_processor import hdr_capture
-            with hdr_capture(self._hdr_tint is not None) as hdr_cap:
-                display = self._img.apply_adjustments(
-                    base, settings=self._settings,
-                    contrast_base=self._contrast_base,
-                    temperature_base=self._temperature_base,
-                    brightness_base=self._brightness_base,
-                    exposure_base=self._exposure_base,
-                    areas_override=self._areas,
-                    base_curve=self._base_curve)
+            display = self._img.apply_adjustments(
+                base, settings=self._settings,
+                contrast_base=self._contrast_base,
+                temperature_base=self._temperature_base,
+                brightness_base=self._brightness_base,
+                exposure_base=self._exposure_base,
+                areas_override=self._areas,
+                base_curve=self._base_curve)
             if not self._converted and not self._positive_mode:
                 # Mirror the preview pipeline: adjustments first, then the
                 # display-only auto-brightness stretch for raw negatives
@@ -5412,10 +5474,6 @@ class HiResDetailWorker(WorkerThread):
                 display = apply_sprocket_mask(display, sprocket_alpha)
             display8 = _np.ascontiguousarray(
                 _cv2.convertScaleAbs(display, alpha=255.0 / 65535.0))
-            if hdr_cap is not None and hdr_cap.over is not None:
-                from core.ccr_processor import apply_hdr_tint
-                display8 = _np.ascontiguousarray(
-                    apply_hdr_tint(display8, hdr_cap.over, self._hdr_tint))
             t2 = _time.perf_counter()
             print(f"Hi-res detail: base {(t1 - t0) * 1000:.0f} ms, "
                   f"adjust+8bit {(t2 - t1) * 1000:.0f} ms "

@@ -1425,8 +1425,9 @@ _WS_HEADROOM_STOPS = float(np.log2((65535.0 - WS_B) / (WS_W - WS_B)))
 
 
 # --- HDR capture (spec/hdr-gain-map-export.md) -------------------------------
-# What glows on an HDR screen is what sits above white BEFORE highlight
-# recovery. _apply_working_space_recovery records it while a capture is open
+# Part of what glows on an HDR screen is what was pushed past white (the rest
+# is the bright end of the finished picture; see hdr_gainmap.glow_stops).
+# _apply_working_space_recovery records it while a capture is open
 # on the calling thread, so no render signature had to change. Exports and the
 # HDR glow preview open one around apply_adjustments; everything else renders
 # exactly as before.
@@ -1434,9 +1435,10 @@ _hdr_tls = threading.local()
 
 
 class HdrCapture:
-    """Receives the pre-recovery brightest channel (`over`, float32 HxW,
-    display units with white = 1) of the first windowed recovery run while it
-    is open. Stays None for a base with no working-space window."""
+    """Receives the brightest channel just before the window clamp (`over`,
+    float32 HxW, display units with white = 1) of the first windowed recovery
+    run while it is open. Stays None for a base with no working-space
+    window."""
     __slots__ = ("over",)
 
     def __init__(self):
@@ -1467,15 +1469,11 @@ class hdr_capture:
         return False
 
 
-def _record_hdr_over(d: np.ndarray, exposure: float) -> None:
+def _record_hdr_over(d: np.ndarray) -> None:
     cap = getattr(_hdr_tls, "cap", None)
     if cap is None or cap.over is not None:
         return
     over = d.max(axis=-1) if d.ndim == 3 else d.copy()
-    if exposure != 0.0:
-        # The legacy Gain/Exposure stage runs after White Point but is an
-        # exposure control too, so fold it in (a scalar, so order is free).
-        over = over * np.float32(1.0 / (1.0 - np.clip(exposure, -200.0, 200.0) / 300.0))
     cap.over = np.ascontiguousarray(over, dtype=np.float32)
 
 
@@ -1881,16 +1879,18 @@ def _apply_working_space_recovery(img16: np.ndarray, exposure: float,
             d[..., 1] *= np.float32(gg)
         if gb != 1.0:
             d[..., 2] *= np.float32(gb)
-    # HDR export / glow preview: what sits above white BEFORE the White Point
-    # recovery and the auto-tone shoulder is what an HDR screen gets to show
-    # brighter. Only while a capture is open (spec/hdr-gain-map-export.md).
-    _record_hdr_over(d, exposure)
     if white_point != 0.0:
         wp = float(np.clip(white_point, -100.0, 100.0))
         d *= np.float32(2.0 ** (_WS_HEADROOM_STOPS * wp / 100.0))   # un-clamped
     if exposure != 0.0:
         white_val = 1.0 - np.clip(exposure, -200.0, 200.0) / 300.0
         d *= np.float32(1.0 / white_val)        # un-clamped: recovers overshoot
+    # HDR export / glow preview: what is pushed past white by every gain,
+    # White Point included (so raising it grows the glow and recovering
+    # shrinks it), but before the auto-tone shoulder that exists to soften
+    # exactly this. Only while a capture is open
+    # (spec/hdr-gain-map-export.md, revision 2).
+    _record_hdr_over(d)
     # Auto tone (spec/auto-tone.md): the frame's own toe/shoulder, measured at
     # conversion, right before the clamp it exists to soften - after every
     # gain, so a user's Master Gain / White Point move pushes content into or
@@ -2516,37 +2516,28 @@ def hdr_geometry(cap, ccr_image, fine_angle, h_flip, v_flip):
 
 
 # HDR glow preview tint (spec/hdr-gain-map-export.md): magenta reads as an
-# overlay on film highlights. No tint below HDR_TINT_MIN_STOPS of glow, then an
-# opacity of HDR_TINT_ALPHA0 + HDR_TINT_ALPHA_SPAN * glow / headroom.
+# overlay on film highlights. Drawn by the canvas as its OWN layer over the
+# picture, never baked into it, so the scopes, the colour probe and the
+# histogram only ever see the real picture. No tint below HDR_TINT_MIN_STOPS
+# of glow, then an opacity of HDR_TINT_ALPHA0 + HDR_TINT_ALPHA_SPAN * glow / H.
 HDR_TINT_RGB = (255, 64, 200)
 HDR_TINT_MIN_STOPS = 0.05
 HDR_TINT_ALPHA0 = 0.30
 HDR_TINT_ALPHA_SPAN = 0.55
 
 
-def apply_hdr_tint(rgb8: np.ndarray, over: np.ndarray, headroom: float) -> np.ndarray:
-    """Blend the pixels that will glow on an HDR screen towards magenta,
-    stronger where they glow more. `rgb8` is the HxWx3 uint8 DISPLAY picture,
-    `over` the matching pre-recovery map; returns a new array (the input is
-    untouched). Preview only: thumbnails, histogram and exports never call
-    this."""
-    from core.hdr_gainmap import glow_stops, clamp_headroom
-    if over is None:
-        return rgb8
-    h, w = rgb8.shape[:2]
-    if over.shape[:2] != (h, w):
-        over = cv2.resize(over, (w, h), interpolation=cv2.INTER_AREA)
+def hdr_tint_alpha(glow: np.ndarray, headroom: float):
+    """The overlay's 8-bit opacity for a glow map (stops), or None when
+    nothing glows enough to show."""
+    from core.hdr_gainmap import clamp_headroom
+    if glow is None:
+        return None
     hr = clamp_headroom(headroom)
-    glow = glow_stops(over, hr)
     alpha = np.where(glow >= HDR_TINT_MIN_STOPS,
-                     HDR_TINT_ALPHA0 + HDR_TINT_ALPHA_SPAN * (glow / hr),
-                     0.0).astype(np.float32)
+                     HDR_TINT_ALPHA0 + HDR_TINT_ALPHA_SPAN * (glow / hr), 0.0)
     if not np.any(alpha):
-        return rgb8
-    a = alpha[..., None]
-    tint = np.array(HDR_TINT_RGB, dtype=np.float32)
-    out = rgb8.astype(np.float32) * (1.0 - a) + tint * a
-    return np.clip(np.rint(out), 0, 255).astype(np.uint8)
+        return None
+    return np.clip(np.rint(alpha * 255.0), 0, 255).astype(np.uint8)
 
 
 def write_export_image(ccr_image, rgb_u16, output_path, jpg_out, jpg_quality,
@@ -2565,18 +2556,25 @@ def write_export_image(ccr_image, rgb_u16, output_path, jpg_out, jpg_quality,
     1-component JPEG, and a grey ICC profile in both — so other software reads
     it as greyscale. See spec/monochrome-raw-mode.md §4.3.
     """
+    glow = None
+    if canvas is None and max_long_side:
+        rgb_u16 = ccr_image.resize_image_to_max_pixel(rgb_u16, max_long_side)
+    if hdr_headroom is not None:
+        # The glow is worked out on the FRAME (its bright end plus whatever
+        # was pushed past white), before any border exists, so a white border
+        # can never glow (spec/hdr-gain-map-export.md, revision 2).
+        from core.hdr_gainmap import glow_map
+        glow = glow_map(rgb_u16, hdr_over, hdr_headroom)
     if canvas is not None:
         # Border / canvas (spec/export-canvas-border.md): the finished frame,
         # centred on the canvas, replaces the long-edge resize. Composed
         # BEFORE the colour-space step so the border is converted with it;
-        # the HDR map is placed the same way and padded with no glow.
+        # the glow is placed the same way and padded with none.
         from core.export_canvas import compose
-        rgb_u16, hdr_over = compose(rgb_u16, canvas, hdr_over)
-    elif max_long_side:
-        rgb_u16 = ccr_image.resize_image_to_max_pixel(rgb_u16, max_long_side)
+        rgb_u16, glow = compose(rgb_u16, canvas, glow)
     if hdr_headroom is not None:
         return _write_hdr_jpeg(rgb_u16, output_path, jpg_quality,
-                               output_colorspace, hdr_headroom, hdr_over)
+                               output_colorspace, hdr_headroom, glow)
     # A coloured border needs three channels, so a monochrome frame keeps its
     # single-channel file only on a neutral canvas.
     mono = renders_monochrome(ccr_image) and (canvas is None or canvas.neutral)
@@ -2622,24 +2620,21 @@ def write_export_image(ccr_image, rgb_u16, output_path, jpg_out, jpg_quality,
 
 
 def _write_hdr_jpeg(rgb_u16, output_path, jpg_quality, output_colorspace,
-                    headroom, over):
+                    headroom, glow):
     """The "JPEG + HDR gain map" branch of write_export_image: the SDR base is
     the same 8-bit pixels the JPEG branch writes (always three channels, since
-    gain-map readers expect a colour base), plus the glow from `over` resized
-    to the output. A missing map means no glow. See
-    spec/hdr-gain-map-export.md."""
-    from core.hdr_gainmap import encode_gainmap_jpeg, glow_stops
+    gain-map readers expect a colour base), plus `glow` (stops, already the
+    output's size). See spec/hdr-gain-map-export.md."""
+    from core.hdr_gainmap import encode_gainmap_jpeg
     out_u16, icc = apply_export_colorspace(rgb_u16, output_colorspace)
     sdr8 = to_8bit(out_u16)
     if sdr8.ndim == 2:
         sdr8 = np.repeat(sdr8[..., None], 3, axis=2)
     h, w = sdr8.shape[:2]
-    if over is None:
+    if glow is None:
         glow = np.zeros((h, w), np.float32)
-    else:
-        if over.shape[:2] != (h, w):
-            over = cv2.resize(over, (w, h), interpolation=cv2.INTER_AREA)
-        glow = glow_stops(over, headroom)
+    elif glow.shape[:2] != (h, w):
+        glow = cv2.resize(glow, (w, h), interpolation=cv2.INTER_AREA)
     data = encode_gainmap_jpeg(sdr8, glow, headroom, quality=int(jpg_quality), icc=icc)
     output_path = os.path.splitext(safe_unicode_path(output_path))[0] + ".jpg"
     try:

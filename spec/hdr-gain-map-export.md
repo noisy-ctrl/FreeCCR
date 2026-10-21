@@ -15,10 +15,10 @@ shows where the glow will be.
   normal picture.
 - One setting: **HDR headroom**, 0.5 to 3 stops in half stops, default 2. How
   far above SDR white the brightest highlight may go.
-- No new grading sliders. What glows is what sits above white *before*
-  highlight recovery, so the existing controls keep their meaning: Master Gain
-  (exposure) decides how much is above white; White Point recovery and the
-  auto-tone shoulder shape the SDR picture only.
+- No new grading sliders. What glows follows the finished picture (revision
+  2): its bright end, plus anything pushed past white. So every control that
+  brightens the picture (Brightness, White Point, Contrast, Curves, Master
+  Gain) grows the glow, and recovering highlights shrinks it.
 - A toolbar toggle, **HDR glow**, that tints the areas that will glow,
   stronger where they glow more.
 - Nothing else changes: the preview, thumbnails, histogram and every existing
@@ -32,11 +32,10 @@ shows where the glow will be.
 - Colour in the glow: the gain is the same on R, G and B, so a highlight gets
   brighter without changing hue. A clipped SDR highlight stays the colour it
   is in SDR.
-- Headroom for bases without a working-space window. Reference-frame
-  conversions and Positive mode render straight into display range, so there
-  is nothing above white to show. Their HDR export is valid, but the gain map
-  is flat and the file looks the same on an HDR screen. Black/white-point and
-  no-anchor conversions (the windowed bases) are where the glow comes from.
+- Data above white for bases without a working-space window.
+  Reference-frame conversions and Positive mode render straight into display
+  range, so only the bright-end term applies to them; black/white-point and
+  no-anchor conversions (the windowed bases) also get the above-white term.
 
 ## UX
 
@@ -63,36 +62,61 @@ A checkable toolbar action, **☀ HDR**, after the area buttons. Tooltip:
 map' export. Stronger tint = more glow, up to the export's HDR headroom.
 Preview only." Off at startup, not saved.
 
-When on, the canvas (preview and hi-res zoom) shows the picture with the
-glowing pixels blended towards magenta (`#ff40c8`): no tint below 0.05 stops
-of glow, then an opacity of 0.30 + 0.55 × glow/H. Magenta is rarely a real
-highlight colour on film, so it reads as an overlay. The thumbnails, the
-histogram and every export never carry the tint. The scopes and the colour
-probe read the displayed picture, so they see the tint while it is on, as
-with any display view; the tooltip need not say so.
+When on, the canvas draws a magenta (`#ff40c8`) layer over the glowing
+pixels: no tint below 0.05 stops of glow, then an opacity of 0.30 + 0.55 ×
+glow/H. Magenta is rarely a real highlight colour on film, so it reads as an
+overlay.
+
+Revision 2: the layer is its **own graphics item**, a child of the picture
+item (so it inherits orientation, fine rotation and the hi-res prescale) and
+cropped exactly like the displayed preview. It is never part of the
+picture's pixels, so the scopes, the colour probe, the histogram, the
+thumbnails and every export only ever see the real picture. (The first
+version baked the tint into the preview and hi-res pixels, and it showed up
+in the waveform.) The opacity map comes out of the preview render at preview
+resolution (`render_preview_pixels` → `hdr_alpha`, stored as
+`_preview_hdr_alpha`) and is scaled to whatever pixmap is displayed; the
+hi-res tile is untouched by the toggle. Turning the tint on re-renders the
+preview once (the map needs the render's above-white capture); turning it off
+only hides the layer. With the tint on, a frame whose stored preview has no
+map for the current headroom is re-rendered when you switch to it.
 
 H is the headroom last chosen in the export dialog.
 
 ## Processing
 
-### What glows
+### What glows (revision 2)
 
-Captured inside `_apply_working_space_recovery`, the windowed base's
-de-window stage, after Channel Levels, the Cineon/Film Look decode, Channel
-Balance, Master Gain (with Auto Gain) and White Balance, and **before** the
-White Point recovery, the auto-tone shoulder and the window clamp. The
-legacy Gain/Exposure stage (`exposure`, a scalar applied after White Point)
-is folded in, since it is an exposure control too.
+The first version measured only what sat above white *before* White Point,
+so a recovered sky would still glow. In use that read as broken: raising
+White Point or Brightness never grew the glow, because neither could reach
+that measurement. The glow now follows the finished picture.
 
-    over = max(R, G, B) × exposure_factor           (display units, white = 1)
-    s    = log2(max(over, 1))                         stops above white
-    glow = H · tanh(s / H)                            stops of HDR brightening
+Two terms, from the finished SDR picture `sdr` (display values, the pixels
+the export writes, before any border) and `over`, the brightest channel
+captured inside `_apply_working_space_recovery` **after** every gain (Channel
+Levels, the Cineon/Film Look decode, Channel Balance, Master Gain with Auto
+Gain, White Balance, White Point and the legacy Gain/Exposure) but **before**
+the auto-tone shoulder and the window clamp:
 
-`tanh` makes the glow start as a straight continuation of the picture (slope
-1 at white) and roll smoothly into the ceiling H instead of hard-clipping
-there. Using the brightest channel means a saturated highlight glows as soon
-as any channel crosses white, which is when the SDR picture starts to lose
-it.
+    y    = Rec.709 luma of sdr                        (0..1)
+    r    = clamp((y − 0.80) / 0.20, 0, 1)             the bright end, knee 0.80
+    s    = r² · 0.5 · H  +  r · log2(max(over, 1))    stops
+    glow = H · tanh(s / H)
+
+- The **bright end** ramps in from 80 % display luma (squared, so it starts
+  gently) to half the headroom at white: 1 stop at the default H = 2.
+  Brightness, Contrast, Curves and White Point all move pixels across it.
+- **Past white** adds log2 of how far, weighted by the same ramp so a dark
+  but saturated colour whose single channel ran past white does not glow.
+  White Point up pushes more past white; recovery pulls it back.
+- `tanh` rolls the total smoothly into the ceiling H (slope 1 at 0).
+- Bases without a window have no `over`: only the bright-end term applies.
+- The auto-tone shoulder is skipped by `over` on purpose: it exists to soften
+  exactly what was pushed past white, and the HDR rendition is where that
+  detail can be shown.
+
+`GLOW_KNEE` (0.80) and `GLOW_EXPAND` (0.5) live in `core/hdr_gainmap.py`.
 
 The capture is a thread-local context (`ccr_processor.hdr_capture()`), so no
 render signature changes. Only the first windowed recovery in a context is
@@ -129,9 +153,12 @@ TIFF keep their single-channel output.
 The four export tails (reference, black/white point, positive, ref-params)
 open a capture around `apply_adjustments(..., for_export=True)` when HDR is
 requested, then pass the captured map through the same crop and orientation
-as the picture (`hdr_geometry`). `write_export_image` resizes it to the
-output size with the picture (INTER_AREA) and builds the file. A capture with
-no map (non-windowed base) gives a zero glow.
+as the picture (`hdr_geometry`). `write_export_image` resizes the picture to
+the output size, works out the glow on the FRAME (`hdr_gainmap.glow_map`,
+which resizes the captured map to it), and only then places both on a border
+canvas if one is set (the glow padded with none), so a white border never
+glows. A capture with no map (non-windowed base) leaves the bright-end term
+alone.
 
 ## Integration points
 

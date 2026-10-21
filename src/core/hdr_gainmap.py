@@ -1,5 +1,5 @@
 """HDR gain-map JPEGs: the normal (SDR) picture plus a map that HDR screens
-use to brighten the highlights that sat above white.
+use to brighten its bright end and anything that was pushed past white.
 
 The file is an "Ultra HDR" JPEG carrying BOTH metadata flavours, so every
 current reader finds what it looks for:
@@ -56,18 +56,71 @@ def clamp_headroom(value) -> float:
     return float(min(HEADROOM_MAX, max(HEADROOM_MIN, v)))
 
 
-def glow_stops(over, headroom) -> np.ndarray:
+# The bright end of the FINISHED picture glows (spec/hdr-gain-map-export.md,
+# revision 2): from GLOW_KNEE of display luma up to white it ramps in
+# smoothly (squared) to GLOW_EXPAND x headroom stops at white, and anything
+# that was pushed past white adds log2 of how far (weighted by the same ramp).
+# So every control that brightens the picture (Brightness, White Point,
+# Contrast, Curves, Master Gain) grows the glow, and recovery shrinks it.
+GLOW_KNEE = 0.80
+GLOW_EXPAND = 0.5
+_LUMA = np.array([0.2126, 0.7152, 0.0722], np.float32)   # Rec.709, display values
+
+
+def _display_luma(sdr) -> np.ndarray:
+    a = np.asarray(sdr)
+    if a.dtype == np.uint8:
+        scale = 1.0 / 255.0
+    elif a.dtype == np.uint16:
+        scale = 1.0 / 65535.0
+    else:
+        scale = 1.0
+    a = a.astype(np.float32) * np.float32(scale)
+    if a.ndim == 3:
+        return a[..., :3] @ _LUMA if a.shape[2] >= 3 else a[..., 0]
+    return a
+
+
+def glow_stops(over, headroom, sdr=None) -> np.ndarray:
     """How many stops each pixel is brightened on an HDR screen.
 
-    ``over`` is the pixel's brightest channel BEFORE highlight recovery, in
-    display units (white = 1.0), as captured by the working-space stage. At or
-    below white nothing changes. Above it the glow is ``log2(over)`` stops,
-    rolled smoothly into the headroom ceiling: ``H * tanh(s / H)``, which has
-    slope 1 at white (so it starts as a straight continuation of the picture)
-    and never quite reaches H."""
+    ``sdr`` is the finished picture (display RGB: uint8, uint16 or float
+    0..1). Its bright end glows: with ``r`` ramping 0 -> 1 from GLOW_KNEE of
+    display luma to white, the glow is ``r^2 * GLOW_EXPAND * H``. ``over`` is
+    the brightest channel just before the window clamp (display units, white
+    = 1.0) as captured by the working-space stage, None for bases without
+    one: whatever was pushed past white adds ``r * log2(over)``. Weighting it
+    by ``r`` keeps a dark but saturated colour, one channel of which ran past
+    white, from glowing. The total is rolled smoothly into the headroom
+    ceiling, ``H * tanh(s / H)`` (slope 1 at 0, never quite H).
+
+    Without a picture (``sdr=None``) the above-white term counts in full."""
     h = clamp_headroom(headroom)
-    s = np.log2(np.maximum(np.asarray(over, dtype=np.float32), np.float32(1.0)))
+    if over is None and sdr is None:
+        raise ValueError("glow_stops needs over and/or sdr")
+    past = None
+    if over is not None:
+        past = np.log2(np.maximum(np.asarray(over, dtype=np.float32), np.float32(1.0)))
+    if sdr is None:
+        s = past
+    else:
+        y = _display_luma(sdr)
+        r = np.clip((y - np.float32(GLOW_KNEE)) / np.float32(1.0 - GLOW_KNEE), 0.0, 1.0)
+        s = np.float32(GLOW_EXPAND * h) * r * r
+        if past is not None:
+            s = s + r * past
     return (np.float32(h) * np.tanh(s / np.float32(h))).astype(np.float32)
+
+
+def glow_map(sdr, over, headroom) -> np.ndarray:
+    """glow_stops for a finished picture and its (possibly differently sized,
+    possibly missing) above-white map: the map is resized to the picture."""
+    if over is not None:
+        hh, ww = np.asarray(sdr).shape[:2]
+        if over.shape[:2] != (hh, ww):
+            over = cv2.resize(np.asarray(over, np.float32), (ww, hh),
+                              interpolation=cv2.INTER_AREA)
+    return glow_stops(over, headroom, sdr=sdr)
 
 
 def gainmap_levels(glow, headroom) -> np.ndarray:

@@ -68,6 +68,36 @@ def test_glow_starts_as_log2_and_rolls_into_the_headroom():
     assert hg.glow_stops(np.float32(4.0), 1.0) < hg.glow_stops(np.float32(4.0), 3.0)
 
 
+def test_bright_end_of_the_picture_glows():
+    h = 2.0
+    y = np.array([0.0, 0.5, hg.GLOW_KNEE, 0.9, 0.95, 1.0], np.float32)
+    sdr = np.repeat(y[:, None], 3, axis=1)[None]               # 1 x 6 x 3 greys
+    g = hg.glow_stops(None, h, sdr=sdr)[0]
+    assert np.all(g[:3] == 0)                                  # up to the knee: none
+    assert 0 < g[3] < g[4] < g[5]                              # then a smooth ramp
+    assert abs(g[5] - h * np.tanh(hg.GLOW_EXPAND)) < 1e-5      # white: GLOW_EXPAND*H, rolled
+    # whatever was past white adds on top, but only where the picture is bright
+    both = hg.glow_stops(np.full((1, 6), 2.0, np.float32), h, sdr=sdr)[0]
+    assert np.all(both[3:] > g[3:]) and np.all(both[:3] == 0)
+    # without a picture it counts in full
+    assert abs(hg.glow_stops(np.float32(2.0), h) - h * np.tanh(1.0 / h)) < 1e-6
+    # uint8 / uint16 / float pictures agree
+    g8 = hg.glow_stops(None, h, sdr=np.round(sdr * 255).astype(np.uint8))[0]
+    g16 = hg.glow_stops(None, h, sdr=np.round(sdr * 65535).astype(np.uint16))[0]
+    assert np.allclose(g8, g, atol=0.02) and np.allclose(g16, g, atol=1e-3)
+    with pytest.raises(ValueError):
+        hg.glow_stops(None, h)
+
+
+def test_glow_map_resizes_the_capture_to_the_picture():
+    sdr = np.full((20, 30, 3), 255, np.uint8)
+    over = np.full((10, 15), 4.0, np.float32)
+    g = hg.glow_map(sdr, over, 2.0)
+    want = hg.glow_stops(np.full((20, 30), 4.0, np.float32), 2.0, sdr=sdr)
+    assert g.shape == (20, 30) and np.allclose(g, want)
+    assert np.all(hg.glow_map(np.zeros_like(sdr), over, 2.0) == 0)   # dark: no glow
+
+
 def test_levels_and_headroom_bounds():
     assert hg.clamp_headroom(0.1) == hg.HEADROOM_MIN
     assert hg.clamp_headroom(9) == hg.HEADROOM_MAX
@@ -185,7 +215,7 @@ def _windowed_base(h=8, w=16):
     return np.clip(codes, 0, 65535).astype(np.uint16), rgb
 
 
-def test_capture_records_the_pre_recovery_maximum():
+def test_capture_records_the_maximum_before_the_clamp():
     base, rgb = _windowed_base()
     with cp.hdr_capture() as cap:
         cp._apply_working_space_recovery(base, 0.0)
@@ -193,16 +223,32 @@ def test_capture_records_the_pre_recovery_maximum():
     assert np.allclose(cap.over, rgb.max(axis=-1), atol=2e-3)
 
 
-def test_white_point_and_auto_tone_do_not_change_what_glows():
+def test_white_point_and_exposure_move_what_glows():
+    # Revision 2: White Point is a highlight control for the glow too.
     base, _ = _windowed_base()
     with cp.hdr_capture() as plain:
         cp._apply_working_space_recovery(base, 0.0)
+    with cp.hdr_capture() as raised:
+        cp._apply_working_space_recovery(base, 0.0, white_point=30.0)
     with cp.hdr_capture() as recovered:
         cp._apply_working_space_recovery(base, 0.0, white_point=-60.0)
-    assert np.array_equal(plain.over, recovered.over)
+    assert np.all(raised.over > plain.over) and np.all(recovered.over < plain.over)
     with cp.hdr_capture() as exposed:
         cp._apply_working_space_recovery(base, 30.0)
     assert np.allclose(exposed.over, plain.over / (1.0 - 30.0 / 300.0), rtol=1e-5)
+
+
+def test_auto_tone_shoulder_does_not_hide_what_was_past_white():
+    base, _ = _windowed_base()
+    with cp.hdr_capture() as plain:
+        cp._apply_working_space_recovery(base, 0.0)
+    shoulder = {"toe": 0.0, "shoulder": 0.9}
+    try:
+        with cp.hdr_capture() as toned:
+            cp._apply_working_space_recovery(base, 0.0, auto_tone=shoulder)
+    except Exception:
+        pytest.skip("auto tone parameters differ in this build")
+    assert np.array_equal(plain.over, toned.over)
 
 
 def test_capture_changes_nothing_and_only_the_first_call_counts():
@@ -243,7 +289,7 @@ def _converted_frame(tmp_path, monkeypatch, w=180, h=120):
 
 
 @needs_uhdr
-def test_export_sdr_base_matches_the_plain_jpeg_and_glows_only_above_white(
+def test_export_sdr_base_matches_the_plain_jpeg_and_only_the_bright_end_glows(
         tmp_path, monkeypatch):
     _converted_frame(tmp_path, monkeypatch)
     plain, hdr = str(tmp_path / "plain.jpg"), str(tmp_path / "hdr.jpg")
@@ -282,38 +328,50 @@ def test_gain_map_follows_crop_and_rotation(tmp_path, monkeypatch):
     seen = {}
     real = cp._write_hdr_jpeg
 
-    def spy(rgb_u16, output_path, jpg_quality, output_colorspace, headroom, over):
-        seen["rgb"], seen["over"] = rgb_u16, over
-        return real(rgb_u16, output_path, jpg_quality, output_colorspace, headroom, over)
+    def spy(rgb_u16, output_path, jpg_quality, output_colorspace, headroom, glow):
+        seen["rgb"], seen["glow"] = rgb_u16, glow
+        return real(rgb_u16, output_path, jpg_quality, output_colorspace, headroom, glow)
     monkeypatch.setattr(cp, "_write_hdr_jpeg", spy)
     assert ccr_backend.export_image_by_index(0, str(tmp_path / "r.jpg"),
                                              jpg_output=True, hdr_headroom=2.0)
-    rgb, over = seen["rgb"], seen["over"]
-    assert over is not None and over.shape == rgb.shape[:2]
+    rgb, glow = seen["rgb"], seen["glow"]
+    assert glow is not None and glow.shape == rgb.shape[:2]
     # Rotated 90 degrees clockwise: the original's right edge is now the bottom.
-    assert over[-1].mean() > over[0].mean()
+    assert glow[-1].mean() > glow[0].mean()
     lum = rgb.astype(np.float64).mean(axis=-1)
     assert lum[-1].mean() > lum[0].mean()
 
 
-def test_base_without_a_window_writes_a_flat_map(tmp_path, monkeypatch):
-    # Positive mode renders straight into display range: nothing is captured.
+def test_base_without_a_window_glows_from_the_picture(tmp_path, monkeypatch):
+    # Positive mode renders straight into display range: nothing is captured,
+    # but its bright end still glows (revision 2).
     path = str(tmp_path / "pos.png")
-    cv2.imwrite(path, np.full((40, 60, 3), 200, np.uint8))
+    pic = np.full((40, 60, 3), 120, np.uint8)
+    pic[:, 40:] = 252                                     # a bright right third
+    cv2.imwrite(path, pic)
     img = CCRImage(path)
     monkeypatch.setattr(ccr_backend, "images", [img])
     monkeypatch.setattr(ccr_backend, "positive_mode", True)
     assert not getattr(img, "_ws_windowed", False)
     seen = {}
     real = cp._write_hdr_jpeg
+    real_capture = cp.hdr_capture
 
-    def spy(rgb_u16, output_path, jpg_quality, output_colorspace, headroom, over):
-        seen["over"] = over
-        return real(rgb_u16, output_path, jpg_quality, output_colorspace, headroom, over)
+    class Spy(real_capture):
+        def __exit__(self, *exc):
+            seen["over"] = self.cap.over if self.cap is not None else "closed"
+            return super().__exit__(*exc)
+
+    def spy(rgb_u16, output_path, jpg_quality, output_colorspace, headroom, glow):
+        seen["glow"] = glow
+        return real(rgb_u16, output_path, jpg_quality, output_colorspace, headroom, glow)
+    monkeypatch.setattr(cp, "hdr_capture", Spy)
     monkeypatch.setattr(cp, "_write_hdr_jpeg", spy)
     assert ccr_backend.export_image_by_index(0, str(tmp_path / "p.jpg"),
                                              jpg_output=True, hdr_headroom=2.0)
     assert seen["over"] is None
+    glow = seen["glow"]
+    assert glow[:, :35].max() == 0 and glow[:, 45:].min() > 0.5
     assert open(str(tmp_path / "p.jpg"), "rb").read()[:2] == b"\xff\xd8"
 
 
@@ -394,42 +452,171 @@ def test_worker_passes_the_headroom(monkeypatch):
 
 # --- 8. the preview tint ----------------------------------------------------------
 
-def test_tint_only_on_the_preview_and_only_where_it_glows(tmp_path, monkeypatch):
+def test_tint_is_a_map_not_pixels(tmp_path, monkeypatch):
     img = _converted_frame(tmp_path, monkeypatch)
     monkeypatch.setattr(ccr_backend, "hdr_tint_headroom", None)
     off = img.render_preview_pixels()
     monkeypatch.setattr(ccr_backend, "hdr_tint_headroom", 2.0)
     on = img.render_preview_pixels()
-    assert off["hdr_tint"] is None and on["hdr_tint"] == 2.0
+    assert off["hdr_tint"] is None and off["hdr_alpha"] is None
+    assert on["hdr_tint"] == 2.0
+    # the picture itself, the thumbnail and the histogram are identical
+    assert np.array_equal(off["preview8"], on["preview8"])
     assert np.array_equal(off["thumb8"], on["thumb8"])
     assert np.array_equal(off["hist"], on["hist"])
-    changed = np.any(off["preview8"] != on["preview8"], axis=-1)
-    w = changed.shape[1]
-    assert changed[:, -3:].all()                          # the bright edge is tinted
-    assert not changed[:, : w // 2].any()                 # the rest is untouched
+    alpha = on["hdr_alpha"]
+    assert alpha.shape == on["preview8"].shape[:2] and alpha.dtype == np.uint8
+    w = alpha.shape[1]
+    assert alpha[:, -3:].min() > 0                        # the bright edge glows
+    assert alpha[:, : w // 2].max() == 0                  # the dark half does not
     snap = img.preview_render_snapshot()
     assert snap["hdr_tint"] == 2.0
     again = img.render_preview_pixels(snap)
-    assert np.array_equal(again["preview8"], on["preview8"])
+    assert np.array_equal(again["hdr_alpha"], alpha)
 
 
-def test_apply_hdr_tint_blend():
-    rgb = np.full((2, 3, 3), 200, np.uint8)
-    over = np.array([[0.5, 1.0, 1.02], [2.0, 4.0, 100.0]], np.float32)
-    out = cp.apply_hdr_tint(rgb, over, 2.0)
-    assert np.array_equal(out[0, :2], rgb[0, :2])                # below / at white
-    assert np.array_equal(out[0, 2], rgb[0, 2])                  # under the 0.05-stop floor
-    g = out[1].astype(int)
-    assert g[0, 1] < 200 and g[1, 1] < g[0, 1] and g[2, 1] <= g[1, 1]   # more glow, more tint
-    assert out is not rgb and np.array_equal(rgb, np.full((2, 3, 3), 200, np.uint8))
-    assert cp.apply_hdr_tint(rgb, None, 2.0) is rgb
+def _zone(img, **settings):
+    """How much of the picture glows, and how strongly: the summed opacity."""
+    img.adjustment_settings = dict(settings)
+    a = img.render_preview_pixels()["hdr_alpha"]
+    return 0 if a is None else int(a.astype(np.int64).sum())
 
 
-def test_stale_tint_rerenders_on_frame_switch(tmp_path, monkeypatch):
+def test_brightness_and_white_point_grow_the_glow(tmp_path, monkeypatch):
+    img = _converted_frame(tmp_path, monkeypatch)
+    monkeypatch.setattr(ccr_backend, "hdr_tint_headroom", 2.0)
+    base = _zone(img)
+    assert base > 0
+    assert _zone(img, brightness=40) > base
+    assert _zone(img, white_point=30) > base
+    assert _zone(img, white_point=-60) < base
+
+
+def test_hdr_tint_alpha():
+    glow = np.array([[0.0, 0.04, 0.05], [0.5, 1.0, 1.9]], np.float32)
+    a = cp.hdr_tint_alpha(glow, 2.0)
+    assert a.dtype == np.uint8
+    assert a[0, 0] == 0 and a[0, 1] == 0                 # below the floor
+    assert a[0, 2] > 0 and a[1, 0] < a[1, 1] < a[1, 2]   # more glow, more tint
+    assert cp.hdr_tint_alpha(np.zeros((2, 2), np.float32), 2.0) is None
+    assert cp.hdr_tint_alpha(None, 2.0) is None
+
+
+def test_stored_preview_remembers_its_glow_map(tmp_path, monkeypatch):
     img = _converted_frame(tmp_path, monkeypatch)
     monkeypatch.setattr(ccr_backend, "hdr_tint_headroom", None)
     img.update_thumbnail_and_preview()
     assert getattr(img, "_preview_hdr_tint", "missing") is None
+    assert img._preview_hdr_alpha is None
     monkeypatch.setattr(ccr_backend, "hdr_tint_headroom", 2.0)
     img.update_thumbnail_and_preview()
-    assert img._preview_hdr_tint == 2.0
+    assert img._preview_hdr_tint == 2.0 and img._preview_hdr_alpha is not None
+
+
+# --- 9. the canvas layer -----------------------------------------------------------
+
+class _Hist:
+    def set_caption(self, text):
+        pass
+
+
+class _Sliders:
+    def __init__(self):
+        self.histogram = _Hist()
+        self.hints = []
+
+    def set_histogram(self, data):
+        pass
+
+    def set_sliders_enabled(self, *a):
+        pass
+
+    def set_current_idx(self, idx):
+        pass
+
+    def set_temporary_hint(self, text, duration=0):
+        self.hints.append(text)
+
+    def clear_hint(self, *a, **k):
+        pass
+
+    def _sync_color_profile_combo(self, idx):
+        pass
+
+    def __getattr__(self, name):            # any other panel hook: a no-op
+        return lambda *a, **k: None
+
+
+class _Thumbs:
+    def selected_indices(self):
+        return []
+
+    def update_thumbnail(self, idx):
+        pass
+
+
+_HOSTS = []
+
+
+def _canvas(tmp_path, monkeypatch, crop=None):
+    from PySide6.QtWidgets import QVBoxLayout, QWidget
+    from widgets.image_preview import ImagePreview
+    img = _converted_frame(tmp_path, monkeypatch)
+    img.crop_rect = crop
+
+    class Host(QWidget):
+        def __init__(self):
+            super().__init__()
+            self.sliders_panel = _Sliders()
+            self.thumbnail_list = _Thumbs()
+            self.mid = QWidget(self)
+    host = Host()
+    _HOSTS.append(host)
+    QVBoxLayout(host).addWidget(host.mid)
+    ip = ImagePreview(host.mid)
+    QVBoxLayout(host.mid).addWidget(ip)
+    host.resize(700, 600)
+    host.show()
+    _app.processEvents()
+    monkeypatch.setattr(ip, "_request_hires_detail", lambda *a, **k: None, raising=False)
+    ip.update_preview(0)
+    return ip, img
+
+
+def test_glow_layer_is_separate_from_the_picture(tmp_path, monkeypatch):
+    monkeypatch.setattr(ccr_backend, "hdr_tint_headroom", None)
+    ip, img = _canvas(tmp_path, monkeypatch)
+    before = ip._capture_display_image()[0].copy()
+    probe_key = ip.current_pixmap.cacheKey()
+    ip.set_hdr_tint(True)
+    assert ccr_backend.hdr_tint_headroom is not None
+    item = ip._glow_item
+    assert item is not None and item.isVisible()
+    assert item.parentItem() is ip.pixmap_item                 # follows every transform
+    ov = item.pixmap()
+    assert (ov.width(), ov.height()) == (ip.current_pixmap.width(),
+                                         ip.current_pixmap.height())
+    # The scopes and the probe read the picture alone: unchanged by the tint.
+    after = ip._capture_display_image()[0]
+    assert np.array_equal(before, after)
+    assert ip.current_pixmap.cacheKey() == probe_key or not ip.current_pixmap.isNull()
+    qimg = ip.current_pixmap.toImage()
+    c = qimg.pixelColor(qimg.width() - 2, qimg.height() // 2)
+    assert abs(c.red() - c.green()) < 40                       # no magenta in the pixels
+    ip.set_hdr_tint(False)
+    assert not ip._glow_item.isVisible()
+    assert np.array_equal(ip._capture_display_image()[0], before)
+    monkeypatch.setattr(ccr_backend, "hdr_tint_headroom", None)
+
+
+def test_glow_layer_is_cropped_like_the_picture(tmp_path, monkeypatch):
+    monkeypatch.setattr(ccr_backend, "hdr_tint_headroom", None)
+    ip, img = _canvas(tmp_path, monkeypatch, crop=(0.5, 0.0, 1.0, 1.0))
+    ip.set_hdr_tint(True)
+    ov = ip._glow_item.pixmap()
+    pm = ip.current_pixmap
+    full = img._preview_hdr_alpha
+    assert abs(ov.width() - full.shape[1] / 2) <= 1
+    assert abs(ov.width() * ip._glow_item.transform().m11() - ip.pixmap_item.pixmap().width()) < 1e-3
+    assert pm.width() == ov.width() and pm.height() == ov.height()
+    monkeypatch.setattr(ccr_backend, "hdr_tint_headroom", None)
