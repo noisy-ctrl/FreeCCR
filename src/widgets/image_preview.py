@@ -1688,7 +1688,8 @@ class ImagePreview(QWidget):
             crop = getattr(img, "crop_rect", None)
             if crop is not None and self._crop_display_angle:
                 extracted = self._extract_rotated_crop(overlay, crop,
-                                                       self._crop_display_angle)
+                                                       self._crop_display_angle,
+                                                       fill=QColor(0, 0, 0, 0))
                 overlay = extracted[0] if extracted is not None else None
             elif crop is not None:
                 px_rect = self._crop_rect_to_pixels(crop, overlay)
@@ -1785,7 +1786,8 @@ class ImagePreview(QWidget):
                     f'&nbsp;&nbsp;&nbsp;&nbsp;</td><td>&nbsp;{label}</td>'
                     f'<td>&nbsp;{meaning}</td></tr>')
             rows.append('<tr><td style="color:#ffffff;">&#9679;</td>'
-                        '<td colspan="2">&nbsp;dots: glows on an HDR screen</td></tr>')
+                        '<td colspan="2">&nbsp;dots (with &#9728; HDR on): '
+                        'glows on an HDR screen</td></tr>')
             lab = QLabel(self.view.viewport())
             lab.setTextFormat(Qt.RichText)
             lab.setText('<table cellspacing="2" cellpadding="0">'
@@ -3290,11 +3292,14 @@ class ImagePreview(QWidget):
         return p.x(), p.y()
 
     @staticmethod
-    def _extract_rotated_crop(pixmap, crop, angle):
+    def _extract_rotated_crop(pixmap, crop, angle, fill=None):
         """Render the content under a rotated crop box into an upright pixmap.
         Returns (pixmap, displayed->full QTransform), or None when degenerate.
         Display twin of apply_crop_to_image's rotated branch: displayed pixel
-        (u, v) shows the source at C + R(angle) . (u - bw/2, v - bh/2)."""
+        (u, v) shows the source at C + R(angle) . (u - bw/2, v - bh/2).
+        `fill` is what shows where the box overhangs the source: black for
+        the picture (as export does); an overlay layer passes transparent, or
+        it would cover the whole picture in black."""
         w, h = pixmap.width(), pixmap.height()
         bw = int(round((crop[2] - crop[0]) * w))
         bh = int(round((crop[3] - crop[1]) * h))
@@ -3310,7 +3315,7 @@ class ImagePreview(QWidget):
         if not ok:
             return None
         out = QPixmap(bw, bh)
-        out.fill(QColor(0, 0, 0))
+        out.fill(QColor(0, 0, 0) if fill is None else fill)
         painter = QPainter(out)
         painter.setRenderHint(QPainter.SmoothPixmapTransform)
         painter.setTransform(inverted)

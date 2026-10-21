@@ -207,3 +207,8 @@ alone.
 - The headroom setting lives with the export, but the tint reads it too, so
   the dialog writes it to `ccr_backend.hdr_tint_headroom` whenever the tint is
   on, and the toggle reads the saved value when switched on.
+- Straightened (angled) crops: the glow layer is cropped with the same
+  `_extract_rotated_crop` as the preview, which filled the box with opaque
+  black for the picture's sake. For a layer that covered the whole frame in
+  black ("the screen goes black when I turn on HDR"), so the layer now passes
+  a transparent fill (`fill=`), and the picture keeps black.

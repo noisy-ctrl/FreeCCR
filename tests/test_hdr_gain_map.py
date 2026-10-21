@@ -621,3 +621,23 @@ def test_glow_layer_is_cropped_like_the_picture(tmp_path, monkeypatch):
     assert abs(ov.width() * ip._glow_item.transform().m11() - ip.pixmap_item.pixmap().width()) < 1e-3
     assert pm.width() == ov.width() and pm.height() == ov.height()
     monkeypatch.setattr(ccr_backend, "hdr_tint_headroom", None)
+
+
+def test_glow_layer_on_a_straightened_crop_is_not_black(tmp_path, monkeypatch):
+    """A rotated (straightened) crop used to give the glow layer an opaque
+    black background, which covered the whole picture."""
+    from PySide6.QtGui import QImage
+    monkeypatch.setattr(ccr_backend, "hdr_tint_headroom", None)
+    ip, img = _canvas(tmp_path, monkeypatch, crop=(0.1, 0.1, 0.9, 0.9))
+    img.crop_angle = 3.0
+    ip.update_preview(0)
+    assert ip._crop_display_angle
+    ip.set_hdr_tint(True)
+    layer = ip._glow_item.pixmap().toImage().convertToFormat(QImage.Format_RGBA8888)
+    w, h = layer.width(), layer.height()
+    a = np.frombuffer(layer.constBits(), np.uint8).reshape(h, layer.bytesPerLine())[:, :w * 4]
+    alpha = a.reshape(h, w, 4)[..., 3]
+    # Dots cover at most 2 x (2x2) pixels of each 6x6 cell, about 22 %.
+    assert (alpha > 0).mean() < 0.3
+    assert (alpha[:, : w // 3] > 0).mean() < 0.02          # the dark side: clear
+    monkeypatch.setattr(ccr_backend, "hdr_tint_headroom", None)
