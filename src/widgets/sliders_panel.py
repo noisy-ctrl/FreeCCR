@@ -7,6 +7,7 @@ from PySide6.QtCore import Qt, QTimer, QThread, Signal, QRectF, QSettings
 from PySide6.QtGui import (QKeySequence, QShortcut, QPainter, QColor,
                            QLinearGradient, QPen)
 from core.ccr_backend import ccr_backend
+from utils.qt_threads import WorkerThread
 from core.ccr_processor import (COLOR_BANDS, BAND_PARAMS, BAND_ADJUSTMENT_KEYS,
                                 compute_density_slopes, CHROMA_NR_RADIUS_DEFAULT,
                                 normalize_tone_shape, TONE_SHAPE_DEFAULT,
@@ -3825,7 +3826,7 @@ class SlidersPanel(QWidget):
         self.set_hint(message, temporary=True, duration=duration)
 
 
-class BWPointConvertWorker(QThread):
+class BWPointConvertWorker(WorkerThread):
     finished = Signal()
     progress = Signal(int, int)
 

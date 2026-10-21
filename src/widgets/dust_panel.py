@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
 from PySide6.QtCore import Qt, QObject, QThread, QTimer, Signal
 
 from core import dust_detect
+from utils.qt_threads import new_thread
 from core.ccr_processor import DUST_FEATHER_DEFAULT
 from ui import theme
 
@@ -440,7 +441,7 @@ class DustRemovalPanel(QWidget):
         self.status_label.setText(
             "Running AI detection at high resolution — seconds on GPU, "
             "up to a minute on CPU…")
-        self._detect_thread = QThread()
+        self._detect_thread = new_thread()
         self._detect_worker = _DetectWorker(img)
         self._detect_worker.moveToThread(self._detect_thread)
         self._detect_thread.started.connect(self._detect_worker.run)
@@ -510,7 +511,7 @@ class DustRemovalPanel(QWidget):
         self.detect_all_btn.setText("Detecting all…")
         self.status_label.setText(f"AI dust detection on {len(targets)} images…")
         try:
-            self._detect_all_thread = QThread()
+            self._detect_all_thread = new_thread()
             self._detect_all_worker = _DetectAllWorker(
                 targets, float(self.sensitivity_slider.value()))
             self._detect_all_worker.moveToThread(self._detect_all_thread)
@@ -578,7 +579,7 @@ class DustRemovalPanel(QWidget):
         self.progress_bar.setValue(0)
         self.status_label.setText("Downloading AI model…")
         self._refresh_ai_section()
-        self._download_thread = QThread()
+        self._download_thread = new_thread()
         self._download_worker = _DownloadWorker()
         self._download_worker.moveToThread(self._download_thread)
         self._download_thread.started.connect(self._download_worker.run)

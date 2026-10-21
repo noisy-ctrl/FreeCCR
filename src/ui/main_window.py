@@ -9,6 +9,7 @@ from widgets.dust_panel import DustRemovalPanel
 from widgets.crop_panel import CropPanel
 from widgets.tether_banner import TetherBanner
 from core.ccr_backend import ccr_backend
+from utils.qt_threads import new_thread
 from core.tether_watcher import (TetherWatchWorker, FolderScanner, is_supported,
                                  encode_bwpoint, decode_bwpoint)
 import ctypes
@@ -1422,7 +1423,7 @@ class MainWindow(QMainWindow):
         # (the backend loader clears its copy too).
         self.sliders_panel.reset_film_stock_combo()
         self.thumbnail_list.show_loading_dialog()
-        self._loader_thread = QThread()
+        self._loader_thread = new_thread()
         self._loader_worker = ImageLoaderWorker(folder=folder, files=files,
                                                 force_no_merge=force_no_merge)
         self._loader_worker.moveToThread(self._loader_thread)
@@ -1504,7 +1505,7 @@ class MainWindow(QMainWindow):
         dlg.setMinimumDuration(0)
         dlg.setValue(0)
         self._replace_dialog = dlg
-        self._replace_thread = QThread()
+        self._replace_thread = new_thread()
         self._replace_worker = MergeReplaceWorker(merged_images)
         self._replace_worker.moveToThread(self._replace_thread)
         self._replace_thread.started.connect(self._replace_worker.run)
@@ -1846,7 +1847,7 @@ class MainWindow(QMainWindow):
 
         # Long-lived worker on its own event-loop QThread (spec §9.1.7); work is
         # delivered by QMetaObject.invokeMethod (queued) so it runs off-GUI.
-        self._tether_thread = QThread()
+        self._tether_thread = new_thread()
         self._tether_worker = TetherWatchWorker()
         self._tether_worker.moveToThread(self._tether_thread)
         self._tether_worker.captured.connect(self._on_capture)

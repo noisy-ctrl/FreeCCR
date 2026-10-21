@@ -15,6 +15,7 @@ import weakref
 from PySide6.QtCore import QObject, QThread, Signal
 
 from core.ccr_backend import ccr_backend
+from utils.qt_threads import WorkerThread
 from core.ccr_image import render_lock
 
 # A drag switches to half-resolution drafts once a full render is slower than
@@ -50,7 +51,7 @@ def _in_backend(img) -> bool:
     return any(x is img for x in ccr_backend.images)
 
 
-class _LiveJob(QThread):
+class _LiveJob(WorkerThread):
     done = Signal(object)          # payload dict, delivered on the GUI thread
 
     def __init__(self, img, snap, draft_long):

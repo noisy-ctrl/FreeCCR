@@ -10,6 +10,7 @@ from PySide6.QtGui import (QPixmap, QIcon, QTransform, QPen, QColor, QAction, QP
                            QImage)
 from PySide6.QtCore import Qt, QSize, Signal, QRect, QRectF, QPointF, QThread, QTimer, QUrl
 from core.ccr_backend import ccr_backend
+from utils.qt_threads import WorkerThread
 from core.ccr_processor import (apply_dust_removal, DUST_FEATHER_DEFAULT,
                                 _crop_keep_mask)
 from core import crop_aspect
@@ -4972,7 +4973,7 @@ class ImagePreview(QWidget):
         if plan.open_folder:
             QDesktopServices.openUrl(QUrl.fromLocalFile(plan.destination))
 
-class SliceWorker(QThread):
+class SliceWorker(WorkerThread):
     """Runs the backend slice (one shared decode + per-slice previews) off
     the GUI thread. With all_images set, every loaded image is sliced at the
     same cut fractions and `progress` counts images instead of pieces."""
@@ -5053,7 +5054,7 @@ class SliceProgressDialog(QDialog):
             super().keyPressEvent(event)
 
 
-class HiResDetailWorker(QThread):
+class HiResDetailWorker(WorkerThread):
     """Renders the zoom detail image off the GUI thread: decode at the
     requested resolution (`preview` picks the RAW half-size decode vs the full
     one, both capped at max_long_side), replay the conversion color-matched to
@@ -5174,7 +5175,7 @@ class HiResDetailWorker(QThread):
             print(f"Hi-res detail render failed: {e}")
 
 
-class AutoFrameWorker(QThread):
+class AutoFrameWorker(WorkerThread):
     finished = Signal()
     progress = Signal(int, int)  # current, total
 
@@ -5266,7 +5267,7 @@ class AutoFrameDialog(QDialog):
         else:
             super().keyPressEvent(event)
 
-class ExportItemsWorker(QThread):
+class ExportItemsWorker(WorkerThread):
     finished = Signal(dict)
     progress = Signal(int, int)  # current, total
 
