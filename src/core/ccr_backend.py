@@ -165,6 +165,10 @@ class CCRBackend:
         # Global display overlay, persisted by MainWindow. See
         # spec/sprocket-hole-mask.md.
         self.sprocket_mask_white: bool = False
+        # HDR glow preview tint: None = off, else the headroom (stops) the
+        # tint is scaled to. Session-only; the canvas's "HDR" toggle sets it.
+        # See spec/hdr-gain-map-export.md.
+        self.hdr_tint_headroom = None
         self.white_point_bgr = None  # (B, G, R) of dense/exposed area
         self.black_point_bgr = None  # (B, G, R) of transparent/clear area
         # Selected film-stock preset for the black-point-only conversion:
@@ -1789,12 +1793,15 @@ class CCRBackend:
     def export_image_by_index(self, idx: int, output_path: str, jpg_output: bool = False,
                               jpg_quality: int = 95, max_long_side: int = None,
                               output_colorspace: str = "srgb",
-                              linear_merge: bool = False) -> bool:
+                              linear_merge: bool = False,
+                              hdr_headroom: float = None) -> bool:
         """
         Exports the processed image at the given index to the specified output path.
         Routes to bwpoint or reference-frame pipeline depending on how the image was converted.
         linear_merge=True (trichrome only) bypasses ALL of that and writes the
         raw channel combination as a linear TIFF.
+        hdr_headroom (stops) writes a "JPEG + HDR gain map" instead of the
+        plain format (spec/hdr-gain-map-export.md).
         Returns True on success.
         """
         if idx is not None and 0 <= idx < len(self.images):
@@ -1811,7 +1818,8 @@ class CCRBackend:
                     ccr_export_positive(image_obj, output_path=output_path,
                                         jpg_out=jpg_output, jpg_quality=jpg_quality,
                                         max_long_side=max_long_side,
-                                        output_colorspace=output_colorspace)
+                                        output_colorspace=output_colorspace,
+                                                 hdr=hdr_headroom)
                     return True
                 ci = getattr(image_obj, "conversion_inputs", None)
                 if ci is not None and ci.get("mode") == "ref_params":
@@ -1821,7 +1829,8 @@ class CCRBackend:
                                                  output_path=output_path,
                                                  jpg_out=jpg_output, jpg_quality=jpg_quality,
                                                  max_long_side=max_long_side,
-                                                 output_colorspace=output_colorspace)
+                                                 output_colorspace=output_colorspace,
+                                                 hdr=hdr_headroom)
                 elif ci is not None and ci.get("mode") == "bw":
                     # Use the anchors BAKED at convert time — resampling the
                     # global points later must not change this image's export.
@@ -1831,6 +1840,7 @@ class CCRBackend:
                                                jpg_out=jpg_output, jpg_quality=jpg_quality,
                                                max_long_side=max_long_side,
                                                output_colorspace=output_colorspace,
+                                               hdr=hdr_headroom,
                                                density=ci.get("density", False),
                                                slopes_bgr=ci.get("slopes"))
                 elif ci is not None and ci.get("mode") == "ref":
@@ -1846,6 +1856,7 @@ class CCRBackend:
                                                  jpg_quality=jpg_quality,
                                                  max_long_side=max_long_side,
                                                  output_colorspace=output_colorspace,
+                                                 hdr=hdr_headroom,
                                                  reference_rect=ci["ref"],
                                                  fine_rot=ci.get("fine_rot", 0))
                 elif image_obj.reference_frame is None and self.black_point_bgr is not None:
@@ -1857,6 +1868,7 @@ class CCRBackend:
                                                jpg_out=jpg_output, jpg_quality=jpg_quality,
                                                max_long_side=max_long_side,
                                                output_colorspace=output_colorspace,
+                                               hdr=hdr_headroom,
                                                density=self.density_bwpoint,
                                                slopes_bgr=(self.film_stock_slopes
                                                            if self.white_point_bgr is None
@@ -1865,7 +1877,8 @@ class CCRBackend:
                     ccr_normalize_with_reference(image_obj, output_path=output_path,
                                                  jpg_out=jpg_output,
                                                  jpg_quality=jpg_quality, max_long_side=max_long_side,
-                                                 output_colorspace=output_colorspace)
+                                                 output_colorspace=output_colorspace,
+                                                 hdr=hdr_headroom)
                 return True
             except Exception as e:
                 # Keep the real reason: the bundled app has no visible stdout,
@@ -1880,7 +1893,8 @@ class CCRBackend:
     def export_items(self, items, jpg_output: bool = False, jpg_quality: int = 95,
                      max_long_side: int = None, output_colorspace: str = "srgb",
                      progress_callback=None, cancel_check=None,
-                     linear_merge: bool = False) -> dict:
+                     linear_merge: bool = False,
+                     hdr_headroom: float = None) -> dict:
         """
         Exports specific images to explicit output paths using parallel processing.
 
@@ -1916,7 +1930,8 @@ class CCRBackend:
             success = self.export_image_by_index(idx, output_path, jpg_output=jpg_output,
                                                  jpg_quality=jpg_quality, max_long_side=max_long_side,
                                                  output_colorspace=output_colorspace,
-                                                 linear_merge=linear_merge)
+                                                 linear_merge=linear_merge,
+                                                 hdr_headroom=hdr_headroom)
             elapsed = time.time() - start_time
             base_name = os.path.basename(output_path)
             if success:

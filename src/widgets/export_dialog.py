@@ -10,13 +10,14 @@ from typing import List, Optional, Tuple
 
 from PySide6.QtCore import Qt, QSettings, QTimer
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout, QGroupBox,
-    QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QRadioButton,
-    QSlider, QVBoxLayout,
+    QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QFormLayout,
+    QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
+    QRadioButton, QSlider, QVBoxLayout,
 )
 
 from core.ccr_backend import ccr_backend
 from core import export_estimator
+from core import hdr_gainmap
 from ui import theme
 from utils.export_naming import build_export_names, build_filename, resolve_conflicts
 from utils.unicode_path_utils import normalize_unicode_path, validate_unicode_path
@@ -37,6 +38,9 @@ class ExportPlan:
     # linear TIFF — no conversion/adjustments/geometry/colour management.
     # See spec/trichrome-linear-tiff-export.md.
     linear_merge: bool = False
+    # "JPEG + HDR gain map": the headroom in stops, else None (a plain
+    # format). See spec/hdr-gain-map-export.md.
+    hdr_headroom: Optional[float] = None
 
 
 class ExportSettingsDialog(QDialog):
@@ -156,6 +160,9 @@ class ExportSettingsDialog(QDialog):
         self.format_combo = QComboBox()
         self.format_combo.addItem("TIFF 16-bit (lossless)", "tiff")
         self.format_combo.addItem("JPEG", "jpeg")
+        # The normal picture plus a gain map HDR screens use to brighten the
+        # highlights that sat above white (spec/hdr-gain-map-export.md).
+        self.format_combo.addItem("JPEG + HDR gain map", "hdr_jpeg")
         if self._merged_indices:
             # Trichrome only: raw channel combination, nothing else applied.
             self.format_combo.addItem("TIFF 16-bit linear merge (unprocessed)",
@@ -191,6 +198,18 @@ class ExportSettingsDialog(QDialog):
         self.quality_row_label = QLabel("Quality:")
         form.addRow(self.quality_row_label, quality_layout)
         self._quality_layout = quality_layout
+
+        self.hdr_headroom_spin = QDoubleSpinBox()
+        self.hdr_headroom_spin.setRange(hdr_gainmap.HEADROOM_MIN, hdr_gainmap.HEADROOM_MAX)
+        self.hdr_headroom_spin.setSingleStep(hdr_gainmap.HEADROOM_STEP)
+        self.hdr_headroom_spin.setDecimals(1)
+        self.hdr_headroom_spin.setSuffix(" stops")
+        self.hdr_headroom_spin.setValue(hdr_gainmap.HEADROOM_DEFAULT)
+        self.hdr_headroom_spin.setToolTip(
+            "How far above normal white the brightest highlights may go on an "
+            "HDR screen. 1–2 stops looks natural; 3 is dramatic.")
+        self.hdr_headroom_label = QLabel("HDR headroom:")
+        form.addRow(self.hdr_headroom_label, self.hdr_headroom_spin)
 
         self.estimate_label = QLabel("Estimated total size: …")
         form.addRow("", self.estimate_label)
@@ -267,6 +286,8 @@ class ExportSettingsDialog(QDialog):
         if cs_index >= 0:
             self.colorspace_combo.setCurrentIndex(cs_index)
         self.quality_slider.setValue(s.value("export/jpeg_quality", 92, type=int))
+        self.hdr_headroom_spin.setValue(hdr_gainmap.clamp_headroom(
+            s.value("export/hdr_headroom", hdr_gainmap.HEADROOM_DEFAULT, type=float)))
         resize_index = self.resize_combo.findData(s.value("export/resize", 0, type=int))
         if resize_index >= 0:
             if self._is_linear():
@@ -299,6 +320,7 @@ class ExportSettingsDialog(QDialog):
             s.setValue("export/colorspace", self.colorspace_combo.currentData())
             s.setValue("export/resize", self.resize_combo.currentData())
         s.setValue("export/jpeg_quality", self.quality_slider.value())
+        s.setValue("export/hdr_headroom", float(self.hdr_headroom_spin.value()))
         s.setValue("export/conflict", self.conflict_combo.currentData())
         s.setValue("export/open_folder", self.open_folder_checkbox.isChecked())
 
@@ -306,6 +328,12 @@ class ExportSettingsDialog(QDialog):
 
     def _is_linear(self) -> bool:
         return self.format_combo.currentData() == "linear"
+
+    def _is_hdr(self) -> bool:
+        return self.format_combo.currentData() == "hdr_jpeg"
+
+    def _is_jpeg_family(self) -> bool:
+        return self.format_combo.currentData() in ("jpeg", "hdr_jpeg")
 
     def _exportable_all(self) -> List[int]:
         return self._merged_indices if self._is_linear() else self._converted_indices
@@ -358,7 +386,7 @@ class ExportSettingsDialog(QDialog):
         return names
 
     def _selected_ext(self) -> str:
-        return ".jpg" if self.format_combo.currentData() == "jpeg" else ".tiff"
+        return ".jpg" if self._is_jpeg_family() else ".tiff"
 
     def _selected_max_long_side(self) -> Optional[int]:
         value = self.resize_combo.currentData()
@@ -430,20 +458,22 @@ class ExportSettingsDialog(QDialog):
         self.colorspace_hint.setText(
             "8-bit ProPhoto JPEG can band — prefer 16-bit TIFF for wide gamut.")
         is_prophoto = self.colorspace_combo.currentData() == "prophoto"
-        is_jpeg = self.format_combo.currentData() == "jpeg"
-        self.colorspace_hint.setVisible(is_prophoto and is_jpeg)
+        self.colorspace_hint.setVisible(is_prophoto and self._is_jpeg_family())
 
     def _on_quality_changed(self, value):
         self.quality_value_label.setText(str(value))
         self._schedule_estimate()
 
     def _update_quality_visibility(self):
-        is_jpeg = self.format_combo.currentData() == "jpeg"
+        is_jpeg = self._is_jpeg_family()
         self.quality_row_label.setVisible(is_jpeg)
         for i in range(self._quality_layout.count()):
             widget = self._quality_layout.itemAt(i).widget()
             if widget is not None:
                 widget.setVisible(is_jpeg)
+        hdr = self._is_hdr()
+        self.hdr_headroom_label.setVisible(hdr)
+        self.hdr_headroom_spin.setVisible(hdr)
 
     def _update_example(self):
         indices = self._scope_indices()
@@ -469,6 +499,8 @@ class ExportSettingsDialog(QDialog):
         fmt = self.format_combo.currentData()
         if fmt == "linear":
             fmt = "tiff"  # same container; the estimator knows tiff/jpeg only
+        elif fmt == "hdr_jpeg":
+            fmt = "jpeg"  # the SDR base; the gain map adds a few percent
         max_long_side = self._selected_max_long_side()
         bpp = None
         if fmt == "jpeg":
@@ -538,7 +570,7 @@ class ExportSettingsDialog(QDialog):
 
         self.plan = ExportPlan(
             items=items,
-            jpg_output=self.format_combo.currentData() == "jpeg",
+            jpg_output=self._is_jpeg_family(),
             jpg_quality=self.quality_slider.value(),
             max_long_side=None if self._is_linear() else self._selected_max_long_side(),
             output_colorspace=self.colorspace_combo.currentData(),
@@ -546,6 +578,11 @@ class ExportSettingsDialog(QDialog):
             destination=destination,
             skipped=skipped,
             linear_merge=self._is_linear(),
+            hdr_headroom=(float(self.hdr_headroom_spin.value())
+                          if self._is_hdr() else None),
         )
         self._save_settings()
+        if self._is_hdr() and ccr_backend.hdr_tint_headroom is not None:
+            # The HDR glow tint is scaled to this headroom: keep it in step.
+            ccr_backend.hdr_tint_headroom = float(self.hdr_headroom_spin.value())
         self.accept()

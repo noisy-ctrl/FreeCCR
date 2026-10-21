@@ -922,7 +922,7 @@ def apply_orientation(img: np.ndarray, rotation_angle: int = 0,
     return img
 
 
-def ccr_normalize_with_reference(ccr_image,output_path=None,jpg_out=False,jpg_quality=95,max_long_side=None,output_colorspace="srgb",reference_rect=None,fine_rot=None) -> np.ndarray:
+def ccr_normalize_with_reference(ccr_image,output_path=None,jpg_out=False,jpg_quality=95,max_long_side=None,output_colorspace="srgb",reference_rect=None,fine_rot=None,hdr=None) -> np.ndarray:
     """
     Normalize and align the image using the CCR algorithm, using a reference rectangle
     for percentile calculations instead of a crop factor.
@@ -1169,9 +1169,11 @@ def ccr_normalize_with_reference(ccr_image,output_path=None,jpg_out=False,jpg_qu
 
     # --- apply user adjustments --- only when outputting
     step_start = time.time()
+    hdr_cap = None
     if output_path is not None:  # this is for processing
-        rgb_brightness_normalized=ccr_image.apply_adjustments(
-            rgb_brightness_normalized, for_export=True)
+        with hdr_capture(hdr is not None) as hdr_cap:
+            rgb_brightness_normalized=ccr_image.apply_adjustments(
+                rgb_brightness_normalized, for_export=True)
     print(f"User adjustments: {time.time() - step_start:.3f}s")
 
     # --- End of user adjustments ---
@@ -1187,6 +1189,7 @@ def ccr_normalize_with_reference(ccr_image,output_path=None,jpg_out=False,jpg_qu
         rgb_brightness_normalized = apply_orientation(
             rgb_brightness_normalized, ccr_image.rotation_angle, fine_angle,
             h_flip, v_flip)
+        hdr_over = hdr_geometry(hdr_cap, ccr_image, fine_angle, h_flip, v_flip)
         print(rgb_brightness_normalized.shape)
         print(f"Orientation transforms: {time.time() - step_start:.3f}s")
 
@@ -1205,7 +1208,8 @@ def ccr_normalize_with_reference(ccr_image,output_path=None,jpg_out=False,jpg_qu
         # Ensure output_path has proper extension and handle Unicode
         step_start = time.time()
         write_export_image(ccr_image, rgb_brightness_normalized, output_path,
-                           jpg_out, jpg_quality, max_long_side, output_colorspace)
+                           jpg_out, jpg_quality, max_long_side, output_colorspace,
+                           hdr_headroom=hdr, hdr_over=hdr_over)
         print(f"File saving: {time.time() - step_start:.3f}s")
         #debug ----------------------v
 
@@ -1417,6 +1421,61 @@ _WS_INV_WIDTH = 1.0 / (WS_W - WS_B)                 # == 1/_WS_WIDTH
 # (~6 at the 10-bit default). The White Point recovery slider spans exactly this
 # range, so WP=-100 maps the ceiling back to white (recovers ALL headroom).
 _WS_HEADROOM_STOPS = float(np.log2((65535.0 - WS_B) / (WS_W - WS_B)))
+
+
+# --- HDR capture (spec/hdr-gain-map-export.md) -------------------------------
+# What glows on an HDR screen is what sits above white BEFORE highlight
+# recovery. _apply_working_space_recovery records it while a capture is open
+# on the calling thread, so no render signature had to change. Exports and the
+# HDR glow preview open one around apply_adjustments; everything else renders
+# exactly as before.
+_hdr_tls = threading.local()
+
+
+class HdrCapture:
+    """Receives the pre-recovery brightest channel (`over`, float32 HxW,
+    display units with white = 1) of the first windowed recovery run while it
+    is open. Stays None for a base with no working-space window."""
+    __slots__ = ("over",)
+
+    def __init__(self):
+        self.over = None
+
+
+class hdr_capture:
+    """Context manager: ``with hdr_capture() as cap: img.apply_adjustments(...)``.
+    ``hdr_capture(False)`` is a no-op that yields None, so callers can write
+    one code path."""
+
+    def __init__(self, enabled=True):
+        self._enabled = bool(enabled)
+        self._prev = None
+        self.cap = None
+
+    def __enter__(self):
+        if not self._enabled:
+            return None
+        self._prev = getattr(_hdr_tls, "cap", None)
+        self.cap = HdrCapture()
+        _hdr_tls.cap = self.cap
+        return self.cap
+
+    def __exit__(self, *exc):
+        if self._enabled:
+            _hdr_tls.cap = self._prev
+        return False
+
+
+def _record_hdr_over(d: np.ndarray, exposure: float) -> None:
+    cap = getattr(_hdr_tls, "cap", None)
+    if cap is None or cap.over is not None:
+        return
+    over = d.max(axis=-1) if d.ndim == 3 else d.copy()
+    if exposure != 0.0:
+        # The legacy Gain/Exposure stage runs after White Point but is an
+        # exposure control too, so fold it in (a scalar, so order is free).
+        over = over * np.float32(1.0 / (1.0 - np.clip(exposure, -200.0, 200.0) / 300.0))
+    cap.over = np.ascontiguousarray(over, dtype=np.float32)
 
 
 def encode_window(d: np.ndarray) -> np.ndarray:
@@ -1821,6 +1880,10 @@ def _apply_working_space_recovery(img16: np.ndarray, exposure: float,
             d[..., 1] *= np.float32(gg)
         if gb != 1.0:
             d[..., 2] *= np.float32(gb)
+    # HDR export / glow preview: what sits above white BEFORE the White Point
+    # recovery and the auto-tone shoulder is what an HDR screen gets to show
+    # brighter. Only while a capture is open (spec/hdr-gain-map-export.md).
+    _record_hdr_over(d, exposure)
     if white_point != 0.0:
         wp = float(np.clip(white_point, -100.0, 100.0))
         d *= np.float32(2.0 ** (_WS_HEADROOM_STOPS * wp / 100.0))   # un-clamped
@@ -2118,7 +2181,7 @@ def ccr_normalize_with_bwpoint(ccr_image, black_point_bgr=None, white_point_bgr=
                                output_path=None, jpg_out=False,
                                jpg_quality=95, max_long_side=None,
                                output_colorspace="srgb", density=False,
-                               slopes_bgr=None):
+                               slopes_bgr=None, hdr=None):
     """
     Film negative conversion using the same pipeline as ccr_normalize_with_reference
     but with explicit per-channel B/W points instead of auto-detected percentiles.
@@ -2277,14 +2340,16 @@ def ccr_normalize_with_bwpoint(ccr_image, black_point_bgr=None, white_point_bgr=
             if white_point_bgr is None else 0.0)
 
     # --- User adjustments (export only) ---
+    hdr_cap = None
     if output_path is not None:
         # Describe the buffer this conversion just produced via overrides
         # (same values a preview conversion would have baked into live state)
         # so a never-converted image's live state stays untouched.
-        rgb_result = ccr_image.apply_adjustments(rgb_result, contrast_base=0,
-                                                 temperature_base=0,
-                                                 ws_windowed=ws,
-                                                 for_export=True)
+        with hdr_capture(hdr is not None) as hdr_cap:
+            rgb_result = ccr_image.apply_adjustments(rgb_result, contrast_base=0,
+                                                     temperature_base=0,
+                                                     ws_windowed=ws,
+                                                     for_export=True)
         # White the sprocket holes / clear film as the last look step — after all
         # adjustments, before the geometric block (same un-rotated space as the
         # preview overlay, so it is WYSIWYG). Gated on the live toggle; deferred
@@ -2302,10 +2367,12 @@ def ccr_normalize_with_bwpoint(ccr_image, black_point_bgr=None, white_point_bgr=
         # Rotation, fine rotation, then the mirrors — the canvas's order.
         rgb_result = apply_orientation(rgb_result, ccr_image.rotation_angle,
                                        fine_angle, h_flip, v_flip)
+        hdr_over = hdr_geometry(hdr_cap, ccr_image, fine_angle, h_flip, v_flip)
 
         # Write file
         write_export_image(ccr_image, rgb_result, output_path, jpg_out,
-                           jpg_quality, max_long_side, output_colorspace)
+                           jpg_quality, max_long_side, output_colorspace,
+                           hdr_headroom=hdr, hdr_over=hdr_over)
         print(f"TOTAL bwpoint normalization time: {time.time() - total_start_time:.3f}s")
         gc.collect()
         return None
@@ -2315,7 +2382,8 @@ def ccr_normalize_with_bwpoint(ccr_image, black_point_bgr=None, white_point_bgr=
 
 
 def ccr_export_positive(ccr_image, output_path=None, jpg_out=False,
-                        jpg_quality=95, max_long_side=None, output_colorspace="srgb"):
+                        jpg_quality=95, max_long_side=None, output_colorspace="srgb",
+                        hdr=None):
     """Positive-mode processing/export: NO negative inversion.
 
     The image is already a normal positive (decoded in sRGB; see
@@ -2341,7 +2409,8 @@ def ccr_export_positive(ccr_image, output_path=None, jpg_out=False,
     if output_path is None:
         return ccr_image.apply_adjustments(img)
 
-    rgb_result = ccr_image.apply_adjustments(img, for_export=True)
+    with hdr_capture(hdr is not None) as hdr_cap:
+        rgb_result = ccr_image.apply_adjustments(img, for_export=True)
 
     # User crop (normalized rect in un-rotated/un-flipped space) — applied
     # before flips/rotation so it matches the cropped preview orientation.
@@ -2350,9 +2419,11 @@ def ccr_export_positive(ccr_image, output_path=None, jpg_out=False,
     # Rotation, fine rotation, then the mirrors — the canvas's order.
     rgb_result = apply_orientation(rgb_result, ccr_image.rotation_angle,
                                    fine_angle, h_flip, v_flip)
+    hdr_over = hdr_geometry(hdr_cap, ccr_image, fine_angle, h_flip, v_flip)
 
     write_export_image(ccr_image, rgb_result, output_path, jpg_out,
-                       jpg_quality, max_long_side, output_colorspace)
+                       jpg_quality, max_long_side, output_colorspace,
+                       hdr_headroom=hdr, hdr_over=hdr_over)
     print(f"TOTAL positive export time: {time.time() - total_start_time:.3f}s")
     gc.collect()
     return None
@@ -2361,7 +2432,7 @@ def ccr_export_positive(ccr_image, output_path=None, jpg_out=False,
 def ccr_normalize_with_refparams(ccr_image, p_lo, p_hi, od_factors,
                                  output_path=None, jpg_out=False,
                                  jpg_quality=95, max_long_side=None,
-                                 output_colorspace="srgb"):
+                                 output_colorspace="srgb", hdr=None):
     """
     Conversion/export pipeline for sliced children carrying precomputed
     reference-conversion constants (conversion_inputs mode "ref_params").
@@ -2383,7 +2454,8 @@ def ccr_normalize_with_refparams(ccr_image, p_lo, p_hi, od_factors,
         return rgb_result
 
     # --- Export path: adjustments, crop, flips, rotation, write ---
-    rgb_result = ccr_image.apply_adjustments(rgb_result, for_export=True)
+    with hdr_capture(hdr is not None) as hdr_cap:
+        rgb_result = ccr_image.apply_adjustments(rgb_result, for_export=True)
     rgb_result = apply_crop_to_image(rgb_result, getattr(ccr_image, 'crop_rect', None),
                                      getattr(ccr_image, 'crop_angle', 0.0))
 
@@ -2392,9 +2464,12 @@ def ccr_normalize_with_refparams(ccr_image, p_lo, p_hi, od_factors,
                                    ccr_image.fine_rotation_angle / 100.0,
                                    ccr_image.horizontal_mirrored,
                                    ccr_image.vertical_mirrored)
+    hdr_over = hdr_geometry(hdr_cap, ccr_image, ccr_image.fine_rotation_angle / 100.0,
+                            ccr_image.horizontal_mirrored, ccr_image.vertical_mirrored)
 
     write_export_image(ccr_image, rgb_result, output_path, jpg_out,
-                       jpg_quality, max_long_side, output_colorspace)
+                       jpg_quality, max_long_side, output_colorspace,
+                       hdr_headroom=hdr, hdr_over=hdr_over)
     print(f"TOTAL ref-params normalization time: {time.time() - total_start_time:.3f}s")
     gc.collect()
     return None
@@ -2423,8 +2498,56 @@ def renders_monochrome(ccr_image) -> bool:
             or getattr(ccr_image, "color_profile", "color") == "bw")
 
 
+def hdr_geometry(cap, ccr_image, fine_angle, h_flip, v_flip):
+    """The captured pre-recovery map (HdrCapture.over) put through the same
+    crop and orientation as the exported picture, or None when nothing was
+    captured (HDR not requested, or a base with no working-space window).
+    See spec/hdr-gain-map-export.md."""
+    if cap is None or cap.over is None:
+        return None
+    over = apply_crop_to_image(cap.over, getattr(ccr_image, 'crop_rect', None),
+                               getattr(ccr_image, 'crop_angle', 0.0))
+    return apply_orientation(over, ccr_image.rotation_angle, fine_angle,
+                             h_flip, v_flip)
+
+
+# HDR glow preview tint (spec/hdr-gain-map-export.md): magenta reads as an
+# overlay on film highlights. No tint below HDR_TINT_MIN_STOPS of glow, then an
+# opacity of HDR_TINT_ALPHA0 + HDR_TINT_ALPHA_SPAN * glow / headroom.
+HDR_TINT_RGB = (255, 64, 200)
+HDR_TINT_MIN_STOPS = 0.05
+HDR_TINT_ALPHA0 = 0.30
+HDR_TINT_ALPHA_SPAN = 0.55
+
+
+def apply_hdr_tint(rgb8: np.ndarray, over: np.ndarray, headroom: float) -> np.ndarray:
+    """Blend the pixels that will glow on an HDR screen towards magenta,
+    stronger where they glow more. `rgb8` is the HxWx3 uint8 DISPLAY picture,
+    `over` the matching pre-recovery map; returns a new array (the input is
+    untouched). Preview only: thumbnails, histogram and exports never call
+    this."""
+    from core.hdr_gainmap import glow_stops, clamp_headroom
+    if over is None:
+        return rgb8
+    h, w = rgb8.shape[:2]
+    if over.shape[:2] != (h, w):
+        over = cv2.resize(over, (w, h), interpolation=cv2.INTER_AREA)
+    hr = clamp_headroom(headroom)
+    glow = glow_stops(over, hr)
+    alpha = np.where(glow >= HDR_TINT_MIN_STOPS,
+                     HDR_TINT_ALPHA0 + HDR_TINT_ALPHA_SPAN * (glow / hr),
+                     0.0).astype(np.float32)
+    if not np.any(alpha):
+        return rgb8
+    a = alpha[..., None]
+    tint = np.array(HDR_TINT_RGB, dtype=np.float32)
+    out = rgb8.astype(np.float32) * (1.0 - a) + tint * a
+    return np.clip(np.rint(out), 0, 255).astype(np.uint8)
+
+
 def write_export_image(ccr_image, rgb_u16, output_path, jpg_out, jpg_quality,
-                       max_long_side, output_colorspace="srgb"):
+                       max_long_side, output_colorspace="srgb",
+                       hdr_headroom=None, hdr_over=None):
     """Single export write chokepoint shared by all three conversion pipelines.
 
     Resizes to the requested long edge, maps the (sRGB-encoded) result into the
@@ -2440,6 +2563,9 @@ def write_export_image(ccr_image, rgb_u16, output_path, jpg_out, jpg_quality,
     """
     if max_long_side:
         rgb_u16 = ccr_image.resize_image_to_max_pixel(rgb_u16, max_long_side)
+    if hdr_headroom is not None:
+        return _write_hdr_jpeg(rgb_u16, output_path, jpg_quality,
+                               output_colorspace, hdr_headroom, hdr_over)
     mono = renders_monochrome(ccr_image)
     if mono:
         # Collapse to one sample per pixel with Rec.601 — the same weights, at
@@ -2479,6 +2605,36 @@ def write_export_image(ccr_image, rgb_u16, output_path, jpg_out, jpg_quality,
                                      compression="deflate", iccprofile=icc):
             raise IOError(f"Failed to save image to {output_path}")
     print(f"Normalized image saved to {output_path}")
+    return output_path
+
+
+def _write_hdr_jpeg(rgb_u16, output_path, jpg_quality, output_colorspace,
+                    headroom, over):
+    """The "JPEG + HDR gain map" branch of write_export_image: the SDR base is
+    the same 8-bit pixels the JPEG branch writes (always three channels, since
+    gain-map readers expect a colour base), plus the glow from `over` resized
+    to the output. A missing map means no glow. See
+    spec/hdr-gain-map-export.md."""
+    from core.hdr_gainmap import encode_gainmap_jpeg, glow_stops
+    out_u16, icc = apply_export_colorspace(rgb_u16, output_colorspace)
+    sdr8 = to_8bit(out_u16)
+    if sdr8.ndim == 2:
+        sdr8 = np.repeat(sdr8[..., None], 3, axis=2)
+    h, w = sdr8.shape[:2]
+    if over is None:
+        glow = np.zeros((h, w), np.float32)
+    else:
+        if over.shape[:2] != (h, w):
+            over = cv2.resize(over, (w, h), interpolation=cv2.INTER_AREA)
+        glow = glow_stops(over, headroom)
+    data = encode_gainmap_jpeg(sdr8, glow, headroom, quality=int(jpg_quality), icc=icc)
+    output_path = os.path.splitext(safe_unicode_path(output_path))[0] + ".jpg"
+    try:
+        with open(output_path, "wb") as f:
+            f.write(data)
+    except Exception as e:
+        raise IOError(f"Failed to save image to {output_path}: {e}")
+    print(f"HDR gain-map JPEG saved to {output_path}")
     return output_path
 
 
