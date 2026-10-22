@@ -202,7 +202,7 @@ def test_peel_sees_a_holder_whose_edge_is_a_slow_ramp():
     L = np.full((400, 1100), -0.85, np.float32)
     L[:, 1030:1030 + len(prof)] = prof
     L[:, 1030 + len(prof):] = -2.95
-    rect, moved, soft, _ = _peel(L, (100, 50, 1047, 350))
+    rect, moved, soft, _, _ = _peel(L, (100, 50, 1047, 350))
     assert not soft["R"] and 7 <= moved["R"] <= 12, moved
     assert rect[2] <= 1039
 

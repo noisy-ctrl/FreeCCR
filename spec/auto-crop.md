@@ -187,3 +187,65 @@ confirmed crops, never from unchecked guesses.
     outside = holder" test failed by a hair; 8 px of rebate stayed in. The
     peel now reads the outside level from the darkest of its four samples.
   Both changes leave the 50 earlier scans exactly as they were.
+
+## Revision 2026-10-22: holder edges read in pieces
+
+Fourth set (30 frames of 645 B&W in a holder, two rolls, plus the earlier
+sets). Auto crop left the clear film rebate in along one or more sides,
+up to ~25 px of the 1080 preview (a black band in the positive). Three causes:
+
+- **Slow holder ramp, measured too early.** The peel took the rebate's level
+  where its walk through the holder's blur stopped, on the ramp's tail, so the
+  "plateau" seemed to end straight away and no gate followed: the edge was
+  called soft at the start of the rebate. A holder half off the scan border
+  also read lighter outside and failed the holder test by a hair.
+- **Gate shown on only part of an edge.** The peel read one median profile
+  across the middle 70 % of the edge; where the picture is as thin as the
+  base along half of it, the median showed no step.
+- **Film turned in its holder.** The deskew squares to the strongest edges
+  (the holder's); the film sat 0.5–1° off, so the rebate was a wedge, thin at
+  one end of the edge and ~10 px wider at the other.
+
+**Change.** For a holder edge (outside ≥ 0.8 log darker than the TOP of the
+plateau, i.e. the brightest of the 12 px after the blur), the band across the
+edge is read in 8 pieces along it. In each piece the rebate starts where the
+profile first reaches the rebate's level, runs flat (within 0.05) and must be
+**even along the piece** (10–90 % spread ≤ 0.035 log at its evenest column:
+clear film is uniform, a picture as thin as the base is textured), then steps
+down by ≥ 0.05 log for 4 px. The pieces' rebate levels must agree (≤ 0.08 log,
+one film base). A straight line is fitted through the pieces' gates, dropping
+pieces **from the inside first** (thin picture can only make a gate look
+further in), with ≥ 3 agreeing within 3 px. The edge goes to the line's
+inward-most end over the span of those pieces (half a piece beyond them, no
+long extrapolation). A guard rejects a "rebate" darker than the picture beside
+it (99th percentile of a band 4 % of the frame deep, + 0.08): film base is the
+brightest thing on a negative, so an even margin darker than the picture is
+the picture's own (a slide's or a target's; the IT8 slide kept its margin).
+No line: the old whole-edge peel runs unchanged.
+
+**Film turned in its holder.** With gate lines on at least two holder edges
+agreeing within 0.2° on a turn of 0.08–2°, the frame is re-straightened by
+that turn (rotating by d adds d to a vertical edge's dx/dy and takes it from a
+horizontal edge's dy/dx) and the edges are peeled again; the turn is kept only
+when every side that showed its gate still does, straighter. Otherwise the
+inward-most end of each line clears the wedge (losing a sliver of picture at
+the other end rather than leaving rebate in). In this set some films were
+turned evenly (squared to the picture), others had one holder blade off
+parallel (one wedge, cleared without a turn).
+
+**Results.** All 88 scans here: every 35mm strip and the trichrome strip roll
+unchanged; the IT8 slide unchanged; on the 645 rolls every rebate band gone
+(edges moved in by 2–25 px), nothing moved outward by more than 2 px. ~0.5 s
+per frame.
+
+**Crop memory.** `auto_crop.DETECTOR_VERSION` (now 2) rides on each recorded
+detection (`det["v"]`); a habit (and the search-box margin) is only learned
+from detections of the current version, since a habit learned while the
+detector left rebate in would now cut the picture. Confirmed sizes and
+positions always count.
+
+Tests: `tests/test_auto_crop_rebate.py` (a film turned ±0.5–0.7° in a holder:
+no rebate left and the crop squared to the picture; half an edge as thin as
+the base; even rebate vs textured thin picture; inside-first line fitting; a
+margin darker than the picture is kept; the detector version on records and
+old-version habits ignored).

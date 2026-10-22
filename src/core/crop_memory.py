@@ -16,7 +16,7 @@ from typing import List, Optional
 
 import numpy as np
 
-from core.auto_crop import INSET_FRAC, Prior
+from core.auto_crop import DETECTOR_VERSION, INSET_FRAC, Prior
 
 VERSION = 1
 MAX_PER_SETUP = 120
@@ -81,6 +81,7 @@ def det_record(fc):
         return None
     w, h = g["size"]
     return {"box": [round(v, 3) for v in box_of(g["out_rect"], g.get("angle", fc.angle), w, h)],
+            "v": DETECTOR_VERSION,
             "gate": [round(float(v), 2) for v in g["gate"]],
             "conf": fc.confidence, "strip": bool(fc.strip), "fmt": fc.fmt or "",
             "soft": "".join(fc.soft or ()), "learned": fc.learned or ""}
@@ -204,7 +205,11 @@ def _prior_of(cluster) -> Prior:
     per_side, dangles, shrinks = ([], [], [], []), [], []
     for e in cluster:
         det = e.get("det")
-        if not det or not det.get("box"):
+        # a habit (and the search-box margin) is measured against the box the
+        # detector gave THEN: from an older detector it would re-correct a
+        # fault the current one no longer makes. The confirmed box itself
+        # (size, position) needs no detector and always counts.
+        if not det or not det.get("box") or det.get("v", 1) != DETECTOR_VERSION:
             continue
         sh, da = inward_shifts(det["box"], e["final"])
         soft = det.get("soft", "")

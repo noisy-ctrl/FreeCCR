@@ -52,7 +52,27 @@ GAP_FLAT = 0.02           # ...and this flat down the column (median-filtered st
 GAP_MIN = 8               # px: narrower runs are flat picture, not a gap
 GAP_MAX = 0.10            # x frame width: wider runs are thin picture beside a gap
 HOLDER_GAP = 0.8          # log10: outside this much darker than inside = holder
+# Holder edges (spec/auto-crop.md, revision 2026-10-22): the gate inside the
+# rebate is read in pieces along the edge, so a gate that shows on only part
+# of it (picture as thin as the base elsewhere) still places the edge, and a
+# film sitting slightly turned in its holder is straightened to the picture.
+PEEL_SEGS = 8             # pieces along each holder edge
+SEG_AGREE = 3             # pieces whose gates fit one straight line
+SEG_TOL = 3.0             # px a piece may sit off that line
+PLATEAU_LOOK = 12         # px past the holder's blur to read the rebate's level
+REBATE_EVEN = 0.035       # log10 spread along a piece: clear film is even, picture isn't
+REBATE_LEVELS = 0.08      # log10: the pieces' rebate levels agree (one film base)
+GATE_STEP = 0.05          # log10 rebate -> picture in a piece (an even rebate is ~0.01 noisy)
+BESIDE_FRAC = 0.04        # how deep beside the gate the picture is checked against the rebate
+GATE_TURN_MIN = 0.08      # degrees: film turned less than this in the holder is left
+GATE_TURN_MAX = 2.0       # ...and more than this is not a film in a holder
+GATE_TURN_AGREE = 0.2     # degrees: sides must agree this well on the turn
 INSET_FRAC = 0.006        # final inset, fraction of the short side
+# Bumped whenever the detector's output box moves for the same scan: a habit
+# learned from your corrections of an older detector's box would correct a
+# fault the new one no longer makes (core/crop_memory.py). 2: holder edges
+# read in pieces (2026-10-22).
+DETECTOR_VERSION = 2
 MAX_SKEW = 4.0
 # Learned frames (spec/auto-crop-learning.md): your confirmed crops / the roll.
 LEARN_TOL = 0.03          # a box within 3% of a learned gate size is that frame
@@ -557,13 +577,117 @@ def _shrink(rect, d):
     return (x0 + d["L"], y0 + d["T"], x1 - d["R"], y1 - d["B"])
 
 
+def _segment_bands(L, rect, side, reach, outside=6, nseg=PEEL_SEGS, margin=0.06):
+    """The band across an edge (from `outside` px out to `reach` px in, as in
+    `_normal_profile`) in `nseg` pieces along it: (position of each piece
+    along the edge from its start, the pieces [along x across], the edge's
+    length)."""
+    x0, y0, x1, y1 = rect
+    h, w = L.shape
+    ks = np.arange(-outside, reach + 1)
+    if side in ("L", "R"):
+        sgn, pos = (1, x0) if side == "L" else (-1, x1)
+        start, length = y0, y1 - y0
+        a, b = y0 + int(length * margin), y1 - int(length * margin)
+        band = L[a:b][:, np.clip(pos + sgn * ks, 0, w - 1)]
+    else:
+        sgn, pos = (1, y0) if side == "T" else (-1, y1)
+        start, length = x0, x1 - x0
+        a, b = x0 + int(length * margin), x1 - int(length * margin)
+        band = L[np.clip(pos + sgn * ks, 0, h - 1)][:, a:b].T
+    cuts = np.linspace(0, band.shape[0], nseg + 1).astype(int)
+    pieces = [band[c0:c1] for c0, c1 in zip(cuts[:-1], cuts[1:])]
+    t = (cuts[:-1] + cuts[1:]) / 2.0 + (a - start)
+    return t, pieces, float(length)
+
+
+def _segment_gate(piece, plateau, step, flat, even=REBATE_EVEN):
+    """One piece of a holder edge: (index where the gate's blur ends, the
+    rebate's level there), or None when no rebate shows there. Rebate is flat
+    across the edge (at its level, then straight into a step down) AND even
+    along it; a picture as thin as the base can match the first, never the
+    second (`even`: the 10-90 % spread along the piece at the rebate's
+    evenest column)."""
+    if piece.shape[0] < 4:
+        return None
+    q = np.median(piece, axis=0)
+    n = len(q)
+    # this piece's own start of the rebate: where it first reaches the
+    # rebate's level (a holder blade need not be parallel to the film, or,
+    # once squared to the film, to the crop; and its blur can carry a bump)
+    up = np.flatnonzero(q[6:] >= plateau - 2 * flat)
+    if up.size == 0:
+        return None
+    k = 6 + int(up[0])
+    look = q[k:min(n, k + PLATEAU_LOOK)]
+    top = float(look.max())
+    j0 = j = k + int(np.argmax(look))
+    while j + 1 < n and q[j + 1] > top - flat:
+        j += 1
+    if j + 4 >= n or not all(q[i] < top - step for i in range(j + 3, min(n, j + 7))):
+        return None
+    run = piece[:, j0:j + 1]
+    spread = np.percentile(run, 90, axis=0) - np.percentile(run, 10, axis=0)
+    if float(spread.min()) > even:
+        return None
+    g = j + 1
+    while g + 2 < n and abs(q[g + 2] - q[g]) > 0.04:
+        g += 1
+    return g, top
+
+
+def _fit_gate_line(t, g, tol=SEG_TOL, need=SEG_AGREE):
+    """Straight line g = m t + c through the pieces' gates, (m, c, and the
+    span along the edge it holds over: the agreeing pieces, half a piece
+    beyond), or None when fewer than `need` agree within `tol` px. Pieces are dropped from the
+    INSIDE first: a picture as thin as the rebate can only make a gate look
+    further in, never further out."""
+    t, g = np.asarray(t, float), np.asarray(g, float)
+    keep = np.ones(len(t), bool)
+    while keep.sum() >= need:
+        tk, gk = t[keep], g[keep]
+        tm, gm = tk.mean(), gk.mean()
+        var = float(((tk - tm) ** 2).sum())
+        m = float(((tk - tm) * (gk - gm)).sum() / var) if var > 0 else 0.0
+        c = gm - m * tm
+        r = np.where(keep, g - (m * t + c), 0.0)
+        if np.abs(r).max() <= tol:
+            half = (t.max() - t.min()) / max(1, len(t) - 1) / 2.0 if len(t) > 1 else 0.0
+            return m, float(c), float(tk.min() - half), float(tk.max() + half)
+        keep[int(np.argmax(r)) if r.max() > tol else int(np.argmin(r))] = False
+    return None
+
+
+def _brightest_beside(L, rect, side, depth, dim, frac=BESIDE_FRAC):
+    """99th percentile of the picture in a band `frac` of the frame deep,
+    starting `depth` px in from `side` of `rect` (its middle 88 %)."""
+    x0, y0, x1, y1 = rect
+    d0, d1 = depth, depth + max(16, int(dim * frac))
+    mx, my = int((x1 - x0) * .06), int((y1 - y0) * .06)
+    if side == "L":
+        band = L[y0 + my:y1 - my, x0 + d0:x0 + d1]
+    elif side == "R":
+        band = L[y0 + my:y1 - my, max(0, x1 - d1):x1 - d0]
+    elif side == "T":
+        band = L[y0 + d0:y0 + d1, x0 + mx:x1 - mx]
+    else:
+        band = L[max(0, y1 - d1):y1 - d0, x0 + mx:x1 - mx]
+    return float(np.percentile(band, 99)) if band.size else -np.inf
+
+
 def _peel(L, rect, max_frac=0.05, flat=0.05, step=0.12):
     """Holder edge -> picture edge. When the band outside an edge is far darker
-    than inside, walk in through the blur, across the bright rebate plateau, to
-    the next step (the gate). None within `max_frac`: stop at the plateau and
-    call the edge soft (picture at base density there)."""
+    than inside, walk in through the blur to the bright rebate plateau, then
+    across it to the next step (the gate), read in `PEEL_SEGS` pieces along
+    the edge: the gate is the straight line through the pieces where an even
+    rebate shows, and the edge goes to that line's inward-most end, so a film
+    turned in its holder leaves no wedge of rebate. No such line: the whole
+    edge's profile, as before; no step within `max_frac` either: stop at the
+    plateau and call the edge soft (picture at base density there). Also
+    returns each gate line's slope (px per px along the edge) for
+    `_gate_turn`."""
     x0, y0, x1, y1 = rect
-    moved, soft, plateaus = {}, {}, []
+    moved, soft, plateaus, slopes = {}, {}, [], {}
     for side in ("L", "R", "T", "B"):
         dim = (x1 - x0) if side in ("L", "R") else (y1 - y0)
         reach = max(12, int(dim * max_frac))
@@ -575,10 +699,41 @@ def _peel(L, rect, max_frac=0.05, flat=0.05, step=0.12):
         while k + 2 < len(p) and abs(p[k + 2] - p[k]) > 0.04:
             k += 1
         plateau = float(p[k])
-        if plateau - out < HOLDER_GAP:
+        # The rebate's level for the pieces is the TOP of the plateau: a slow
+        # holder ramp is still creeping up where the walk above stops (and a
+        # holder half off the scan reads lighter outside).
+        top = float(np.max(p[k:min(len(p), k + PLATEAU_LOOK)]))
+        if top - out < HOLDER_GAP:
             moved[side], soft[side] = 0, False
             continue
-        plateaus.append(plateau)
+        holder = plateau - out >= HOLDER_GAP      # the whole-edge test, as before
+        if holder:
+            plateaus.append(plateau)
+        t, pieces, length = _segment_bands(L, rect, side, reach)
+        found = [(ti, r) for ti, pc in zip(t, pieces)
+                 if (r := _segment_gate(pc, top, GATE_STEP, flat)) is not None]
+        if len(found) >= SEG_AGREE:
+            # one film base: the pieces' rebate levels agree
+            lvl = float(np.median([r[1] for _, r in found]))
+            found = [(ti, r) for ti, r in found if abs(r[1] - lvl) <= REBATE_LEVELS]
+        line = (_fit_gate_line([ti for ti, _ in found], [r[0] for _, r in found])
+                if len(found) >= SEG_AGREE else None)
+        if line is not None:
+            m, c, t_lo, t_hi = line
+            lvl = float(np.median([r[1] for _, r in found]))
+            # Clear film is the brightest thing on a negative: a "rebate"
+            # darker than the picture beside it is a margin of the picture (a
+            # slide's or a target's), not film base.
+            gate = int(np.ceil(max(m * t_lo + c, m * t_hi + c)))
+            if _brightest_beside(L, rect, side, gate - 6, dim) <= lvl + REBATE_LEVELS:
+                # the line's inward-most end over the pieces that showed it
+                # (half a piece beyond them): no long extrapolation
+                moved[side], soft[side] = max(0, gate - 6), False
+                slopes[side] = m
+                continue
+        if not holder:
+            moved[side], soft[side] = 0, False
+            continue
         j = k
         while j + 1 < len(p) and abs(p[j + 1] - plateau) < flat:
             j += 1
@@ -589,7 +744,22 @@ def _peel(L, rect, max_frac=0.05, flat=0.05, step=0.12):
             moved[side], soft[side] = max(0, g - 6), False
         else:
             moved[side], soft[side] = max(0, k - 6), True
-    return _shrink(rect, moved), moved, soft, plateaus
+    return _shrink(rect, moved), moved, soft, plateaus, slopes
+
+
+def _gate_turn(slopes):
+    """Degrees (getRotationMatrix2D convention, to add to the deskew angle)
+    that square the picture's gate when the film sits turned in its holder,
+    from the gate lines of at least two holder edges that agree; None
+    otherwise. Rotating by d (radians) adds d to a vertical edge's dx/dy and
+    takes d from a horizontal edge's dy/dx; an L/T edge's gate line runs at
+    +slope, an R/B edge's at -slope."""
+    sign = {"L": -1.0, "R": 1.0, "T": 1.0, "B": -1.0}
+    turns = [np.degrees(np.arctan(sign[s] * m)) for s, m in slopes.items()]
+    if len(turns) < 2 or max(turns) - min(turns) > GATE_TURN_AGREE:
+        return None
+    d = float(np.median(turns))
+    return d if GATE_TURN_MIN <= abs(d) <= GATE_TURN_MAX else None
 
 
 def _trim(L, rect, base, max_frac=0.03, min_w=3, flat=0.05):
@@ -751,7 +921,7 @@ def detect_frame(raw: np.ndarray, inset_frac: float = INSET_FRAC, priors=None) -
     L = cv2.GaussianBlur(_rotate(L0, ang), (0, 0), 1.0)
     learned = _priors_deskewed(priors, w, h, ang)
     best, strip = _search(L, learned)
-    res = _finish(L, best, strip, ang, w, h, inset_frac, priors)
+    res = _finish(L, best, strip, ang, w, h, inset_frac, priors, L0=L0)
     if not res.usable:
         usual = _usual_frame(priors, w, h, strip, res)
         if usual is not None:
@@ -759,11 +929,39 @@ def detect_frame(raw: np.ndarray, inset_frac: float = INSET_FRAC, priors=None) -
     return res
 
 
-def _finish(L, best, strip, ang, w, h, inset_frac, priors):
+def _move_box(box, ang_from, ang_to, w, h):
+    """The same-size box about the same scan point, deskewed by `ang_to`
+    instead of `ang_from`."""
+    x0, y0, x1, y1 = box
+    A1, t1 = _deskew_map(w, h, ang_from)
+    A2, t2 = _deskew_map(w, h, ang_to)
+    co = np.linalg.solve(A1, np.array([(x0 + x1) / 2.0, (y0 + y1) / 2.0]) - t1)
+    cx, cy = A2 @ co + t2
+    hw, hh = (x1 - x0) / 2.0, (y1 - y0) / 2.0
+    return (int(round(cx - hw)), int(round(cy - hh)), int(round(cx + hw)), int(round(cy + hh)))
+
+
+def _finish(L, best, strip, ang, w, h, inset_frac, priors, L0=None):
     if best is None:
         return FrameCrop(None, angle=ang, reason="no frame edges found", strip=strip)
     rect0 = best["rect"]
-    rect, peeled, soft, plateaus = _peel(L, rect0)
+    rect, peeled, soft, plateaus, slopes = _peel(L, rect0)
+    turn = _gate_turn(slopes) if L0 is not None else None
+    if turn is not None:
+        # The film sits turned in its holder: square the crop to the picture's
+        # gate, not the holder, and peel again in that frame. Kept only when
+        # the gate lines come out straighter.
+        ang2 = ang + turn
+        L2 = cv2.GaussianBlur(_rotate(L0, ang2), (0, 0), 1.0)
+        box2 = _move_box(rect0, ang, ang2, w, h)
+        again = _peel(L2, box2)
+        before = max(abs(m) for m in slopes.values())
+        # kept when every side that showed its gate still does, straighter
+        if (set(slopes) <= set(again[4])
+                and max(abs(m) for m in again[4].values()) < before):
+            L, ang, rect0 = L2, ang2, box2
+            rect, peeled, soft, plateaus, slopes = again
+            best = dict(best, rect=box2, turned=turn)
     if strip:
         # the sprocket rows and the exact 3:2 already place a strip frame; a
         # band of picture at base density would look like rebate to the trim
