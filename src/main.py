@@ -83,6 +83,10 @@ def main():
     apply_theme(app)  # neutral dark theme (Fusion + palette + global QSS)
     install_dark_titlebar_filter(app)  # dark title bars for dialogs / message boxes
     install_macos_srgb_filter(app)  # color-managed previews on wide-gamut Macs
+    # Scrolls go to the widget under the pointer, even when Qt has latched the
+    # wheel onto another one (spec/wheel-routing.md).
+    from ui.wheel_routing import install_wheel_router
+    install_wheel_router(app)
     _icon_path = os.path.join(os.path.dirname(__file__), 'icons', 'freeccr_logo.png')
     app.setWindowIcon(QIcon(_icon_path))
     print("Starting FreeCCR...")
