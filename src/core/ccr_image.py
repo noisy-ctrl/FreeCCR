@@ -2116,6 +2116,10 @@ class CCRImage:
                      # (spec/golden-highlights.md); per layer.
                      golden_highlights=s.get('golden_highlights', 0),
                      golden_shape=s.get('golden_shape'),
+                     # Shadow Neutralise, right after it
+                     # (spec/shadow-neutralise.md); per layer.
+                     shadow_neutralise=s.get('shadow_neutralise', 0),
+                     shadow_shape=s.get('shadow_shape'),
                      # Per-color-band sliders ride the same GPU pass (or the
                      # CPU fallback); None keeps the inactive case free.
                      band_settings=(s if any(s.get(k, 0)
@@ -2254,6 +2258,10 @@ class CCRImage:
                      # (spec/golden-highlights.md); per layer.
                      golden_highlights=s.get('golden_highlights', 0),
                      golden_shape=s.get('golden_shape'),
+                     # Shadow Neutralise, right after it
+                     # (spec/shadow-neutralise.md); per layer.
+                     shadow_neutralise=s.get('shadow_neutralise', 0),
+                     shadow_shape=s.get('shadow_shape'),
                      balance_r=s.get('balance_r', 0),
                      balance_g=s.get('balance_g', 0),
                      balance_b=s.get('balance_b', 0),

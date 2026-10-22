@@ -7,9 +7,11 @@ import time
 import tifffile
 import gc
 
-# Golden Highlights (spec/golden-highlights.md). Imported here, on the main
-# thread at start-up: its OKLab matrices are inverted at import.
+# Golden Highlights (spec/golden-highlights.md) and Shadow Neutralise
+# (spec/shadow-neutralise.md). Imported here, on the main thread at start-up:
+# their shared OKLab matrices (core/oklab.py) are inverted at import.
 from core.golden import apply_golden
+from core.shadow_neutral import apply_shadow_neutralise
 from core.color_management import (apply_export_colorspace,
                                    apply_export_colorspace_gray,
                                    inject_jpeg_icc, srgb_encode)
@@ -3804,6 +3806,10 @@ def adjust_image(
     # (None = default). Appended last.
     golden_highlights: float = 0.0,
     golden_shape=None,
+    # Shadow Neutralise (spec/shadow-neutralise.md), 0..100, and its options
+    # (None = default). Appended last.
+    shadow_neutralise: float = 0.0,
+    shadow_shape=None,
 ) -> np.ndarray:
     """
     Apply temperature, tint, exposure, brightness, blackpoint, whitepoint, highlights, shadows,
@@ -4029,6 +4035,11 @@ def adjust_image(
     if golden_highlights and golden_highlights > 0:
         img = apply_golden(np.clip(img / 65535.0, 0.0, 1.0).astype(np.float32),
                            golden_highlights, golden_shape) * 65535.0
+    # Shadow Neutralise: right after it (UI order = render order), the very
+    # last colour stage.
+    if shadow_neutralise and shadow_neutralise > 0:
+        img = apply_shadow_neutralise(np.clip(img / 65535.0, 0.0, 1.0).astype(np.float32),
+                                      shadow_neutralise, shadow_shape) * 65535.0
 
     img = np.clip(img, 0, 65535)
     return img.astype(np.uint16)
@@ -4319,6 +4330,9 @@ def adjust_image_opencl(
     # Golden Highlights — appended last, see adjust_image.
     golden_highlights: float = 0.0,
     golden_shape=None,
+    # Shadow Neutralise — appended last, see adjust_image.
+    shadow_neutralise: float = 0.0,
+    shadow_shape=None,
 ) -> np.ndarray:
     """
     GPU-accelerated (OpenCL) version of adjust_image.
@@ -4500,7 +4514,9 @@ def adjust_image_opencl(
                           highlights_x=highlights_x, shadows_x=shadows_x,
                           punch_x=punch_x, xtone_shape=xtone_shape,
                           golden_highlights=golden_highlights,
-                          golden_shape=golden_shape)
+                          golden_shape=golden_shape,
+                          shadow_neutralise=shadow_neutralise,
+                          shadow_shape=shadow_shape)
 
     try:
       # Serialize GPU submissions: the hi-res zoom worker may run this
@@ -4570,6 +4586,11 @@ def adjust_image_opencl(
       if golden_highlights and golden_highlights > 0:
           result = apply_golden(np.clip(result / 65535.0, 0.0, 1.0).astype(np.float32),
                                 golden_highlights, golden_shape) * 65535.0
+      # ... and Shadow Neutralise after it, the same way.
+      if shadow_neutralise and shadow_neutralise > 0:
+          result = apply_shadow_neutralise(
+              np.clip(result / 65535.0, 0.0, 1.0).astype(np.float32),
+              shadow_neutralise, shadow_shape) * 65535.0
       return np.clip(result, 0, 65535).astype(np.uint16)
 
     except Exception as e:
@@ -4595,7 +4616,9 @@ def adjust_image_opencl(
                           highlights_x=highlights_x, shadows_x=shadows_x,
                           punch_x=punch_x, xtone_shape=xtone_shape,
                           golden_highlights=golden_highlights,
-                          golden_shape=golden_shape)
+                          golden_shape=golden_shape,
+                          shadow_neutralise=shadow_neutralise,
+                          shadow_shape=shadow_shape)
 
 
 

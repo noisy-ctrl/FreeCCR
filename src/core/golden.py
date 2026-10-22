@@ -9,6 +9,8 @@ share (Neutral whites). Gold chroma is then added along one hue, easing back to
 a clean cream at the very top."""
 import numpy as np
 
+from core.oklab import to_oklab, from_oklab, smooth as _smooth, fit_move
+
 GOLDEN_SHAPE_DEFAULT = {"hue": 72, "start": 55, "clean": 60, "neutral": 10}
 GOLDEN_LIMITS = {"hue": (50, 95), "start": (30, 85), "clean": (0, 100),
                  "neutral": (0, 100)}
@@ -25,15 +27,6 @@ NEUTRAL_BELOW = 0.004    # chroma under this counts as a pure grey...
 NEUTRAL_ABOVE = 0.012    # ...and over this as having a hue of its own
 CHUNK = 1 << 20
 
-_M1 = np.array([[0.4122214708, 0.5363325363, 0.0514459929],
-                [0.2119034982, 0.6806995451, 0.1073969566],
-                [0.0883024619, 0.2817188376, 0.6299787005]], np.float32)
-_M2 = np.array([[0.2104542553, 0.7936177850, -0.0040720468],
-                [1.9779984951, -2.4285922050, 0.4505937099],
-                [0.0259040371, 0.7827717662, -0.8086757660]], np.float32)
-_M1i = np.linalg.inv(_M1.astype(np.float64)).astype(np.float32)
-_M2i = np.linalg.inv(_M2.astype(np.float64)).astype(np.float32)
-
 
 def normalize_golden_shape(shape):
     """A clean options dict, or None when absent / not a dict / all default."""
@@ -47,32 +40,6 @@ def normalize_golden_shape(shape):
         except (TypeError, ValueError):
             out[k] = dflt
     return None if out == GOLDEN_SHAPE_DEFAULT else out
-
-
-def _lin(c):
-    c = np.maximum(c, 0.0)
-    return np.where(c <= 0.04045, c / np.float32(12.92),
-                    ((c + np.float32(0.055)) / np.float32(1.055)) ** np.float32(2.4))
-
-
-def _enc(l):
-    l = np.maximum(l, 0.0)
-    return np.where(l <= 0.0031308, l * np.float32(12.92),
-                    np.float32(1.055) * l ** np.float32(1 / 2.4) - np.float32(0.055))
-
-
-def to_oklab(rgb):
-    return np.cbrt(_lin(rgb) @ _M1.T) @ _M2.T
-
-
-def from_oklab(lab):
-    lms = lab @ _M2i.T
-    return _enc((lms * lms * lms) @ _M1i.T)
-
-
-def _smooth(x):
-    x = np.clip(x, 0.0, 1.0)
-    return x * x * (3.0 - 2.0 * x)
 
 
 def gold_weight(lab, shape):
@@ -100,10 +67,6 @@ def weight_map(rgb01, shape=None):
     return w.reshape(a.shape[:2])
 
 
-def _outside(rgb):
-    return (rgb < -1e-4).any(axis=1) | (rgb > 1.0 + 1e-4).any(axis=1)
-
-
 def _chunk(x, amount, shape):
     out = x.copy()
     lab_all = to_oklab(x)
@@ -115,24 +78,8 @@ def _chunk(x, amount, shape):
     hg = np.radians(shape["hue"])
     d = np.stack([np.zeros_like(k), k * np.float32(np.cos(hg)), k * np.float32(np.sin(hg))], 1)
     res = from_oklab(lab + d)
-    out[sel] = _fit(res, lab, d)
+    out[sel] = fit_move(res, lab, d)
     return np.clip(out, 0.0, 1.0)
-
-
-def _fit(out, lab, d):
-    bad = _outside(out)
-    if bad.any():
-        # the largest fraction of the shift that keeps the colour in range
-        lb, db = lab[bad], d[bad]
-        lo = np.zeros(len(lb), np.float32)
-        hi = np.ones(len(lb), np.float32)
-        for _ in range(8):
-            mid = 0.5 * (lo + hi)
-            ok = ~_outside(from_oklab(lb + mid[:, None] * db))
-            lo = np.where(ok, mid, lo)
-            hi = np.where(ok, hi, mid)
-        out[bad] = from_oklab(lb + lo[:, None] * db)
-    return out
 
 
 def apply_golden(img01, amount, shape=None):

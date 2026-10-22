@@ -1157,9 +1157,11 @@ class ImagePreview(QWidget):
         self._fc_item = None
         self._fc_cache = None            # (cacheKey of the shown pixmap, layer)
         self._fc_legend = None
-        # Golden Highlights "show where it acts" (spec/golden-highlights.md):
-        # its own layer while the options popup asks for it; None = off.
+        # Golden Highlights / Shadow Neutralise "show where it acts"
+        # (spec/golden-highlights.md, spec/shadow-neutralise.md): one layer,
+        # shown while a tool's options popup asks for it; None = off.
         self._gold_mask_shape = None
+        self._mask_kind = None           # "gold" / "shadow" while showing
         self._gm_item = None
         self._gm_cache = None            # (cacheKey, options) -> layer
         self._probe_qimage_key = None    # its QPixmap.cacheKey()
@@ -1720,23 +1722,53 @@ class ImagePreview(QWidget):
         self._glow_item.setTransform(t)
         self._glow_item.setVisible(True)
 
-    # --- Golden Highlights: where it acts (spec/golden-highlights.md) ------
+    # --- Golden Highlights / Shadow Neutralise: where it acts --------------
+    # (spec/golden-highlights.md, spec/shadow-neutralise.md)
     GM_MAX_LONG = 1200      # the map's own resolution (GUI thread; it is soft)
+    # kind -> (module, normaliser, defaults, alpha gain, wash colour). The
+    # gold weights rarely reach 1, so they are lifted; the shadow weight is
+    # often 1 in the deep shadows, so it is drawn as it is. Gold is cyan (no
+    # sunlit highlight is cyan); shadows are magenta, because a cyan wash
+    # reads as the teal cast or blue sky it sits next to.
+    _MASK_KINDS = {
+        "gold": ("core.golden", "normalize_golden_shape", "GOLDEN_SHAPE_DEFAULT",
+                 1.6, (0, 205, 255)),
+        "shadow": ("core.shadow_neutral", "normalize_shadow_shape",
+                   "SHADOW_SHAPE_DEFAULT", 1.0, (255, 40, 200)),
+    }
 
     def set_gold_mask(self, shape):
         """Show where Golden Highlights acts with these options (a cyan wash,
         stronger where it acts more), or hide it with None. A display layer
         like False colour: nothing that reads the picture sees it."""
-        from core.golden import normalize_golden_shape, GOLDEN_SHAPE_DEFAULT
+        self._set_tool_mask("gold", shape)
+
+    def set_shadow_mask(self, shape):
+        """The same for Shadow Neutralise (a magenta wash)."""
+        self._set_tool_mask("shadow", shape)
+
+    def _set_tool_mask(self, kind, shape):
+        import importlib
         if shape is None:
+            # only the tool whose map is showing can hide it (one popup
+            # closing must not hide the next one's map)
+            if getattr(self, "_mask_kind", None) not in (None, kind):
+                return
             self._gold_mask_shape = None
+            self._mask_kind = None
         else:
-            self._gold_mask_shape = normalize_golden_shape(shape) or dict(GOLDEN_SHAPE_DEFAULT)
+            mod_name, norm, dflt, _gain, _colour = self._MASK_KINDS[kind]
+            mod = importlib.import_module(mod_name)
+            self._gold_mask_shape = getattr(mod, norm)(shape) or dict(getattr(mod, dflt))
+            self._mask_kind = kind
         self._refresh_gold_mask()
 
     def _gold_mask_pixmap_for(self, target, shape):
-        from core.golden import weight_map
-        key = (target.cacheKey(), tuple(sorted(shape.items())))
+        import importlib
+        kind = getattr(self, "_mask_kind", None) or "gold"
+        mod_name, _norm, _dflt, gain, colour = self._MASK_KINDS[kind]
+        weight_map = importlib.import_module(mod_name).weight_map
+        key = (kind, target.cacheKey(), tuple(sorted(shape.items())))
         if self._gm_cache is not None and self._gm_cache[0] == key:
             return self._gm_cache[1]
         src = target
@@ -1750,8 +1782,8 @@ class ImagePreview(QWidget):
         rgb = buf.reshape(h, qimg.bytesPerLine())[:, :w * 3].reshape(h, w, 3)
         wm = weight_map(rgb.astype(np.float32) / 255.0, shape)
         rgba = np.zeros((h, w, 4), np.uint8)
-        rgba[..., 1], rgba[..., 2] = 205, 255           # cyan: never a picture colour here
-        rgba[..., 3] = (np.clip(wm * 1.6, 0.0, 0.85) * 255).astype(np.uint8)
+        rgba[..., 0], rgba[..., 1], rgba[..., 2] = colour
+        rgba[..., 3] = (np.clip(wm * gain, 0.0, 0.85) * 255).astype(np.uint8)
         rgba = np.ascontiguousarray(rgba)
         pm = QPixmap.fromImage(QImage(rgba.data, w, h, 4 * w,
                                       QImage.Format_RGBA8888).copy())

@@ -96,12 +96,14 @@ GAP_SECTION = SPACE_XL    # 12 — between functional groups (usually with a sep
 CONTROL_H = 28            # sliders, combos, labels, normal & secondary buttons, tabs
 CONTROL_H_LG = 36         # weighty primary commits (Done, Export)
 GLYPH_W = 28             # square glyph buttons (✕ remove / clear) — one width
-LABEL_COL_W = 100         # right-aligned label gutter — the longest label
-                          # ("Subtracted Sat") measures 89px in the macOS system
-                          # font, so 90 left it flush against the panel border and
-                          # one font step away from clipping. Keep slack here.
+LABEL_COL_W = 124         # right-aligned label gutter — the longest label
+                          # ("Shadow Neutralise", ~112px in the macOS system font;
+                          # "Golden Highlights" ~107) must fit with slack, also at
+                          # a 1.15x wider UI font. Was 100 for "Subtracted Sat"
+                          # (89px); PANEL_W grew by the same 24px so the slider
+                          # tracks kept their length.
 VALUE_COL_W = 40          # left-aligned value gutter in a 3-column row
-PANEL_W = 340             # the right-hand side panels (sliders / dust / crop).
+PANEL_W = 364             # the right-hand side panels (sliders / dust / crop).
                           # Widest row is WB Picker|AWB|Crop|Slice at ~293px, so
                           # this must stay >= that + 2*GAP_PANEL, with slack for
                           # systems whose UI font is wider than the one it was

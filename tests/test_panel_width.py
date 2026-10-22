@@ -57,7 +57,7 @@ from ui.main_window import MainWindow  # noqa: E402
 from widgets.sliders_panel import SlidersPanel  # noqa: E402
 
 # The longest label sitting in a LABEL_COL_W gutter.
-LONGEST_LABEL = "Subtracted Sat"
+LONGEST_LABEL = "Shadow Neutralise"
 
 # How much wider a UI font the panels must absorb (see the stress test below).
 FONT_STRESS = 1.15
@@ -138,6 +138,21 @@ def test_label_gutter_fits_the_longest_label():
     assert text_w <= theme.LABEL_COL_W - theme.GAP_TIGHT, (
         f"{LONGEST_LABEL!r} measures {text_w}px in this UI font; "
         f"LABEL_COL_W is {theme.LABEL_COL_W}px")
+
+
+@needs_ui_font
+def test_every_gutter_label_fits():
+    """Not just the one named above: every label sitting in the gutter (a new
+    tool's long name clipped silently once - "Shadow Neutralise")."""
+    from PySide6.QtWidgets import QLabel as _QL
+    panel = SlidersPanel(None)
+    fm = QFontMetrics(QLabel().font())
+    labels = [w for w in panel.findChildren(_QL)
+              if w.minimumWidth() == w.maximumWidth() == theme.LABEL_COL_W and w.text()]
+    assert len(labels) > 20
+    for w in labels:
+        assert fm.horizontalAdvance(w.text()) <= theme.LABEL_COL_W - theme.GAP_TIGHT, w.text()
+    assert max(labels, key=lambda w: fm.horizontalAdvance(w.text())).text() == LONGEST_LABEL
 
 
 @needs_ui_font

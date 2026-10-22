@@ -115,9 +115,11 @@ def test_slider_helper_text_and_group():
     QApplication.instance() or QApplication([])
     from widgets.sliders_panel import SlidersPanel, SYNC_GROUPS, _BASIC_LABELS
     keys = SlidersPanel.ADJUSTMENT_KEYS
-    # Golden Highlights sits between them (spec/golden-highlights.md)
+    # Golden Highlights and Shadow Neutralise sit between them
+    # (spec/golden-highlights.md, spec/shadow-neutralise.md)
     assert keys.index("golden_highlights") == keys.index("sub_saturation") + 1
-    assert keys.index("colour_organics") == keys.index("golden_highlights") + 1
+    assert keys.index("shadow_neutralise") == keys.index("golden_highlights") + 1
+    assert keys.index("colour_organics") == keys.index("shadow_neutralise") + 1
     assert "colour_organics" in dict((g, k) for g, _l, k in SYNC_GROUPS)["sat"]
     assert _BASIC_LABELS["colour_organics"] == "Colour Organics"
     p = SlidersPanel()

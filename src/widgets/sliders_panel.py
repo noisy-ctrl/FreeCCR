@@ -13,6 +13,7 @@ from core.ccr_processor import (COLOR_BANDS, BAND_PARAMS, BAND_ADJUSTMENT_KEYS,
                                 normalize_organics_shape)
 from core.x_tones import normalize_xtone_shape, XTONE_SHAPE_DEFAULT
 from core.golden import normalize_golden_shape
+from core.shadow_neutral import normalize_shadow_shape
 from core.film_stocks import (decode_film_stocks, encode_film_stocks,
                               find_film_stock, upsert_film_stock,
                               remove_film_stock)
@@ -44,7 +45,8 @@ SYNC_GROUPS = [
       "shadows", "black_point", "highlights_x", "shadows_x", "punch_x",
       "contrast")),
     ("sat", "Saturation", ("saturation", "sat_rolloff", "vibrance", "sub_saturation",
-                            "golden_highlights", "colour_organics")),
+                            "golden_highlights", "shadow_neutralise",
+                            "colour_organics")),
     ("crop", "Crop", ()),
     # Coarse 90-degree rotation + the mirror flags, synced like crop (whole-image
     # properties, not adjustment keys). fine_rotation_angle is deliberately NOT
@@ -175,6 +177,7 @@ _BASIC_LABELS = {
     "vibrance": "Vibrance",
     "sub_saturation": "Subtracted Sat", "colour_organics": "Colour Organics",
     "golden_highlights": "Golden Highlights",
+    "shadow_neutralise": "Shadow Neutralise",
     "exposure": "Exposure",
     "ch_input_gain": "Input Gain", "ch_master_shift": "Master Shift",
     "ch_master_gain": "Master Gain",
@@ -261,6 +264,10 @@ def paste_options(clip, default_for):
         from widgets.golden_popup import describe_golden
         rows.append(("Adjustments", "golden_shape", "Golden Highlights options  ("
                      + describe_golden(clip["golden_shape"]) + ")"))
+    if normalize_shadow_shape(clip.get("shadow_shape")):
+        from widgets.shadow_popup import describe_shadow
+        rows.append(("Adjustments", "shadow_shape", "Shadow Neutralise options  ("
+                     + describe_shadow(clip["shadow_shape"]) + ")"))
     if normalize_organics_shape(clip.get("organics_shape")):
         from widgets.organics_popup import describe_organics
         rows.append(("Adjustments", "organics_shape", "Colour Organics families  ("
@@ -651,6 +658,8 @@ class SlidersPanel(QWidget):
         # (spec/golden-highlights.md), then Colour Organics, the last of the
         # colour sliders (spec/colour-organics.md)
         "golden_highlights",
+        # Shadow Neutralise right under it (spec/shadow-neutralise.md)
+        "shadow_neutralise",
         "colour_organics",
         # Per-channel levels controls (collapsible section)
         "ch_input_gain", "ch_master_shift", "ch_master_gain",
@@ -1201,6 +1210,19 @@ class SlidersPanel(QWidget):
         self._golden_label.customContextMenuRequested.connect(
             lambda pos: self._open_golden_popup(self._golden_label.mapToGlobal(pos)))
         self._update_golden_label()
+        # Shadow Neutralise: shadows towards a neutral, inky black (casts out,
+        # dark colours kept); right-click for range / reach / depth.
+        # Created right after Golden Highlights (ADJUSTMENT_KEYS zip).
+        # spec/shadow-neutralise.md
+        self.shadow_neutralise_slider_layout = self.create_slider(
+            "Shadow Neutralise", min_value=0, max_value=100)
+        self._shadow_shape = None        # active layer's options (None = default)
+        self._shadow_popup = None
+        self._shadow_label = self.shadow_neutralise_slider_layout.itemAt(0).widget()
+        self._shadow_label.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._shadow_label.customContextMenuRequested.connect(
+            lambda pos: self._open_shadow_popup(self._shadow_label.mapToGlobal(pos)))
+        self._update_shadow_label()
         from core.ccr_processor import ORGANICS_AMOUNT_MAX
         self.colour_organics_slider_layout = self.create_slider(
             "Colour Organics", min_value=0, max_value=ORGANICS_AMOUNT_MAX)
@@ -1232,6 +1254,7 @@ class SlidersPanel(QWidget):
         scroll_layout.addLayout(self.vibrance_slider_layout)
         scroll_layout.addLayout(self.sub_saturation_slider_layout)
         scroll_layout.addLayout(self.golden_slider_layout)
+        scroll_layout.addLayout(self.shadow_neutralise_slider_layout)
         scroll_layout.addLayout(self.colour_organics_slider_layout)
 
         # --- Reset / Compare / Sync buttons ---
@@ -1721,6 +1744,9 @@ class SlidersPanel(QWidget):
         self._golden_shape = normalize_golden_shape(
             adjustment.get("golden_shape") if adjustment else None)
         self._update_golden_label()
+        self._shadow_shape = normalize_shadow_shape(
+            adjustment.get("shadow_shape") if adjustment else None)
+        self._update_shadow_label()
         for i, key in enumerate(self.adjustment_keys):
             if i < len(self.sliders):
                 val = adjustment.get(key, self._default_for(key)) if adjustment \
@@ -2097,6 +2123,9 @@ class SlidersPanel(QWidget):
         # ... and the Golden Highlights options.
         if getattr(self, "_golden_shape", None):
             adjustment["golden_shape"] = dict(self._golden_shape)
+        # ... and the Shadow Neutralise options.
+        if getattr(self, "_shadow_shape", None):
+            adjustment["shadow_shape"] = dict(self._shadow_shape)
         return adjustment
 
     def _attach_cineon(self, adjustment: dict) -> dict:
@@ -2443,6 +2472,68 @@ class SlidersPanel(QWidget):
             self._on_golden_show_mask(False)     # the map is only for adjusting
             self.end_undo_burst()
 
+    # --- Shadow Neutralise options (spec/shadow-neutralise.md) ---------------
+    SHADOW_HINT = ("Shadow Neutralise: takes the colour cast out of the "
+                   "shadows so they read as a neutral, inky black, like a good "
+                   "lab scan. Only low colour is taken out - a strongly "
+                   "coloured dark thing (a red car, deep foliage) keeps its "
+                   "colour - and lightness is left exactly as it was. "
+                   "Midtones and highlights are never touched.")
+    SHADOW_LABEL_TIP = "Right-click: range, reach, depth"
+
+    def _update_shadow_label(self):
+        lbl = getattr(self, "_shadow_label", None)
+        if lbl is None:
+            return
+        from widgets.shadow_popup import describe_shadow
+        custom = self._shadow_shape is not None
+        f = lbl.font()
+        f.setUnderline(custom)
+        lbl.setFont(f)
+        lines = [self.SHADOW_HINT]
+        if custom:
+            lines.append("Options: " + describe_shadow(self._shadow_shape))
+        lines.append(self.SHADOW_LABEL_TIP)
+        lbl.setToolTip("\n".join(lines))
+
+    def _open_shadow_popup(self, global_pos):
+        if self.current_idx is None:
+            return
+        from widgets.shadow_popup import ShadowPopup
+        self.end_undo_burst()
+        i = self.adjustment_keys.index("shadow_neutralise")
+        pop = ShadowPopup(self._shadow_shape, self.sliders[i].value(), self)
+        pop.changed.connect(self._on_shadow_shape_changed)
+        pop.show_mask.connect(self._on_shadow_show_mask)
+        pop.closed.connect(self._on_shadow_popup_closed)
+        self._shadow_popup = pop
+        pop.adjustSize()
+        from utils.popup_placement import place_on_screen
+        place_on_screen(pop, global_pos)
+        pop.show()
+
+    def _on_shadow_show_mask(self, on):
+        ip = self._golden_preview()
+        if ip is not None and hasattr(ip, "set_shadow_mask"):
+            ip.set_shadow_mask(dict(self._shadow_shape or {}) if on else None)
+
+    def _on_shadow_shape_changed(self, shape):
+        self._shadow_shape = normalize_shadow_shape(shape)
+        self._update_shadow_label()
+        pop = self._shadow_popup
+        if pop is not None and pop.mask_check.isChecked():
+            self._on_shadow_show_mask(True)
+        # Same store / preview / debounced-reprocess path as a slider move;
+        # its undo burst is held open until the popup closes (one undo step).
+        self.on_slider_changed()
+        self._undo_burst_timer.stop()
+
+    def _on_shadow_popup_closed(self):
+        if self._shadow_popup is not None:
+            self._shadow_popup = None
+            self._on_shadow_show_mask(False)     # the map is only for adjusting
+            self.end_undo_burst()
+
     # --- Colour Organics families (spec/colour-organics.md) -------------------
     ORGANICS_LABEL_TIP = "Right-click: families and reach"
 
@@ -2700,6 +2791,8 @@ class SlidersPanel(QWidget):
         self._update_xtone_labels()
         self._golden_shape = None
         self._update_golden_label()
+        self._shadow_shape = None
+        self._update_shadow_label()
         # Save adjustment to the ACTIVE layer (global or selected area) and
         # update the preview. Resetting an area zeroes that area's settings;
         # resetting the Whole Image layer zeroes the global sliders (areas keep
@@ -2815,6 +2908,7 @@ class SlidersPanel(QWidget):
         src_shape = normalize_xtone_shape(src_global.get("xtone_shape"))
         src_org = normalize_organics_shape(src_global.get("organics_shape"))
         src_gold = normalize_golden_shape(src_global.get("golden_shape"))
+        src_shadow = normalize_shadow_shape(src_global.get("shadow_shape"))
         current_adjustment = src_global
         crop_rect = src.crop_rect if src is not None else None
         crop_angle = getattr(src, "crop_angle", 0.0) if src is not None else 0.0
@@ -2837,9 +2931,11 @@ class SlidersPanel(QWidget):
             org_changes = sync_org_shape and own_org != src_org
             own_gold = normalize_golden_shape(img.adjustment_settings.get("golden_shape"))
             gold_changes = sync_org_shape and own_gold != src_gold
+            own_shadow = normalize_shadow_shape(img.adjustment_settings.get("shadow_shape"))
+            shadow_changes = sync_org_shape and own_shadow != src_shadow
             if (not adj_changes and not crop_changes and not profile_changes
                     and not curves_changes and not orient_changes and not shape_changes
-                    and not org_changes and not gold_changes):
+                    and not org_changes and not gold_changes and not shadow_changes):
                 continue  # nothing to change — and no dead undo snapshot
             img.push_undo_state()
             if adj_changes:
@@ -2863,6 +2959,8 @@ class SlidersPanel(QWidget):
                     merged["organics_shape"] = dict(own_org)
                 if own_gold and not gold_changes:
                     merged["golden_shape"] = dict(own_gold)
+                if own_shadow and not shadow_changes:
+                    merged["shadow_shape"] = dict(own_shadow)
                 # Same for the Cineon flag when the channels group (which
                 # carries it) is NOT being synced — the rebuild from
                 # adjustment_keys would silently drop it otherwise.
@@ -2885,6 +2983,11 @@ class SlidersPanel(QWidget):
                     img.adjustment_settings["golden_shape"] = dict(src_gold)
                 else:
                     img.adjustment_settings.pop("golden_shape", None)
+            if shadow_changes:
+                if src_shadow:
+                    img.adjustment_settings["shadow_shape"] = dict(src_shadow)
+                else:
+                    img.adjustment_settings.pop("shadow_shape", None)
             if curves_changes:
                 if src_curves:
                     img.adjustment_settings["curves"] = copy.deepcopy(src_curves)
@@ -3719,6 +3822,8 @@ class SlidersPanel(QWidget):
                 live["organics_shape"] = g["organics_shape"]
             if g.get("golden_shape"):
                 live["golden_shape"] = g["golden_shape"]
+            if g.get("shadow_shape"):
+                live["shadow_shape"] = g["shadow_shape"]
             for flag in GLOBAL_FLAG_KEYS:
                 if g.get(flag):
                     live[flag] = g[flag]
@@ -3731,6 +3836,7 @@ class SlidersPanel(QWidget):
             "organics_shape": copy.deepcopy(
                 normalize_organics_shape(live.get("organics_shape"))),
             "golden_shape": copy.deepcopy(normalize_golden_shape(live.get("golden_shape"))),
+            "shadow_shape": copy.deepcopy(normalize_shadow_shape(live.get("shadow_shape"))),
             # Bypass-until-export flags ride with their section's paste row.
             "flags": {f: bool(live.get(f)) for f in GLOBAL_FLAG_KEYS
                       if f not in ("cineon_log", "look_lut")},
@@ -3848,7 +3954,8 @@ class SlidersPanel(QWidget):
         flag_for = {"noise": "chroma_nr_export_only", "sharpen": "sharpen_export_only"}
         touch_adj = (bool(adj_keys) or "curves" in chosen or "cineon_log" in chosen
                      or "look_lut" in chosen or "xtone_shape" in chosen
-                     or "organics_shape" in chosen or "golden_shape" in chosen)
+                     or "organics_shape" in chosen or "golden_shape" in chosen
+                     or "shadow_shape" in chosen)
         merged = None
         if touch_adj:
             # Build a COMPLETE dict from the target (missing keys filled with
@@ -3877,6 +3984,10 @@ class SlidersPanel(QWidget):
                 merged["golden_shape"] = copy.deepcopy(clip["golden_shape"])
             elif normalize_golden_shape(target.get("golden_shape")):
                 merged["golden_shape"] = target["golden_shape"]
+            if "shadow_shape" in chosen and clip.get("shadow_shape"):
+                merged["shadow_shape"] = copy.deepcopy(clip["shadow_shape"])
+            elif normalize_shadow_shape(target.get("shadow_shape")):
+                merged["shadow_shape"] = target["shadow_shape"]
             if "cineon_log" in chosen or target.get("cineon_log"):
                 merged["cineon_log"] = True
             if "look_lut" in chosen and clip.get("look_lut"):
@@ -3909,6 +4020,8 @@ class SlidersPanel(QWidget):
                 self._update_xtone_labels()
                 self._golden_shape = normalize_golden_shape(merged.get("golden_shape"))
                 self._update_golden_label()
+                self._shadow_shape = normalize_shadow_shape(merged.get("shadow_shape"))
+                self._update_shadow_label()
 
         pixels = touch_adj
         if "profile" in chosen:
