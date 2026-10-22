@@ -141,3 +141,17 @@ hence the cap). The scale is exactly 1.0 at the default reach, so default
 renders are byte-identical; frames with a custom reach render somewhat
 stronger than before (the user's choice). The kernel gets the scale folded
 into the amount (`params[27]`), matching `_apply_colour_organics`.
+
+
+## Revision 2026-10-22: Reach to 80 %
+
+Asked to extend Reach again. Measured (mean hue move over the circle, full
+amount): with the depth held, the pull peaks at about 60-70 % (6.1 deg) and
+falls beyond (5.6 deg at 80 %), because the families' windows already cover
+most of their spans. So past `ORGANICS_REACH_FIRM` (60 %) the centre also
+firms: its slope falls linearly from the held 0.40 to `ORGANICS_FIRM_SLOPE`
+(0.26) at 80 %, with `s = (1 - slope) / (1 - w)`. The pull then keeps rising,
+to about 6.9 deg at 80 % (+13 % over 60 %), monotone throughout (minimum slope
+= that centre slope). Reach 10-60 % renders exactly as before. A separate
+Strength control was offered as the bigger lever (+50 % pull at 150 %) and
+declined for now.

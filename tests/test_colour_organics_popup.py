@@ -213,10 +213,10 @@ def _hdiff2(a, b):
     return (np.asarray(a, np.float64) - np.asarray(b, np.float64) + 180.0) % 360.0 - 180.0
 
 
-def test_reach_range_is_10_to_60():
+def test_reach_range_is_10_to_80():
     from core.ccr_processor import ORGANICS_REACH_MIN, ORGANICS_REACH_MAX
-    assert (ORGANICS_REACH_MIN, ORGANICS_REACH_MAX) == (10, 60)
-    assert normalize_organics_shape({"reach": 99})["reach"] == 60
+    assert (ORGANICS_REACH_MIN, ORGANICS_REACH_MAX) == (10, 80)
+    assert normalize_organics_shape({"reach": 99})["reach"] == 80
 
 
 def test_strength_scale_is_exactly_one_at_the_default():
@@ -231,21 +231,35 @@ def test_more_reach_is_wider_and_stronger_and_stays_monotone():
     from core.ccr_processor import (organics_anchors, organics_hue_map,
                                     organics_strength_scale, organics_width)
     h = np.linspace(0, 360, 36001)[:-1].astype(np.float32)
+    from core.ccr_processor import ORGANICS_FIRM_SLOPE
+    held = 1 - ORGANICS_STRENGTH * (1 - 0.3)
     pulls = []
-    for reach in (10, 30, 45, 60):
+    for reach, centre in ((10, held), (30, held), (45, held), (60, held),
+                          (70, (held + ORGANICS_FIRM_SLOPE) / 2),
+                          (80, ORGANICS_FIRM_SLOPE)):
         shape = {"reach": reach}
         s = ORGANICS_STRENGTH * organics_strength_scale(shape)
         m = organics_hue_map(h, s, organics_anchors(shape), organics_width(shape))
         step = _hdiff2(np.roll(m, -1), m)[:-1] / 0.01
         assert step.min() > 0                                  # never reorders hues
-        assert step.min() == pytest.approx(1 - ORGANICS_STRENGTH * (1 - 0.3), abs=0.02)
+        assert step.min() == pytest.approx(centre, abs=0.02), reach
         pulls.append(np.abs(_hdiff2(m, h)).mean())
-    assert pulls == sorted(pulls) and pulls[-1] > 1.3 * pulls[1]
+    assert pulls == sorted(pulls)                              # more reach, more pull
+    assert pulls[3] > 1.3 * pulls[1]                           # 60 % vs the default
+    assert pulls[5] > 1.08 * pulls[3]                          # 80 % vs 60 %
 
 
-def test_reach_60_gpu_matches_cpu():
+def test_the_firming_joins_smoothly_at_60():
+    from core.ccr_processor import organics_strength_scale
+    a = organics_strength_scale({"reach": 60})
+    b = organics_strength_scale({"reach": 61})
+    assert b > a and (b - a) / a < 0.1
+
+
+@pytest.mark.parametrize("reach", [60, 80])
+def test_long_reach_gpu_matches_cpu(reach):
     img = _img(5)
-    shape = {"reach": 60}
+    shape = {"reach": reach}
     cpu = adjust_image(img, colour_organics=100, organics_shape=shape)
     gpu = adjust_image_opencl(img, colour_organics=100, organics_shape=shape)
     np.testing.assert_allclose(cpu.astype(np.int64), gpu.astype(np.int64), atol=3)

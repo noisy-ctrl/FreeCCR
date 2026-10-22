@@ -3522,10 +3522,17 @@ ORGANICS_ANCHORS = tuple(h for *_rest, h in ORGANICS_FAMILIES)
 ORGANICS_STRENGTH = 0.85       # slope at an anchor at full: 1 - 0.85 (1 - w) = 0.40
 ORGANICS_WIDTH = 0.3           # each anchor's pull reaches 30 % into its spans
 ORGANICS_SHIFT_MAX = 20        # popup: hue nudge per family, degrees
-# Popup: reach, percent. Up to 60 since the depth is held constant (see
-# organics_strength_scale); with the old fixed strength anything past ~45 made
-# the pull WEAKER (and it vanished at 100), because a wider window thinned it.
-ORGANICS_REACH_MIN, ORGANICS_REACH_MAX = 10, 60
+# Popup: reach, percent. Up to 80 since the depth is held constant to 60 % and
+# firmed beyond it (see organics_strength_scale); with the old fixed strength
+# anything past ~45 made the pull WEAKER (and it vanished at 100), because a
+# wider window thinned it.
+ORGANICS_REACH_MIN, ORGANICS_REACH_MAX = 10, 80
+# Past ORGANICS_REACH_FIRM the families' windows already cover most of their
+# spans, so holding the depth alone would make the pull FALL again; from there
+# the centre's slope is lowered linearly to ORGANICS_FIRM_SLOPE at the maximum
+# reach, so the top of the slider still adds pull (about 13 % more at 80 %).
+ORGANICS_REACH_FIRM = 0.60
+ORGANICS_FIRM_SLOPE = 0.26
 _ORG_GATE_LO, _ORG_GATE_HI = 0.06, 0.20     # the colour bands' grey gate
 
 ORGANICS_SHAPE_DEFAULT = {"reach": int(round(ORGANICS_WIDTH * 100))}
@@ -3579,7 +3586,16 @@ def organics_strength_scale(shape=None) -> float:
     w0 = np.float32(ORGANICS_WIDTH)
     if w == w0:
         return 1.0
-    return float((np.float32(1.0) - w0) / (np.float32(1.0) - w))
+    if w <= np.float32(ORGANICS_REACH_FIRM):
+        return float((np.float32(1.0) - w0) / (np.float32(1.0) - w))
+    # Past ORGANICS_REACH_FIRM: the centre's slope falls linearly from the
+    # held depth to ORGANICS_FIRM_SLOPE at the maximum reach (revision
+    # 2026-10-22), continuous with the held-depth branch at the joint.
+    held = 1.0 - ORGANICS_STRENGTH * (1.0 - ORGANICS_WIDTH)
+    top = ORGANICS_REACH_MAX / 100.0
+    f = (float(w) - ORGANICS_REACH_FIRM) / (top - ORGANICS_REACH_FIRM)
+    slope = held - f * (held - ORGANICS_FIRM_SLOPE)
+    return float((1.0 - slope) / (1.0 - float(w)) / ORGANICS_STRENGTH)
 
 
 def _organics_table(anchors):

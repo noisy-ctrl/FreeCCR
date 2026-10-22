@@ -17,7 +17,8 @@ INTRO = ("Hues near each family are drawn together. Switch a family off to "
          "leave its colours alone, or nudge where its centre sits.")
 REACH_TIP = ("How far each family's pull reaches towards its neighbours. "
              "Further gathers more colours into each family, just as firmly "
-             "at its centre, so the effect grows all the way to 60 %.")
+             "at its centre (firmer still past 60 %), so the effect grows "
+             "all the way to 80 %.")
 
 
 def describe_organics(shape):
