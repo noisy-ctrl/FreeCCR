@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (QFrame, QWidget, QVBoxLayout, QHBoxLayout, QLabel
 from core.x_tones import XTONE_SHAPE_DEFAULT, grey_curve, normalize_xtone_shape
 from ui import theme
 
-TOOL_NAMES = {"hx": "Highlights \u00d7", "sx": "Shadows \u00d7", "px": "Punch \u00d7"}
+TOOL_NAMES = {"hx": "Highlights L", "sx": "Shadows \u2143", "px": "Punch \u00d7"}
 SLIDER_KEYS = {"hx": "highlights_x", "sx": "shadows_x", "px": "punch_x"}
 # Which options each tool has: (option key, label, tooltip)
 RANGE_TIPS = {

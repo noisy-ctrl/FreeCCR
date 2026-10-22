@@ -282,7 +282,7 @@ def test_three_sliders_after_black_point(panel):
     i = keys.index("black_point")
     assert keys[i + 1:i + 4] == ["highlights_x", "shadows_x", "punch_x"]
     assert keys[i + 4] == "contrast"
-    for key, text in (("highlights_x", "Highlights ×"), ("shadows_x", "Shadows ×"),
+    for key, text in (("highlights_x", "Highlights L"), ("shadows_x", "Shadows ⅃"),
                       ("punch_x", "Punch ×")):
         lbl, slider = _row_label(panel, key)
         assert lbl.text() == text

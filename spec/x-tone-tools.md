@@ -1,4 +1,9 @@
-# Highlights × / Shadows × / Punch × (the measured tone tools)
+# Highlights L / Shadows ⅃ / Punch × (the measured tone tools)
+
+Renamed 2026-10-22: the sliders were labelled Highlights × and Shadows ×; they are now
+**Highlights L** and **Shadows ⅃** (U+2143, a reversed L). Only the labels changed: the
+keys stay `highlights_x` / `shadows_x`, so catalogs and copied settings are unaffected.
+Below, "Highlights ×" and "Shadows ×" mean these two.
 
 Three sliders that do what the measured **Lights**, **Darks** and **Punch** do,
 measured from the measured exports, with right-click options. Highlights and
@@ -129,7 +134,7 @@ numpy helper) and the three tools run in numpy and are zeroed for the kernel
 
 ## UI
 
-Three sliders, labels "Highlights ×", "Shadows ×", "Punch ×", under Black
+Three sliders, labels "Highlights L", "Shadows ⅃", "Punch ×", under Black
 Point. Label tooltip: what the tool does + "Right-click: options"; underlined
 when options are not default. Popup (`widgets/x_tone_popup.py`): the
 options above, a curve preview (the tool on the grey axis at the current
