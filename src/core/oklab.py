@@ -39,10 +39,15 @@ def to_oklab(rgb):
     return np.cbrt(_lin(rgb) @ _M1.T) @ _M2.T
 
 
-def from_oklab(lab):
-    """OKLab -> display RGB, float32 (not clipped)."""
+def to_linear(lab):
+    """OKLab -> LINEAR RGB, float32, unclamped (out-of-gamut values show)."""
     lms = lab @ _M2i.T
-    return _enc((lms * lms * lms) @ _M1i.T)
+    return (lms * lms * lms) @ _M1i.T
+
+
+def from_oklab(lab):
+    """OKLab -> display RGB, float32 (a negative linear value encodes as 0)."""
+    return _enc(to_linear(lab))
 
 
 def smooth(x):
@@ -51,26 +56,31 @@ def smooth(x):
     return x * x * (3.0 - 2.0 * x)
 
 
-def outside(rgb):
-    return (rgb < -1e-4).any(axis=1) | (rgb > 1.0 + 1e-4).any(axis=1)
+def outside(lin):
+    """True where a LINEAR RGB value leaves 0..1 (by more than ~1 16-bit code
+    once encoded). Tested in linear light because the display encoding
+    floors negatives at 0, which would hide a channel pushed below black."""
+    return (lin < -1e-6).any(axis=1) | (lin > 1.0 + 1e-5).any(axis=1)
 
 
-def fit_move(out, lab, d, steps=FIT_STEPS):
-    """`out` = from_oklab(lab + d). Where that leaves 0..1, use the largest
-    fraction of the move that stays inside (bisection): nothing is clipped, so
-    no channel flattens and no hue twists. Returns `out`, fixed in place."""
-    bad = outside(out)
+def fit_move(lab, d, steps=FIT_STEPS):
+    """Display RGB of `lab + d`, or, where that leaves 0..1, of the largest
+    fraction of the move that stays inside (bisection in linear light):
+    nothing is clipped, so no channel flattens and no hue twists. (A
+    regula-falsi variant was tried: slower here and less exact.)"""
+    lin = to_linear(lab + d)
+    bad = outside(lin)
     if bad.any():
         lb, db = lab[bad], d[bad]
         lo = np.zeros(len(lb), np.float32)
         hi = np.ones(len(lb), np.float32)
         for _ in range(steps):
             mid = 0.5 * (lo + hi)
-            ok = ~outside(from_oklab(lb + mid[:, None] * db))
+            ok = ~outside(to_linear(lb + mid[:, None] * db))
             lo = np.where(ok, mid, lo)
             hi = np.where(ok, hi, mid)
-        out[bad] = from_oklab(lb + lo[:, None] * db)
-    return out
+        lin[bad] = to_linear(lb + lo[:, None] * db)
+    return _enc(lin)
 
 
 # --- The decision map --------------------------------------------------------
@@ -91,7 +101,7 @@ SIGMA_SPACE = 1.5           # px at DECISION_LONG (scaled for smaller renders)
 SIGMA_COLOR = 0.05          # OKLab (L1 over L, a, b): grain averages, edges stay
 
 
-def decision_lab(img01, with_full=False):
+def decision_lab(img01, with_full=False, sigma_space=None):
     """OKLab of `img01` (HxWx3 float, 0..1) at the decision resolution,
     bilateral-smoothed: an hxwx3 float32 array (h, w <= H, W). With
     `with_full`, also the render's own per-pixel OKLab (HxWx3) when it was
@@ -107,7 +117,8 @@ def decision_lab(img01, with_full=False):
     lab = np.ascontiguousarray(to_oklab(a.reshape(-1, 3)).reshape(a.shape),
                                dtype=np.float32)
     full = lab if long_side <= DECISION_LONG else None
-    sigma = SIGMA_SPACE * min(1.0, long_side / DECISION_LONG)
+    sigma = (SIGMA_SPACE if sigma_space is None else sigma_space) * \
+        min(1.0, long_side / DECISION_LONG)
     if sigma >= 0.5 and min(lab.shape[:2]) >= 3:
         d = 2 * int(np.ceil(2.0 * sigma)) + 1
         smooth_lab = cv2.bilateralFilter(lab, d, SIGMA_COLOR, sigma)

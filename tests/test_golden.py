@@ -115,6 +115,30 @@ def test_ramps_are_smooth_and_keep_their_order(tint):
     assert np.abs(np.diff(chroma)).max() < 0.0015                    # no steps: no banding
 
 
+@pytest.mark.parametrize("rgb", [(0.93, 0.89, 0.80), (0.90, 0.89, 0.87), (0.86, 0.84, 0.80),
+                                 (0.92, 0.90, 0.88)])
+def test_grain_is_not_stretched(rgb):
+    """How much gold a pixel gets is decided on the denoised view, so the gold
+    is a smooth field and a sunlit area's colour grain comes through all but
+    as it was, even near-white with heavy grain at 100 (deciding per pixel gave
+    a warmer-by-chance speck more gold: 1.5-1.7x on real scans at 60, 2-4x
+    on this patch)."""
+    rng = np.random.default_rng(5)
+    lab0 = _lab(rgb)[0]
+    shape = (540, 1080)                      # preview size: the decision's own scale
+    lab = np.empty(shape + (3,), np.float32)
+    lab[..., 0] = lab0[0] + rng.normal(0, 0.006, shape)
+    lab[..., 1] = lab0[1] + rng.normal(0, 0.004, shape)    # heavy colour grain
+    lab[..., 2] = lab0[2] + rng.normal(0, 0.004, shape)
+    img = np.clip(gd.from_oklab(lab.reshape(-1, 3)), 0, 1).reshape(lab.shape)
+    a = _lab(img).reshape(lab.shape)
+    b = _lab(gd.apply_golden(img, 100)).reshape(lab.shape)
+    assert np.hypot(*(b[..., 1:].mean((0, 1)) - a[..., 1:].mean((0, 1)))) > 0.002   # it acted
+    for ch in (1, 2):
+        assert (b[..., ch] - b[..., ch].mean()).std() < 1.10 * (a[..., ch] - a[..., ch].mean()).std()
+    np.testing.assert_allclose(b[..., 0], a[..., 0], atol=2e-3)
+
+
 def test_options_are_normalised():
     assert gd.normalize_golden_shape(dict(gd.GOLDEN_SHAPE_DEFAULT)) is None
     assert gd.normalize_golden_shape({"hue": 200}) == dict(gd.GOLDEN_SHAPE_DEFAULT, hue=95)

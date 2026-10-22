@@ -110,8 +110,7 @@ def _chunk(x, m, k, shape, lab=None):
     new[:, 0] = lm[:, 0] * s[moved] if shape["depth"] else lm[:, 0]
     new[:, 1] = lm[:, 1] * fm
     new[:, 2] = lm[:, 2] * fm
-    res = from_oklab(new)
-    out[moved] = np.clip(fit_move(res, lm, new - lm), 0.0, 1.0)
+    out[moved] = np.clip(fit_move(lm, new - lm), 0.0, 1.0)
     return out
 
 

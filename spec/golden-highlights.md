@@ -36,6 +36,38 @@ halos round wires and branches against the sky, which is worse than the limit.
 Where it matters, raise Start or lower the amount; "Show where it acts" shows
 exactly what is affected.
 
+## Revision 3 (2026-10-22): grain must not steer it
+
+Checked against the image-quality rules (CLAUDE.md, "Finishing tools must
+keep the picture's quality"): revision 2 decided the gold per pixel, so a
+grain speck that happened to be warmer got more gold — colour grain where it
+acts rose **1.5–1.7× at 60 and ~2–2.4× at 100** on the lab scans and the
+user's conversions. Now:
+
+- how much gold each pixel gets is **decided on the decision view**
+  (`core.oklab.decision_lab`, shared with Shadow Neutralise: the render at the
+  preview's resolution, OKLab, bilateral) with a wider spatial σ (3 px at
+  1080; the gold gate is steep in colour), then scaled back to the render's
+  size and **added to each pixel's own colour** — the gold is a smooth field,
+  so the grain comes through as it was;
+- the grey → sunlit hand-off is widened from C 0.004–0.012 to **0–0.03**: a
+  hue read off a near-grey is mostly grain, and the steep hand-off let grain
+  decide even on the smoothed view (2–4× on a heavy-grain near-white patch);
+- the gamut fit is tested in **linear light** (`fit_move`): the display
+  encoding floors negatives at 0, so a channel pushed below black used to be
+  clipped silently instead of the move being shortened.
+
+Measured: on flat areas of the five lab scans and two conversions, colour
+grain where it acts is now 1.00–1.01× at 60 (a high-pass measure over the
+whole acting area reads up to 1.07×: edges, where a gilded surface meets an
+ungilded one); a near-white patch with heavy synthetic grain stays ≤ 1.10× at
+100. Selection is unchanged (cream 0.31, pale stone 0.50, skin 0, pale sky 0,
+plain grey 0.09); a warm near-white takes a little less (0.125 → 0.087). Gold
+on pale skin 1 px from a cream edge is ~1 % of the cream's.
+
+Cost: ~0.2–0.5 s per 1080 preview render in the 2-thread test container
+(the bilateral and the gamut fit near white dominate).
+
 ## Why a tool of its own
 
 - **Not Colour Organics.** Organics turns the hue of colours that are already
@@ -83,13 +115,15 @@ On display values, sRGB-encoded, in OKLab (float32 throughout):
   centred on 88° with half-width 30° (0.5 at ±15°, 0 beyond ±30°): warm,
   low-colour tones only;
 - a grey has no reliable hue, so the colour weight blends from the Neutral
-  whites share (C < 0.004) to the sunlit gate (C > 0.012) with a smoothstep,
-  so near-greys can't speckle;
+  whites share (C 0) to the sunlit gate (C 0.03) with a smoothstep (revision
+  3; it was 0.004–0.012);
 - add `amount/100 · 0.06 · w · col` of chroma along the gold hue to (a, b) at
   **unchanged L**, so highlights stay as bright as they were;
+- the weights above are read on the decision view (revision 3), the chroma is
+  added to each pixel's own colour;
 - back to RGB; a pixel that would leave 0..1 gets the largest fraction of its
-  shift that stays inside (bisection): no clipped channels, no hue twist,
-  never darker;
+  shift that stays inside (12-step bisection in linear light): no clipped
+  channels, no hue twist, never darker;
 - pixels with zero weight are returned **exactly** (no OKLab round trip).
 
 Every weight is a smooth function of colour, so gradients cannot band.
@@ -117,7 +151,9 @@ appended LAST to `adjust_image` / `adjust_image_opencl`.
 
 ## Tests (`tests/test_golden.py`)
 
-0 is a byte-identical no-op; shadows and midtones untouched; sunlit cream
+0 is a byte-identical no-op; shadows and midtones untouched; colour grain on
+a noisy sunlit / near-white patch at preview size doesn't grow (≤ 1.10× at
+100); sunlit cream
 gains chroma towards the gold hue with L unchanged (±0.002); skin (pale,
 light, tanned), sky (pale, deep), foliage, red, yellow get under a tenth of
 what cream gets; plain greys get the Neutral whites share; output stays in
