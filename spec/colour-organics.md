@@ -155,3 +155,16 @@ to about 6.9 deg at 80 % (+13 % over 60 %), monotone throughout (minimum slope
 = that centre slope). Reach 10-60 % renders exactly as before. A separate
 Strength control was offered as the bigger lever (+50 % pull at 150 %) and
 declined for now.
+
+
+## Revision 2026-10-22 (b): the main slider to 150
+
+The Strength lever, on the main slider: Colour Organics now runs 0–150.
+`organics_strength(amount, shape)` = amount/100 × 0.85 × the reach's scale,
+capped so the centre's slope `1 - s (1 - w)` never goes below
+`ORGANICS_MIN_CENTRE_SLOPE` (0.10): the warp stays monotone, so hues never
+swap order and gradients cannot band. At 30–60 % reach, 150 brings the centre
+slope to about 0.11 (mean pull about 1.5× that at 100); at 80 % reach the cap
+binds above roughly 130. Up to 100 the cap never binds, so existing edits
+render exactly as before. The kernel receives the capped strength folded back
+into an amount (`params[27]`), matching `_apply_colour_organics`.

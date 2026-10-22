@@ -272,3 +272,56 @@ def test_default_reach_renders_exactly_as_before():
     a = adjust_image(img, colour_organics=70)
     b = adjust_image(img, colour_organics=70, organics_shape={"reach": 30})
     assert np.array_equal(a, b)
+
+
+# --- The main slider to 150 (revision 2026-10-22) -------------------------------
+
+def test_slider_runs_to_150(panel):
+    from core.ccr_processor import ORGANICS_AMOUNT_MAX
+    assert ORGANICS_AMOUNT_MAX == 150
+    i = panel.adjustment_keys.index("colour_organics")
+    assert panel.sliders[i].value_range() == (0, 150)
+
+
+def test_up_to_100_nothing_changes():
+    from core.ccr_processor import organics_strength, organics_strength_scale
+    for reach in (10, 30, 45, 60, 70, 80):
+        shape = {"reach": reach}
+        for amount in (0, 25, 70, 100):
+            assert organics_strength(amount, shape) == (
+                amount / 100.0 * ORGANICS_STRENGTH * organics_strength_scale(shape))
+
+
+@pytest.mark.parametrize("reach", [10, 30, 60, 80])
+def test_150_deepens_and_never_reorders_hues(reach):
+    from core.ccr_processor import (ORGANICS_MIN_CENTRE_SLOPE, organics_anchors,
+                                    organics_hue_map, organics_strength,
+                                    organics_width)
+    shape = {"reach": reach}
+    h = np.linspace(0, 360, 36001)[:-1].astype(np.float32)
+    pulls = []
+    for amount in (100, 150):
+        m = organics_hue_map(h, organics_strength(amount, shape),
+                             organics_anchors(shape), organics_width(shape))
+        step = _hdiff2(np.roll(m, -1), m)[:-1] / 0.01
+        assert step.min() > ORGANICS_MIN_CENTRE_SLOPE - 0.02     # monotone
+        pulls.append(np.abs(_hdiff2(m, h)).mean())
+    assert pulls[1] > 1.15 * pulls[0]                            # 150 pulls harder
+
+
+def test_the_cap_binds_only_at_long_reach():
+    from core.ccr_processor import organics_strength, organics_width
+    for reach, capped in ((30, False), (60, False), (80, True)):
+        shape = {"reach": reach}
+        s = organics_strength(150, shape)
+        centre = 1 - s * (1 - organics_width(shape))
+        assert (abs(centre - 0.10) < 1e-9) == capped, reach
+
+
+@pytest.mark.parametrize("reach", [30, 80])
+def test_150_gpu_matches_cpu(reach):
+    img = _img(5)
+    shape = {"reach": reach}
+    cpu = adjust_image(img, colour_organics=150, organics_shape=shape)
+    gpu = adjust_image_opencl(img, colour_organics=150, organics_shape=shape)
+    np.testing.assert_allclose(cpu.astype(np.int64), gpu.astype(np.int64), atol=3)

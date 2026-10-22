@@ -191,7 +191,9 @@ def test_no_slider_spans_the_old_gain_range(panel):
         # positions span +-200 for +-100 (spec/printer-lights.md, half points).
         lo, hi = slider.value_range()
         assert lo >= -100, key
-        assert hi <= 100, key
+        # Colour Organics deliberately runs to 150 (spec/colour-organics.md,
+        # 2026-10-22); still nowhere near the old +-200.
+        assert hi <= (150 if key == "colour_organics" else 100), key
 
 
 def test_exposure_dropped_from_the_tone_sync_group():

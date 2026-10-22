@@ -3533,6 +3533,12 @@ ORGANICS_REACH_MIN, ORGANICS_REACH_MAX = 10, 80
 # reach, so the top of the slider still adds pull (about 13 % more at 80 %).
 ORGANICS_REACH_FIRM = 0.60
 ORGANICS_FIRM_SLOPE = 0.26
+# The main slider runs to 150 (revision 2026-10-22). Past 100 the pull
+# deepens; the centre's slope is never allowed below ORGANICS_MIN_CENTRE_SLOPE,
+# which keeps the warp monotone (hues never swap order, so no banding). That
+# floor only binds at long reach above ~130; up to 100 nothing is capped.
+ORGANICS_AMOUNT_MAX = 150
+ORGANICS_MIN_CENTRE_SLOPE = 0.10
 _ORG_GATE_LO, _ORG_GATE_HI = 0.06, 0.20     # the colour bands' grey gate
 
 ORGANICS_SHAPE_DEFAULT = {"reach": int(round(ORGANICS_WIDTH * 100))}
@@ -3598,6 +3604,16 @@ def organics_strength_scale(shape=None) -> float:
     return float((1.0 - slope) / (1.0 - float(w)) / ORGANICS_STRENGTH)
 
 
+def organics_strength(amount, shape=None) -> float:
+    """The warp strength for slider `amount` (0..ORGANICS_AMOUNT_MAX) and a
+    shape: amount/100 x ORGANICS_STRENGTH x the reach's scale, capped so the
+    centre's slope 1 - s (1 - w) stays at least ORGANICS_MIN_CENTRE_SLOPE.
+    The cap never binds at 100 or below, so those renders are unchanged."""
+    s = float(amount) / 100.0 * ORGANICS_STRENGTH * organics_strength_scale(shape)
+    cap = (1.0 - ORGANICS_MIN_CENTRE_SLOPE) / (1.0 - organics_width(shape))
+    return cap if s > cap else s
+
+
 def _organics_table(anchors):
     return np.array(list(anchors) + [anchors[0] + 360.0], np.float32)
 
@@ -3660,8 +3676,7 @@ def _apply_colour_organics(img_norm: np.ndarray, amount: float,
     hue = np.where(ms == r, 60.0 * np.mod((g - b) / cs + 6.0, 6.0),
           np.where(ms == g, 60.0 * ((b - r) / cs + 2.0),
                             60.0 * ((r - g) / cs + 4.0))).astype(np.float32)
-    scale = organics_strength_scale(shape)
-    h2 = organics_hue_map(hue, np.float32(amount / 100.0 * ORGANICS_STRENGTH * scale)
+    h2 = organics_hue_map(hue, np.float32(organics_strength(amount, shape))
                           * gate[sel],
                           anchors, organics_width(shape))
     # the fully saturated colour of hue h2
@@ -4579,9 +4594,12 @@ def adjust_image_opencl(
             band_active,
             vibrance,
             sat_rolloff,
-            # The amount carries the reach's depth-holding scale (exactly 1 at
-            # the default reach), matching _apply_colour_organics.
-            colour_organics * organics_strength_scale(organics_shape),
+            # The amount carries the reach's scale and the centre-slope cap
+            # (both exact no-ops at the default reach and <= 100), matching
+            # _apply_colour_organics: the kernel multiplies it back by
+            # ORGANICS_STRENGTH / 100.
+            (organics_strength(colour_organics, organics_shape)
+             / ORGANICS_STRENGTH * 100.0 if colour_organics else 0.0),
             *_organics_params(organics_shape),
         ], dtype=np.float32)
 

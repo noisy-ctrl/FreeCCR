@@ -1161,12 +1161,14 @@ class SlidersPanel(QWidget):
         # protected. Created right after Saturation (ADJUSTMENT_KEYS zip).
         self.vibrance_slider_layout = self.create_slider("Vibrance")
         self.sub_saturation_slider_layout = self.create_slider("Subtracted Sat")
-        # Colour Organics: hues drawn into print families, 0..100. Its
+        # Colour Organics: hues drawn into print families, 0..150 (past 100
+        # the pull deepens, capped so hues never swap order). Its
         # explanation is the label's tooltip (no line in the panel).
         # Created right after Subtracted Sat (ADJUSTMENT_KEYS zip).
         # spec/colour-organics.md
+        from core.ccr_processor import ORGANICS_AMOUNT_MAX
         self.colour_organics_slider_layout = self.create_slider(
-            "Colour Organics", min_value=0, max_value=100)
+            "Colour Organics", min_value=0, max_value=ORGANICS_AMOUNT_MAX)
         # Right-click the label for the families and their reach
         # (spec/colour-organics.md, popup revision).
         self._organics_shape = None      # active layer's shape (None = default)
