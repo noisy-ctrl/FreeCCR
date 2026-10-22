@@ -18,7 +18,7 @@ from core.ccr_processor import (adjust_image, adjust_image_opencl,  # noqa: E402
                                 normalize_organics_shape, organics_anchors,
                                 organics_width, organics_hue_map,
                                 ORGANICS_SHAPE_DEFAULT, ORGANICS_STRENGTH)
-from test_tone_range import _Img, _wire, _Stub, _img  # noqa: E402
+from test_x_tones import _Img, _wire, _Stub, _img  # noqa: E402
 
 FULL = ORGANICS_STRENGTH
 SHAPE = {"warm_shift": -12, "sky_on": False, "reach": 40}

@@ -27,6 +27,7 @@ build-windows: install-deps install-nuitka
 	$(PYTHON) write_version.py
 	MACOSX_DEPLOYMENT_TARGET=10.15 $(PYTHON) -m nuitka --mingw64 --clang --standalone --include-package=numpy --enable-plugin=pyside6 \
 	--include-data-dir=src/icons=icons --windows-icon-from-ico=src/icons/freeccr_logo.ico \
+	--include-data-files=src/core/x_tones.npz=core/x_tones.npz \
 	--include-data-dir=LICENSES=LICENSES \
 	--windows-console-mode=attach --output-filename=FreeCCR \
 	src/main.py

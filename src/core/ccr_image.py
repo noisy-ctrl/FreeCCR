@@ -2086,9 +2086,6 @@ class CCRImage:
                      self.tint_balance_factor,
                      highlights=s.get('highlights', 0),
                      shadows=s.get('shadows', 0),
-                     # Range / keep-endpoint shape of the two tools
-                     # (spec/highlights-shadows-range.md); per layer.
-                     tone_shape=s.get('tone_shape'),
                      ch_input_gain=s.get('ch_input_gain', 0),
                      ch_master_shift=s.get('ch_master_shift', 0),
                      # Auto Gain rides Master Gain: ADDED to the user's value, so
@@ -2109,6 +2106,12 @@ class CCRImage:
                      sat_rolloff=s.get('sat_rolloff', 0),
                      colour_organics=s.get('colour_organics', 0),
                      organics_shape=s.get('organics_shape'),
+                     # Highlights x / Shadows x / Punch x and their options
+                     # (spec/x-tone-tools.md); per layer.
+                     highlights_x=s.get('highlights_x', 0),
+                     shadows_x=s.get('shadows_x', 0),
+                     punch_x=s.get('punch_x', 0),
+                     xtone_shape=s.get('xtone_shape'),
                      # Per-color-band sliders ride the same GPU pass (or the
                      # CPU fallback); None keeps the inactive case free.
                      band_settings=(s if any(s.get(k, 0)
@@ -2220,9 +2223,6 @@ class CCRImage:
                      self.tint_balance_factor,
                      highlights=s.get('highlights', 0),
                      shadows=s.get('shadows', 0),
-                     # Range / keep-endpoint shape of the two tools
-                     # (spec/highlights-shadows-range.md); per layer.
-                     tone_shape=s.get('tone_shape'),
                      ch_input_gain=s.get('ch_input_gain', 0),
                      ch_master_shift=s.get('ch_master_shift', 0),
                      ch_master_gain=s.get('ch_master_gain', 0),
@@ -2240,6 +2240,12 @@ class CCRImage:
                      sat_rolloff=s.get('sat_rolloff', 0),
                      colour_organics=s.get('colour_organics', 0),
                      organics_shape=s.get('organics_shape'),
+                     # Highlights x / Shadows x / Punch x and their options
+                     # (spec/x-tone-tools.md); per layer.
+                     highlights_x=s.get('highlights_x', 0),
+                     shadows_x=s.get('shadows_x', 0),
+                     punch_x=s.get('punch_x', 0),
+                     xtone_shape=s.get('xtone_shape'),
                      balance_r=s.get('balance_r', 0),
                      balance_g=s.get('balance_g', 0),
                      balance_b=s.get('balance_b', 0),

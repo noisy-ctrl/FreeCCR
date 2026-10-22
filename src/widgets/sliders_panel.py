@@ -10,8 +10,8 @@ from core.ccr_backend import ccr_backend
 from utils.qt_threads import WorkerThread
 from core.ccr_processor import (COLOR_BANDS, BAND_PARAMS, BAND_ADJUSTMENT_KEYS,
                                 compute_density_slopes, CHROMA_NR_RADIUS_DEFAULT,
-                                normalize_tone_shape, TONE_SHAPE_DEFAULT,
                                 normalize_organics_shape)
+from core.x_tones import normalize_xtone_shape, XTONE_SHAPE_DEFAULT
 from core.film_stocks import (decode_film_stocks, encode_film_stocks,
                               find_film_stock, upsert_film_stock,
                               remove_film_stock)
@@ -40,7 +40,8 @@ SYNC_GROUPS = [
     # across two groups.
     ("tone", "Tone (brightness, contrast, ...)",
      ("brightness", "gamma", "highlights", "white_point",
-      "shadows", "black_point", "contrast")),
+      "shadows", "black_point", "highlights_x", "shadows_x", "punch_x",
+      "contrast")),
     ("sat", "Saturation", ("saturation", "sat_rolloff", "vibrance", "sub_saturation",
                             "colour_organics")),
     ("crop", "Crop", ()),
@@ -167,6 +168,8 @@ _BASIC_LABELS = {
     "temperature": "Temperature", "tint": "Tint", "brightness": "Brightness",
     "gamma": "Gamma", "highlights": "Highlights", "white_point": "White Point",
     "shadows": "Shadows", "black_point": "Black Point", "contrast": "Contrast",
+    "highlights_x": "Highlights \u00d7", "shadows_x": "Shadows \u00d7",
+    "punch_x": "Punch \u00d7",
     "saturation": "Saturation", "sat_rolloff": "Saturation Roll-off",
     "vibrance": "Vibrance",
     "sub_saturation": "Subtracted Sat", "colour_organics": "Colour Organics",
@@ -248,10 +251,10 @@ def paste_options(clip, default_for):
         rows.append(("Colour", "profile", "Colour Profile: Black & White"))
     if clip.get("curves"):
         rows.append(("Colour", "curves", "Curves"))
-    if normalize_tone_shape(clip.get("tone_shape")):
-        from widgets.tone_range_popup import describe_shape
-        rows.append(("Adjustments", "tone_shape", "Highlights/Shadows range  ("
-                     + describe_shape(normalize_tone_shape(clip["tone_shape"])) + ")"))
+    if normalize_xtone_shape(clip.get("xtone_shape")):
+        from widgets.x_tone_popup import describe_xtone_shape
+        rows.append(("Adjustments", "xtone_shape", "Highlights/Shadows/Punch \u00d7 options  ("
+                     + describe_xtone_shape(clip["xtone_shape"]) + ")"))
     if normalize_organics_shape(clip.get("organics_shape")):
         from widgets.organics_popup import describe_organics
         rows.append(("Adjustments", "organics_shape", "Colour Organics families  ("
@@ -627,7 +630,11 @@ class SlidersPanel(QWidget):
         # Gain replaces it). The pipeline parameter still exists for the baked
         # auto-exposure and for area layers — it just has no slider to zip to.
         "temperature", "tint", "brightness", "gamma", "highlights",
-        "white_point", "shadows", "black_point", "contrast", "saturation",
+        "white_point", "shadows", "black_point",
+        # Highlights x / Shadows x / Punch x: the measured tone tools,
+        # created right after Black Point (spec/x-tone-tools.md).
+        "highlights_x", "shadows_x", "punch_x",
+        "contrast", "saturation",
         # Saturation Roll-off sits directly under Saturation (its
         # create_slider() call is right after Saturation's), then Vibrance.
         # spec/saturation-rolloff.md, spec/vibrance.md.
@@ -1132,20 +1139,26 @@ class SlidersPanel(QWidget):
         self.highlights_slider_layout = self.create_slider("Highlights")
         self.white_point_slider_layout = self.create_slider("White Point")
         self.shadows_slider_layout = self.create_slider("Shadows")
-        # Right-click the Highlights / Shadows LABEL for range and
-        # keep-endpoint options (spec/highlights-shadows-range.md).
-        self._tone_shape = None          # active layer's shape (None = default)
-        self._tone_popup = None
-        self._tone_labels = {}
-        for tool, lay in (("hl", self.highlights_slider_layout),
-                          ("sh", self.shadows_slider_layout)):
+        self.black_point_slider_layout = self.create_slider("Black Point")
+        # Highlights x / Shadows x / Punch x: the measured tone tools,
+        # measured from the measured exports. Right-click a LABEL for its
+        # options (spec/x-tone-tools.md). Created right after Black Point
+        # (ADJUSTMENT_KEYS zip).
+        self.highlights_x_slider_layout = self.create_slider("Highlights \u00d7")
+        self.shadows_x_slider_layout = self.create_slider("Shadows \u00d7")
+        self.punch_x_slider_layout = self.create_slider("Punch \u00d7")
+        self._xtone_shape = None         # active layer's options (None = default)
+        self._xtone_popup = None
+        self._xtone_labels = {}
+        for tool, lay in (("hx", self.highlights_x_slider_layout),
+                          ("sx", self.shadows_x_slider_layout),
+                          ("px", self.punch_x_slider_layout)):
             lbl = lay.itemAt(0).widget()
             lbl.setContextMenuPolicy(Qt.CustomContextMenu)
             lbl.customContextMenuRequested.connect(
-                lambda pos, t=tool, l=lbl: self._open_tone_popup(t, l.mapToGlobal(pos)))
-            self._tone_labels[tool] = lbl
-        self._update_tone_labels()
-        self.black_point_slider_layout = self.create_slider("Black Point")
+                lambda pos, t=tool, l=lbl: self._open_xtone_popup(t, l.mapToGlobal(pos)))
+            self._xtone_labels[tool] = lbl
+        self._update_xtone_labels()
         self.contrast_slider_layout = self.create_slider("Contrast")
         self.saturation_slider_layout = self.create_slider("Saturation")
         # Saturation Roll-off: a soft ceiling on strong colours, 0..100.
@@ -1188,6 +1201,9 @@ class SlidersPanel(QWidget):
         scroll_layout.addLayout(self.white_point_slider_layout)
         scroll_layout.addLayout(self.shadows_slider_layout)
         scroll_layout.addLayout(self.black_point_slider_layout)
+        scroll_layout.addLayout(self.highlights_x_slider_layout)
+        scroll_layout.addLayout(self.shadows_x_slider_layout)
+        scroll_layout.addLayout(self.punch_x_slider_layout)
         scroll_layout.addLayout(self.contrast_slider_layout)
         scroll_layout.addLayout(self.saturation_slider_layout)
         scroll_layout.addLayout(self.sat_rolloff_slider_layout)
@@ -1673,9 +1689,9 @@ class SlidersPanel(QWidget):
         # re-enters here for the SAME image and reloading would clear the drag.
         if not self.curve_editor.is_dragging():
             self.curve_editor.set_curves(adjustment.get("curves") if adjustment else None)
-        self._tone_shape = normalize_tone_shape(
-            adjustment.get("tone_shape") if adjustment else None)
-        self._update_tone_labels()
+        self._xtone_shape = normalize_xtone_shape(
+            adjustment.get("xtone_shape") if adjustment else None)
+        self._update_xtone_labels()
         self._organics_shape = normalize_organics_shape(
             adjustment.get("organics_shape") if adjustment else None)
         self._update_organics_label()
@@ -2045,10 +2061,10 @@ class SlidersPanel(QWidget):
         curves = self.curve_editor.get_curves()
         if curves:
             adjustment["curves"] = curves
-        # The Highlights/Shadows shape is a nested, non-slider setting like the
-        # curves; it rides every slider -> dict rebuild the same way.
-        if self._tone_shape:
-            adjustment["tone_shape"] = dict(self._tone_shape)
+        # The Highlights/Shadows/Punch x options are a nested, non-slider
+        # setting like the curves; they ride every slider -> dict rebuild.
+        if getattr(self, "_xtone_shape", None):
+            adjustment["xtone_shape"] = dict(self._xtone_shape)
         # Colour Organics families: nested and non-slider in the same way.
         if getattr(self, "_organics_shape", None):
             adjustment["organics_shape"] = dict(self._organics_shape)
@@ -2264,58 +2280,70 @@ class SlidersPanel(QWidget):
         gamma = f"γ {'+' if gv > 0 else '−' if gv < 0 else ''}{abs(gv)}"
         self._pl_readout.setText("   ".join(parts) + "   points   ·   " + gamma)
 
-    # --- Highlights / Shadows range (spec/highlights-shadows-range.md) --------
-    TONE_LABEL_TIP = "Right-click: range and endpoint options"
+    # --- Highlights x / Shadows x / Punch x options (spec/x-tone-tools.md) --
+    XTONE_HINTS = {
+        "hx": ("Highlights \u00d7: the measured Lights, measured. "
+               "Lifts (or lowers) the upper tones; black stays put, white barely "
+               "moves, and bright colours soften as they lift, like a film shoulder."),
+        "sx": ("Shadows \u00d7: the measured Darks, measured. "
+               "Lifts (or deepens) the lower tones; white stays put. Like the measured render, "
+               "+ also lifts black a little (a fade) \u2014 Keep black point "
+               "stops that."),
+        "px": ("Punch \u00d7: the measured Punch, measured. "
+               "Contrast through the upper midtones, both ends moving slightly."),
+    }
+    XTONE_LABEL_TIP = "Right-click: options"
 
-    def _update_tone_labels(self):
-        from widgets.tone_range_popup import describe_shape
-        shape = self._tone_shape or TONE_SHAPE_DEFAULT
-        for tool, lbl in getattr(self, "_tone_labels", {}).items():
-            custom = (shape[f"{tool}_keep"] != TONE_SHAPE_DEFAULT[f"{tool}_keep"]
-                      or shape[f"{tool}_range"] != TONE_SHAPE_DEFAULT[f"{tool}_range"])
+    def _update_xtone_labels(self):
+        from widgets.x_tone_popup import describe_xtone_shape, tool_is_custom
+        for tool, lbl in getattr(self, "_xtone_labels", {}).items():
+            custom = tool_is_custom(self._xtone_shape, tool)
             f = lbl.font()
             f.setUnderline(custom)
             lbl.setFont(f)
-            part = [p for p in describe_shape(shape).split("; ")
-                    if p.startswith("Highlights" if tool == "hl" else "Shadows")]
-            lbl.setToolTip((part[0] + "\n" if custom and part else "") + self.TONE_LABEL_TIP)
+            lines = [self.XTONE_HINTS[tool]]
+            if custom:
+                from widgets.x_tone_popup import TOOL_NAMES
+                part = [x for x in describe_xtone_shape(self._xtone_shape).split("; ")
+                        if x.startswith(TOOL_NAMES[tool])]
+                if part:
+                    lines.append(part[0])
+            lines.append(self.XTONE_LABEL_TIP)
+            lbl.setToolTip("\n".join(lines))
 
-    def _tone_slider_value(self, tool):
-        key = "highlights" if tool == "hl" else "shadows"
-        i = self.adjustment_keys.index(key)
+    def _xtone_slider_value(self, tool):
+        from widgets.x_tone_popup import SLIDER_KEYS
+        i = self.adjustment_keys.index(SLIDER_KEYS[tool])
         return self.sliders[i].value()
 
-    def _open_tone_popup(self, tool, global_pos):
+    def _open_xtone_popup(self, tool, global_pos):
         if self.current_idx is None:
             return
-        from widgets.tone_range_popup import ToneRangePopup
-        shape = self._tone_shape or TONE_SHAPE_DEFAULT
+        from widgets.x_tone_popup import XTonePopup
         self.end_undo_burst()
-        pop = ToneRangePopup(tool, shape[f"{tool}_keep"], shape[f"{tool}_range"],
-                             self._tone_slider_value(tool), self)
-        pop.changed.connect(self._on_tone_shape_changed)
-        pop.closed.connect(self._on_tone_popup_closed)
-        self._tone_popup = pop
+        pop = XTonePopup(tool, self._xtone_shape, self._xtone_slider_value(tool), self)
+        pop.changed.connect(self._on_xtone_shape_changed)
+        pop.closed.connect(self._on_xtone_popup_closed)
+        self._xtone_popup = pop
         pop.adjustSize()
         # Kept on screen, flipping up/left near the edges like a menu does.
         from utils.popup_placement import place_on_screen
         place_on_screen(pop, global_pos)
         pop.show()
 
-    def _on_tone_shape_changed(self, tool, keep, rng):
-        shape = dict(self._tone_shape or TONE_SHAPE_DEFAULT)
-        shape[f"{tool}_keep"] = bool(keep)
-        shape[f"{tool}_range"] = int(rng)
-        self._tone_shape = normalize_tone_shape(shape)
-        self._update_tone_labels()
+    def _on_xtone_shape_changed(self, options):
+        shape = dict(self._xtone_shape or XTONE_SHAPE_DEFAULT)
+        shape.update(options)
+        self._xtone_shape = normalize_xtone_shape(shape)
+        self._update_xtone_labels()
         # Same store / preview / debounced-reprocess path as a slider move;
         # its undo burst is held open until the popup closes (one undo step).
         self.on_slider_changed()
         self._undo_burst_timer.stop()
 
-    def _on_tone_popup_closed(self):
-        if self._tone_popup is not None:
-            self._tone_popup = None
+    def _on_xtone_popup_closed(self):
+        if self._xtone_popup is not None:
+            self._xtone_popup = None
             self.end_undo_burst()
 
     # --- Colour Organics families (spec/colour-organics.md) -------------------
@@ -2567,9 +2595,12 @@ class SlidersPanel(QWidget):
         # is the curve-only path). set_curves does not emit, so it won't start a
         # competing undo burst here.
         self.curve_editor.set_curves(None)
-        # ... and the Colour Organics families go back to the standard four.
+        # ... and the Colour Organics families go back to the standard four,
+        # the Highlights/Shadows/Punch x options to the measured own.
         self._organics_shape = None
         self._update_organics_label()
+        self._xtone_shape = None
+        self._update_xtone_labels()
         # Save adjustment to the ACTIVE layer (global or selected area) and
         # update the preview. Resetting an area zeroes that area's settings;
         # resetting the Whole Image layer zeroes the global sliders (areas keep
@@ -2672,8 +2703,8 @@ class SlidersPanel(QWidget):
         sync_profile = bool(selection.get("profile"))
         sync_curves = bool(selection.get("curves"))
         sync_orientation = bool(selection.get("orientation"))
-        # The Highlights/Shadows shape rides the Tone group (its two sliders);
-        # the Colour Organics families ride the Saturation group.
+        # The Highlights/Shadows/Punch x options ride the Tone group (their
+        # sliders); the Colour Organics families ride the Saturation group.
         sync_tone_shape = bool(selection.get("tone"))
         sync_org_shape = bool(selection.get("sat"))
         # Sync always copies the SOURCE image's GLOBAL (whole-image) layer, not
@@ -2682,7 +2713,7 @@ class SlidersPanel(QWidget):
         src = ccr_backend.get_image_by_index(self.current_idx)
         src_global = dict(src.adjustment_settings) if src is not None else {}
         src_curves = src_global.get("curves")  # None when identity/absent
-        src_shape = normalize_tone_shape(src_global.get("tone_shape"))
+        src_shape = normalize_xtone_shape(src_global.get("xtone_shape"))
         src_org = normalize_organics_shape(src_global.get("organics_shape"))
         current_adjustment = src_global
         crop_rect = src.crop_rect if src is not None else None
@@ -2700,7 +2731,7 @@ class SlidersPanel(QWidget):
             profile_changes = sync_profile and getattr(img, "color_profile", "color") != src_profile
             curves_changes = sync_curves and img.adjustment_settings.get("curves") != src_curves
             orient_changes = sync_orientation and _orientation_of(img) != src_orientation
-            own_shape = normalize_tone_shape(img.adjustment_settings.get("tone_shape"))
+            own_shape = normalize_xtone_shape(img.adjustment_settings.get("xtone_shape"))
             shape_changes = sync_tone_shape and own_shape != src_shape
             own_org = normalize_organics_shape(img.adjustment_settings.get("organics_shape"))
             org_changes = sync_org_shape and own_org != src_org
@@ -2725,7 +2756,7 @@ class SlidersPanel(QWidget):
                     merged["curves"] = existing_curves
                 if own_shape and not shape_changes:
                     # not synced, or already equal to the source's: keep it
-                    merged["tone_shape"] = dict(own_shape)
+                    merged["xtone_shape"] = dict(own_shape)
                 if own_org and not org_changes:
                     merged["organics_shape"] = dict(own_org)
                 # Same for the Cineon flag when the channels group (which
@@ -2737,9 +2768,9 @@ class SlidersPanel(QWidget):
                 img.adjustment_settings = merged
             if shape_changes:
                 if src_shape:
-                    img.adjustment_settings["tone_shape"] = dict(src_shape)
+                    img.adjustment_settings["xtone_shape"] = dict(src_shape)
                 else:
-                    img.adjustment_settings.pop("tone_shape", None)
+                    img.adjustment_settings.pop("xtone_shape", None)
             if org_changes:
                 if src_org:
                     img.adjustment_settings["organics_shape"] = dict(src_org)
@@ -3573,8 +3604,8 @@ class SlidersPanel(QWidget):
             live = {k: g.get(k, self._default_for(k)) for k in self.adjustment_keys}
             if g.get("curves"):
                 live["curves"] = g["curves"]
-            if g.get("tone_shape"):
-                live["tone_shape"] = g["tone_shape"]
+            if g.get("xtone_shape"):
+                live["xtone_shape"] = g["xtone_shape"]
             if g.get("organics_shape"):
                 live["organics_shape"] = g["organics_shape"]
             for flag in GLOBAL_FLAG_KEYS:
@@ -3585,7 +3616,7 @@ class SlidersPanel(QWidget):
             "curves": copy.deepcopy(live.get("curves")) or None,
             "cineon_log": bool(live.get("cineon_log")),
             "look_lut": live.get("look_lut") or None,
-            "tone_shape": copy.deepcopy(normalize_tone_shape(live.get("tone_shape"))),
+            "xtone_shape": copy.deepcopy(normalize_xtone_shape(live.get("xtone_shape"))),
             "organics_shape": copy.deepcopy(
                 normalize_organics_shape(live.get("organics_shape"))),
             # Bypass-until-export flags ride with their section's paste row.
@@ -3704,7 +3735,7 @@ class SlidersPanel(QWidget):
         # Section -> its bypass flag (pasted with the section's row).
         flag_for = {"noise": "chroma_nr_export_only", "sharpen": "sharpen_export_only"}
         touch_adj = (bool(adj_keys) or "curves" in chosen or "cineon_log" in chosen
-                     or "look_lut" in chosen or "tone_shape" in chosen
+                     or "look_lut" in chosen or "xtone_shape" in chosen
                      or "organics_shape" in chosen)
         merged = None
         if touch_adj:
@@ -3722,10 +3753,10 @@ class SlidersPanel(QWidget):
                 merged["curves"] = copy.deepcopy(clip["curves"])
             elif target.get("curves") is not None:
                 merged["curves"] = target["curves"]
-            if "tone_shape" in chosen and clip.get("tone_shape"):
-                merged["tone_shape"] = copy.deepcopy(clip["tone_shape"])
-            elif normalize_tone_shape(target.get("tone_shape")):
-                merged["tone_shape"] = target["tone_shape"]
+            if "xtone_shape" in chosen and clip.get("xtone_shape"):
+                merged["xtone_shape"] = copy.deepcopy(clip["xtone_shape"])
+            elif normalize_xtone_shape(target.get("xtone_shape")):
+                merged["xtone_shape"] = target["xtone_shape"]
             if "organics_shape" in chosen and clip.get("organics_shape"):
                 merged["organics_shape"] = copy.deepcopy(clip["organics_shape"])
             elif normalize_organics_shape(target.get("organics_shape")):
@@ -3758,6 +3789,8 @@ class SlidersPanel(QWidget):
                 self.curve_editor.set_curves(merged.get("curves"))
                 self._organics_shape = normalize_organics_shape(merged.get("organics_shape"))
                 self._update_organics_label()
+                self._xtone_shape = normalize_xtone_shape(merged.get("xtone_shape"))
+                self._update_xtone_labels()
 
         pixels = touch_adj
         if "profile" in chosen:

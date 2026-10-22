@@ -78,6 +78,7 @@ python -m nuitka \
     --include-data-dir="$PYOPENCL_CL_DIR=pyopencl/cl" \
     --enable-plugin=pyside6 \
     --include-data-dir=src/icons=icons \
+    --include-data-files=src/core/x_tones.npz=core/x_tones.npz \
     --include-data-dir=LICENSES=LICENSES \
     --deployment \
     --nofollow-import-to=doctest \

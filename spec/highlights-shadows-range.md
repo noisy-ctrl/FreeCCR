@@ -1,5 +1,10 @@
 # Highlights / Shadows — range and keep-endpoint controls
 
+> **Superseded 2026-10-22.** Highlights / Shadows are back to the plain
+> anchored bumps; their range / keep options were removed and an old
+> `tone_shape` is ignored. Range and keep options now belong to Highlights × /
+> Shadows × / Punch × (spec/x-tone-tools.md).
+
 ## Problem
 
 Highlights and Shadows add a broad "bump" to the tone curve:

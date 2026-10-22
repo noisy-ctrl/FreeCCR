@@ -3705,98 +3705,32 @@ def _apply_colour_organics(img_norm: np.ndarray, amount: float,
     return out
 
 
-# --- Highlights / Shadows shape (spec/highlights-shadows-range.md) ---------
-TONE_SHAPE_DEFAULT = {"hl_keep": False, "hl_range": 50,
-                      "sh_keep": False, "sh_range": 50}
-_HS_PEAK_CLASSIC = 0.10546875     # max of x^3(1-x): today's normaliser
-_HS_STRENGTH = 0.30               # offset at the bump peak for a full slider
-_KEEP_G_MAX_SLOPE = 3.0792014     # max |g'| of g(t) = (4t(1-t))^2
-_KEEP_SLOPE_FRAC = 0.9            # keep the curve's slope >= 0.1
-_TONE_GRID = np.linspace(0.0, 1.0, 4097)
+# --- Highlights / Shadows -------------------------------------------------------
+# The classic anchored per-channel bumps. (Their right-click range / keep
+# options were removed on 2026-10-22: those options now belong to Highlights x
+# / Shadows x, spec/x-tone-tools.md; an old `tone_shape` is ignored.)
+HS_PEAK = 0.10546875     # peak of x^3 (1 - x): normalises the bumps to peak 1
+HS_STRENGTH = 0.30       # channel offset at the bump peak for a full slider
 
 
-def normalize_tone_shape(shape):
-    """A clean shape dict, or None when absent / not a dict / all default
-    (None means: run today's inline curve, byte-identical)."""
-    if not isinstance(shape, dict):
-        return None
-    out = {}
-    for k, dflt in TONE_SHAPE_DEFAULT.items():
-        v = shape.get(k, dflt)
-        if isinstance(dflt, bool):
-            out[k] = bool(v)
-        else:
-            try:
-                out[k] = int(round(float(np.clip(float(v), 0.0, 100.0))))
-            except (TypeError, ValueError):
-                out[k] = dflt
-    return None if out == TONE_SHAPE_DEFAULT else out
+def _apply_highlights_shadows(img, highlights, shadows):
+    """Highlights / Shadows on a float image in 0..65535. Region bumps are zero
+    at 0 and 1, so pure black and white stay anchored and highlights roll off
+    smoothly below white. Shared by adjust_image and the OpenCL pre-stage."""
+    x = img / 65535.0
+    one_minus = 1.0 - x
+    wh = (x ** 3) * one_minus / HS_PEAK            # peaks at x = 0.75
+    ws = x * (one_minus ** 3) / HS_PEAK            # peaks at x = 0.25
+    x = x + (highlights / 100.0) * HS_STRENGTH * wh + (shadows / 100.0) * HS_STRENGTH * ws
+    return np.clip(x, 0.0, 1.0) * 65535.0
 
 
-def _classic_exponent(r):
-    return 3.0 ** (1.0 + (50.0 - float(r)) / 50.0)
-
-
-def _classic_peak(a):
-    return (a / (a + 1.0)) ** a / (a + 1.0)
-
-
-def _keep_bump(t):
-    inside = (t > 0.0) & (t < 1.0)
-    g = 4.0 * t * (1.0 - t)
-    return np.where(inside, g * g, 0.0)
-
-
-def keep_region(tool, r):
-    """(lo, hi) of a keep-endpoint region: highlights end at 1, shadows at 0."""
-    if tool == "hl":
-        return 0.8 - 0.6 * r / 100.0, 1.0
-    return 0.0, 0.2 + 0.6 * r / 100.0
-
-
-def tone_region_curve(x, highlights, shadows, shape):
-    """Highlights/Shadows as a tone curve of `x` in [0,1] for a (normalised)
-    shape dict — see spec/highlights-shadows-range.md. Returns x' in [0,1]."""
-    shape = normalize_tone_shape(shape) or dict(TONE_SHAPE_DEFAULT)
-    x = np.asarray(x, dtype=np.float64)
-    out = x.copy()
-    any_keep = False
-    for tool, v in (("hl", highlights), ("sh", shadows)):
-        if not v:
-            continue
-        amt = float(v) / 100.0
-        r = shape[f"{tool}_range"]
-        if shape[f"{tool}_keep"]:
-            any_keep = True
-            lo, hi = keep_region(tool, r)
-            width = hi - lo
-            c = amt * min(_HS_STRENGTH, _KEEP_SLOPE_FRAC * width / _KEEP_G_MAX_SLOPE)
-            out += c * _keep_bump((x - lo) / width)
-        else:
-            a = _classic_exponent(r)
-            if tool == "hl":
-                w = np.power(x, a) * (1.0 - x)
-            else:
-                w = x * np.power(1.0 - x, a)
-            out += amt * _HS_STRENGTH * w / _classic_peak(a)
-    if any_keep and x.ndim == 1 and np.all(np.diff(x) >= 0):
-        out = np.maximum.accumulate(out)   # overlapping regions: stay monotone
-    return np.clip(out, 0.0, 1.0)
-
-
-def _apply_tone_curve(img, highlights, shadows, shape):
-    """Apply the Highlights/Shadows curve for a custom shape to a float image
-    in 0..65535: a 4097-point curve, direct-indexed (the grid is uniform, so
-    no search) and linearly interpolated. Shared by the CPU and GPU paths."""
-    n = _TONE_GRID.size - 1
-    lut = tone_region_curve(_TONE_GRID, highlights, shadows, shape).astype(np.float32)
-    lut *= np.float32(65535.0)
-    u = np.asarray(img, dtype=np.float32) * np.float32(n / 65535.0)
-    np.clip(u, 0.0, float(n), out=u)
-    i = np.minimum(u.astype(np.int32), n - 1)
-    u -= i
-    lo = lut[i]
-    return lo + u * (lut[i + 1] - lo)
+def _apply_xtones(img, highlights_x, shadows_x, punch_x, xtone_shape):
+    """Highlights x / Shadows x / Punch x (spec/x-tone-tools.md) on a float
+    image in 0..65535."""
+    from core.x_tones import apply_x_tones
+    return apply_x_tones(np.clip(img / 65535.0, 0.0, 1.0).astype(np.float32),
+                             highlights_x, shadows_x, punch_x, xtone_shape) * 65535.0
 
 
 def adjust_image(
@@ -3844,8 +3778,8 @@ def adjust_image(
     # Film Look (spec/film-look-lut.md): a parsed LookLUT, decoded in Cineon's
     # slot (and instead of it). Appended last for the same reason.
     look_lut=None,
-    # Highlights/Shadows range + keep-endpoint shape
-    # (spec/highlights-shadows-range.md); None/default = today's curve.
+    # Was the Highlights/Shadows range + keep-endpoint shape; IGNORED since
+    # 2026-10-22 (spec/x-tone-tools.md). Kept for positional callers.
     tone_shape=None,
     # Auto tone (spec/auto-tone.md): the frame's measured toe/shoulder, applied
     # in the windowed pre-stage. Appended last for the positional reason above.
@@ -3857,6 +3791,12 @@ def adjust_image(
     # Colour Organics families / reach from the right-click popup; None =
     # default. Appended last.
     organics_shape=None,
+    # Highlights x / Shadows x / Punch x (spec/x-tone-tools.md), -100..100,
+    # and their right-click options (None = default). Appended last.
+    highlights_x: float = 0.0,
+    shadows_x: float = 0.0,
+    punch_x: float = 0.0,
+    xtone_shape=None,
 ) -> np.ndarray:
     """
     Apply temperature, tint, exposure, brightness, blackpoint, whitepoint, highlights, shadows,
@@ -3977,26 +3917,14 @@ def adjust_image(
         img = img_norm * 65535.0
 
     # Highlights / Shadows (anchored per-channel tone-region roll-off)
-    # Region "bumps" are zero at both endpoints (0 and 1) so pure black and
-    # pure white stay anchored — highlights roll off smoothly below white
-    # rather than the white point itself being scaled.
-    _shape = (normalize_tone_shape(tone_shape)
-              if (highlights != 0.0 or shadows != 0.0) else None)
-    if _shape is not None:
-        # Custom range / keep-endpoint shape: the same per-channel tone curve
-        # family, evaluated once as a fine curve and interpolated.
-        # See spec/highlights-shadows-range.md.
-        img = _apply_tone_curve(img, highlights, shadows, _shape)
-    elif highlights != 0.0 or shadows != 0.0:
-        HS_PEAK = 0.10546875   # peak of x^3*(1-x), normalizes bumps to peak 1.0
-        HS_STRENGTH = 0.30     # max channel offset at the bump peak for full slider
-        x = img / 65535.0
-        one_minus = 1.0 - x
-        # Highlight bump peaks at x=0.75; shadow bump peaks at x=0.25
-        wh = (x ** 3) * one_minus / HS_PEAK
-        ws = x * (one_minus ** 3) / HS_PEAK
-        x = x + (highlights / 100.0) * HS_STRENGTH * wh + (shadows / 100.0) * HS_STRENGTH * ws
-        img = np.clip(x, 0.0, 1.0) * 65535.0
+    if highlights != 0.0 or shadows != 0.0:
+        img = _apply_highlights_shadows(img, highlights, shadows)
+
+    # Highlights x / Shadows x / Punch x: the measured tone tools,
+    # measured (spec/x-tone-tools.md). Tone tools on the display image,
+    # right after Highlights / Shadows.
+    if highlights_x or shadows_x or punch_x:
+        img = _apply_xtones(img, highlights_x, shadows_x, punch_x, xtone_shape)
 
     # Black/White point (Adobe-like: remap input range)
     if blackpoint != 0.0 or whitepoint != 0.0:
@@ -4361,7 +4289,7 @@ def adjust_image_opencl(
     vibrance: float = 0.0,
     # Film Look — appended last, see adjust_image.
     look_lut=None,
-    # Highlights/Shadows shape — appended last, see adjust_image.
+    # Ignored (was the Highlights/Shadows shape) — see adjust_image.
     tone_shape=None,
     # Auto tone — appended last, see adjust_image.
     auto_tone=None,
@@ -4370,6 +4298,11 @@ def adjust_image_opencl(
     # Colour Organics — appended last, see adjust_image.
     colour_organics: float = 0.0,
     organics_shape=None,
+    # Highlights x / Shadows x / Punch x — appended last, see adjust_image.
+    highlights_x: float = 0.0,
+    shadows_x: float = 0.0,
+    punch_x: float = 0.0,
+    xtone_shape=None,
 ) -> np.ndarray:
     """
     GPU-accelerated (OpenCL) version of adjust_image.
@@ -4484,16 +4417,13 @@ def adjust_image_opencl(
         (float(band_settings.get('band_feather', _BAND_FEATHER_DEFAULT) or 0) > 0) and \
         any(band_settings.get(k, 0) for k in BAND_ADJUSTMENT_KEYS)
     use_gpu = not feather_active and _initialize_opencl()
-    # A custom Highlights/Shadows shape (spec/highlights-shadows-range.md) is a
-    # numpy curve; the kernel keeps its inline default. Run every kernel stage
-    # that precedes Highlights/Shadows (Channel Levels on a non-windowed base,
-    # Gain, Brightness — WB is already consumed above) plus the custom curve
-    # here, in adjust_image's exact order and arithmetic, and zero them for the
+    # Highlights x / Shadows x / Punch x (spec/x-tone-tools.md) are numpy
+    # lookups the kernel doesn't have. Run every kernel stage that precedes
+    # them (Channel Levels on a non-windowed base, Gain, Brightness,
+    # Highlights/Shadows — WB is already consumed above) plus the tools here,
+    # in adjust_image's exact order and arithmetic, and zero them for the
     # kernel. GPU/CPU parity stays exact and the rest stays on the GPU.
-    _shape = ((normalize_tone_shape(tone_shape)
-               if (highlights != 0.0 or shadows != 0.0) else None)
-              if use_gpu else None)
-    if _shape is not None:
+    if use_gpu and (highlights_x or shadows_x or punch_x):
         img16 = img16.astype(np.float32)
         _lv = _channel_levels_active(ch_input_gain, ch_master_shift, ch_master_gain,
                                      ch_r_shift, ch_r_gain, ch_r_blackpoint,
@@ -4528,8 +4458,11 @@ def adjust_image_opencl(
             img_norm = np.clip(img_norm, 0.0, 1.0)
             img16 = img_norm * 65535.0
             brightness = 0.0
-        img16 = _apply_tone_curve(img16, highlights, shadows, _shape)
-        highlights = shadows = 0.0
+        if highlights != 0.0 or shadows != 0.0:
+            img16 = _apply_highlights_shadows(img16, highlights, shadows)
+            highlights = shadows = 0.0
+        img16 = _apply_xtones(img16, highlights_x, shadows_x, punch_x, xtone_shape)
+        highlights_x = shadows_x = punch_x = 0.0
     if not use_gpu:
         return adjust_image(img16, kelvin_shift, tint_shift, exposure, brightness,
                           blackpoint, whitepoint, contrast, saturation, tint_balance_factor,
@@ -4547,7 +4480,9 @@ def adjust_image_opencl(
                           vibrance=vibrance, look_lut=look_lut,
                           tone_shape=tone_shape, sat_rolloff=sat_rolloff,
                           colour_organics=colour_organics,
-                          organics_shape=organics_shape)
+                          organics_shape=organics_shape,
+                          highlights_x=highlights_x, shadows_x=shadows_x,
+                          punch_x=punch_x, xtone_shape=xtone_shape)
 
     try:
       # Serialize GPU submissions: the hi-res zoom worker may run this
@@ -4633,7 +4568,9 @@ def adjust_image_opencl(
                           vibrance=vibrance, look_lut=look_lut,
                           tone_shape=tone_shape, sat_rolloff=sat_rolloff,
                           colour_organics=colour_organics,
-                          organics_shape=organics_shape)
+                          organics_shape=organics_shape,
+                          highlights_x=highlights_x, shadows_x=shadows_x,
+                          punch_x=punch_x, xtone_shape=xtone_shape)
 
 
 
