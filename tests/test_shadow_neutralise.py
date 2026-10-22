@@ -20,7 +20,8 @@ from core.oklab import to_oklab, from_oklab  # noqa: E402
 from core.ccr_processor import adjust_image, adjust_image_opencl, encode_window  # noqa: E402
 from test_x_tones import _Img, _wire, _Stub, _img, _capture  # noqa: E402
 
-TEAL_CAST = np.array([0.55, 1.0, 0.92], np.float32)   # C ~0.02 at L 0.22
+TEAL_CAST = np.array([0.55, 1.0, 0.92], np.float32)   # a teal cast: C ~0.014 at L 0.18
+DEEP = 0.08                                          # x TEAL_CAST: a cast deep in the shadows
 
 
 def _lab(rgb):
@@ -69,9 +70,9 @@ def test_tones_above_the_range_are_returned_exactly():
 
 
 def test_a_cast_in_the_deep_shadows_goes_neutral_at_the_same_lightness():
-    rgb = tuple(0.12 * TEAL_CAST)
+    rgb = tuple(DEEP * TEAL_CAST)
     kept, a, b = _kept(rgb)
-    assert _chroma(a[None])[0] > 0.015                             # a real cast
+    assert _chroma(a[None])[0] > 0.012                             # a real cast
     assert kept < 0.4                                               # mostly gone
     assert b[0] == pytest.approx(a[0], abs=1e-4)                    # lightness kept
     hue_a, hue_b = np.arctan2(a[2], a[1]), np.arctan2(b[2], b[1])
@@ -96,17 +97,26 @@ def test_skin_in_shade_keeps_more_than_a_cast_does():
 
 
 def test_reach_widens_what_counts_as_a_cast():
-    rgb = (0.08, 0.16, 0.04)                 # deep foliage
+    rgb = (0.04, 0.08, 0.02)                 # foliage deep in shade (L 0.18, C 0.034)
     low, _a, _b = _kept(rgb, shape={"reach": 20})
     high, _a, _b = _kept(rgb, shape={"reach": 100})
-    assert low > 0.95 and high < 0.6
+    assert low > 0.9 and high < 0.3
 
 
 def test_range_moves_where_it_ends():
-    rgb = (0.32, 0.40, 0.384)                # a mild cast in the lower midtones (L ~0.5)
-    short, _a, _b = _kept(rgb, shape={"range": 30})
-    long_, _a, _b = _kept(rgb, shape={"range": 70})
-    assert short == 1.0 and long_ < 0.8
+    rgb = (0.15, 0.19, 0.18)                 # a mild cast at L 0.30 (display ~44/255)
+    short, _a, _b = _kept(rgb, shape={"range": 20})
+    long_, _a, _b = _kept(rgb, shape={"range": 45})
+    assert short == 1.0 and long_ < 0.5
+
+
+def test_it_is_the_lower_end_of_the_shadows_by_default():
+    """Default Range 30: fully on near black, gone by display ~44/255, so the
+    upper shadows and everything above keep their colour."""
+    keep_44, _a, _b = _kept((0.15, 0.19, 0.18))           # L 0.30
+    keep_low, _a, _b = _kept(tuple(DEEP * TEAL_CAST))     # L 0.18
+    assert keep_44 == 1.0 and keep_low < 0.3
+    assert sn.SHADOW_LIMITS["range"] == (15, 45)
 
 
 def test_depth_deepens_the_darkest_tones_monotonically():
@@ -213,17 +223,20 @@ def test_grain_is_never_stretched(c_frac):
 
 def test_options_are_normalised():
     assert sn.normalize_shadow_shape(dict(sn.SHADOW_SHAPE_DEFAULT)) is None
-    assert sn.normalize_shadow_shape({"range": 200}) == dict(sn.SHADOW_SHAPE_DEFAULT, range=70)
+    assert sn.normalize_shadow_shape({"range": 200}) == dict(sn.SHADOW_SHAPE_DEFAULT, range=45)
+    # an old three-option shape (no Smoothing) keeps the default smoothing
+    assert sn.normalize_shadow_shape({"range": 30, "reach": 45, "depth": 20}) == \
+        dict(sn.SHADOW_SHAPE_DEFAULT, depth=20)
     assert sn.normalize_shadow_shape("junk") is None
 
 
 def test_weight_map_matches_what_it_does():
-    img = np.array([[tuple(0.12 * TEAL_CAST), (0.30, 0.04, 0.04), (0.8, 0.8, 0.8)]],
+    img = np.array([[tuple(DEEP * TEAL_CAST), (0.30, 0.04, 0.04), (0.8, 0.8, 0.8)]],
                    np.float32)
     w = sn.weight_map(img)
     assert w[0, 0] > 0.6 and w[0, 1] < 0.1 and w[0, 2] == 0.0
-    t = sn.tone_weight(_lab(img[0, 1])[:, 0], dict(sn.SHADOW_SHAPE_DEFAULT))[0]
-    assert sn.weight_map(img, {"depth": 100})[0, 1] == pytest.approx(t)  # Depth acts on it
+    td = sn.depth_weight(_lab(img[0, 1])[:, 0], dict(sn.SHADOW_SHAPE_DEFAULT))[0]
+    assert sn.weight_map(img, {"depth": 100})[0, 1] == pytest.approx(td, abs=1e-6)
 
 
 @pytest.mark.parametrize("ws", [False, True])
@@ -408,3 +421,116 @@ def test_canvas_layer_shows_where_it_acts(tmp_path, monkeypatch):
     assert ip._gm_item.isVisible()               # ... doesn't hide this map
     ip.set_shadow_mask(None)
     assert not ip._gm_item.isVisible()
+
+
+# --------------------------------------------------------------------------- #
+# the matte: no blocks, gradations kept (spec/shadow-neutralise.md, revision 4)
+# --------------------------------------------------------------------------- #
+
+def _diagonal(H, W, inside, outside, slope=0.37):
+    """`inside` below a slanted line, `outside` above it, antialiased."""
+    yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
+    d = yy - (H * 0.5 + (xx - W * 0.5) * slope)
+    a = np.clip(0.5 + d, 0.0, 1.0)[..., None]
+    return (a * np.array(inside, np.float32) + (1 - a) * np.array(outside, np.float32)).astype(np.float32)
+
+
+def _along(m, xs, ys):
+    """Bilinear samples of a map at float positions."""
+    import cv2
+    return cv2.remap(m, xs.astype(np.float32)[None], ys.astype(np.float32)[None],
+                     cv2.INTER_LINEAR)[0]
+
+
+@pytest.mark.parametrize("long_side", [1080, 4320])
+def test_the_matte_follows_a_slanted_edge_without_steps(long_side):
+    """A cast shadow meeting a dark red along a slanted edge: at any distance
+    from the edge the strength is the same all along it (no stair-steps from
+    a coarse map scaled up), and it doesn't spill across."""
+    H, W = int(long_side * 2 / 3), long_side
+    red = (0.18, 0.02, 0.02)
+    img = _diagonal(H, W, tuple(DEEP * TEAL_CAST), red)
+    shp = dict(sn.SHADOW_SHAPE_DEFAULT)
+    m = sn.strength_map(img, 1.0, shp)
+    scale = long_side / 1080
+    xs = np.arange(int(W * 0.2), int(W * 0.8), dtype=np.float32)
+    edge = H * 0.5 + (xs - W * 0.5) * 0.37
+    for off in (-12, -4, -1.5, 1.5, 4, 12):          # px from the edge, at preview size
+        # a vertical step of off/cos(theta) is a perpendicular distance of off
+        vals = _along(m, xs, edge + off * scale / np.cos(np.arctan(0.37)))
+        assert vals.std() < 0.001, (off, float(vals.std()))   # a 1080 map scaled up: 0.0018
+    red_alone = sn.strength_map(np.full((64, 96, 3), red, np.float32), 1.0, shp)[32, 48]
+    far_in = m[int(H * 0.5 + 40 * scale), W // 2]
+    far_out = m[int(H * 0.5 - 40 * scale), W // 2]
+    assert far_in > 0.6 and abs(far_out - red_alone) < 0.01
+
+
+def test_a_big_smooth_gradient_stays_smooth():
+    """A 4320-px dark ramp whose cast fades in down the frame: the change the
+    tool makes is a smooth field - no steps between neighbours, no kinks."""
+    H, W = 1440, 4320
+    yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
+    v = 0.02 + 0.20 * xx / W                                   # black to ~44/255
+    cast = (yy / H)[..., None] * (TEAL_CAST - 1.0) + 1.0
+    img = (v[..., None] * cast).astype(np.float32)
+    out = sn.apply_shadow_neutralise(img, 100)
+    a, b = _lab(img).reshape(H, W, 3), _lab(out).reshape(H, W, 3)
+    np.testing.assert_allclose(b[..., 0], a[..., 0], atol=2e-4)  # lightness kept
+    f = np.hypot(b[..., 1], b[..., 2]) / np.maximum(np.hypot(a[..., 1], a[..., 2]), 1e-6)
+    f = f[H // 4:, :]                                           # where there is a cast
+    assert np.abs(np.diff(f, axis=1)).max() < 0.01
+    assert np.abs(np.diff(f, 2, axis=1)).max() < 0.002          # no kinks either
+
+
+@pytest.mark.parametrize("c_frac", [0.5, 1.2, 2.0])
+def test_grain_is_never_stretched_at_preview_size(c_frac):
+    """As test_grain_is_never_stretched, on a preview-sized frame, where the
+    decision view is denoised: colour grain only falls, luma grain is kept."""
+    rng = np.random.default_rng(11)
+    h = np.radians(200)
+    c = c_frac * 0.02
+    shape = (540, 1080)
+    lab = np.zeros(shape + (3,), np.float32)
+    lab[..., 0] = 0.15 + rng.normal(0, 0.012, shape)
+    lab[..., 1] = c * np.cos(h) + rng.normal(0, 0.004, shape)
+    lab[..., 2] = c * np.sin(h) + rng.normal(0, 0.004, shape)
+    img = np.clip(from_oklab(lab.reshape(-1, 3)), 0, 1).reshape(lab.shape)
+    out = sn.apply_shadow_neutralise(img, 100)
+    a, b = _lab(img).reshape(lab.shape), _lab(out).reshape(lab.shape)
+    for ch in (1, 2):
+        assert (b[..., ch] - b[..., ch].mean()).std() <= (a[..., ch] - a[..., ch].mean()).std() * 1.001
+    np.testing.assert_allclose(b[..., 0], a[..., 0], atol=2e-4)
+
+
+def test_smoothing_softens_specks_but_keeps_edges():
+    """Isolated specks of cast in a coloured area (what a hard selection
+    would leave as blotches) are taken out less with more Smoothing, while
+    the big area's strength is unchanged."""
+    rng = np.random.default_rng(3)
+    H, W = 540, 1080
+    img = np.empty((H, W, 3), np.float32)
+    img[:] = (0.18, 0.02, 0.02)                                  # dark red
+    img[:, : W // 2] = tuple(DEEP * TEAL_CAST)                  # cast shadow
+    ys, xs = rng.integers(20, H - 20, 60), rng.integers(W // 2 + 20, W - 20, 60)
+    for y, x in zip(ys, xs):
+        img[y - 1:y + 2, x - 1:x + 2] = tuple(DEEP * TEAL_CAST)  # 3 px specks
+    shp = dict(sn.SHADOW_SHAPE_DEFAULT)
+    crisp = sn.strength_map(img, 1.0, dict(shp, smooth=0))
+    soft = sn.strength_map(img, 1.0, dict(shp, smooth=100))
+    speck_crisp = np.mean([crisp[y, x] for y, x in zip(ys, xs)])
+    speck_soft = np.mean([soft[y, x] for y, x in zip(ys, xs)])
+    assert speck_soft < 0.6 * speck_crisp
+    assert abs(soft[H // 2, W // 4] - crisp[H // 2, W // 4]) < 0.02
+
+
+def test_popup_has_less_more_depth_and_smoothing():
+    from PySide6.QtWidgets import QApplication
+    QApplication.instance() or QApplication([])
+    from widgets.shadow_popup import ROWS, ShadowPopup
+    rows = {k: ends for k, _n, ends, _t in ROWS}
+    assert rows["depth"] == ("Less", "More")
+    assert "smooth" in rows
+    pop = ShadowPopup(None, 0)
+    assert pop.sliders["range"].minimum() == 15 and pop.sliders["range"].maximum() == 45
+    assert pop.values() == sn.SHADOW_SHAPE_DEFAULT
+    pop.close()

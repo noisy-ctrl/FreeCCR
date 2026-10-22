@@ -8,19 +8,22 @@ every strongly coloured area are left alone, and pure greys only take a small
 share (Neutral whites). Gold chroma is then added along one hue, easing back to
 a clean cream at the very top.
 
-How much gold each pixel gets is DECIDED on the denoised decision view
-(core.oklab.decision_lab: preview resolution, edge-preserving) and ADDED to
-each pixel's own colour, so the gold is a smooth field: a pixel's grain
-passes through untouched. (Deciding on each pixel's own noisy colour gave
-a warmer-by-chance grain speck more gold: colour grain rose 1.5-1.7x at 60.)"""
+How much gold each pixel gets is a matte DECIDED on the denoised decision
+view (core.oklab.decision_lab: edge-preserving guided filters at the render's
+own resolution), smoothed along the picture's edges (Smoothing option,
+core.oklab.finish_matte), and the gold is ADDED to each pixel's own colour:
+the gold is a smooth field, so a pixel's grain and every tonal gradation
+pass through untouched, and there is no up-scaling, so no blocks at any
+size. (Deciding on each pixel's own noisy colour gave a warmer-by-chance
+grain speck more gold: colour grain rose 1.5-1.7x at 60.)"""
 import numpy as np
 
-from core.oklab import (to_oklab, from_oklab, smooth as _smooth, fit_move, decision_lab,
-                         to_render_size)
+from core.oklab import smooth as _smooth, fit_move, decision_lab, finish_matte
+from core.oklab import to_oklab, from_oklab  # noqa: F401  (re-exported for callers)
 
-GOLDEN_SHAPE_DEFAULT = {"hue": 72, "start": 55, "clean": 60, "neutral": 10}
+GOLDEN_SHAPE_DEFAULT = {"hue": 72, "start": 55, "clean": 60, "neutral": 10, "smooth": 30}
 GOLDEN_LIMITS = {"hue": (50, 95), "start": (30, 85), "clean": (0, 100),
-                 "neutral": (0, 100)}
+                 "neutral": (0, 100), "smooth": (0, 100)}
 GOLD_CHROMA = 0.06       # OKLab chroma added at 100 to a fully sunlit tone
 RISE = 0.20              # L over which the effect comes in after the start
 TOP = 0.85               # L where clean whites start easing it back
@@ -37,9 +40,9 @@ SUNLIT_CHROMA = 0.035    # colour gate exp(-(C/0.035)^2): skin and sky drop out
 NEUTRAL_BELOW = 0.0
 NEUTRAL_ABOVE = 0.03
 # The gold gate is steep in colour, so it is decided on a smoother view than
-# Shadow Neutralise's (px at the decision resolution; the bilateral still keeps
-# edges: gold on pale skin 1 px from a cream edge is ~1 % of the cream's).
-DECISION_SIGMA = 3.0
+# Shadow Neutralise's (radius in px at the preview's size, scaled with the
+# render; the guided filter still keeps edges).
+DECISION_R = 4
 CHUNK = 1 << 20
 
 
@@ -74,23 +77,31 @@ def gold_weight(lab, shape):
     return (GOLD_CHROMA * w * col).astype(np.float32)
 
 
+def _matte(smooth_lab, shape, scale):
+    """gold_weight x scale on the decision view, in chunks, then finished
+    along the picture's edges."""
+    H, W = smooth_lab.shape[:2]
+    flat = smooth_lab.reshape(-1, 3)
+    k = np.empty(H * W, np.float32)
+    for s in range(0, len(flat), CHUNK):
+        k[s:s + CHUNK] = gold_weight(flat[s:s + CHUNK], shape) * np.float32(scale)
+    return finish_matte(k.reshape(H, W), smooth_lab[..., 0], shape["smooth"])
+
+
 def weight_map(rgb01, shape=None):
     """0..1 map of where the tool acts on a display image (for the canvas),
     decided as the render decides it."""
     shape = normalize_golden_shape(shape) or dict(GOLDEN_SHAPE_DEFAULT)
-    lab = decision_lab(rgb01, sigma_space=DECISION_SIGMA)
-    w = gold_weight(lab.reshape(-1, 3), shape) / np.float32(GOLD_CHROMA)
-    return to_render_size(w.reshape(lab.shape[:2]), np.shape(rgb01))
+    smooth_lab, _lab = decision_lab(rgb01, radius=DECISION_R)
+    return _matte(smooth_lab, shape, 1.0 / GOLD_CHROMA)
 
 
 def gold_map(img01, amount, shape, with_full=False):
-    """Chroma to add per pixel (amount included), decided on the denoised
-    view, at the render's size (and, with `with_full`, the render's per-pixel
-    OKLab when it came free)."""
-    lab, full = decision_lab(img01, with_full=True, sigma_space=DECISION_SIGMA)
-    k = gold_weight(lab.reshape(-1, 3), shape) * np.float32(amount / 100.0)
-    k = to_render_size(k.reshape(lab.shape[:2]), np.shape(img01))
-    return (k, full) if with_full else k
+    """Chroma to add per pixel (amount included) at the render's size (and,
+    with `with_full`, the render's own per-pixel OKLab, computed on the way)."""
+    smooth_lab, lab = decision_lab(img01, radius=DECISION_R)
+    k = _matte(smooth_lab, shape, amount / 100.0)
+    return (k, lab) if with_full else k
 
 
 # Chroma under this (a thousandth of a 16-bit code's worth) is not added: the
@@ -103,7 +114,7 @@ def _chunk(x, k, shape, lab=None):
     sel = k > K_EPS
     if not sel.any():
         return out            # nothing to add: exactly the input (no round trip)
-    lab = to_oklab(x[sel]) if lab is None else lab[sel]
+    lab = lab[sel]
     k = k[sel]
     hg = np.radians(shape["hue"])
     d = np.stack([np.zeros_like(k), k * np.float32(np.cos(hg)), k * np.float32(np.sin(hg))], 1)
@@ -121,10 +132,10 @@ def apply_golden(img01, amount, shape=None):
     flat = a.reshape(-1, 3)
     k, full = gold_map(a, float(amount), shape, with_full=True)
     k = k.reshape(-1)
-    full = None if full is None else full.reshape(-1, 3)
+    full = full.reshape(-1, 3)
     out = flat.copy()
     for s in range(0, flat.shape[0], CHUNK):
         sl = slice(s, s + CHUNK)
         if (k[sl] > K_EPS).any():
-            out[sl] = _chunk(flat[sl], k[sl], shape, None if full is None else full[sl])
+            out[sl] = _chunk(flat[sl], k[sl], shape, full[sl])
     return out.reshape(a.shape)

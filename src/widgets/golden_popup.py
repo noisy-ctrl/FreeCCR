@@ -13,6 +13,8 @@ from core.golden import (GOLDEN_SHAPE_DEFAULT, GOLDEN_LIMITS, apply_golden,
                          normalize_golden_shape)
 from ui import theme
 
+LABEL_W = 96            # fits "Neutral whites" with room
+
 ROWS = (
     ("hue", "Hue", ("Amber", "Yellow"),
      "The gold's hue. The middle is the gold measured off a Noritsu scan; "
@@ -29,6 +31,12 @@ ROWS = (
      "are already a little warm (sunlit); a grey has no warmth to go on, so "
      "it only gets this share. Raise it if your conversions render sunlit "
      "highlights perfectly neutral."),
+    ("smooth", "Smoothing", ("Crisp", "Soft"),
+     "How soft the edge of the area it acts on is, like the blur on a "
+     "Resolve qualifier - but it follows the picture's own edges, so it "
+     "softens the selection without spilling over onto the next thing. "
+     "More hides small specks in the selection; less keeps it tight to "
+     "fine detail."),
 )
 
 
@@ -37,7 +45,7 @@ def describe_golden(shape):
     if shape is None:
         return "default"
     names = {"hue": "hue", "start": "start", "clean": "clean whites",
-             "neutral": "neutral whites"}
+             "neutral": "neutral whites", "smooth": "smoothing"}
     return ", ".join(f"{names[k]} {shape[k]}" for k in GOLDEN_SHAPE_DEFAULT
                      if shape[k] != GOLDEN_SHAPE_DEFAULT[k]) or "default"
 
@@ -83,7 +91,7 @@ class GoldenPopup(QFrame):
             row = QHBoxLayout()
             lbl = QLabel(name)
             lbl.setToolTip(tip)
-            lbl.setFixedWidth(80)
+            lbl.setFixedWidth(LABEL_W)
             sl = QSlider(Qt.Horizontal)
             sl.setRange(*GOLDEN_LIMITS[key])
             sl.setValue(int(shape[key]))
@@ -96,7 +104,7 @@ class GoldenPopup(QFrame):
             row.addWidget(val)
             lay.addLayout(row)
             ends = QHBoxLayout()
-            ends.setContentsMargins(80 + row.spacing(), 0, 28 + row.spacing(), 0)
+            ends.setContentsMargins(LABEL_W + row.spacing(), 0, 28 + row.spacing(), 0)
             for text, align in ((left, Qt.AlignLeft), (right, Qt.AlignRight)):
                 e = QLabel(text)
                 e.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 10px;")

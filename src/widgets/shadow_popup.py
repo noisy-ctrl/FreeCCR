@@ -13,17 +13,27 @@ from core.shadow_neutral import (SHADOW_SHAPE_DEFAULT, SHADOW_LIMITS,
                                  apply_shadow_neutralise, normalize_shadow_shape)
 from ui import theme
 
+LABEL_W = 96            # fits "Neutral whites" with room
+
 ROWS = (
-    ("range", "Range", ("Deep shadows", "Into midtones"),
-     "How far up the tones it reaches. It is fully on in the deepest tones "
-     "and fades out smoothly by this point; nothing brighter is touched."),
+    ("range", "Range", ("Near black", "Lower shadows"),
+     "How far up from black it reaches. It is fully on in the deepest tones "
+     "and fades out smoothly by this point; nothing brighter is touched. "
+     "The default stops at about 44/255."),
     ("reach", "Reach", ("Casts only", "Colours too"),
      "How much colour still counts as a cast. Lower keeps more colour in "
      "dark things (skin in shade, dark wood); higher neutralises stronger "
      "casts, and starts to take colour out of dark colours too."),
-    ("depth", "Depth", ("None", "Inky"),
-     "Deepens the darkest tones a little for a richer black. Black stays "
-     "black, nothing clips, and tones above the range are left alone."),
+    ("depth", "Depth", ("Less", "More"),
+     "How much deeper the darkest tones go, for a richer, inkier black. 0 "
+     "leaves the tones as they are; black stays black, nothing clips, and "
+     "tones above the range are left alone."),
+    ("smooth", "Smoothing", ("Crisp", "Soft"),
+     "How soft the edge of the area it acts on is, like the blur on a "
+     "Resolve qualifier - but it follows the picture's own edges, so it "
+     "softens the selection without spilling over onto the next thing. "
+     "More hides small specks in the selection; less keeps it tight to "
+     "fine detail."),
 )
 
 # A dark ramp with a teal cast (the kind a conversion leaves in its shadows)
@@ -40,7 +50,7 @@ def describe_shadow(shape):
 
 def _ramp_pixmap(amount, shape, w=200, h=14):
     """Black up to the shadows' end with a cast, as displayed (no scaling)."""
-    x = np.linspace(0.0, 0.35, w, dtype=np.float32)
+    x = np.linspace(0.0, 0.25, w, dtype=np.float32)
     ramp = np.repeat((x[:, None] * CAST)[None], h, axis=0)
     out = apply_shadow_neutralise(ramp, amount, shape) if amount else ramp
     rgb = np.ascontiguousarray((np.clip(out, 0, 1) * 255 + 0.5).astype(np.uint8))
@@ -79,7 +89,7 @@ class ShadowPopup(QFrame):
             row = QHBoxLayout()
             lbl = QLabel(name)
             lbl.setToolTip(tip)
-            lbl.setFixedWidth(80)
+            lbl.setFixedWidth(LABEL_W)
             sl = QSlider(Qt.Horizontal)
             sl.setRange(*SHADOW_LIMITS[key])
             sl.setValue(int(shape[key]))
@@ -92,7 +102,7 @@ class ShadowPopup(QFrame):
             row.addWidget(val)
             lay.addLayout(row)
             ends = QHBoxLayout()
-            ends.setContentsMargins(80 + row.spacing(), 0, 28 + row.spacing(), 0)
+            ends.setContentsMargins(LABEL_W + row.spacing(), 0, 28 + row.spacing(), 0)
             for text, align in ((left, Qt.AlignLeft), (right, Qt.AlignRight)):
                 e = QLabel(text)
                 e.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 10px;")

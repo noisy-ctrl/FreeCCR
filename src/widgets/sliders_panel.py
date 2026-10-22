@@ -2411,7 +2411,7 @@ class SlidersPanel(QWidget):
                    "darkening them. Skin, sky, foliage, shadows and every "
                    "strongly coloured area are left alone, and the very "
                    "brightest tones stay a clean cream rather than yellow.")
-    GOLDEN_LABEL_TIP = "Right-click: hue, where it starts, clean whites"
+    GOLDEN_LABEL_TIP = "Right-click: hue, where it starts, clean whites, smoothing"
 
     def _update_golden_label(self):
         lbl = getattr(self, "_golden_label", None)
@@ -2474,12 +2474,13 @@ class SlidersPanel(QWidget):
 
     # --- Shadow Neutralise options (spec/shadow-neutralise.md) ---------------
     SHADOW_HINT = ("Shadow Neutralise: takes the colour cast out of the "
-                   "shadows so they read as a neutral, inky black, like a good "
-                   "lab scan. Only low colour is taken out - a strongly "
-                   "coloured dark thing (a red car, deep foliage) keeps its "
-                   "colour - and lightness is left exactly as it was. "
-                   "Midtones and highlights are never touched.")
-    SHADOW_LABEL_TIP = "Right-click: range, reach, depth"
+                   "lower end of the shadows so they read as a neutral, inky "
+                   "black, like a good lab scan. Only low colour is taken out "
+                   "- a strongly coloured dark thing (a red car, navy) keeps "
+                   "its colour - and lightness is left exactly as it was. "
+                   "The rest of the shadows, midtones and highlights are "
+                   "never touched.")
+    SHADOW_LABEL_TIP = "Right-click: range, reach, depth, smoothing"
 
     def _update_shadow_label(self):
         lbl = getattr(self, "_shadow_label", None)

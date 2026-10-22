@@ -68,6 +68,32 @@ on pale skin 1 px from a cream edge is ~1 % of the cream's.
 Cost: ~0.2–0.5 s per 1080 preview render in the 2-thread test container
 (the bilateral and the gamut fit near white dominate).
 
+## Revision 4 (2026-10-23): a smooth matte, gradations first
+
+Feedback: "preserving tonal gradations is key", and the same concern about a
+blocky look as for Shadow Neutralise. Shared with it (see
+`spec/shadow-neutralise.md` revision 4):
+
+- the decision view is made with **guided filters at the render's own
+  resolution** (`core.oklab.decision_lab`, radius 4 px at preview size for
+  the gold, scaled with the render) instead of a bilateral at 1080 px whose
+  map was scaled up — so no blocks or stair-steps at export size;
+- a **Smoothing** option (0..100, default 30, "Crisp" ↔ "Soft") smooths the
+  gold matte along the picture's edges (`core.oklab.finish_matte`, guided
+  filter on the decision view's lightness);
+- the gold is still ADDED to each pixel's own colour at unchanged lightness,
+  so every tonal gradation passes through: on a 4320-px sunlit ramp the gold
+  added changes by < 1e-4 between neighbours with no kinks (second
+  difference < 2e-6), lightness within 0.002; along a slanted cream/sky edge
+  at 4320 px it varies by < 0.0002 at a fixed distance from the edge, and the
+  sky gets none.
+
+Measured on real frames at 60: colour grain where it acts 1.00× on flat
+areas, ≤ 1.03× over the whole acting area (edges; was 1.07×).
+
+The user also wondered about the overall approach (adding gold in OKLab to a
+sunlit-tone selection); that is parked for a later conversation.
+
 ## Why a tool of its own
 
 - **Not Colour Organics.** Organics turns the hue of colours that are already

@@ -293,3 +293,63 @@ def test_canvas_layer_shows_where_it_acts(tmp_path, monkeypatch):
     assert alpha[:, : w // 10].max() == 0 and alpha[:, w // 2:].max() > 0  # dark end clear
     ip.set_gold_mask(None)
     assert not ip._gm_item.isVisible()
+
+
+# --------------------------------------------------------------------------- #
+# the matte: no blocks, gradations kept (spec/golden-highlights.md, revision 4)
+# --------------------------------------------------------------------------- #
+
+def _diagonal(H, W, inside, outside, slope=0.37):
+    yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
+    d = yy - (H * 0.5 + (xx - W * 0.5) * slope)
+    a = np.clip(0.5 + d, 0.0, 1.0)[..., None]
+    return (a * np.array(inside, np.float32) + (1 - a) * np.array(outside, np.float32)).astype(np.float32)
+
+
+def _along(m, xs, ys):
+    import cv2
+    return cv2.remap(m, xs.astype(np.float32)[None], ys.astype(np.float32)[None],
+                     cv2.INTER_LINEAR)[0]
+
+
+@pytest.mark.parametrize("long_side", [1080, 4320])
+def test_the_gold_follows_a_slanted_edge_without_steps(long_side):
+    """Sunlit cream against pale sky along a slanted edge, at preview and
+    export size: at any distance from the edge the gold is the same all along
+    it (no stair-steps), and the sky keeps none."""
+    H, W = int(long_side * 2 / 3), long_side
+    img = _diagonal(H, W, CREAM, (0.75, 0.82, 0.90))
+    k = gd.gold_map(img, 100, dict(gd.GOLDEN_SHAPE_DEFAULT))
+    scale = long_side / 1080
+    xs = np.arange(int(W * 0.2), int(W * 0.8), dtype=np.float32)
+    edge = H * 0.5 + (xs - W * 0.5) * 0.37
+    for off in (-12, -4, -1.5, 1.5, 4, 12):
+        vals = _along(k, xs, edge + off * scale / np.cos(np.arctan(0.37)))
+        assert vals.std() < 0.0002, (off, float(vals.std()))
+    assert k[int(H * 0.5 + 40 * scale), W // 2] > 0.01
+    assert k[int(H * 0.5 - 40 * scale), W // 2] < 1e-4
+
+
+def test_a_big_smooth_gradient_takes_a_smooth_gold():
+    """A 4320-px sunlit ramp (a lit wall falling off into shade): the gold
+    added is a smooth field - no steps between neighbours, no kinks - and
+    the lightness is untouched."""
+    H, W = 720, 4320
+    xx = np.linspace(0.0, 1.0, W, dtype=np.float32)[None, :].repeat(H, 0)
+    img = (np.array(CREAM, np.float32) * (0.35 + 0.65 * xx)[..., None]).astype(np.float32)
+    out = gd.apply_golden(img, 100)
+    a, b = _lab(img).reshape(H, W, 3), _lab(out).reshape(H, W, 3)
+    assert np.abs(b[..., 0] - a[..., 0]).max() < 0.002
+    gain = np.hypot(b[..., 1] - a[..., 1], b[..., 2] - a[..., 2])[H // 2]
+    assert gain.max() > 0.01
+    assert np.abs(np.diff(gain)).max() < 1e-4
+    assert np.abs(np.diff(gain, 2)).max() < 2e-6
+
+
+def test_smoothing_option_is_in_the_popup():
+    from widgets.golden_popup import ROWS
+    keys = [k for k, *_ in ROWS]
+    assert "smooth" in keys
+    assert gd.GOLDEN_SHAPE_DEFAULT["smooth"] == 30
+    assert gd.normalize_golden_shape({"hue": 72, "start": 55, "clean": 60,
+                                      "neutral": 10}) is None   # old shapes: default

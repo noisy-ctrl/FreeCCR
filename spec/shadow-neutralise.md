@@ -12,6 +12,48 @@ grain by up to 1.2–1.3× in places on lab scans, so how much the tool acts
 is now DECIDED on a denoised, edge-preserving view of the picture (the
 "decision map", shared with Golden Highlights) and only APPLIED per pixel.
 
+## Revision 4 (2026-10-23): the lower end of the shadows, and a smooth matte
+
+Feedback: "Depth - None to Inky doesn't make sense. It should be less to
+more. Also, we're talking about the lower end of shadows. The default and
+range is too high. There should also be a smoothing algorithm ... similar to
+DaVinci Resolve's colour pick tool. Otherwise it's going to look blocky."
+
+- **Range** now covers the lower end of the shadows only: OKLab L
+  **0.15..0.45** (display ~11..85/255), **default 0.30** (~44/255), fully on
+  below half of it (default: below ~11/255), fading smoothly to 0 at it. Was
+  0.20..0.70, default 0.50 (~99/255), which reached the lower midtones. Popup
+  ends "Near black" ↔ "Lower shadows".
+- **Depth** reads "Less" ↔ "More". It now has its own, wider fade
+  (`depth_weight` = 1 − smoothstep(L/Range), black to Range): with the new
+  short range, Depth on the neutralising fade would have steepened the tones
+  in a narrow band (peak slope 1.44 at Depth 100); on its own fade the peak is
+  ~1.07 and the slope at black stays ≥ 0.75.
+- **Smoothing** (new option, 0..100, default 30, "Crisp" ↔ "Soft"): like the
+  blur in Resolve's qualifier Matte Finesse, but edge-aware. The strength
+  map is a matte; `core.oklab.finish_matte` smooths it with a **guided
+  filter** along the decision view's lightness — soft inside an area, so
+  specks of a selection don't blotch, and following a real light/dark edge
+  instead of spilling over it. Radius 1 + 0.08·Smoothing px at the preview's
+  size (3 px at the default, 9 at 100), scaled with the render.
+- **No blocks at any size.** The decision used to be made at 1080 px and the
+  map scaled up for a bigger render; now the denoising is guided filters too
+  (`decision_lab`: each OKLab channel smoothed by a guided filter on itself,
+  radius 2 px at preview size scaled with the render, ε (0.020, 0.008, 0.008)²
+  for L, a, b — grain is smoothed, edges are kept), all O(1) box filters, so
+  the whole decision runs at the render's own resolution. On a slanted edge
+  at 4320 px the matte varies by 0.0002 (s.d.) along the edge at a fixed
+  distance from it, against 0.0018 for the old scaled-up map, and the edge
+  lands exactly on the picture's edge. (A first try kept the 1080 map and
+  "guided-upsampled" it on each pixel's own lightness: that would let luma
+  grain modulate the strength in the fade zone, so it was dropped.)
+
+Measured (real frames, at 100): colour grain where it acts falls to 0.44×
+on average on flat areas (max 0.83×), and nowhere rises (whole acting area
+max 1.00×, was 1.14× from edges with the scaled-up map); lightness exactly
+kept. Cost: ~0.4 s per 1080 preview render in the 2-thread test container,
+~11 s for a 24 MP export.
+
 ## Why a tool of its own
 
 - **Not White Balance / Temperature-Tint.** Those move every tone. A
@@ -48,10 +90,11 @@ dark plum 0.078, navy 0.091, a dark red 0.097, skin in shade (0.30, 0.20,
   right after Golden Highlights (so right before Colour Organics); Saturation
   sync group.
 - Right-click the label: **Range** (how far up the tones it reaches, OKLab
-  L 0.20..0.70, default 0.50, "Deep shadows" ↔ "Into midtones"), **Reach**
+  L 0.15..0.45, default 0.30, "Near black" ↔ "Lower shadows"; revision 4), **Reach**
   (how much colour still counts as a cast, chroma 0.010..0.100, default 0.045,
   "Casts only" ↔ "Colours too"), **Depth** (deepen the darkest tones a little,
-  0..100, default 0, "None" ↔ "Inky"), **Show where it acts** (a magenta
+  0..100, default 0, "Less" ↔ "More"), **Smoothing** (0..100, default 30,
+  "Crisp" ↔ "Soft"; revision 4), **Show where it acts** (a magenta
   overlay while the popup is open), Reset, and a before/after strip of a
   cast shadow ramp.
 - Non-goals: correcting a cast that runs through every tone (that is White
