@@ -1157,6 +1157,11 @@ class ImagePreview(QWidget):
         self._fc_item = None
         self._fc_cache = None            # (cacheKey of the shown pixmap, layer)
         self._fc_legend = None
+        # Golden Highlights "show where it acts" (spec/golden-highlights.md):
+        # its own layer while the options popup asks for it; None = off.
+        self._gold_mask_shape = None
+        self._gm_item = None
+        self._gm_cache = None            # (cacheKey, options) -> layer
         self._probe_qimage_key = None    # its QPixmap.cacheKey()
         self.scopes_panel.expanded_changed.connect(self._on_scopes_expanded)
         self.scopes_panel.sample_reference_changed.connect(self._on_sample_area_changed)
@@ -1220,6 +1225,8 @@ class ImagePreview(QWidget):
         self._glow_cache = None
         self._fc_item = None
         self._fc_cache = None
+        self._gm_item = None
+        self._gm_cache = None
         self._sync_mirror_actions()
         self._scope_timer.stop()
         self._scopes_dirty = False
@@ -1423,6 +1430,7 @@ class ImagePreview(QWidget):
         self._dust_cursor_item = None
         self._glow_item = None
         self._fc_item = None
+        self._gm_item = None
         for _slice_line in self._slice_lines:
             _slice_line["item"] = None
 
@@ -1638,6 +1646,7 @@ class ImagePreview(QWidget):
         # The false-colour and HDR glow layers follow whatever pixmap is now
         # displayed.
         self._refresh_fc_overlay()
+        self._refresh_gold_mask()
         self._refresh_glow_overlay()
 
         # The displayed image content/orientation may have changed (rotate,
@@ -1710,6 +1719,64 @@ class ImagePreview(QWidget):
         t.scale(target.width() / overlay.width(), target.height() / overlay.height())
         self._glow_item.setTransform(t)
         self._glow_item.setVisible(True)
+
+    # --- Golden Highlights: where it acts (spec/golden-highlights.md) ------
+    GM_MAX_LONG = 1200      # the map's own resolution (GUI thread; it is soft)
+
+    def set_gold_mask(self, shape):
+        """Show where Golden Highlights acts with these options (a cyan wash,
+        stronger where it acts more), or hide it with None. A display layer
+        like False colour: nothing that reads the picture sees it."""
+        from core.golden import normalize_golden_shape, GOLDEN_SHAPE_DEFAULT
+        if shape is None:
+            self._gold_mask_shape = None
+        else:
+            self._gold_mask_shape = normalize_golden_shape(shape) or dict(GOLDEN_SHAPE_DEFAULT)
+        self._refresh_gold_mask()
+
+    def _gold_mask_pixmap_for(self, target, shape):
+        from core.golden import weight_map
+        key = (target.cacheKey(), tuple(sorted(shape.items())))
+        if self._gm_cache is not None and self._gm_cache[0] == key:
+            return self._gm_cache[1]
+        src = target
+        long_side = max(src.width(), src.height())
+        if long_side > self.GM_MAX_LONG:
+            src = src.scaled(src.size() * (self.GM_MAX_LONG / long_side),
+                             Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        qimg = src.toImage().convertToFormat(QImage.Format_RGB888)
+        w, h = qimg.width(), qimg.height()
+        buf = np.frombuffer(qimg.constBits(), np.uint8)
+        rgb = buf.reshape(h, qimg.bytesPerLine())[:, :w * 3].reshape(h, w, 3)
+        wm = weight_map(rgb.astype(np.float32) / 255.0, shape)
+        rgba = np.zeros((h, w, 4), np.uint8)
+        rgba[..., 1], rgba[..., 2] = 205, 255           # cyan: never a picture colour here
+        rgba[..., 3] = (np.clip(wm * 1.6, 0.0, 0.85) * 255).astype(np.uint8)
+        rgba = np.ascontiguousarray(rgba)
+        pm = QPixmap.fromImage(QImage(rgba.data, w, h, 4 * w,
+                                      QImage.Format_RGBA8888).copy())
+        self._gm_cache = (key, pm)
+        return pm
+
+    def _refresh_gold_mask(self):
+        item = self.pixmap_item
+        shape = getattr(self, "_gold_mask_shape", None)
+        target = item.pixmap() if item is not None else None
+        if (shape is None or item is None or target is None or target.isNull()
+                or self.current_pixmap is None):
+            if self._gm_item is not None:
+                self._gm_item.setVisible(False)
+            return
+        layer = self._gold_mask_pixmap_for(target, shape)
+        if self._gm_item is None:
+            self._gm_item = QGraphicsPixmapItem(item)
+            self._gm_item.setTransformationMode(Qt.SmoothTransformation)
+            self._gm_item.setZValue(1.5)                 # over false colour, under the HDR dots
+        self._gm_item.setPixmap(layer)
+        t = QTransform()
+        t.scale(target.width() / layer.width(), target.height() / layer.height())
+        self._gm_item.setTransform(t)
+        self._gm_item.setVisible(True)
 
     # --- False colour (spec/false-colour.md) -----------------------------
     FC_MAX_LONG = 4096      # cap for the layer's own resolution (GUI-thread cost)

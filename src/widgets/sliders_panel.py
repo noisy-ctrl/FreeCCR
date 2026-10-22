@@ -2376,11 +2376,12 @@ class SlidersPanel(QWidget):
             self.end_undo_burst()
 
     # --- Golden Highlights options (spec/golden-highlights.md) -----------------
-    GOLDEN_HINT = ("Golden Highlights: the creamy gold of a good lab scan's "
-                   "sunlit highlights, added without darkening them. Shadows "
-                   "stay neutral, strong colours (sky, foliage) are left alone, "
-                   "and the very brightest tones ease back to a clean cream "
-                   "rather than going yellow. Around 60 matches a Noritsu.")
+    GOLDEN_HINT = ("Golden Highlights: more of a good lab scan's gold in sunlit "
+                   "highlights - bright tones that are already a little warm "
+                   "(lit whites, creams, pale stone, fabric) - without "
+                   "darkening them. Skin, sky, foliage, shadows and every "
+                   "strongly coloured area are left alone, and the very "
+                   "brightest tones stay a clean cream rather than yellow.")
     GOLDEN_LABEL_TIP = "Right-click: hue, where it starts, clean whites"
 
     def _update_golden_label(self):
@@ -2406,6 +2407,7 @@ class SlidersPanel(QWidget):
         i = self.adjustment_keys.index("golden_highlights")
         pop = GoldenPopup(self._golden_shape, self.sliders[i].value(), self)
         pop.changed.connect(self._on_golden_shape_changed)
+        pop.show_mask.connect(self._on_golden_show_mask)
         pop.closed.connect(self._on_golden_popup_closed)
         self._golden_popup = pop
         pop.adjustSize()
@@ -2413,9 +2415,23 @@ class SlidersPanel(QWidget):
         place_on_screen(pop, global_pos)
         pop.show()
 
+    def _golden_preview(self):
+        try:
+            return self.parent().parent().image_preview
+        except AttributeError:
+            return None
+
+    def _on_golden_show_mask(self, on):
+        ip = self._golden_preview()
+        if ip is not None and hasattr(ip, "set_gold_mask"):
+            ip.set_gold_mask(dict(self._golden_shape or {}) if on else None)
+
     def _on_golden_shape_changed(self, shape):
         self._golden_shape = normalize_golden_shape(shape)
         self._update_golden_label()
+        pop = self._golden_popup
+        if pop is not None and pop.mask_check.isChecked():
+            self._on_golden_show_mask(True)
         # Same store / preview / debounced-reprocess path as a slider move;
         # its undo burst is held open until the popup closes (one undo step).
         self.on_slider_changed()
@@ -2424,6 +2440,7 @@ class SlidersPanel(QWidget):
     def _on_golden_popup_closed(self):
         if self._golden_popup is not None:
             self._golden_popup = None
+            self._on_golden_show_mask(False)     # the map is only for adjusting
             self.end_undo_burst()
 
     # --- Colour Organics families (spec/colour-organics.md) -------------------

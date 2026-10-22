@@ -1,12 +1,13 @@
-"""Right-click popup for Golden Highlights: the gold's hue, where it starts and
-how clean the whites stay, with a before / after strip of a grey ramp.
+"""Right-click popup for Golden Highlights: the gold's hue, where it starts,
+how clean the whites stay and how much plain greys take, a before / after
+strip of sunlit-cream tones, and a switch to show on the picture where it acts.
 See spec/golden-highlights.md."""
 
 import numpy as np
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (QFrame, QVBoxLayout, QHBoxLayout, QLabel, QSlider,
-                               QPushButton)
+                               QPushButton, QCheckBox)
 
 from core.golden import (GOLDEN_SHAPE_DEFAULT, GOLDEN_LIMITS, apply_golden,
                          normalize_golden_shape)
@@ -19,10 +20,15 @@ ROWS = (
      "as yellow rather than gold)."),
     ("start", "Start", ("Lower", "Higher"),
      "Where in the tones the gold begins. Below it nothing changes, so "
-     "shadows stay neutral."),
+     "shadows and midtones stay as they are."),
     ("clean", "Clean whites", ("Golden", "Clean"),
      "How much the very brightest tones ease back to neutral. A lab scan "
      "keeps its whites a clean cream; at 0 the gold runs right up to white."),
+    ("neutral", "Neutral whites", ("None", "All"),
+     "How much plain greys and whites take. The tool acts on highlights that "
+     "are already a little warm (sunlit); a grey has no warmth to go on, so "
+     "it only gets this share. Raise it if your conversions render sunlit "
+     "highlights perfectly neutral."),
 )
 
 
@@ -30,15 +36,18 @@ def describe_golden(shape):
     shape = normalize_golden_shape(shape)
     if shape is None:
         return "default"
-    names = {"hue": "hue", "start": "start", "clean": "clean whites"}
+    names = {"hue": "hue", "start": "start", "clean": "clean whites",
+             "neutral": "neutral whites"}
     return ", ".join(f"{names[k]} {shape[k]}" for k in GOLDEN_SHAPE_DEFAULT
                      if shape[k] != GOLDEN_SHAPE_DEFAULT[k]) or "default"
 
 
 def _ramp_pixmap(amount, shape, w=200, h=14):
+    """A ramp of sunlit-cream tones (faintly warm greys), dark to light."""
     x = np.linspace(0.0, 1.0, w, dtype=np.float32)
-    grey = np.repeat(np.repeat(x[None, :, None], 3, axis=2), h, axis=0)
-    out = apply_golden(grey, amount, shape) if amount else grey
+    warm = np.array([1.0, 0.975, 0.92], np.float32)
+    ramp = np.repeat((x[:, None] * warm)[None], h, axis=0)
+    out = apply_golden(ramp, amount, shape) if amount else ramp
     rgb = np.ascontiguousarray((np.clip(out, 0, 1) * 255 + 0.5).astype(np.uint8))
     q = QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888).copy()
     return QPixmap.fromImage(q)
@@ -49,6 +58,7 @@ class GoldenPopup(QFrame):
     (a full options dict) on every edit and `closed()` when dismissed."""
 
     changed = Signal(dict)
+    show_mask = Signal(bool)
     closed = Signal()
 
     def __init__(self, shape=None, slider_value=0, parent=None):
@@ -95,7 +105,15 @@ class GoldenPopup(QFrame):
             lay.addLayout(ends)
             self.sliders[key], self.values_lbl[key] = sl, val
 
-        cap = QLabel("A grey ramp, before and after:")
+        self.mask_check = QCheckBox("Show where it acts")
+        self.mask_check.setToolTip(
+            "While this popup is open, the picture shows in cyan where Golden "
+            "Highlights acts (stronger cyan, more gold). Skin, sky and strong "
+            "colours should stay clear.")
+        self.mask_check.toggled.connect(self.show_mask.emit)
+        lay.addWidget(self.mask_check)
+
+        cap = QLabel("Sunlit-cream tones, before and after:")
         cap.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 10px;")
         lay.addWidget(cap)
         self.before = QLabel()

@@ -1,17 +1,28 @@
-"""Golden Highlights: the creamy gold of a lab scan's sunlit highlights,
-added at unchanged lightness (spec/golden-highlights.md).
+"""Golden Highlights: more of a lab scan's gold in SUNLIT highlights, added at
+unchanged lightness (spec/golden-highlights.md, revision 2).
 
-Display values (sRGB-encoded, 0..1) in OKLab: gold chroma is added along one
-hue, weighted by tone (none below the start, full through the bright tones,
-easing back to neutral at the very top) and by colour (near-neutrals take it
-all, colours already near gold some, cool colours very little)."""
+Display values (sRGB-encoded, 0..1) in OKLab. Only bright tones that are
+already a little warm and low in colour - sunlit whites, creams, pale stone,
+lit fabric - take it: skin (more colour, more orange), sky (blue), foliage and
+every strongly coloured area are left alone, and pure greys only take a small
+share (Neutral whites). Gold chroma is then added along one hue, easing back to
+a clean cream at the very top."""
 import numpy as np
 
-GOLDEN_SHAPE_DEFAULT = {"hue": 72, "start": 40, "clean": 60}
-GOLDEN_LIMITS = {"hue": (50, 95), "start": (20, 70), "clean": (0, 100)}
-GOLD_CHROMA = 0.035      # OKLab chroma added to a neutral at 100
-RISE = 0.25              # L over which the effect comes in after the start
+GOLDEN_SHAPE_DEFAULT = {"hue": 72, "start": 55, "clean": 60, "neutral": 10}
+GOLDEN_LIMITS = {"hue": (50, 95), "start": (30, 85), "clean": (0, 100),
+                 "neutral": (0, 100)}
+GOLD_CHROMA = 0.06       # OKLab chroma added at 100 to a fully sunlit tone
+RISE = 0.20              # L over which the effect comes in after the start
 TOP = 0.85               # L where clean whites start easing it back
+# What counts as sunlit: warm and low in colour. Hue window (OKLab degrees)
+# around sunlit cream / pale stone / lit fabric (measured 85-90); skin sits
+# lower (~45-62) and has more colour, so it falls outside.
+SUNLIT_HUE = 88.0
+SUNLIT_WIDTH = 30.0      # half-width: weight 0.5 at +-15, 0 at +-30
+SUNLIT_CHROMA = 0.035    # colour gate exp(-(C/0.035)^2): skin and sky drop out
+NEUTRAL_BELOW = 0.004    # chroma under this counts as a pure grey...
+NEUTRAL_ABOVE = 0.012    # ...and over this as having a hue of its own
 CHUNK = 1 << 20
 
 _M1 = np.array([[0.4122214708, 0.5363325363, 0.0514459929],
@@ -65,16 +76,28 @@ def _smooth(x):
 
 
 def gold_weight(lab, shape):
-    """Chroma to add (before the amount) for each OKLab colour: tone x colour."""
+    """Chroma to add (before the amount) for each OKLab colour: tone x sunlit."""
     L, a, b = lab[:, 0], lab[:, 1], lab[:, 2]
-    hg = np.radians(shape["hue"])
     w = _smooth((L - shape["start"] / 100.0) / RISE)
     w = w * (1.0 - shape["clean"] / 100.0 * _smooth((L - TOP) / (1.0 - TOP)))
     C = np.hypot(a, b)
-    near = 0.5 + 0.5 * (a * np.cos(hg) + b * np.sin(hg)) / np.maximum(C, 1e-6)
-    C0 = 0.015 + 0.085 * np.maximum(near, 0.0) ** 1.5
-    c = 1.0 / (1.0 + (C / C0) ** 2)
-    return (GOLD_CHROMA * w * c).astype(np.float32)
+    h = np.degrees(np.arctan2(b, a))
+    d = np.abs((h - SUNLIT_HUE + 180.0) % 360.0 - 180.0)
+    g_hue = np.where(d < SUNLIT_WIDTH, 0.5 + 0.5 * np.cos(np.pi * d / SUNLIT_WIDTH), 0.0)
+    g_chroma = np.exp(-(C / SUNLIT_CHROMA) ** 2)
+    # a grey has no reliable hue: blend from the Neutral-whites share to the
+    # sunlit gate as the colour becomes measurable (smooth, so no speckle)
+    t = _smooth((C - NEUTRAL_BELOW) / (NEUTRAL_ABOVE - NEUTRAL_BELOW))
+    col = (1.0 - t) * (shape["neutral"] / 100.0) + t * g_hue * g_chroma
+    return (GOLD_CHROMA * w * col).astype(np.float32)
+
+
+def weight_map(rgb01, shape=None):
+    """0..1 map of where the tool acts on a display image (for the canvas)."""
+    shape = normalize_golden_shape(shape) or dict(GOLDEN_SHAPE_DEFAULT)
+    a = np.asarray(rgb01, np.float32)
+    w = gold_weight(to_oklab(a.reshape(-1, 3)), shape) / np.float32(GOLD_CHROMA)
+    return w.reshape(a.shape[:2])
 
 
 def _outside(rgb):
