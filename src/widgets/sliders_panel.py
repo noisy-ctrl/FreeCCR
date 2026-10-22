@@ -12,6 +12,7 @@ from core.ccr_processor import (COLOR_BANDS, BAND_PARAMS, BAND_ADJUSTMENT_KEYS,
                                 compute_density_slopes, CHROMA_NR_RADIUS_DEFAULT,
                                 normalize_organics_shape)
 from core.x_tones import normalize_xtone_shape, XTONE_SHAPE_DEFAULT
+from core.golden import normalize_golden_shape
 from core.film_stocks import (decode_film_stocks, encode_film_stocks,
                               find_film_stock, upsert_film_stock,
                               remove_film_stock)
@@ -43,7 +44,7 @@ SYNC_GROUPS = [
       "shadows", "black_point", "highlights_x", "shadows_x", "punch_x",
       "contrast")),
     ("sat", "Saturation", ("saturation", "sat_rolloff", "vibrance", "sub_saturation",
-                            "colour_organics")),
+                            "golden_highlights", "colour_organics")),
     ("crop", "Crop", ()),
     # Coarse 90-degree rotation + the mirror flags, synced like crop (whole-image
     # properties, not adjustment keys). fine_rotation_angle is deliberately NOT
@@ -173,6 +174,7 @@ _BASIC_LABELS = {
     "saturation": "Saturation", "sat_rolloff": "Saturation Roll-off",
     "vibrance": "Vibrance",
     "sub_saturation": "Subtracted Sat", "colour_organics": "Colour Organics",
+    "golden_highlights": "Golden Highlights",
     "exposure": "Exposure",
     "ch_input_gain": "Input Gain", "ch_master_shift": "Master Shift",
     "ch_master_gain": "Master Gain",
@@ -255,6 +257,10 @@ def paste_options(clip, default_for):
         from widgets.x_tone_popup import describe_xtone_shape
         rows.append(("Adjustments", "xtone_shape", "Highlights/Shadows/Punch \u00d7 options  ("
                      + describe_xtone_shape(clip["xtone_shape"]) + ")"))
+    if normalize_golden_shape(clip.get("golden_shape")):
+        from widgets.golden_popup import describe_golden
+        rows.append(("Adjustments", "golden_shape", "Golden Highlights options  ("
+                     + describe_golden(clip["golden_shape"]) + ")"))
     if normalize_organics_shape(clip.get("organics_shape")):
         from widgets.organics_popup import describe_organics
         rows.append(("Adjustments", "organics_shape", "Colour Organics families  ("
@@ -641,7 +647,10 @@ class SlidersPanel(QWidget):
         "sat_rolloff",
         "vibrance",
         "sub_saturation",
-        # Colour Organics, the last of the colour sliders (spec/colour-organics.md)
+        # Golden Highlights sits directly above Colour Organics
+        # (spec/golden-highlights.md), then Colour Organics, the last of the
+        # colour sliders (spec/colour-organics.md)
+        "golden_highlights",
         "colour_organics",
         # Per-channel levels controls (collapsible section)
         "ch_input_gain", "ch_master_shift", "ch_master_gain",
@@ -1179,6 +1188,19 @@ class SlidersPanel(QWidget):
         # explanation is the label's tooltip (no line in the panel).
         # Created right after Subtracted Sat (ADJUSTMENT_KEYS zip).
         # spec/colour-organics.md
+        # Golden Highlights: the gold of a lab scan's sunlit highlights, added
+        # at unchanged brightness; right-click for hue / start / clean whites.
+        # Created right before Colour Organics (ADJUSTMENT_KEYS zip).
+        # spec/golden-highlights.md
+        self.golden_slider_layout = self.create_slider(
+            "Golden Highlights", min_value=0, max_value=100)
+        self._golden_shape = None        # active layer's options (None = default)
+        self._golden_popup = None
+        self._golden_label = self.golden_slider_layout.itemAt(0).widget()
+        self._golden_label.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._golden_label.customContextMenuRequested.connect(
+            lambda pos: self._open_golden_popup(self._golden_label.mapToGlobal(pos)))
+        self._update_golden_label()
         from core.ccr_processor import ORGANICS_AMOUNT_MAX
         self.colour_organics_slider_layout = self.create_slider(
             "Colour Organics", min_value=0, max_value=ORGANICS_AMOUNT_MAX)
@@ -1209,6 +1231,7 @@ class SlidersPanel(QWidget):
         scroll_layout.addLayout(self.sat_rolloff_slider_layout)
         scroll_layout.addLayout(self.vibrance_slider_layout)
         scroll_layout.addLayout(self.sub_saturation_slider_layout)
+        scroll_layout.addLayout(self.golden_slider_layout)
         scroll_layout.addLayout(self.colour_organics_slider_layout)
 
         # --- Reset / Compare / Sync buttons ---
@@ -1695,6 +1718,9 @@ class SlidersPanel(QWidget):
         self._organics_shape = normalize_organics_shape(
             adjustment.get("organics_shape") if adjustment else None)
         self._update_organics_label()
+        self._golden_shape = normalize_golden_shape(
+            adjustment.get("golden_shape") if adjustment else None)
+        self._update_golden_label()
         for i, key in enumerate(self.adjustment_keys):
             if i < len(self.sliders):
                 val = adjustment.get(key, self._default_for(key)) if adjustment \
@@ -2068,6 +2094,9 @@ class SlidersPanel(QWidget):
         # Colour Organics families: nested and non-slider in the same way.
         if getattr(self, "_organics_shape", None):
             adjustment["organics_shape"] = dict(self._organics_shape)
+        # ... and the Golden Highlights options.
+        if getattr(self, "_golden_shape", None):
+            adjustment["golden_shape"] = dict(self._golden_shape)
         return adjustment
 
     def _attach_cineon(self, adjustment: dict) -> dict:
@@ -2346,6 +2375,57 @@ class SlidersPanel(QWidget):
             self._xtone_popup = None
             self.end_undo_burst()
 
+    # --- Golden Highlights options (spec/golden-highlights.md) -----------------
+    GOLDEN_HINT = ("Golden Highlights: the creamy gold of a good lab scan's "
+                   "sunlit highlights, added without darkening them. Shadows "
+                   "stay neutral, strong colours (sky, foliage) are left alone, "
+                   "and the very brightest tones ease back to a clean cream "
+                   "rather than going yellow. Around 60 matches a Noritsu.")
+    GOLDEN_LABEL_TIP = "Right-click: hue, where it starts, clean whites"
+
+    def _update_golden_label(self):
+        lbl = getattr(self, "_golden_label", None)
+        if lbl is None:
+            return
+        from widgets.golden_popup import describe_golden
+        custom = self._golden_shape is not None
+        f = lbl.font()
+        f.setUnderline(custom)
+        lbl.setFont(f)
+        lines = [self.GOLDEN_HINT]
+        if custom:
+            lines.append("Options: " + describe_golden(self._golden_shape))
+        lines.append(self.GOLDEN_LABEL_TIP)
+        lbl.setToolTip("\n".join(lines))
+
+    def _open_golden_popup(self, global_pos):
+        if self.current_idx is None:
+            return
+        from widgets.golden_popup import GoldenPopup
+        self.end_undo_burst()
+        i = self.adjustment_keys.index("golden_highlights")
+        pop = GoldenPopup(self._golden_shape, self.sliders[i].value(), self)
+        pop.changed.connect(self._on_golden_shape_changed)
+        pop.closed.connect(self._on_golden_popup_closed)
+        self._golden_popup = pop
+        pop.adjustSize()
+        from utils.popup_placement import place_on_screen
+        place_on_screen(pop, global_pos)
+        pop.show()
+
+    def _on_golden_shape_changed(self, shape):
+        self._golden_shape = normalize_golden_shape(shape)
+        self._update_golden_label()
+        # Same store / preview / debounced-reprocess path as a slider move;
+        # its undo burst is held open until the popup closes (one undo step).
+        self.on_slider_changed()
+        self._undo_burst_timer.stop()
+
+    def _on_golden_popup_closed(self):
+        if self._golden_popup is not None:
+            self._golden_popup = None
+            self.end_undo_burst()
+
     # --- Colour Organics families (spec/colour-organics.md) -------------------
     ORGANICS_LABEL_TIP = "Right-click: families and reach"
 
@@ -2601,6 +2681,8 @@ class SlidersPanel(QWidget):
         self._update_organics_label()
         self._xtone_shape = None
         self._update_xtone_labels()
+        self._golden_shape = None
+        self._update_golden_label()
         # Save adjustment to the ACTIVE layer (global or selected area) and
         # update the preview. Resetting an area zeroes that area's settings;
         # resetting the Whole Image layer zeroes the global sliders (areas keep
@@ -2715,6 +2797,7 @@ class SlidersPanel(QWidget):
         src_curves = src_global.get("curves")  # None when identity/absent
         src_shape = normalize_xtone_shape(src_global.get("xtone_shape"))
         src_org = normalize_organics_shape(src_global.get("organics_shape"))
+        src_gold = normalize_golden_shape(src_global.get("golden_shape"))
         current_adjustment = src_global
         crop_rect = src.crop_rect if src is not None else None
         crop_angle = getattr(src, "crop_angle", 0.0) if src is not None else 0.0
@@ -2735,9 +2818,11 @@ class SlidersPanel(QWidget):
             shape_changes = sync_tone_shape and own_shape != src_shape
             own_org = normalize_organics_shape(img.adjustment_settings.get("organics_shape"))
             org_changes = sync_org_shape and own_org != src_org
+            own_gold = normalize_golden_shape(img.adjustment_settings.get("golden_shape"))
+            gold_changes = sync_org_shape and own_gold != src_gold
             if (not adj_changes and not crop_changes and not profile_changes
                     and not curves_changes and not orient_changes and not shape_changes
-                    and not org_changes):
+                    and not org_changes and not gold_changes):
                 continue  # nothing to change — and no dead undo snapshot
             img.push_undo_state()
             if adj_changes:
@@ -2759,6 +2844,8 @@ class SlidersPanel(QWidget):
                     merged["xtone_shape"] = dict(own_shape)
                 if own_org and not org_changes:
                     merged["organics_shape"] = dict(own_org)
+                if own_gold and not gold_changes:
+                    merged["golden_shape"] = dict(own_gold)
                 # Same for the Cineon flag when the channels group (which
                 # carries it) is NOT being synced — the rebuild from
                 # adjustment_keys would silently drop it otherwise.
@@ -2776,6 +2863,11 @@ class SlidersPanel(QWidget):
                     img.adjustment_settings["organics_shape"] = dict(src_org)
                 else:
                     img.adjustment_settings.pop("organics_shape", None)
+            if gold_changes:
+                if src_gold:
+                    img.adjustment_settings["golden_shape"] = dict(src_gold)
+                else:
+                    img.adjustment_settings.pop("golden_shape", None)
             if curves_changes:
                 if src_curves:
                     img.adjustment_settings["curves"] = copy.deepcopy(src_curves)
@@ -3608,6 +3700,8 @@ class SlidersPanel(QWidget):
                 live["xtone_shape"] = g["xtone_shape"]
             if g.get("organics_shape"):
                 live["organics_shape"] = g["organics_shape"]
+            if g.get("golden_shape"):
+                live["golden_shape"] = g["golden_shape"]
             for flag in GLOBAL_FLAG_KEYS:
                 if g.get(flag):
                     live[flag] = g[flag]
@@ -3619,6 +3713,7 @@ class SlidersPanel(QWidget):
             "xtone_shape": copy.deepcopy(normalize_xtone_shape(live.get("xtone_shape"))),
             "organics_shape": copy.deepcopy(
                 normalize_organics_shape(live.get("organics_shape"))),
+            "golden_shape": copy.deepcopy(normalize_golden_shape(live.get("golden_shape"))),
             # Bypass-until-export flags ride with their section's paste row.
             "flags": {f: bool(live.get(f)) for f in GLOBAL_FLAG_KEYS
                       if f not in ("cineon_log", "look_lut")},
@@ -3736,7 +3831,7 @@ class SlidersPanel(QWidget):
         flag_for = {"noise": "chroma_nr_export_only", "sharpen": "sharpen_export_only"}
         touch_adj = (bool(adj_keys) or "curves" in chosen or "cineon_log" in chosen
                      or "look_lut" in chosen or "xtone_shape" in chosen
-                     or "organics_shape" in chosen)
+                     or "organics_shape" in chosen or "golden_shape" in chosen)
         merged = None
         if touch_adj:
             # Build a COMPLETE dict from the target (missing keys filled with
@@ -3761,6 +3856,10 @@ class SlidersPanel(QWidget):
                 merged["organics_shape"] = copy.deepcopy(clip["organics_shape"])
             elif normalize_organics_shape(target.get("organics_shape")):
                 merged["organics_shape"] = target["organics_shape"]
+            if "golden_shape" in chosen and clip.get("golden_shape"):
+                merged["golden_shape"] = copy.deepcopy(clip["golden_shape"])
+            elif normalize_golden_shape(target.get("golden_shape")):
+                merged["golden_shape"] = target["golden_shape"]
             if "cineon_log" in chosen or target.get("cineon_log"):
                 merged["cineon_log"] = True
             if "look_lut" in chosen and clip.get("look_lut"):
@@ -3791,6 +3890,8 @@ class SlidersPanel(QWidget):
                 self._update_organics_label()
                 self._xtone_shape = normalize_xtone_shape(merged.get("xtone_shape"))
                 self._update_xtone_labels()
+                self._golden_shape = normalize_golden_shape(merged.get("golden_shape"))
+                self._update_golden_label()
 
         pixels = touch_adj
         if "profile" in chosen:

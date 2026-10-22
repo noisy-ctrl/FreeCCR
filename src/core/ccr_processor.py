@@ -7,6 +7,9 @@ import time
 import tifffile
 import gc
 
+# Golden Highlights (spec/golden-highlights.md). Imported here, on the main
+# thread at start-up: its OKLab matrices are inverted at import.
+from core.golden import apply_golden
 from core.color_management import (apply_export_colorspace,
                                    apply_export_colorspace_gray,
                                    inject_jpeg_icc, srgb_encode)
@@ -3797,6 +3800,10 @@ def adjust_image(
     shadows_x: float = 0.0,
     punch_x: float = 0.0,
     xtone_shape=None,
+    # Golden Highlights (spec/golden-highlights.md), 0..100, and its options
+    # (None = default). Appended last.
+    golden_highlights: float = 0.0,
+    golden_shape=None,
 ) -> np.ndarray:
     """
     Apply temperature, tint, exposure, brightness, blackpoint, whitepoint, highlights, shadows,
@@ -4016,6 +4023,12 @@ def adjust_image(
             feather = float(band_settings.get('band_feather', _BAND_FEATHER_DEFAULT) or 0)
             img_norm = np.clip(img / 65535.0, 0.0, 1.0).astype(np.float32)
             img = _apply_color_bands_float(img_norm, bin_deltas, feather) * 65535.0
+
+    # Golden Highlights: the last colour stage, finishing the look (after the
+    # saturation sliders and the bands, so they don't push it around).
+    if golden_highlights and golden_highlights > 0:
+        img = apply_golden(np.clip(img / 65535.0, 0.0, 1.0).astype(np.float32),
+                           golden_highlights, golden_shape) * 65535.0
 
     img = np.clip(img, 0, 65535)
     return img.astype(np.uint16)
@@ -4303,6 +4316,9 @@ def adjust_image_opencl(
     shadows_x: float = 0.0,
     punch_x: float = 0.0,
     xtone_shape=None,
+    # Golden Highlights — appended last, see adjust_image.
+    golden_highlights: float = 0.0,
+    golden_shape=None,
 ) -> np.ndarray:
     """
     GPU-accelerated (OpenCL) version of adjust_image.
@@ -4482,7 +4498,9 @@ def adjust_image_opencl(
                           colour_organics=colour_organics,
                           organics_shape=organics_shape,
                           highlights_x=highlights_x, shadows_x=shadows_x,
-                          punch_x=punch_x, xtone_shape=xtone_shape)
+                          punch_x=punch_x, xtone_shape=xtone_shape,
+                          golden_highlights=golden_highlights,
+                          golden_shape=golden_shape)
 
     try:
       # Serialize GPU submissions: the hi-res zoom worker may run this
@@ -4547,7 +4565,12 @@ def adjust_image_opencl(
 
         # Get results and reshape
         result = img_buf.get().reshape(img.shape)
-        return np.clip(result, 0, 65535).astype(np.uint16)
+      # Golden Highlights runs after everything else, in numpy on both paths
+      # (the same function as adjust_image's last stage).
+      if golden_highlights and golden_highlights > 0:
+          result = apply_golden(np.clip(result / 65535.0, 0.0, 1.0).astype(np.float32),
+                                golden_highlights, golden_shape) * 65535.0
+      return np.clip(result, 0, 65535).astype(np.uint16)
 
     except Exception as e:
         print(f"OpenCL processing failed: {e}")
@@ -4570,7 +4593,9 @@ def adjust_image_opencl(
                           colour_organics=colour_organics,
                           organics_shape=organics_shape,
                           highlights_x=highlights_x, shadows_x=shadows_x,
-                          punch_x=punch_x, xtone_shape=xtone_shape)
+                          punch_x=punch_x, xtone_shape=xtone_shape,
+                          golden_highlights=golden_highlights,
+                          golden_shape=golden_shape)
 
 
 

@@ -2112,6 +2112,10 @@ class CCRImage:
                      shadows_x=s.get('shadows_x', 0),
                      punch_x=s.get('punch_x', 0),
                      xtone_shape=s.get('xtone_shape'),
+                     # Golden Highlights and its options
+                     # (spec/golden-highlights.md); per layer.
+                     golden_highlights=s.get('golden_highlights', 0),
+                     golden_shape=s.get('golden_shape'),
                      # Per-color-band sliders ride the same GPU pass (or the
                      # CPU fallback); None keeps the inactive case free.
                      band_settings=(s if any(s.get(k, 0)
@@ -2246,6 +2250,10 @@ class CCRImage:
                      shadows_x=s.get('shadows_x', 0),
                      punch_x=s.get('punch_x', 0),
                      xtone_shape=s.get('xtone_shape'),
+                     # Golden Highlights and its options
+                     # (spec/golden-highlights.md); per layer.
+                     golden_highlights=s.get('golden_highlights', 0),
+                     golden_shape=s.get('golden_shape'),
                      balance_r=s.get('balance_r', 0),
                      balance_g=s.get('balance_g', 0),
                      balance_b=s.get('balance_b', 0),
