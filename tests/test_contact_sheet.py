@@ -80,7 +80,7 @@ def test_crop_source():
 
 # --- the overlay ---------------------------------------------------------------------
 
-def _draw(rect, angle=0.0, source="auto", w=400, h=300):
+def _draw(rect, angle=0.0, source="auto", w=400, h=300, overlay=True):
     from PySide6.QtCore import QRectF
     from PySide6.QtGui import QPainter
     src = QPixmap(w, h)
@@ -88,7 +88,7 @@ def _draw(rect, angle=0.0, source="auto", w=400, h=300):
     out = QImage(200, 150, QImage.Format_RGB888)
     out.fill(QColor(0, 0, 0))
     p = QPainter(out)
-    cs.draw_frame(p, QRectF(0, 0, 200, 150), src, rect, angle, source)
+    cs.draw_frame(p, QRectF(0, 0, 200, 150), src, rect, angle, source, overlay)
     p.end()
     return out
 
@@ -112,6 +112,13 @@ def test_unsure_frame_gets_a_dashed_outline():
     red = cs.SOURCES["unsure"][0]
     edge = [_near(_rgb(out, x, 1), red, 70) for x in range(10, 190)]
     assert any(edge) and not all(edge)              # dashed
+
+
+def test_without_the_overlay_just_the_frame():
+    out = _draw((0.25, 0.2, 0.75, 0.8), overlay=False)
+    for x in (20, 50, 100, 180):                         # outside, edge, inside
+        assert _near(_rgb(out, x, 75), (128, 128, 128), 3)
+    assert _near(_rgb(_draw(None, source="unsure", overlay=False), 100, 1), (128, 128, 128), 3)
 
 
 # --- the sheet ------------------------------------------------------------------------
@@ -278,3 +285,34 @@ def test_catalog_keeps_where_the_crop_came_from(tmp_path):
     old = catalog.create_images_for_path(path, path=cat)[0]
     assert old.crop_rect == (0.1, 0.2, 0.9, 0.8)
     assert old.auto_crop_rect is None and old.auto_crop_example is None
+
+
+def test_overlay_toggle_redraws_every_frame_and_is_remembered(images, monkeypatch):
+    from PySide6.QtCore import QSettings
+    store = {}
+    monkeypatch.setattr(QSettings, "setValue", lambda self, k, v: store.__setitem__(k, v))
+    sheet = cs.ContactSheet()
+    sheet.overlay = True
+    images[1].crop_rect = (0.25, 0.2, 0.75, 0.8)
+    sheet.update()
+    r = sheet.layout().image_rect(1)
+    outside = (r.x() + r.width() * 0.08, r.center().y())
+    assert sum(_rgb(sheet.image(), *outside)) < 3 * 128 - 60       # dimmed
+    sheet.set_overlay(False)
+    assert sheet.redrawn == [0, 1, 2, 3, 4] and store["sheet/overlay"] is False
+    assert _near(_rgb(sheet.image(), *outside), (128, 128, 128), 3)
+    sheet.set_overlay(True)
+    assert sum(_rgb(sheet.image(), *outside)) < 3 * 128 - 60
+
+
+def test_overlay_checkbox_sits_next_to_negatives(images):
+    sheet = cs.ContactSheet()
+    sheet.overlay = False
+    view = cs.ContactSheetView(sheet)
+    _KEEP.append(view)
+    bar = view.neg_check.parentWidget().layout()
+    i = bar.indexOf(view.neg_check)
+    assert bar.itemAt(i + 1).widget() is view.overlay_check
+    assert view.overlay_check.text() == "Overlay" and not view.overlay_check.isChecked()
+    view.overlay_check.setChecked(True)
+    assert sheet.overlay is True

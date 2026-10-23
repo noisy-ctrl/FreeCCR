@@ -110,11 +110,11 @@ def _caption(source, detail):
     return label
 
 
-def draw_frame(p, target, source_img, crop_rect, crop_angle, source):
+def draw_frame(p, target, source_img, crop_rect, crop_angle, source, overlay=True):
     """One frame, uncropped and as scanned, fitted and centred in `target`,
     with its crop overlay: the outside dimmed and the crop outlined in the
     source colour (a red dashed outline round a frame auto crop wasn't sure
-    of). Returns the frame's rect."""
+    of). With `overlay` False, just the frame. Returns the frame's rect."""
     if isinstance(source_img, QPixmap):
         source_img = source_img.toImage()
     sw, sh = source_img.width(), source_img.height()
@@ -125,7 +125,7 @@ def draw_frame(p, target, source_img, crop_rect, crop_angle, source):
     p.translate(x, y)
     p.drawImage(QRectF(0, 0, w, h), source_img)
     colour = QColor(*SOURCES.get(source, SOURCES["none"])[0])
-    if crop_rect is not None:
+    if overlay and crop_rect is not None:
         poly = QPolygonF(crop_polygon(crop_rect, crop_angle, w, h))
         outside = QPainterPath()
         outside.addRect(QRectF(0, 0, w, h))
@@ -136,7 +136,7 @@ def draw_frame(p, target, source_img, crop_rect, crop_angle, source):
         p.setPen(QPen(colour, 2.5))
         p.setBrush(Qt.NoBrush)
         p.drawPolygon(poly)
-    elif source == "unsure":
+    elif overlay and source == "unsure":
         p.setPen(QPen(colour, 2.5, Qt.DashLine))
         p.setBrush(Qt.NoBrush)
         p.drawRect(QRectF(1.5, 1.5, w - 3, h - 3))
@@ -285,6 +285,8 @@ class ContactSheet(QObject):
         super().__init__(parent)
         self._settings = QSettings("FreeCCR", "FreeCCR")
         self.negatives = self._settings.value("sheet/negatives", False, type=bool)
+        # the crop overlay (dimmed outside + outline); on unless turned off
+        self.overlay = self._settings.value("sheet/overlay", True, type=bool)
         self._image = None
         self._layout = None
         self._sigs = []
@@ -316,6 +318,12 @@ class ContactSheet(QObject):
     def set_negatives(self, on):
         self.negatives = bool(on)
         self._settings.setValue("sheet/negatives", self.negatives)
+        self.update(force=True)
+
+    def set_overlay(self, on):
+        """Show or hide every frame's crop overlay (the captions stay)."""
+        self.overlay = bool(on)
+        self._settings.setValue("sheet/overlay", self.overlay)
         self.update(force=True)
 
     def update(self, force=False):
@@ -356,7 +364,7 @@ class ContactSheet(QObject):
                    tuple(img.crop_rect) if img.crop_rect else None,
                    round(float(getattr(img, "crop_angle", 0.0) or 0.0), 4),
                    src, detail, _name(img), fmt, self.negatives,
-                   self._neg_state(img) if self.negatives else None)
+                   self._neg_state(img) if self.negatives else None, self.overlay)
             if self._sigs[i] == sig:
                 continue
             self._sigs[i] = sig
@@ -382,7 +390,7 @@ class ContactSheet(QObject):
         area = lay.image_rect(i)
         if source is not None and not source.isNull():
             draw_frame(p, area, source, img.crop_rect,
-                       getattr(img, "crop_angle", 0.0), src)
+                       getattr(img, "crop_angle", 0.0), src, self.overlay)
         else:
             p.setPen(QColor(110, 110, 110))
             p.drawText(area, Qt.AlignCenter, "reading scan…")
@@ -557,7 +565,7 @@ class _SheetGraphicsView(QGraphicsView):
 
 class ContactSheetView(QWidget):
     """The sheet in place of the main image view: a bar (title, Negatives,
-    Fit / 100%, Export…, Back to frame) over the zoomable image."""
+    Overlay, Fit / 100%, Export…, Back to frame) over the zoomable image."""
     frameActivated = Signal(int, bool)     # index, open in the Crop panel
     autoCropRequested = Signal(int)
     closeRequested = Signal()
@@ -593,6 +601,14 @@ class ContactSheetView(QWidget):
         self.neg_check.setChecked(self.sheet.negatives)
         self.neg_check.toggled.connect(self.sheet.set_negatives)
         b.addWidget(self.neg_check)
+        self.overlay_check = QCheckBox("Overlay")
+        self.overlay_check.setToolTip(
+            "Show each frame's crop: the area outside it dimmed and the crop "
+            "outlined in the colour of where it came from. Off shows the "
+            "frames as they are; the captions stay. Also what Export writes.")
+        self.overlay_check.setChecked(self.sheet.overlay)
+        self.overlay_check.toggled.connect(self.sheet.set_overlay)
+        b.addWidget(self.overlay_check)
         self.fit_btn = QPushButton("Fit")
         self.full_btn = QPushButton("100%")
         self.export_btn = QPushButton("Export…")

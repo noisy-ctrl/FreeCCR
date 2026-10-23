@@ -111,3 +111,12 @@ a conversion shows up by itself.
   per-frame controls and restores them, double-click opens a frame, refused
   while cropping.
 - Catalog round trip of the provenance keys, and an old record without them.
+
+## Overlay checkbox (2026-10-23)
+
+An **Overlay** checkbox sits right after Negatives in the sheet's bar (on by
+default, remembered as `sheet/overlay`). Off draws every frame as it is: no
+dimmed outside, no crop outline, no dashed "unsure" box (`draw_frame(...,
+overlay=False)`); the captions under each frame (number, name, format, where
+the crop came from) and the footer legend stay. It is part of each frame's
+signature, so toggling redraws every cell, and Export writes what is shown.
