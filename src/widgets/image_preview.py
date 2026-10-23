@@ -1170,6 +1170,11 @@ class ImagePreview(QWidget):
         self._mask_kind = None           # "gold" / "shadow" while showing
         self._gm_item = None
         self._gm_cache = None            # (cacheKey, options) -> layer
+        # What is clipping, while a histogram clip corner is hovered
+        # (spec/histogram-clip-overlay.md): "black" / "white" / None.
+        self._clip_kind = None
+        self._clip_item = None
+        self._clip_cache = None          # ((kind, cacheKey), layer)
         self._probe_qimage_key = None    # its QPixmap.cacheKey()
         self.scopes_panel.expanded_changed.connect(self._on_scopes_expanded)
         self.scopes_panel.sample_reference_changed.connect(self._on_sample_area_changed)
@@ -1235,6 +1240,8 @@ class ImagePreview(QWidget):
         self._fc_cache = None
         self._gm_item = None
         self._gm_cache = None
+        self._clip_item = None
+        self._clip_cache = None
         self._sync_mirror_actions()
         self._scope_timer.stop()
         self._scopes_dirty = False
@@ -1439,6 +1446,7 @@ class ImagePreview(QWidget):
         self._glow_item = None
         self._fc_item = None
         self._gm_item = None
+        self._clip_item = None
         for _slice_line in self._slice_lines:
             _slice_line["item"] = None
 
@@ -1656,6 +1664,7 @@ class ImagePreview(QWidget):
         self._refresh_fc_overlay()
         self._refresh_gold_mask()
         self._refresh_glow_overlay()
+        self._refresh_clip_overlay()
 
         # The displayed image content/orientation may have changed (rotate,
         # flip, fine rotation, hi-res pixmap swap) — refresh the scopes.
@@ -1829,6 +1838,53 @@ class ImagePreview(QWidget):
         t.scale(target.width() / layer.width(), target.height() / layer.height())
         self._gm_item.setTransform(t)
         self._gm_item.setVisible(True)
+
+    # --- What is clipping (spec/histogram-clip-overlay.md) ----------------
+    def set_clip_overlay(self, kind):
+        """Show the pixels clipping to black ("black", in blue) or white
+        ("white", in red) over the picture, or hide them (None / ""). A
+        display layer: nothing that reads the picture sees it."""
+        self._clip_kind = kind if kind in ("black", "white") else None
+        self._refresh_clip_overlay()
+
+    def _clip_pixmap_for(self, target, kind):
+        from core.clip_overlay import clip_rgba
+        key = (kind, target.cacheKey())
+        if self._clip_cache is not None and self._clip_cache[0] == key:
+            return self._clip_cache[1]
+        qimg = target.toImage().convertToFormat(QImage.Format_RGB888)
+        w, h = qimg.width(), qimg.height()
+        buf = np.frombuffer(qimg.constBits(), np.uint8)
+        rgb = buf.reshape(h, qimg.bytesPerLine())[:, :w * 3].reshape(h, w, 3)
+        rgba = np.ascontiguousarray(clip_rgba(rgb, kind))
+        lh, lw = rgba.shape[:2]
+        # the max-pool's block (1 = full size); its padding is clear
+        k = max(1, -(-max(w, h) // max(lw, lh)))
+        pm = QPixmap.fromImage(QImage(rgba.data, lw, lh, 4 * lw,
+                                      QImage.Format_RGBA8888).copy())
+        self._clip_cache = (key, (pm, k))
+        return pm, k
+
+    def _refresh_clip_overlay(self):
+        item = self.pixmap_item
+        kind = getattr(self, "_clip_kind", None)
+        target = item.pixmap() if item is not None else None
+        if (kind is None or item is None or target is None or target.isNull()
+                or self.current_pixmap is None):
+            if getattr(self, "_clip_item", None) is not None:
+                self._clip_item.setVisible(False)
+            return
+        layer, k = self._clip_pixmap_for(target, kind)
+        if self._clip_item is None:
+            self._clip_item = QGraphicsPixmapItem(item)
+            # crisp: a clipped pixel is a pixel, not a soft blob
+            self._clip_item.setTransformationMode(Qt.FastTransformation)
+            self._clip_item.setZValue(2.5)               # over every other layer
+        self._clip_item.setPixmap(layer)
+        t = QTransform()
+        t.scale(k, k)
+        self._clip_item.setTransform(t)
+        self._clip_item.setVisible(True)
 
     # --- False colour (spec/false-colour.md) -----------------------------
     FC_MAX_LONG = 4096      # cap for the layer's own resolution (GUI-thread cost)

@@ -26,10 +26,14 @@ resolution. Three improvements over the previous render:
    clipping lights small colour-coded wedges in the bottom corners.
 
 Fed via :meth:`set_data` (a ``(3, 256)`` array or ``None`` to clear).
+
+Hovering a bottom corner emits ``clip_hover("black" | "white")`` (``""`` on
+leaving) so the canvas can show what is clipping
+(spec/histogram-clip-overlay.md).
 """
 
 import numpy as np
-from PySide6.QtCore import Qt, QPointF, QRectF
+from PySide6.QtCore import Qt, QPointF, QRectF, Signal
 from PySide6.QtGui import QPainter, QPen, QBrush, QColor, QPainterPath, QPolygonF
 from PySide6.QtWidgets import QWidget
 
@@ -52,17 +56,24 @@ _PAD = 6.0            # plot inset inside the rounded background
 _CLIP_THRESH = 0.0015   # fraction of pixels at an extreme to register as clipping
 _CLIP_SAT = 0.04        # clip fraction that maps to a fully-opaque corner wedge
 _CLIP_SIZE = 11.0       # corner wedge leg length in px
+_HOT = 2 * _CLIP_SIZE   # hover square at each bottom corner (the clip overlay)
+_CLIP_NAMES = {"black": "Black clipping", "white": "White clipping"}
+_CLIP_SHOWN = {"black": "blue", "white": "red"}
 
 
 class HistogramWidget(QWidget):
     """Antialiased RGB histogram with a percentile-clipped vertical scale."""
 
+    clip_hover = Signal(str)       # "black" / "white" while a corner is hovered, else ""
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._data = None          # np.ndarray (3, 256) float32, R/G/B, or None
         self._caption = ""         # small top-left label, e.g. "Ref frame"
+        self._hover = ""           # the hovered clip corner, "" for none
         self.setMinimumHeight(120)
         self.setAttribute(Qt.WA_OpaquePaintEvent, False)
+        self.setMouseTracking(True)
 
     # -- data ------------------------------------------------------------
     def set_data(self, data):
@@ -72,7 +83,62 @@ class HistogramWidget(QWidget):
         else:
             arr = np.asarray(data, dtype=np.float32)
             self._data = arr if arr.shape == (3, 256) else None
+        if self._data is None:
+            self._set_hover("")
+        elif self._hover:
+            self.setToolTip(self._clip_tip(self._hover))
         self.update()
+
+    # -- clip corners (spec/histogram-clip-overlay.md) --------------------
+    def _plot_rect(self):
+        return QRectF(self.rect()).adjusted(0.5 + _PAD, 0.5 + _PAD,
+                                            -0.5 - _PAD, -0.5 - _PAD)
+
+    def clip_corner_at(self, pos):
+        """"black" / "white" when `pos` is in a bottom hot corner, else ""."""
+        if self._data is None:
+            return ""
+        plot = self._plot_rect()
+        x, y = float(pos.x()), float(pos.y())
+        if y < plot.bottom() - _HOT:
+            return ""
+        if x <= plot.left() + _HOT:
+            return "black"
+        if x >= plot.right() - _HOT:
+            return "white"
+        return ""
+
+    def _clip_tip(self, kind):
+        data = self._data
+        total = float(data[0].sum()) if data is not None else 0.0
+        if total <= 0:
+            return ""
+        col = 0 if kind == "black" else 255
+        parts = ", ".join(f"{n} {100.0 * float(data[c, col]) / total:.1f} %"
+                          for c, n in enumerate("RGB"))
+        return (f"{_CLIP_NAMES[kind]}: {parts} of the picture.\n"
+                f"Shown in {_CLIP_SHOWN[kind]} on the picture while you hover "
+                "(solid where all three channels clip).")
+
+    def _set_hover(self, kind):
+        if kind == self._hover:
+            return
+        self._hover = kind
+        self.setToolTip(self._clip_tip(kind) if kind else "")
+        self.update()
+        self.clip_hover.emit(kind)
+
+    def mouseMoveEvent(self, event):
+        self._set_hover(self.clip_corner_at(event.position()))
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event):
+        self._set_hover("")
+        super().leaveEvent(event)
+
+    def hideEvent(self, event):
+        self._set_hover("")
+        super().hideEvent(event)
 
     def clear_data(self):
         self.set_data(None)
@@ -104,6 +170,8 @@ class HistogramWidget(QWidget):
         if self._data is not None and float(self._data.sum()) > 0.0:
             self._draw_channels(p, plot)
             self._draw_clip_markers(p, plot)
+        if self._hover and self._data is not None:
+            self._draw_hover_outline(p, plot, left=self._hover == "black")
 
         if self._caption:
             p.setPen(QColor(theme.TEXT_MUTED))
@@ -201,6 +269,22 @@ class HistogramWidget(QWidget):
         highlight = data[:, 255] / total  # ... at pure white
         self._corner_wedge(p, plot, shadow, left=True)
         self._corner_wedge(p, plot, highlight, left=False)
+
+    def _draw_hover_outline(self, p, plot, left):
+        """The hovered corner's wedge outline, so it reads as a control even
+        when nothing clips."""
+        s = _CLIP_SIZE
+        b = plot.bottom()
+        x = plot.left() if left else plot.right()
+        d = s if left else -s
+        tri = QPolygonF([QPointF(x, b), QPointF(x + d, b), QPointF(x, b - s)])
+        p.setBrush(Qt.NoBrush)
+        # a dark halo under a light line: reads on the dark plot and on a lit
+        # (white / coloured) wedge alike
+        p.setPen(QPen(QColor(0, 0, 0, 200), 2.6))
+        p.drawPolygon(tri)
+        p.setPen(QPen(QColor(255, 255, 255, 235), 1.2))
+        p.drawPolygon(tri)
 
     def _corner_wedge(self, p, plot, frac, left):
         on = frac > _CLIP_THRESH

@@ -864,6 +864,9 @@ class SlidersPanel(QWidget):
         # widget's real resolution). See widgets/histogram_widget.py.
         self.histogram = HistogramWidget()
         self.histogram.setFixedHeight(150)
+        # Hovering a clip corner shows what is clipping on the picture
+        # (spec/histogram-clip-overlay.md).
+        self.histogram.clip_hover.connect(self._on_clip_hover)
         # Inset to match the content below so it isn't flush against the panel's
         # right border (the scroll area below keeps its scrollbar at the edge).
         hist_row = QHBoxLayout()
@@ -2575,6 +2578,11 @@ class SlidersPanel(QWidget):
         from utils.popup_placement import place_on_screen
         place_on_screen(pop, global_pos)
         pop.show()
+
+    def _on_clip_hover(self, kind):
+        ip = self._golden_preview()
+        if ip is not None and hasattr(ip, "set_clip_overlay"):
+            ip.set_clip_overlay(kind or None)
 
     def _golden_preview(self):
         try:
