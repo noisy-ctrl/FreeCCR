@@ -1,6 +1,6 @@
-"""Right-click popup for Shadow Lift: how far up the tones it reaches, how
-much it lifts black itself, a before / after strip of a dark gradient, and a
-switch to show on the picture where it acts. See spec/shadow-lift.md."""
+"""Right-click popup for Shadow Lift: how far up the shadows black's lift
+rolls off, a before / after strip of a dark gradient, and a switch to show on
+the picture where it acts. See spec/shadow-lift.md."""
 
 import numpy as np
 from PySide6.QtCore import Qt, Signal
@@ -15,27 +15,27 @@ from ui import theme
 LABEL_W = 96
 
 ROWS = (
-    ("range", "Range", ("Narrow", "Wide"),
-     "How far up the tones it reaches. Narrow keeps it to the deepest "
-     "shadows; wide takes it into the lower midtones."),
-    ("black", "Lift black", ("None", "More"),
-     "Lifts black itself, for a matte, faded-print look. At None pure black "
-     "stays black and only the shadows open."),
+    ("rolloff", "Roll-off", ("Shorter", "Longer"),
+     "How far up the shadows the lift fades out (the display level it is "
+     "gone by). Shorter keeps it to the deepest shadows; longer eases it out "
+     "more gently, into the lower midtones."),
 )
+
+FORMATS = {"rolloff": lambda v: f"{v} %"}
 
 
 def describe_lift(shape):
     shape = normalize_lift_shape(shape)
     if shape is None:
         return "default"
-    return ", ".join(f"{k} {shape[k]}" for k in LIFT_SHAPE_DEFAULT
+    return ", ".join(f"{k} {FORMATS[k](shape[k])}" for k in LIFT_SHAPE_DEFAULT
                      if shape[k] != LIFT_SHAPE_DEFAULT[k]) or "default"
 
 
 def _spot_pixmap(amount, shape, w=200, h=40):
     """A dark gradient (black to the lower midtones) with two shadow
-    colours, as displayed: the shadows opening, black staying black."""
-    x = np.linspace(0.0, 0.45, w, dtype=np.float32)
+    colours, as displayed: black lifting, the lift fading out."""
+    x = np.linspace(0.0, 0.6, w, dtype=np.float32)
     img = np.repeat(np.repeat(x[None, :, None], 3, axis=2), h, axis=0)
     img[h // 2:, : w // 3] = (0.16, 0.09, 0.06)            # a warm shadow
     img[h // 2:, w // 3: 2 * w // 3] = (0.05, 0.08, 0.12)  # a cool one
@@ -82,14 +82,14 @@ class ShadowLiftPopup(QFrame):
             sl.setValue(int(shape[key]))
             sl.setToolTip(tip)
             sl.valueChanged.connect(self._emit)
-            val = QLabel(str(sl.value()))
-            val.setFixedWidth(28)
+            val = QLabel(FORMATS[key](sl.value()))
+            val.setFixedWidth(42)
             row.addWidget(lbl)
             row.addWidget(sl, 1)
             row.addWidget(val)
             lay.addLayout(row)
             ends = QHBoxLayout()
-            ends.setContentsMargins(LABEL_W + row.spacing(), 0, 28 + row.spacing(), 0)
+            ends.setContentsMargins(LABEL_W + row.spacing(), 0, 42 + row.spacing(), 0)
             for text, align in ((left, Qt.AlignLeft), (right, Qt.AlignRight)):
                 e = QLabel(text)
                 e.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 10px;")
@@ -101,8 +101,8 @@ class ShadowLiftPopup(QFrame):
         self.mask_check = QCheckBox("Show where it acts")
         self.mask_check.setToolTip(
             "While this popup is open, the picture shows in green where it "
-            "acts (stronger green, more lift): strongest in the deepest "
-            "shadows, fading to nothing at the top of the Range.")
+            "acts (stronger green, more lift): full in the deepest shadows, "
+            "fading to nothing by the Roll-off.")
         self.mask_check.toggled.connect(self.show_mask.emit)
         lay.addWidget(self.mask_check)
 
@@ -138,7 +138,7 @@ class ShadowLiftPopup(QFrame):
 
     def _refresh(self):
         for k, s in self.sliders.items():
-            self.values_lbl[k].setText(str(s.value()))
+            self.values_lbl[k].setText(FORMATS[k](s.value()))
         shape = self.values()
         self.before.setPixmap(_spot_pixmap(0, shape))
         # at 0 the strip shows what 60 would do, so the options can be judged

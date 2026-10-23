@@ -163,3 +163,8 @@ and Glow as one per-pixel kernel (`lift_apply`: the OKLab tone curve and
 real picture; on uniformly random colours ≤ 33 codes on 0.001 % of pixels,
 all already on a face of the gamut, where float32 rounding picks a different
 bisection step (0.13 of an 8-bit level).
+
+Revision 2 of Shadow Lift (a neutral black lift with a smoothstep roll-off on
+the display luma) made `lift_apply` a smoothstep and an add; it matches numpy
+within one 16-bit code on pictures and random colours alike, and the
+`fit_move_n` helper went with the old curve.

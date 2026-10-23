@@ -1,77 +1,72 @@
 # Shadow Lift (Lab Finish)
 
-Opens up the shadows the way a lab print does: shadow detail comes up while
-pure black stays black. A right-click option also lifts black itself, for a
-matte, faded-print look. A slider in the Lab Finish section, between Shadow
-Neutralise and Glow.
+Revision 2 (2026-10-23). Lifts black a little, the way a lab print's black
+is a deep grey rather than pure black: the deepest shadows come up as they
+are, grain and all, and the lift rolls off smoothly into the shadows. A
+slider in the Lab Finish section, between Shadow Neutralise and Glow.
+
+Revision 1 opened the shadows (a tone curve lifting shadow detail, black
+fixed) with lifting black as an option. The user's direction: the Shadows
+and Black Point sliders already do the opening; what is wanted is the quick
+lift of black alone, with a good roll-off, nothing sudden.
 
 ## Goals / non-goals
 
-- **Shadow Lift** 0..100 (default 0), key `shadow_lift`, in the sync group with the other Lab Finish tools
-  ("Saturation & Lab Finish", id `sat`).
-- Right-click: **Range** (how far up the tones it reaches, "Narrow" ↔
-  "Wide"), **Lift black** (0 = black stays black; up to a matte black,
-  "None" ↔ "More"), **Show where it acts**, Reset. Stored as
-  `adjustment_settings["shadow_lift_shape"]`, None when default.
-- Non-goals: local (spatial) shadow recovery; this is a tone curve, the
-  same for every pixel of the same tone.
+- **Shadow Lift** 0..100 (default 0), key `shadow_lift`, in the sync group
+  with the other Lab Finish tools ("Saturation & Lab Finish", id `sat`).
+  At 100 black sits at 0.10 display (25.5 / 255); linear in the slider
+  (40 = 10 / 255).
+- Right-click: **Roll-off** (display level the lift has faded out by, 35–80 %,
+  default 50 %, "Shorter" ↔ "Longer"), **Show where it acts** (green), Reset.
+  Stored as `adjustment_settings["shadow_lift_shape"]` = `{"rolloff": n}`,
+  None when default. Revision 1's `range` / `black` keys are ignored.
+- Non-goals: opening shadow detail (Shadows / Black Point / Shadows L do
+  that), any colour change beyond the neutral lift, local recovery.
 
 ## Processing (`core/shadow_lift.py`)
 
-Per pixel, in OKLab on the display values, float32 (no spatial decision:
-a tone curve depends only on the pixel's own tone, so there is nothing for
-grain to steer).
+On the display values (sRGB-encoded 0..1), float32, per pixel; a tone curve
+on the pixel's own luma, so there is no decision for grain to steer:
 
-1. **Open.** `R = range/100` (OKLab L, default 0.45, limits 0.25–0.65),
-   `t = L/R`, `w = (1 − t)²` below R, 0 above (C¹ at R).
-   `s = 1 + a·w`, `a = amount/100` (full = 1). `L1 = s·L`, and the colour
-   with it: `a, b × s`, so a lifted shadow keeps its saturation
-   (`C/L`) instead of greying. Black (L 0) stays 0.
-   Monotone: `dL1/dL = 1 + a·(1 − t)(1 − 3t) ≥ 1 − a/3 ≥ 0.67`; steepest at
-   black, `1 + a` (2 at full). Peak lift `a·R·4/27` at `L = R/3` (0.067 at
-   default).
-2. **Lift black** (option `black`, 0..100): `F = a·0.16·black/100` (OKLab L;
-   full ≈ 15/255 display), faded out over `Rf = max(R, 0.50)`:
-   `L2 = L1 + F·(1 − L1/Rf)²`, colour unchanged (neutral light added, as a
-   matte print's black). C¹ at Rf. The fade is `(1 − u)²`, not a
-   smoothstep: its flattening is greatest at black, where the opening is
-   steepest (slope `1 + a`), so the two don't stack. With a smoothstep the
-   flattening peaks mid-span, on top of the opening's own shallowest point
-   (`L = 2R/3`), and the combined slope fell to 0.37 at the defaults with
-   Lift black at full; with `(1 − u)²` it is ≥ 0.52 at the default Range and
-   ≥ 0.39 at the narrowest with every option at full (a strong matte; still
-   smooth and monotone).
-3. Out of range → the largest fraction of the move that fits
-   (`core.oklab.fit_move`); untouched pixels (`w = 0` and no lift there)
-   are returned exactly.
+    Y    = Rec.709 luma of the display values
+    lift = v0 · (1 − smoothstep(Y / Vf)),  v0 = amount/100 · 0.10,  Vf = Roll-off
+    out  = rgb + min(lift, 1 − max(rgb))   (the same on R, G and B)
 
-Grain: a lift raises the shadows' slope, so their grain comes up with them
-(by the same factor as the tones, at most `1 + a`); that is what opening
-the shadows means. Nothing decides on grain, and colour noise is scaled
-exactly as the colour is, so no extra noise appears.
+- Neutral: the same amount on all three channels, as raising a curve's
+  black point does, so a dark colour keeps its hue and loses a little
+  saturation, the matte look.
+- Along grey the slope is `1 − v0·S'(u)/Vf`: exactly 1 at black (so the
+  deepest shadows and their grain move up unchanged; a noisy patch at 2 %
+  keeps its grain to within 1 %), never below `1 − 1.5·v0/Vf` (0.70 at full
+  lift and the default Roll-off; 0.57 at the shortest, 0.81 at the longest;
+  ≥ 0.87 at 30), and 1 again where the lift ends: C¹, nothing sudden.
+- A pixel whose brightest channel would pass 1 takes only the lift that
+  fits (a saturated blue at the top of its channel is left as it is).
+- Above the Roll-off (`Y ≥ Vf`) the pixel comes back exactly.
 
 ## Pipeline
 
-After Shadow Neutralise and before Glow (the tones are set before the light
-spreads), in `adjust_image`, in the numpy finishing on the OpenCL result,
-and in `core/finish_gpu.py` (the `lift_apply` kernel, the same maths) on a
-GPU.
-`shadow_lift`, `shadow_lift_shape` appended LAST to `adjust_image` /
-`adjust_image_opencl`; `CCRImage` passes them from each layer's settings.
+After Shadow Neutralise and before Glow, in `adjust_image`, in the numpy
+finishing on the OpenCL result, and in `core/finish_gpu.py` (the
+`lift_apply` kernel: the same smoothstep and add) on a GPU. `shadow_lift`,
+`shadow_lift_shape` appended LAST to `adjust_image` / `adjust_image_opencl`
+(unchanged from revision 1); `CCRImage` passes them from each layer.
 
 ## UI / data model
 
 Plumbed exactly like `glow_shape` (load, attach on rebuild, reset, one undo
 per popup, the Lab Finish sync group, copy, its own paste row). The popup
-(`widgets/shadow_lift_popup.py`) has Range / Lift black, a before/after
-strip of a dark gradient, "Show where it acts" (the shared tool-mask layer,
-in GREEN), Reset.
+(`widgets/shadow_lift_popup.py`) has Roll-off, a before / after strip of a
+dark gradient, Show where it acts (the shared tool-mask layer, GREEN: the
+share of black's lift each pixel gets), Reset.
 
 ## Tests (`tests/test_shadow_lift.py`)
 
-0 is a byte-identical no-op; tones above Range untouched exactly; black
-stays black without Lift black and rises to about F with it; the grey axis
-is monotone and smooth across Range and Lift black; saturation kept in the
-opened shadows (C/L); in range; CPU == GPU; panel: slider in Lab Finish
-between Shadow Neutralise and Glow, popup writes the options with one undo,
-paste row, copy, sync (Lab Finish), reset, mask follows the popup.
+0 is a byte-identical no-op; tones above the Roll-off untouched exactly;
+black goes to 25.5 / 10.2 / 2.55 levels at 100 / 40 / 10, neutrally, never
+darker; the grey axis is monotone and C¹ with slope 1 at black and the floor
+above; a noisy near-black patch keeps its grain; colours at the top of a
+channel take only what fits; options normalised (old keys ignored); CPU ==
+GPU within one 16-bit code; panel: slider in Lab Finish between Shadow
+Neutralise and Glow, popup writes the option with one undo, paste row, copy,
+sync, reset, mask follows the popup.

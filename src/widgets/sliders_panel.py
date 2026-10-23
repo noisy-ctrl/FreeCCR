@@ -1306,8 +1306,8 @@ class SlidersPanel(QWidget):
         self._shadow_label.customContextMenuRequested.connect(
             lambda pos: self._open_shadow_popup(self._shadow_label.mapToGlobal(pos)))
         self._update_shadow_label()
-        # Shadow Lift: opens the shadows (detail up, black stays black);
-        # right-click for range / lift black. Created right after Shadow
+        # Shadow Lift: lifts black a little, rolling off smoothly; right-click
+        # for the roll-off. Created right after Shadow
         # Neutralise (ADJUSTMENT_KEYS zip). spec/shadow-lift.md
         self.shadow_lift_slider_layout = self.create_slider(
             "Shadow Lift", min_value=0, max_value=100)
@@ -2711,12 +2711,12 @@ class SlidersPanel(QWidget):
             self.end_undo_burst()
 
     # --- Shadow Lift options (spec/shadow-lift.md) -----------------------------
-    LIFT_HINT = ("Shadow Lift: opens the shadows the way a lab print does. "
-                 "Shadow detail comes up, keeping its colour, while pure black "
-                 "stays black; tones above the shadows are left exactly as they "
-                 "were. Right-click to also lift black itself, for a matte, "
-                 "faded-print look.")
-    LIFT_LABEL_TIP = "Right-click: range, lift black"
+    LIFT_HINT = ("Shadow Lift: lifts black a little, like a lab print's matte "
+                 "black. The deepest shadows come up as they are, grain and all, "
+                 "and the lift fades out smoothly through the shadows (by "
+                 "mid-grey by default); everything above is left exactly as it "
+                 "was. Up to about 25/255 at 100.")
+    LIFT_LABEL_TIP = "Right-click: roll-off"
 
     def _update_lift_label(self):
         lbl = getattr(self, "_lift_label", None)
