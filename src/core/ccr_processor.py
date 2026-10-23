@@ -14,6 +14,9 @@ from functools import lru_cache
 from core.golden import apply_golden
 from core.shadow_neutral import apply_shadow_neutralise
 from core.glow import apply_glow
+# ... and their GPU versions (spec/gpu-finishing-tools.md), run straight after
+# the main kernel when the OpenCL device is a GPU.
+from core import finish_gpu
 from core.color_management import (apply_export_colorspace,
                                    apply_export_colorspace_gray,
                                    inject_jpeg_icc, srgb_encode)
@@ -42,6 +45,35 @@ _opencl_cache = {
     'kernel': None,
     'device_name': None
 }
+
+# Set once the GPU finishing has failed on this machine, so it isn't retried
+# (and the numpy finishing used) on every render.
+_gpu_finish_broken = False
+
+
+def _finish_on_gpu(ctx, queue, img_buf, H, W, golden_highlights, golden_shape,
+                   shadow_neutralise, shadow_shape, glow, glow_shape) -> bool:
+    """Golden Highlights / Shadow Neutralise / Glow on the main kernel's
+    buffer, on the GPU. True when done there; False to use numpy (none on,
+    not a GPU device, FREECCR_GPU_FINISH=0, or it failed)."""
+    global _gpu_finish_broken
+    if not ((golden_highlights and golden_highlights > 0)
+            or (shadow_neutralise and shadow_neutralise > 0) or (glow and glow > 0)):
+        return False
+    if _gpu_finish_broken:
+        return False
+    try:
+        if not finish_gpu.enabled_for(ctx.devices[0]):
+            return False
+        finish_gpu.for_queue(ctx, queue).finish(
+            img_buf, H, W, golden_highlights, golden_shape, shadow_neutralise,
+            shadow_shape, glow, glow_shape)
+        return True
+    except Exception as e:
+        print(f"GPU finishing failed, using numpy from now on: {e}")
+        _gpu_finish_broken = True
+        return False
+
 
 def _opencl_wanted() -> bool:
     """FREECCR_OPENCL=0 runs every render on the numpy path (same output)."""
@@ -4662,9 +4694,17 @@ def adjust_image_opencl(
         kernel(queue, (n_pixels,), None, img_buf.data, params_buf.data,
                lut_buf.data, np.int32(n_pixels))
 
+        # The finishing tools on the GPU, on the kernel's own buffer, so the
+        # picture leaves the GPU once (spec/gpu-finishing-tools.md).
+        finished = _finish_on_gpu(ctx, queue, img_buf, img.shape[0], img.shape[1],
+                                  golden_highlights, golden_shape,
+                                  shadow_neutralise, shadow_shape, glow, glow_shape)
+
         # Get results and reshape
         result = img_buf.get().reshape(img.shape)
-      # Golden Highlights runs after everything else, in numpy on both paths
+      if finished:
+          return np.clip(result, 0, 65535).astype(np.uint16)
+      # Otherwise Golden Highlights runs after everything else, in numpy
       # (the same function as adjust_image's last stage).
       if golden_highlights and golden_highlights > 0:
           result = apply_golden(np.clip(result / 65535.0, 0.0, 1.0).astype(np.float32),
