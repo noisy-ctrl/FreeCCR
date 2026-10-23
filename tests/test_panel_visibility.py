@@ -34,8 +34,8 @@ def _shown(widget):
 
 def test_every_section_listed_and_present(panel):
     ids = [sid for sid, _l, _a in panel.HIDEABLE_SECTIONS]
-    assert ids == ["printer_lights", "crosstalk", "lab_finish", "levels", "balance",
-                   "curves", "bands", "noise", "details"]
+    assert ids == ["layers", "printer_lights", "crosstalk", "lab_finish", "levels",
+                   "balance", "curves", "bands", "noise", "details"]
     for _sid, _label, attr in panel.HIDEABLE_SECTIONS:
         assert getattr(panel, attr) is not None
 
@@ -118,3 +118,23 @@ def test_lab_finish_section_sits_under_colour_organics(panel):
     assert "golden_highlights" in keys and "shadow_neutralise" in keys
     panel.set_hidden_sections(set())
     assert _shown(sec) and _shown(panel._lab_finish_sep_below)
+
+
+def test_layers_hide_but_show_on_a_frame_with_areas(panel, monkeypatch):
+    """Layers is hideable like the others (with the line under it), but a
+    frame that has area layers shows it anyway: the sliders edit the active
+    layer, so the list saying which one can't vanish."""
+    from core.ccr_backend import ccr_backend
+    img = type("I", (), {"area_layers": [], "active_area_id": None})()
+    monkeypatch.setattr(ccr_backend, "get_image_by_index", lambda i: img)
+    panel.current_idx = 0
+    panel.set_hidden_sections({"layers"})
+    assert not _shown(panel.layers_container) and not _shown(panel._layers_sep_below)
+    img.area_layers = [{"id": 1, "kind": "circle"}]
+    panel._apply_layers_visibility()
+    assert _shown(panel.layers_container) and _shown(panel._layers_sep_below)
+    img.area_layers = []
+    panel._apply_layers_visibility()
+    assert not _shown(panel.layers_container)
+    panel.set_hidden_sections(set())
+    assert _shown(panel.layers_container) and _shown(panel._layers_sep_below)

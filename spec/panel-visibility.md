@@ -7,8 +7,9 @@ short: Settings → **Panel** lists the collapsible tools with a tickbox each.
 
 ## Sections
 
-Printer Lights, Crosstalk Correction, Lab Finish (Golden Highlights and
-Shadow Neutralise), Channel Levels (with Film Look and Cineon inside it),
+Layers (revision 2026-10-23, see below), Printer Lights, Crosstalk
+Correction, Lab Finish (Golden Highlights, Shadow Neutralise, Shadow Lift,
+Glow), Channel Levels (with Film Look and Cineon inside it),
 Channel Balance, Curves, Subtractive Saturations, Chroma Noise Reduction,
 Details. Master Gain, the tone sliders and the B/W-point controls are always
 shown.
@@ -18,6 +19,14 @@ the saturation group between Vibrance and Subtracted Sat. It sits mid-list,
 so it has a line above AND below; both hide with it (`_lab_finish_sep_below`
 is the extra one). Its two sliders were created where they always were, so
 `ADJUSTMENT_KEYS` and stored settings are unchanged: only the layout moved.
+
+**Layers** (2026-10-23), the area-editing list at the top of the panel, is
+hideable too, with the line under it (`_layers_sep_below`). It is shown anyway
+on a frame that has area layers (`_apply_layers_visibility`, re-checked on
+every Layers rebuild: frame switch, area added or removed): the sliders edit
+whichever layer is active, so the list that says which one it is must not
+vanish while there is a choice. On a frame without areas there is nothing to
+pick but Whole Image, so hiding it loses nothing.
 
 ## Behaviour
 

@@ -935,7 +935,9 @@ class SlidersPanel(QWidget):
         self.feather_row.setVisible(False)
         self._layer_buttons = {}
         scroll_layout.addWidget(self.layers_container)
-        scroll_layout.addWidget(theme.section_separator())
+        # hideable in Settings -> Panel, with the line under it
+        self._layers_sep_below = theme.section_separator()
+        scroll_layout.addWidget(self._layers_sep_below)
 
         # --- 10 existing sliders (sliders[0]–[9]) ---
         # --- Film B/W Point section — at the top, right below the histogram ---
@@ -2093,6 +2095,7 @@ class SlidersPanel(QWidget):
         self._layers_sig = self._layers_signature(idx)
         self._clear_layout(self._layers_list_vbox)
         self._layer_buttons = {}
+        self._apply_layers_visibility(idx)
         img = ccr_backend.get_image_by_index(idx) if idx is not None else None
         if img is None:
             self.feather_row.setVisible(False)
@@ -2301,10 +2304,12 @@ class SlidersPanel(QWidget):
         self._update_thumb()
 
     # --- Settings -> Panel: show / hide sections (spec/panel-visibility.md) ----
-    HIDEABLE_SECTIONS = (("printer_lights", "Printer Lights", "printer_section"),
+    HIDEABLE_SECTIONS = (("layers", "Layers (shown anyway on a frame that has areas)",
+                          "layers_container"),
+                         ("printer_lights", "Printer Lights", "printer_section"),
                          ("crosstalk", "Crosstalk Correction", "crosstalk_section"),
-                         ("lab_finish", "Lab Finish (Golden Highlights, Shadow Neutralise)",
-                          "lab_finish_section"),
+                         ("lab_finish", "Lab Finish (Golden Highlights, Shadow Neutralise, "
+                          "Shadow Lift, Glow)", "lab_finish_section"),
                          ("levels", "Channel Levels (incl. Film Look, Cineon)", "od_section"),
                          ("balance", "Channel Balance", "balance_section"),
                          ("curves", "Curves", "curves_section"),
@@ -2325,9 +2330,13 @@ class SlidersPanel(QWidget):
         self.apply_section_visibility(set(ids))
 
     def apply_section_visibility(self, hidden):
+        self._hidden_now = set(hidden)
         for sid, _label, attr in self.HIDEABLE_SECTIONS:
             section = getattr(self, attr, None)
             if section is None:
+                continue
+            if sid == "layers":
+                self._apply_layers_visibility()
                 continue
             visible = sid not in hidden
             section.setVisible(visible)
@@ -2338,6 +2347,25 @@ class SlidersPanel(QWidget):
                 below = getattr(self, "_lab_finish_sep_below", None)
                 if below is not None:
                     below.setVisible(visible)
+
+    def _apply_layers_visibility(self, idx=None):
+        """Layers hidden in Settings -> Panel stays shown on a frame that has
+        area layers: the sliders below edit whichever layer is active, so the
+        list that says which one it is can't disappear while there is a choice
+        (spec/panel-visibility.md, revision 2026-10-23)."""
+        container = getattr(self, "layers_container", None)
+        if container is None:
+            return
+        hidden = "layers" in getattr(self, "_hidden_now", set())
+        if idx is None:
+            idx = self.current_idx
+        img = ccr_backend.get_image_by_index(idx) if idx is not None else None
+        has_areas = bool(img is not None and getattr(img, "area_layers", None))
+        visible = (not hidden) or has_areas
+        container.setVisible(visible)
+        below = getattr(self, "_layers_sep_below", None)
+        if below is not None:
+            below.setVisible(visible)
 
     # --- Printer Lights (spec/printer-lights.md) ------------------------------
     PRINTER_POINT_UNITS = 3     # Shift-slider units per printer point (0.02 density)
