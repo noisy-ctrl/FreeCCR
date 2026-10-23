@@ -12,6 +12,7 @@ import gc
 # their shared OKLab matrices (core/oklab.py) are inverted at import.
 from core.golden import apply_golden
 from core.shadow_neutral import apply_shadow_neutralise
+from core.glow import apply_glow
 from core.color_management import (apply_export_colorspace,
                                    apply_export_colorspace_gray,
                                    inject_jpeg_icc, srgb_encode)
@@ -3810,6 +3811,10 @@ def adjust_image(
     # (None = default). Appended last.
     shadow_neutralise: float = 0.0,
     shadow_shape=None,
+    # Glow (spec/highlight-glow.md), 0..100, and its options (None = default).
+    # Appended last.
+    glow: float = 0.0,
+    glow_shape=None,
 ) -> np.ndarray:
     """
     Apply temperature, tint, exposure, brightness, blackpoint, whitepoint, highlights, shadows,
@@ -4040,6 +4045,10 @@ def adjust_image(
     if shadow_neutralise and shadow_neutralise > 0:
         img = apply_shadow_neutralise(np.clip(img / 65535.0, 0.0, 1.0).astype(np.float32),
                                       shadow_neutralise, shadow_shape) * 65535.0
+    # Glow: light spreading over the finished picture, the very last stage.
+    if glow and glow > 0:
+        img = apply_glow(np.clip(img / 65535.0, 0.0, 1.0).astype(np.float32),
+                         glow, glow_shape) * 65535.0
 
     img = np.clip(img, 0, 65535)
     return img.astype(np.uint16)
@@ -4333,6 +4342,9 @@ def adjust_image_opencl(
     # Shadow Neutralise — appended last, see adjust_image.
     shadow_neutralise: float = 0.0,
     shadow_shape=None,
+    # Glow — appended last, see adjust_image.
+    glow: float = 0.0,
+    glow_shape=None,
 ) -> np.ndarray:
     """
     GPU-accelerated (OpenCL) version of adjust_image.
@@ -4516,7 +4528,8 @@ def adjust_image_opencl(
                           golden_highlights=golden_highlights,
                           golden_shape=golden_shape,
                           shadow_neutralise=shadow_neutralise,
-                          shadow_shape=shadow_shape)
+                          shadow_shape=shadow_shape,
+                          glow=glow, glow_shape=glow_shape)
 
     try:
       # Serialize GPU submissions: the hi-res zoom worker may run this
@@ -4591,6 +4604,10 @@ def adjust_image_opencl(
           result = apply_shadow_neutralise(
               np.clip(result / 65535.0, 0.0, 1.0).astype(np.float32),
               shadow_neutralise, shadow_shape) * 65535.0
+      # ... and Glow last of all.
+      if glow and glow > 0:
+          result = apply_glow(np.clip(result / 65535.0, 0.0, 1.0).astype(np.float32),
+                              glow, glow_shape) * 65535.0
       return np.clip(result, 0, 65535).astype(np.uint16)
 
     except Exception as e:
@@ -4618,7 +4635,8 @@ def adjust_image_opencl(
                           golden_highlights=golden_highlights,
                           golden_shape=golden_shape,
                           shadow_neutralise=shadow_neutralise,
-                          shadow_shape=shadow_shape)
+                          shadow_shape=shadow_shape,
+                          glow=glow, glow_shape=glow_shape)
 
 
 

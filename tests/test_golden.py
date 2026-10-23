@@ -197,7 +197,7 @@ def test_slider_sits_above_shadow_neutralise_and_colour_organics(panel):
     from PySide6.QtCore import Qt
     keys = panel.adjustment_keys
     i = keys.index("golden_highlights")
-    assert keys[i + 1:i + 3] == ["shadow_neutralise", "colour_organics"]
+    assert keys[i + 1:i + 4] == ["shadow_neutralise", "glow", "colour_organics"]
     i = keys.index("golden_highlights")
     assert panel.sliders[i].value_range() == (0, 100)
     lbl = panel._golden_label

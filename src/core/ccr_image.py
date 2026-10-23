@@ -2120,6 +2120,10 @@ class CCRImage:
                      # (spec/shadow-neutralise.md); per layer.
                      shadow_neutralise=s.get('shadow_neutralise', 0),
                      shadow_shape=s.get('shadow_shape'),
+                     # Glow, last of the Lab Finish tools
+                     # (spec/highlight-glow.md); per layer.
+                     glow=s.get('glow', 0),
+                     glow_shape=s.get('glow_shape'),
                      # Per-color-band sliders ride the same GPU pass (or the
                      # CPU fallback); None keeps the inactive case free.
                      band_settings=(s if any(s.get(k, 0)
@@ -2262,6 +2266,10 @@ class CCRImage:
                      # (spec/shadow-neutralise.md); per layer.
                      shadow_neutralise=s.get('shadow_neutralise', 0),
                      shadow_shape=s.get('shadow_shape'),
+                     # Glow, last of the Lab Finish tools
+                     # (spec/highlight-glow.md); per layer.
+                     glow=s.get('glow', 0),
+                     glow_shape=s.get('glow_shape'),
                      balance_r=s.get('balance_r', 0),
                      balance_g=s.get('balance_g', 0),
                      balance_b=s.get('balance_b', 0),

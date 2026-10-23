@@ -1741,6 +1741,9 @@ class ImagePreview(QWidget):
                  1.6, (0, 205, 255)),
         "shadow": ("core.shadow_neutral", "normalize_shadow_shape",
                    "SHADOW_SHAPE_DEFAULT", 1.0, (255, 40, 200)),
+        # Glow's map is already scaled to read full where the glow is strong
+        "glow": ("core.glow", "normalize_glow_shape", "GLOW_SHAPE_DEFAULT",
+                 1.0, (255, 170, 30)),
     }
 
     def set_gold_mask(self, shape):
@@ -1752,6 +1755,10 @@ class ImagePreview(QWidget):
     def set_shadow_mask(self, shape):
         """The same for Shadow Neutralise (a magenta wash)."""
         self._set_tool_mask("shadow", shape)
+
+    def set_glow_mask(self, shape):
+        """The same for Glow (an amber wash where the glow lands)."""
+        self._set_tool_mask("glow", shape)
 
     def _set_tool_mask(self, kind, shape):
         import importlib

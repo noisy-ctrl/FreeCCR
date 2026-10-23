@@ -119,7 +119,8 @@ def test_slider_helper_text_and_group():
     # (spec/golden-highlights.md, spec/shadow-neutralise.md)
     assert keys.index("golden_highlights") == keys.index("sub_saturation") + 1
     assert keys.index("shadow_neutralise") == keys.index("golden_highlights") + 1
-    assert keys.index("colour_organics") == keys.index("shadow_neutralise") + 1
+    assert keys.index("glow") == keys.index("shadow_neutralise") + 1
+    assert keys.index("colour_organics") == keys.index("glow") + 1
     assert "colour_organics" in dict((g, k) for g, _l, k in SYNC_GROUPS)["sat"]
     assert _BASIC_LABELS["colour_organics"] == "Colour Organics"
     p = SlidersPanel()
