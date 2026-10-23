@@ -135,6 +135,38 @@ class MergeReplaceWorker(QObject):
             progress_cb=lambda d, t, n: self.progress.emit(d, t, n))
         self.finished.emit(result)
 
+class _AppWideHook(QObject):
+    """The main window's app-wide event filter (upstream 2.2.1: Up/Down always
+    switch image; drops anywhere in the window load files), installed once
+    per application and handing the few event types it cares about to the
+    newest MainWindow's eventFilter."""
+
+    _TYPES = (QEvent.KeyPress, QEvent.DragEnter, QEvent.DragMove, QEvent.Drop)
+    _hook = None
+
+    def __init__(self, app):
+        super().__init__(app)
+        self.window = None
+
+    @classmethod
+    def point_at(cls, window):
+        app = QApplication.instance()
+        if cls._hook is None or cls._hook.parent() is not app:
+            cls._hook = cls(app)
+            app.installEventFilter(cls._hook)
+        cls._hook.window = window
+
+    def eventFilter(self, obj, event):
+        w = self.window
+        if w is None or event.type() not in self._TYPES:
+            return False
+        try:
+            return bool(w.eventFilter(obj, event))
+        except RuntimeError:          # the window's C++ side is gone
+            self.window = None
+            return False
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -345,8 +377,13 @@ class MainWindow(QMainWindow):
         # selection) in the slope-source label right away.
         self.sliders_panel._update_bwp_mode_label()
 
-        self.installEventFilter(self)
-        self._install_drop_support()
+        # App-wide (2.2.1): Up/Down switch image no matter which widget has
+        # focus, and drops anywhere in this window load files. eventFilter
+        # scopes both to this window. ONE app-wide hook, pointed at the newest
+        # window, rather than a filter per window: every live window's filter
+        # would run on every event in the app (the test suite keeps dozens).
+        _AppWideHook.point_at(self)
+        self.setAcceptDrops(True)
         self.create_menu()
 
         # Restore the active camera-profile selection (applied to every decode).
@@ -2145,10 +2182,9 @@ class MainWindow(QMainWindow):
         return [u.toLocalFile() for u in md.urls() if u.isLocalFile() and u.toLocalFile()]
 
     def _install_drop_support(self):
+        # The app-wide event filter (installed in __init__) already sees drag
+        # events for every widget in this window, so no per-child filters.
         self.setAcceptDrops(True)
-        for child in self.findChildren(QWidget):
-            if child.acceptDrops():
-                child.installEventFilter(self)
 
     def _handle_drop_event(self, event) -> bool:
         etype = event.type()
@@ -2167,16 +2203,18 @@ class MainWindow(QMainWindow):
         return True
 
     def eventFilter(self, obj, event):
+        in_window = isinstance(obj, QWidget) and obj.window() is self
         if event.type() in (QEvent.DragEnter, QEvent.DragMove, QEvent.Drop):
-            if self._handle_drop_event(event):
+            # Only this window's widgets (the filter is app-wide): a dialog
+            # that takes drops of its own keeps them.
+            if in_window and self._handle_drop_event(event):
                 return True
             return super().eventFilter(obj, event)
-        # The filter is also installed on drop-accepting children (above);
-        # the window's pre-existing key handling below must stay scoped to the
-        # window itself, or Up/Down would be stolen from those text boxes.
-        if obj is not self:
-            return super().eventFilter(obj, event)
-        if event.type() == QEvent.KeyPress and event.key() in (Qt.Key_Up, Qt.Key_Down):
+        # Up/Down are dedicated to switching image: intercepted app-wide before
+        # any focused slider/spinbox/combo/text field can use them. Only for
+        # widgets in this window, so dialogs and open combo popups keep them.
+        if (event.type() == QEvent.KeyPress
+                and event.key() in (Qt.Key_Up, Qt.Key_Down) and in_window):
             self.thumbnail_list.thumbnail_list.setFocus()
             self.thumbnail_list.thumbnail_list.keyPressEvent(event)
             return True
