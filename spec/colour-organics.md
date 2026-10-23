@@ -168,3 +168,49 @@ slope to about 0.11 (mean pull about 1.5× that at 100); at 80 % reach the cap
 binds above roughly 130. Up to 100 the cap never binds, so existing edits
 render exactly as before. The kernel receives the capped strength folded back
 into an amount (`params[27]`), matching `_apply_colour_organics`.
+
+## Revision 2026-10-23: shown 0–100, with 100 twice the old 100
+
+Asked for: "make Colour Organics go to 100 but make 100 2× as strong as 100
+is now".
+
+- **Stored vs shown.** The amount is still stored in the old units, now
+  0–200 (`ORGANICS_AMOUNT_MAX`), and the slider SHOWS half
+  (`HalfShownSlider`, SCALE 0.5; `value()`/`setValue()` speak stored units
+  like `HalfStepSlider`). So every catalog, copied setting and area layer
+  renders exactly as before, with no migration: shown 50 is the old 100, an
+  old 150 shows as 75. An odd stored value from the old slider shows as
+  x.5 and is kept exactly until this slider itself moves (another slider
+  rebuilding the settings never nudges it). The wheel moves one shown step;
+  the paste row shows the shown number (`shown_value`).
+- **What "strength" is.** The mean hue pull `|h' − h|` over the hue circle
+  with the default families (`_organics_mean_pull`): at the default reach,
+  old 100 = 3.9°, old 150 = 5.9° (1.51×). Twice (7.8°) cannot come from depth
+  alone: the centre's slope would have to go below 0 (hues swap order, i.e.
+  banding); at the 0.10 floor depth tops out at about 1.5×.
+- **So past the floor the pull widens** (`organics_pull(amount, shape) →
+  (strength, reach)`): up to where the slope floor binds (stored ≈ 151 at
+  reach ≤ 60 %, ≈ 122 at 80 %) it returns exactly the old
+  `(organics_strength, organics_width)`; past it the depth stays on the floor
+  and the effective reach widens from the user's towards the reach of the
+  largest monotone pull (`_organics_peak_width`, 0.63), the mean pull rising
+  linearly to twice the old 100's at stored 200, or to that maximum if it is
+  less. Measured, shown 100 vs the old 100: reach 10 → 2.00×, 30 (default)
+  → 2.00× (effective reach 0.42), 45 → 1.72×, 60 → 1.52×, 80 → 1.22× (wide
+  reach is already near the most a monotone warp can pull, so the top of
+  the slider holds there). Cached per (amount, reach, scale); a few ms.
+- **Kernel.** `params[27]` carries the pull's strength (as before) and
+  `params[34]` its effective reach (`_organics_params(shape, width)`); the
+  numpy path calls the same `organics_pull`. CPU == GPU (≤ 1 code).
+- **Quality, measured.** Monotone everywhere (centre slope ≥ 0.10). This is
+  a per-pixel hue warp (it predates the finishing tools' quality rules), so
+  it stretches hue differences BETWEEN the families: peak hue stretch 1.26
+  at old 100, 1.38 at old 150, 1.66 at shown 100 (default reach). On 13 real
+  frames, colour grain (OKLab a/b high-pass, 16 px blocks) at old 100:
+  median 0.88–1.04, p99 1.00–1.22; at shown 100: median 0.73–0.99, p99
+  1.00–1.39. Moving it onto the decision view (decide the hue shift on the
+  denoised view, rotate each pixel's own colour by it, so grain passes
+  through at 1.00) is the fix if that matters; it changes existing renders
+  at grain level and needs the warp in numpy on the OpenCL path, so it is
+  left for a separate change.
+

@@ -191,9 +191,13 @@ def test_no_slider_spans_the_old_gain_range(panel):
         # positions span +-200 for +-100 (spec/printer-lights.md, half points).
         lo, hi = slider.value_range()
         assert lo >= -100, key
-        # Colour Organics deliberately runs to 150 (spec/colour-organics.md,
-        # 2026-10-22); still nowhere near the old +-200.
-        assert hi <= (150 if key == "colour_organics" else 100), key
+        # Colour Organics STORES 0..200 but shows 0..100 (spec/colour-
+        # organics.md, 2026-10-23: stored in the old units); it is the shown
+        # range that must not look like the old Gain slider's.
+        if key == "colour_organics":
+            assert (lo, hi) == (0, 200) and slider.maximum() == 100, key
+            continue
+        assert hi <= 100, key
 
 
 def test_exposure_dropped_from_the_tone_sync_group():

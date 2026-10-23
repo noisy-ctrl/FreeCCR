@@ -276,11 +276,11 @@ def test_default_reach_renders_exactly_as_before():
 
 # --- The main slider to 150 (revision 2026-10-22) -------------------------------
 
-def test_slider_runs_to_150(panel):
+def test_slider_stores_to_200(panel):
     from core.ccr_processor import ORGANICS_AMOUNT_MAX
-    assert ORGANICS_AMOUNT_MAX == 150
+    assert ORGANICS_AMOUNT_MAX == 200            # shown 100 (revision 2026-10-23)
     i = panel.adjustment_keys.index("colour_organics")
-    assert panel.sliders[i].value_range() == (0, 150)
+    assert panel.sliders[i].value_range() == (0, 200)
 
 
 def test_up_to_100_nothing_changes():
@@ -325,3 +325,80 @@ def test_150_gpu_matches_cpu(reach):
     cpu = adjust_image(img, colour_organics=150, organics_shape=shape)
     gpu = adjust_image_opencl(img, colour_organics=150, organics_shape=shape)
     np.testing.assert_allclose(cpu.astype(np.int64), gpu.astype(np.int64), atol=3)
+
+
+# --- Shown 0..100, 100 twice the old 100 (revision 2026-10-23) ----------------
+
+def _pull(amount, shape):
+    from core.ccr_processor import organics_pull, _organics_mean_pull
+    return _organics_mean_pull(*organics_pull(amount, shape))
+
+
+@pytest.mark.parametrize("reach", [10, 30, 45, 60, 70, 80])
+def test_every_earlier_edit_renders_unchanged(reach):
+    """Up to the old top (150) the pull is exactly what it was."""
+    from core.ccr_processor import organics_pull, organics_strength, organics_width
+    shape = {"reach": reach}
+    for amount in list(range(0, 151, 5)) + [37, 99, 101, 149]:
+        assert organics_pull(amount, shape) == (organics_strength(amount, shape),
+                                                organics_width(shape)), amount
+
+
+@pytest.mark.parametrize("reach", [10, 30])
+def test_shown_100_pulls_twice_the_old_100(reach):
+    shape = {"reach": reach}
+    assert _pull(200, shape) == pytest.approx(2.0 * _pull(100, shape), rel=0.01)
+
+
+@pytest.mark.parametrize("reach", [10, 30, 45, 60, 70, 80])
+def test_the_top_never_reorders_hues_and_never_weakens(reach):
+    from core.ccr_processor import (ORGANICS_MIN_CENTRE_SLOPE, organics_anchors,
+                                    organics_hue_map, organics_pull)
+    shape = {"reach": reach}
+    h = np.linspace(0, 360, 36001)[:-1].astype(np.float32)
+    last = 0.0
+    for amount in range(100, 201, 10):
+        s, w = organics_pull(amount, shape)
+        m = organics_hue_map(h, np.float32(s), organics_anchors(shape), w)
+        step = _hdiff2(np.roll(m, -1), m)[:-1] / 0.01
+        assert step.min() > ORGANICS_MIN_CENTRE_SLOPE - 0.02        # monotone
+        p = _pull(amount, shape)
+        assert p >= last - 1e-6                                     # never weaker
+        last = p
+    # wide reach is already near the most a monotone warp can pull: the top
+    # still adds, or holds, never takes away
+    assert _pull(200, shape) >= _pull(150, shape) - 1e-6
+
+
+@pytest.mark.parametrize("reach", [30, 45])
+def test_200_gpu_matches_cpu(reach):
+    img = _img(5)
+    shape = {"reach": reach}
+    cpu = adjust_image(img, colour_organics=200, organics_shape=shape).astype(np.int64)
+    gpu = adjust_image_opencl(img, colour_organics=200, organics_shape=shape).astype(np.int64)
+    assert np.abs(cpu - gpu).max() <= 2
+
+
+def test_slider_shows_half_and_keeps_odd_old_values(panel, monkeypatch):
+    from PySide6.QtCore import QPoint, QPointF
+    from PySide6.QtGui import QWheelEvent
+    from PySide6.QtCore import Qt
+    i = panel.adjustment_keys.index("colour_organics")
+    sl = panel.sliders[i]
+    sl.setValue(200)
+    assert sl.value_text() == "100" and sl.value() == 200
+    sl.setValue(75)                                  # an edit from the old 0..150 slider
+    assert sl.value() == 75 and sl.value_text() == "37.5"
+    j = panel.adjustment_keys.index("saturation")
+    panel.sliders[j].setValue(5)                     # another slider moving
+    assert sl.value() == 75                          # ... doesn't nudge it
+    ev = QWheelEvent(QPointF(5, 5), QPointF(5, 5), QPoint(0, 0), QPoint(0, 120),
+                     Qt.NoButton, Qt.NoModifier, Qt.NoScrollPhase, False)
+    sl.wheelEvent(ev)
+    assert sl.value_text() == "39" and sl.value() == 78  # one shown step
+
+
+def test_paste_row_shows_the_shown_number():
+    from widgets.sliders_panel import paste_options
+    rows = paste_options({"adjustments": {"colour_organics": 120}}, lambda k: 0)
+    assert any("Colour Organics" in r[2] and "(+60)" in r[2] for r in rows)

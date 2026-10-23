@@ -6,6 +6,7 @@ import threading
 import time
 import tifffile
 import gc
+from functools import lru_cache
 
 # Golden Highlights (spec/golden-highlights.md) and Shadow Neutralise
 # (spec/shadow-neutralise.md). Imported here, on the main thread at start-up:
@@ -3543,8 +3544,13 @@ ORGANICS_FIRM_SLOPE = 0.26
 # deepens; the centre's slope is never allowed below ORGANICS_MIN_CENTRE_SLOPE,
 # which keeps the warp monotone (hues never swap order, so no banding). That
 # floor only binds at long reach above ~130; up to 100 nothing is capped.
-ORGANICS_AMOUNT_MAX = 150
+ORGANICS_AMOUNT_MAX = 200
 ORGANICS_MIN_CENTRE_SLOPE = 0.10
+# Revision 2026-10-23: the slider SHOWS 0..100 and stores twice that (old
+# units, so every edit renders as before; shown 50 = the old 100), and the
+# shown 100 is twice the old 100's pull. Depth alone tops out at the slope
+# floor (about 1.5x), so past it the pull WIDENS (organics_pull).
+ORGANICS_SHOWN_PER_AMOUNT = 0.5
 _ORG_GATE_LO, _ORG_GATE_HI = 0.06, 0.20     # the colour bands' grey gate
 
 ORGANICS_SHAPE_DEFAULT = {"reach": int(round(ORGANICS_WIDTH * 100))}
@@ -3620,16 +3626,80 @@ def organics_strength(amount, shape=None) -> float:
     return cap if s > cap else s
 
 
+_ORG_M_HUES = np.arange(0.0, 360.0, 0.5, dtype=np.float32)
+
+
+def _organics_mean_pull(strength, width):
+    """Mean hue pull |h' - h| (degrees) over the hue circle, default
+    families: what "how strong" Colour Organics is means here."""
+    hp = organics_hue_map(_ORG_M_HUES, np.float32(strength), ORGANICS_ANCHORS, width)
+    d = np.mod(hp - _ORG_M_HUES + 180.0, 360.0) - 180.0
+    return float(np.abs(d).mean())
+
+
+def _floor_strength(w):
+    """Strength that puts the centre's slope 1 - s (1 - w) on the floor."""
+    return (1.0 - ORGANICS_MIN_CENTRE_SLOPE) / (1.0 - w)
+
+
+@lru_cache(maxsize=1)
+def _organics_peak_width():
+    """The reach of the largest monotone pull (centre slope on the floor):
+    wider than this the families' windows overlap and the mean pull falls."""
+    ws = np.arange(0.30, 0.80001, 0.005)
+    ms = [_organics_mean_pull(_floor_strength(w), float(w)) for w in ws]
+    return float(ws[int(np.argmax(ms))])
+
+
+@lru_cache(maxsize=512)
+def _organics_pull_cached(amount, w0, scale):
+    s_lin = amount / 100.0 * ORGANICS_STRENGTH * scale
+    cap = _floor_strength(w0)
+    if s_lin <= cap:
+        return s_lin, w0
+    w_peak = _organics_peak_width()
+    if w0 >= w_peak:
+        return cap, w0                 # nothing wider pulls more
+    a_c = 100.0 * cap / (ORGANICS_STRENGTH * scale)       # where depth ran out
+    top = float(ORGANICS_AMOUNT_MAX)
+    m_c = _organics_mean_pull(cap, w0)
+    m_top = min(m_c * top / a_c, _organics_mean_pull(_floor_strength(w_peak), w_peak))
+    target = m_c + (min(amount, top) - a_c) / (top - a_c) * (m_top - m_c)
+    lo, hi = w0, w_peak
+    for _ in range(30):                 # mean pull rises with w up to w_peak
+        mid = 0.5 * (lo + hi)
+        if _organics_mean_pull(_floor_strength(mid), mid) < target:
+            lo = mid
+        else:
+            hi = mid
+    w = 0.5 * (lo + hi)
+    return _floor_strength(w), w
+
+
+def organics_pull(amount, shape=None):
+    """(strength, reach) of the warp for the stored `amount` (0..200, old
+    units; the slider shows half) and a shape. Up to where the centre slope
+    reaches its floor this is exactly (organics_strength, organics_width), so
+    every earlier edit renders unchanged; past it the depth stays on the
+    floor and the reach widens until the mean pull is twice the old 100's at
+    200 (shown 100), or the most a monotone warp can pull if that is less.
+    See spec/colour-organics.md, revision 2026-10-23."""
+    return _organics_pull_cached(float(amount), float(organics_width(shape)),
+                                 float(organics_strength_scale(shape)))
+
+
 def _organics_table(anchors):
     return np.array(list(anchors) + [anchors[0] + 360.0], np.float32)
 
 
-def _organics_params(shape):
-    """Kernel params[28..34]: anchor count, anchors + wrap padded to 5, reach."""
+def _organics_params(shape, width=None):
+    """Kernel params[28..34]: anchor count, anchors + wrap padded to 5, reach
+    (the effective reach from organics_pull when given)."""
     anchors = organics_anchors(shape)
     table = list(_organics_table(anchors)) if anchors else []
     table += [0.0] * (5 - len(table))
-    return [float(len(anchors))] + [float(v) for v in table] + [organics_width(shape)]
+    w = organics_width(shape) if width is None else width
+    return [float(len(anchors))] + [float(v) for v in table] + [float(w)]
 
 
 def organics_hue_map(hue_deg, strength, anchors=None, width=None):
@@ -3682,9 +3752,8 @@ def _apply_colour_organics(img_norm: np.ndarray, amount: float,
     hue = np.where(ms == r, 60.0 * np.mod((g - b) / cs + 6.0, 6.0),
           np.where(ms == g, 60.0 * ((b - r) / cs + 2.0),
                             60.0 * ((r - g) / cs + 4.0))).astype(np.float32)
-    h2 = organics_hue_map(hue, np.float32(organics_strength(amount, shape))
-                          * gate[sel],
-                          anchors, organics_width(shape))
+    strength, width = organics_pull(amount, shape)
+    h2 = organics_hue_map(hue, np.float32(strength) * gate[sel], anchors, width)
     # the fully saturated colour of hue h2
     hp = h2 / np.float32(60.0)
     xx = np.float32(1.0) - np.abs(np.mod(hp, np.float32(2.0)) - np.float32(1.0))
@@ -4564,6 +4633,7 @@ def adjust_image_opencl(
         # after the band flag so no existing index moves — params[26]
         # Saturation Roll-off, params[27] Colour Organics, params[28..34] its
         # families: count, anchors + wrap (5 slots), reach)
+        _org_pull = organics_pull(colour_organics or 0.0, organics_shape)
         params = np.array([
             kelvin_shift, tint_shift, exposure, brightness,
             blackpoint, whitepoint, contrast, saturation, balance_factor,
@@ -4579,10 +4649,10 @@ def adjust_image_opencl(
             # The amount carries the reach's scale and the centre-slope cap
             # (both exact no-ops at the default reach and <= 100), matching
             # _apply_colour_organics: the kernel multiplies it back by
-            # ORGANICS_STRENGTH / 100.
-            (organics_strength(colour_organics, organics_shape)
-             / ORGANICS_STRENGTH * 100.0 if colour_organics else 0.0),
-            *_organics_params(organics_shape),
+            # ORGANICS_STRENGTH / 100. Past the slope floor organics_pull
+            # also widens the reach, passed in params[34].
+            (_org_pull[0] / ORGANICS_STRENGTH * 100.0 if colour_organics else 0.0),
+            *_organics_params(organics_shape, _org_pull[1]),
         ], dtype=np.float32)
 
         params_buf = cl_array.to_device(queue, params)

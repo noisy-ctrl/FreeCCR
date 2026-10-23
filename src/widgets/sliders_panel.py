@@ -224,6 +224,17 @@ def adjustment_label(key):
     return key.replace("_", " ").capitalize()
 
 
+def shown_value(key, v):
+    """The number a slider SHOWS for a stored value (Colour Organics shows
+    half its stored amount; spec/colour-organics.md, revision 2026-10-23)."""
+    if key == "colour_organics":
+        try:
+            return float(v) * 0.5
+        except (TypeError, ValueError):
+            return v
+    return v
+
+
 def _fmt_value(v):
     try:
         f = float(v)
@@ -248,7 +259,7 @@ def paste_options(clip, default_for):
                    else "Channel Balance" if key.startswith("balance_")
                    else "Adjustments")
         rows.append((section, f"adj:{key}",
-                     f"{adjustment_label(key)}  ({_fmt_value(val)})"))
+                     f"{adjustment_label(key)}  ({_fmt_value(shown_value(key, val))})"))
     if clip.get("cineon_log"):
         rows.append(("Channel Levels", "cineon_log", "Cineon Log → Workspace"))
     if clip.get("look_lut"):
@@ -590,6 +601,45 @@ class HalfStepSlider(ResettableSlider):
 
     def setValue(self, v):
         QSlider.setValue(self, int(round(float(v) * self.SCALE)))
+
+
+class HalfShownSlider(ResettableSlider):
+    """A slider that SHOWS half its value (spec/colour-organics.md, revision
+    2026-10-23): Colour Organics stores its amount in the old units (0..200)
+    so every edit renders as before, and shows 0..100. value()/setValue()
+    speak stored units, like HalfStepSlider; the position is the shown
+    number. A stored odd value (an edit from the old 0..150 slider) is kept
+    exactly until this slider itself is moved, so moving another slider
+    never nudges it."""
+
+    SCALE = 0.5
+
+    def value(self):
+        raw = QSlider.value(self)
+        exact = getattr(self, "_exact", None)
+        if exact is not None and int(exact * 0.5 + 0.5) == raw:
+            return exact
+        return 2 * raw
+
+    def setValue(self, v):
+        v = float(v)
+        self._exact = int(v) if v.is_integer() else v
+        QSlider.setValue(self, int(v * 0.5 + 0.5))
+
+    def value_text(self):
+        v = self.value() * 0.5
+        return str(int(v)) if float(v).is_integer() else f"{v:.1f}"
+
+    def wheelEvent(self, event):
+        # One shown step per notch (the base steps one STORED unit, which
+        # would round back to the same position).
+        delta = event.angleDelta().y()
+        raw = QSlider.value(self)
+        if delta > 0:
+            QSlider.setValue(self, min(self.maximum(), raw + 1))
+        elif delta < 0:
+            QSlider.setValue(self, max(self.minimum(), raw - 1))
+        event.accept()
 
 
 class GradientSlider(ResettableSlider):
@@ -1200,8 +1250,9 @@ class SlidersPanel(QWidget):
         # protected. Created right after Saturation (ADJUSTMENT_KEYS zip).
         self.vibrance_slider_layout = self.create_slider("Vibrance")
         self.sub_saturation_slider_layout = self.create_slider("Subtracted Sat")
-        # Colour Organics: hues drawn into print families, 0..150 (past 100
-        # the pull deepens, capped so hues never swap order). Its
+        # Colour Organics: hues drawn into print families, shown 0..100 and
+        # stored 0..200 (shown 50 = the old 100; past where the depth would
+        # make hues swap order the pull widens instead). Its
         # explanation is the label's tooltip (no line in the panel).
         # Created right after Subtracted Sat (ADJUSTMENT_KEYS zip).
         # spec/colour-organics.md
@@ -1243,8 +1294,11 @@ class SlidersPanel(QWidget):
             lambda pos: self._open_glow_popup(self._glow_label.mapToGlobal(pos)))
         self._update_glow_label()
         from core.ccr_processor import ORGANICS_AMOUNT_MAX
+        # Shows 0..100, stores twice that (revision 2026-10-23): shown 50 is
+        # the old 100, shown 100 twice its pull.
         self.colour_organics_slider_layout = self.create_slider(
-            "Colour Organics", min_value=0, max_value=ORGANICS_AMOUNT_MAX)
+            "Colour Organics", min_value=0, max_value=ORGANICS_AMOUNT_MAX,
+            half_shown=True)
         # Right-click the label for the families and their reach
         # (spec/colour-organics.md, popup revision).
         self._organics_shape = None      # active layer's shape (None = default)
@@ -1593,7 +1647,8 @@ class SlidersPanel(QWidget):
             self.histogram.set_caption("")
 
     def create_slider(self, label_text, min_value=-100, max_value=100,
-                      default_value=0, gradient=None, half_steps=False):
+                      default_value=0, gradient=None, half_steps=False,
+                      half_shown=False):
         # `gradient` (a (left, right) colour pair) gives a custom-painted
         # gradient groove — e.g. Temperature blue->amber, Tint green->magenta.
         # `half_steps`: the value moves in halves (the Channel Levels Shift
@@ -1602,14 +1657,16 @@ class SlidersPanel(QWidget):
             slider = GradientSlider(gradient, Qt.Horizontal)
         elif half_steps:
             slider = HalfStepSlider(Qt.Horizontal)
+        elif half_shown:
+            slider = HalfShownSlider(Qt.Horizontal)
         else:
             slider = ResettableSlider(Qt.Horizontal)
-        slider.setMinimum(min_value * slider.SCALE)
-        slider.setMaximum(max_value * slider.SCALE)
+        slider.setMinimum(int(round(min_value * slider.SCALE)))
+        slider.setMaximum(int(round(max_value * slider.SCALE)))
         slider.setValue(default_value)
         slider.reset_value = default_value     # double-click target
         slider.setOrientation(Qt.Horizontal)
-        slider.setTickInterval(10 * slider.SCALE)
+        slider.setTickInterval(max(1, int(round(10 * slider.SCALE))))
         slider.setFixedHeight(theme.CONTROL_H)
 
         label = QLabel(label_text)
