@@ -1,4 +1,4 @@
-"""Right-click popup for Highlights x / Shadows x / Punch x: range and
+"""Right-click popup for Highlights L / Shadows ⅃ / Contrast L ⅃: range and
 keep-endpoint options with a live curve preview. See spec/x-tone-tools.md."""
 
 import numpy as np
@@ -14,17 +14,17 @@ TOOL_NAMES = {"hx": "Highlights L", "sx": "Shadows \u2143", "px": "Contrast L \u
 SLIDER_KEYS = {"hx": "highlights_x", "sx": "shadows_x", "px": "punch_x"}
 # Which options each tool has: (option key, label, tooltip)
 RANGE_TIPS = {
-    "hx": ("How far down the tones it reaches. The middle is the measured Lights; "
+    "hx": ("How far down the tones it reaches. The middle is the default; "
            "Wide takes it further into the midtones and shadows, Narrow keeps "
            "it in the brightest tones."),
-    "sx": ("How far up the tones it reaches. The middle is the measured Darks; "
+    "sx": ("How far up the tones it reaches. The middle is the default; "
            "Wide takes it further into the midtones, Narrow keeps it in the "
            "deepest shadows."),
 }
 KEEP_WHITE_TIP = ("Pure white stays exactly white: the change fades out over "
                   "the brightest quarter of the tones, so nothing new clips.")
 KEEP_BLACK_TIP = ("Pure black stays exactly black: the change fades in over the "
-                  "darkest quarter of the tones (the measured Darks lifts black at +; "
+                  "darkest quarter of the tones (Shadows \u2143 lifts black at +; "
                   "this keeps a true black).")
 CHECKS = {
     "hx": (("hx_keep", "Keep white point", KEEP_WHITE_TIP),),
@@ -167,7 +167,7 @@ class XTonePopup(QFrame):
         lay.addWidget(self.preview, alignment=Qt.AlignHCenter)
 
         self.reset_btn = QPushButton("Reset")
-        self.reset_btn.setToolTip("Back to the measured own behaviour")
+        self.reset_btn.setToolTip("Back to the default behaviour")
         self.reset_btn.clicked.connect(self.reset)
         lay.addWidget(self.reset_btn)
         self._refresh_preview()

@@ -700,8 +700,8 @@ class SlidersPanel(QWidget):
         # auto-exposure and for area layers — it just has no slider to zip to.
         "temperature", "tint", "brightness", "gamma", "highlights",
         "white_point", "shadows", "black_point",
-        # Highlights x / Shadows x / Punch x: the measured tone tools,
-        # created right after Black Point (spec/x-tone-tools.md).
+        # Highlights L / Shadows ⅃ / Contrast L ⅃ (keys *_x), the measured
+        # tone tools, created right after Black Point (spec/x-tone-tools.md).
         "highlights_x", "shadows_x", "punch_x",
         "contrast", "saturation",
         # Saturation Roll-off sits directly under Saturation (its
@@ -1216,9 +1216,9 @@ class SlidersPanel(QWidget):
         self.white_point_slider_layout = self.create_slider("White Point")
         self.shadows_slider_layout = self.create_slider("Shadows")
         self.black_point_slider_layout = self.create_slider("Black Point")
-        # Highlights x / Shadows x / Punch x: the measured tone tools,
-        # measured from the measured exports. Right-click a LABEL for its
-        # options (spec/x-tone-tools.md). Created right after Black Point
+        # Highlights L / Shadows ⅃ / Contrast L ⅃ (keys *_x): tone tools
+        # stored as measured 3D tables. Right-click a LABEL for its options
+        # (spec/x-tone-tools.md). Created right after Black Point
         # (ADJUSTMENT_KEYS zip).
         self.highlights_x_slider_layout = self.create_slider("Highlights L")
         self.shadows_x_slider_layout = self.create_slider("Shadows \u2143")
@@ -1316,7 +1316,7 @@ class SlidersPanel(QWidget):
         scroll_layout.addLayout(self.gamma_slider_layout)
         # Shown order only (the creation order above is what ADJUSTMENT_KEYS
         # zips with): Highlights L sits under Highlights and Shadows ⅃ under
-        # Shadows, each next to the control it is the measured the measured render version of.
+        # Shadows, each next to the plain control it is the richer version of.
         scroll_layout.addLayout(self.highlights_slider_layout)
         scroll_layout.addLayout(self.highlights_x_slider_layout)
         scroll_layout.addLayout(self.white_point_slider_layout)
@@ -2209,7 +2209,7 @@ class SlidersPanel(QWidget):
         curves = self.curve_editor.get_curves()
         if curves:
             adjustment["curves"] = curves
-        # The Highlights/Shadows/Punch x options are a nested, non-slider
+        # The Highlights L / Shadows ⅃ / Contrast L ⅃ options are a nested, non-slider
         # setting like the curves; they ride every slider -> dict rebuild.
         if getattr(self, "_xtone_shape", None):
             adjustment["xtone_shape"] = dict(self._xtone_shape)
@@ -2442,17 +2442,16 @@ class SlidersPanel(QWidget):
         gamma = f"γ {'+' if gv > 0 else '−' if gv < 0 else ''}{abs(gv)}"
         self._pl_readout.setText("   ".join(parts) + "   points   ·   " + gamma)
 
-    # --- Highlights x / Shadows x / Punch x options (spec/x-tone-tools.md) --
+    # --- Highlights L / Shadows ⅃ / Contrast L ⅃ options (spec/x-tone-tools.md) --
     XTONE_HINTS = {
-        "hx": ("Highlights L: the measured Lights, measured. "
-               "Lifts (or lowers) the upper tones; black stays put, white barely "
-               "moves, and bright colours soften as they lift, like a film shoulder."),
-        "sx": ("Shadows \u2143: the measured Darks, measured. "
-               "Lifts (or deepens) the lower tones; white stays put. Like the measured render, "
-               "+ also lifts black a little (a fade) \u2014 Keep black point "
-               "stops that."),
-        "px": ("Contrast L \u2143: the measured Punch, measured. "
-               "Contrast through the upper midtones, both ends moving slightly."),
+        "hx": ("Highlights L: lifts (or lowers) the upper tones; black stays "
+               "put, white barely moves, and bright colours soften as they lift, "
+               "like a film shoulder."),
+        "sx": ("Shadows \u2143: lifts (or deepens) the lower tones; white stays "
+               "put. + also lifts black a little (a fade) \u2014 Keep black "
+               "point stops that."),
+        "px": ("Contrast L \u2143: contrast through the upper midtones, both "
+               "ends moving slightly."),
     }
     XTONE_LABEL_TIP = "Right-click: options"
 
@@ -2950,7 +2949,7 @@ class SlidersPanel(QWidget):
         # competing undo burst here.
         self.curve_editor.set_curves(None)
         # ... and the Colour Organics families go back to the standard four,
-        # the Highlights/Shadows/Punch x options to the measured own.
+        # the Highlights L / Shadows ⅃ / Contrast L ⅃ options to their defaults.
         self._organics_shape = None
         self._update_organics_label()
         self._xtone_shape = None
@@ -3063,7 +3062,7 @@ class SlidersPanel(QWidget):
         sync_profile = bool(selection.get("profile"))
         sync_curves = bool(selection.get("curves"))
         sync_orientation = bool(selection.get("orientation"))
-        # The Highlights/Shadows/Punch x options ride the Tone group (their
+        # The Highlights L / Shadows ⅃ / Contrast L ⅃ options ride the Tone group (their
         # sliders); the Colour Organics families ride the Saturation group.
         sync_tone_shape = bool(selection.get("tone"))
         sync_org_shape = bool(selection.get("sat"))

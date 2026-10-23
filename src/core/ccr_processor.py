@@ -3545,8 +3545,8 @@ def _apply_sat_rolloff(img_norm: np.ndarray, amount: float) -> np.ndarray:
 # does: hue differences shrink near each anchor and open up between them.
 # The warp is monotone (hues are never reordered, so gradients can't band)
 # and realised at the same luma and chroma. The anchors are an informed guess
-# that follows the structure measured in the measured film rendering; replace them
-# with measured Noritsu anchors when scan pairs exist. The OpenCL kernel
+# at print families; replace them with measured Noritsu anchors when scan
+# pairs exist. The OpenCL kernel
 # substitutes these constants (and the anchor table) textually.
 # The families: (key, name, what they hold, default HSV hue). Each can be
 # switched off or nudged by +-ORGANICS_SHIFT_MAX degrees in the right-click
@@ -3833,7 +3833,7 @@ def _apply_highlights_shadows(img, highlights, shadows):
 
 
 def _apply_xtones(img, highlights_x, shadows_x, punch_x, xtone_shape):
-    """Highlights x / Shadows x / Punch x (spec/x-tone-tools.md) on a float
+    """Highlights L / Shadows ⅃ / Contrast L ⅃ (spec/x-tone-tools.md) on a float
     image in 0..65535."""
     from core.x_tones import apply_x_tones
     return apply_x_tones(np.clip(img / 65535.0, 0.0, 1.0).astype(np.float32),
@@ -3898,7 +3898,7 @@ def adjust_image(
     # Colour Organics families / reach from the right-click popup; None =
     # default. Appended last.
     organics_shape=None,
-    # Highlights x / Shadows x / Punch x (spec/x-tone-tools.md), -100..100,
+    # Highlights L / Shadows ⅃ / Contrast L ⅃ (spec/x-tone-tools.md), -100..100,
     # and their right-click options (None = default). Appended last.
     highlights_x: float = 0.0,
     shadows_x: float = 0.0,
@@ -4039,9 +4039,9 @@ def adjust_image(
     if highlights != 0.0 or shadows != 0.0:
         img = _apply_highlights_shadows(img, highlights, shadows)
 
-    # Highlights x / Shadows x / Punch x: the measured tone tools,
-    # measured (spec/x-tone-tools.md). Tone tools on the display image,
-    # right after Highlights / Shadows.
+    # Highlights L / Shadows ⅃ / Contrast L ⅃: measured tone tables
+    # (spec/x-tone-tools.md). Tone tools on the display image, right after
+    # Highlights / Shadows.
     if highlights_x or shadows_x or punch_x:
         img = _apply_xtones(img, highlights_x, shadows_x, punch_x, xtone_shape)
 
@@ -4432,7 +4432,7 @@ def adjust_image_opencl(
     # Colour Organics — appended last, see adjust_image.
     colour_organics: float = 0.0,
     organics_shape=None,
-    # Highlights x / Shadows x / Punch x — appended last, see adjust_image.
+    # Highlights L / Shadows ⅃ / Contrast L ⅃ — appended last, see adjust_image.
     highlights_x: float = 0.0,
     shadows_x: float = 0.0,
     punch_x: float = 0.0,
@@ -4560,7 +4560,7 @@ def adjust_image_opencl(
         (float(band_settings.get('band_feather', _BAND_FEATHER_DEFAULT) or 0) > 0) and \
         any(band_settings.get(k, 0) for k in BAND_ADJUSTMENT_KEYS)
     use_gpu = not feather_active and _initialize_opencl()
-    # Highlights x / Shadows x / Punch x (spec/x-tone-tools.md) are numpy
+    # Highlights L / Shadows ⅃ / Contrast L ⅃ (spec/x-tone-tools.md) are numpy
     # lookups the kernel doesn't have. Run every kernel stage that precedes
     # them (Channel Levels on a non-windowed base, Gain, Brightness,
     # Highlights/Shadows — WB is already consumed above) plus the tools here,

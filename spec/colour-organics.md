@@ -8,9 +8,8 @@ transitions between families open up, which reads as cohesive and natural.
 A neutral digital rendering keeps hues evenly spread, which can feel
 "digital". Colour Organics does the grouping, with one amount slider.
 
-The hue families are an informed guess, not a measurement of Noritsu: they
-follow the structure measured in the measured base rendering (HALD export,
-2026-10-16), which compresses hue differences around warm (0-55 degrees),
+The hue families are an informed guess, not a measurement of Noritsu: a
+film-like rendering compresses hue differences around warm (0-55 degrees),
 foliage (95-120) and blue-violet (245-310), and opens them up between green
 and cyan (120-155), cyan and blue (205-235) and magenta and red (325-350).
 When Noritsu scan pairs arrive, the anchors are replaced with measured ones.

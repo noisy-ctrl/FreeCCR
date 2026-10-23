@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""Build core/x_tones.npz: the measured tone tools measured from
-HALD exports, as changes on FreeCCR's display values (spec/x-tone-tools.md).
+"""Build core/x_tones.npz: the Highlights L / Shadows ⅃ / Contrast L ⅃
+tables, measured from graded HALD images as changes on FreeCCR's display
+values (spec/x-tone-tools.md).
 
     python3.11 tools/fit_x_tones.py --base base.tiff \
-        --hx-100 l-100.tiff --hx-50 l-50.tiff --hx+50 l+50.tiff --hx+100 l+100.tiff \
+        --hx-100 h-100.tiff --hx-50 h-50.tiff --hx+50 h+50.tiff --hx+100 h+100.tiff \
         --sx-100 ... --px+100 ... [--out src/core/x_tones.npz] [--grid 33]
 
-Every input is a level-16 HALD (4096 x 4096, 256 steps per channel) exported
-from the measured positive mode: `--base` with no adjustment, the others with one
-tool at -100 / -50 / +50 / +100 and nothing else.
+Every input is a level-16 HALD (4096 x 4096, 256 steps per channel):
+`--base` ungraded, the others with one tone change at -100 / -50 / +50 /
++100 and nothing else.
 """
 import argparse
 import os

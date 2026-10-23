@@ -2106,7 +2106,7 @@ class CCRImage:
                      sat_rolloff=s.get('sat_rolloff', 0),
                      colour_organics=s.get('colour_organics', 0),
                      organics_shape=s.get('organics_shape'),
-                     # Highlights x / Shadows x / Punch x and their options
+                     # Highlights L / Shadows ⅃ / Contrast L ⅃ and their options
                      # (spec/x-tone-tools.md); per layer.
                      highlights_x=s.get('highlights_x', 0),
                      shadows_x=s.get('shadows_x', 0),
@@ -2252,7 +2252,7 @@ class CCRImage:
                      sat_rolloff=s.get('sat_rolloff', 0),
                      colour_organics=s.get('colour_organics', 0),
                      organics_shape=s.get('organics_shape'),
-                     # Highlights x / Shadows x / Punch x and their options
+                     # Highlights L / Shadows ⅃ / Contrast L ⅃ and their options
                      # (spec/x-tone-tools.md); per layer.
                      highlights_x=s.get('highlights_x', 0),
                      shadows_x=s.get('shadows_x', 0),

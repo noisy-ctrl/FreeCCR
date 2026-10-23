@@ -3,8 +3,8 @@
 ## Goal
 
 A lab-style printer-lights pad: C−/C+, M−/M+, Y−/Y+, D−/D+ buttons with a
-step of 1, 2 or 4 points and a reset, as on a Frontier/Noritsu operator panel
-(and other software). Fast, repeatable exposure/colour corrections in the lab's own
+step of 1, 2 or 4 points and a reset, as on a Frontier/Noritsu operator panel.
+Fast, repeatable exposure/colour corrections in the lab's own
 units.
 
 ## What a printer point is here
@@ -39,8 +39,7 @@ convention.
   pushes towards (D− light grey, D+ near-black with an outline).
 - One printer point per click; **Shift-click** moves 4. **Right-click** any
   button: "Reset printer lights to 0" (the four Shift sliders).
-- No step row and no per-channel value boxes (other software shows the values in boxes
-  under its buttons; this pad deliberately doesn't copy that). A single muted
+- No step row and no per-channel value boxes. A single muted
   readout line under the pad: `D +5  C +3  M −2  Y 0  points` (one decimal when
   a slider was set by hand to a non-multiple of 3). Updates on every change.
 - At a slider's limit (±100 = ±33 points) further presses do nothing and the

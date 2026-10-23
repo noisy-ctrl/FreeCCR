@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Highlights x / Shadows x / Punch x: the measured tone tools
+"""Highlights L / Shadows ⅃ / Contrast L ⅃, the measured tone tables
 (spec/x-tone-tools.md). Also hosts the small panel helpers the popup
 tests share (they lived in the removed Highlights/Shadows range tests)."""
 
@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 from core import x_tones as et  # noqa: E402
 from core.ccr_processor import adjust_image, adjust_image_opencl, encode_window  # noqa: E402
 
-# the measured exports (level-16 HALD, positive mode), read at five colours:
+# The measured exports (level-16 HALD), read at five colours:
 # three greys and two colours, input (r, g, b) / 255 =
 # (51,51,51) (119,119,119) (187,187,187) (40,90,160) (200,150,110).
 MEASURED = {
@@ -47,15 +47,16 @@ def _xtone_space():
 
 
 # --------------------------------------------------------------------------- #
-# against the measured render
+# against the measured exports
 # --------------------------------------------------------------------------- #
 
 @pytest.mark.parametrize("tool", ["hx", "sx", "px"])
 @pytest.mark.parametrize("amount", [-100, -50, 50, 100])
 def test_matches_the_measured_exports(tool, amount):
-    """the measured rendered colours, mapped into FreeCCR's black..white, then the
-    tool: the measured own result, in the same units — greys within 0.5/255, the
-    two colours within 2/255 (one sits where the measured render clips a channel)."""
+    """The measured base colours, mapped into FreeCCR's black..white, then the
+    tool: the measured result, in the same units — greys within 0.5/255, the
+    two colours within 2/255 (one sits where the measured render clips a
+    channel)."""
     b, w = _xtone_space()
     base = np.array(MEASURED["base"], np.float64)
     want = np.array(MEASURED[f"{tool}{'+' if amount > 0 else '-'}{abs(amount)}"], np.float64)
@@ -77,7 +78,7 @@ def test_zero_is_an_exact_no_op():
             adjust_image_opencl(img, highlights=20, contrast=10, **kw))
 
 
-def test_ends_behave_like_measured render():
+def test_ends_behave_as_measured():
     x = np.array([0.0, 1.0], np.float32)
     for v in (100, -100):
         lo, hi = et.grey_curve(x, highlights_x=v)
@@ -94,7 +95,7 @@ def test_keep_pins_the_ends_exactly():
     assert et.grey_curve(x, highlights_x=100, shape={"hx_keep": True})[1] == 1.0
     p = et.grey_curve(x, punch_x=100, shape={"px_keep_black": True, "px_keep_white": True})
     assert p[0] == 0.0 and p[1] == 1.0
-    # ...and only near the end: the midtones are the measured
+    # ...and only near the end: the midtones are as without Keep
     m = np.array([0.5], np.float32)
     assert (et.grey_curve(m, shadows_x=100, shape={"sx_keep": True})[0]
             == pytest.approx(et.grey_curve(m, shadows_x=100)[0], abs=1e-6))
@@ -288,7 +289,7 @@ def test_three_sliders_after_black_point(panel):
         assert lbl.text() == text
         assert slider.value_range() == (-100, 100)
         assert lbl.contextMenuPolicy() == Qt.CustomContextMenu
-        assert "Right-click" in lbl.toolTip() and "the measured render" in lbl.toolTip()
+        assert "Right-click" in lbl.toolTip() and lbl.toolTip().startswith(text)
 
 
 def test_highlights_and_shadows_have_no_popup_any_more(panel):
@@ -408,3 +409,20 @@ def test_l_sliders_sit_under_the_controls_they_measure():
                                      "Shadows ⅃", "Black Point", "Contrast L ⅃"]
     keys = SlidersPanel.ADJUSTMENT_KEYS
     assert keys.index("highlights_x") > keys.index("black_point")      # zip order kept
+
+
+def test_an_older_catalog_keeps_its_options():
+    """Options saved under the older key are recognised by their contents."""
+    from core.catalog import _adopt_tone_options, _areas_from_json
+    opts = {"hx_range": 20, "hx_keep": True, "sx_range": 50, "sx_keep": False,
+            "px_keep_black": True, "px_keep_white": False}
+    old = {"highlights_x": 40, "legacy_shape": dict(opts)}
+    assert _adopt_tone_options(old) == {"highlights_x": 40, "xtone_shape": opts}
+    # other options dicts are left alone, and a current catalog is untouched
+    keep = {"golden_shape": {"hue": 60}, "xtone_shape": None}
+    assert _adopt_tone_options(dict(keep)) == keep
+    cur = {"xtone_shape": {"hx_range": 70}, "legacy_shape": dict(opts)}
+    assert _adopt_tone_options(dict(cur))["xtone_shape"] == {"hx_range": 70}
+    a = _areas_from_json([{"settings": {"legacy_shape": dict(opts)}}])
+    assert a[0]["settings"] == {"xtone_shape": opts}
+

@@ -73,7 +73,7 @@ def test_the_curve_is_a_soft_knee():
     c = rolloff_curve(s, 100)
     assert np.all(np.diff(c) >= -1e-7)                      # monotone
     assert c[500] == pytest.approx(0.5, abs=1e-6)           # the knee
-    assert c[-1] == pytest.approx(0.716, abs=0.005)         # ~the measured default
+    assert c[-1] == pytest.approx(0.716, abs=0.005)         # the full-strength ceiling
     slope = np.diff(c) / np.diff(s)
     assert slope[500] == pytest.approx(1.0, abs=0.01)       # no kink at the knee
 

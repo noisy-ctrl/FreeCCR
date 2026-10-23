@@ -4,9 +4,8 @@
 
 A soft ceiling on strong colours: the most saturated colours are eased back
 so they don't go neon or clip, while muted colours and greys are untouched.
-This is what the measured render calls "chroma compression" (measured from Miles's HALD
-exports, 2026-10-16: a knee on saturation, colours under about half
-saturation unchanged, lightness kept); FreeCCR had no equivalent (Vibrance
+A chroma compression: a knee on saturation, colours under about half
+saturation unchanged, lightness kept; FreeCCR had no equivalent (Vibrance
 is the opposite shape: it moves muted colours and leaves strong ones).
 
 ## Non-goals
@@ -33,7 +32,7 @@ Per pixel on display values `x` in [0,1]:
 - For `s <= K` nothing changes. Above it,
   `s' = K + (M - K) (1 - exp(-(s - K) / (M - K)))`: slope 1 at the knee (no
   kink), approaching `M`; at `a = 1` a fully saturated colour lands at 0.72
-  (the measured default compression measured about 0.71).
+  (a typical print-like compression).
 - Two exact steps. (1) Lower the saturation to `s'` with the brightest
   channel and the hue fixed: `c = max - (max - x) s' / s` (raises the other
   channels, so `c >= x`). (2) Scale the whole colour, which keeps hue and
@@ -87,7 +86,7 @@ like Vibrance's. Guarded on `max > 1e-6` (black has no saturation).
   luminance exact unless the brightest channel would pass 1, never clips.
 - Why two-sided makes sense: muted colours and greys are untouched either
   way, so it is the strong-colour counterpart of Vibrance (which works on
-  muted ones), and the measured chroma compression is two-sided the same way.
+  muted ones).
 - Values set while the slider was 0..100 now act twice as strong (anything
   above 50 clamps to 50).
 - `params[26]` carries the signed value; `ROLLOFF_SCALE`/`ROLLOFF_PUNCH` are

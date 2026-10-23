@@ -433,6 +433,7 @@ def test_preview_toolbar_fits_at_the_smallest_window():
             f"the toolbar needs {need}px at {MAC_FONT}x the UI font, the canvas "
             f"can be as narrow as {ip.minimumWidth()}px")
         texts = [a.text() for a in ip.toolbar.actions()]
-        assert "False colour" in texts and not any("classic" in a.toolTip() for a in ip.toolbar.actions())
+        assert "False colour" in texts
+        assert ip.fc_action.toolTip().startswith("Show the picture in greyscale")
     finally:
         _app.setFont(base)

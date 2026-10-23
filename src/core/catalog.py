@@ -170,6 +170,21 @@ def _areas_to_json(areas):
     return out
 
 
+def _adopt_tone_options(settings):
+    """A catalog written before the tone tools' options were stored under
+    `xtone_shape` keeps them under an older key. Recognise them by their
+    contents (the Range/Keep option names) and move them, so old edits keep
+    their right-click options."""
+    if not isinstance(settings, dict) or settings.get("xtone_shape") is not None:
+        return settings
+    for k, v in list(settings.items()):
+        if (k != "xtone_shape" and k.endswith("_shape") and isinstance(v, dict)
+                and "hx_range" in v and "px_keep_black" in v):
+            settings["xtone_shape"] = settings.pop(k)
+            break
+    return settings
+
+
 def _areas_from_json(areas):
     """Inverse of _areas_to_json; defensive against legacy/partial records."""
     out = []
@@ -184,7 +199,7 @@ def _areas_from_json(areas):
             "angle": float(a.get("angle", 0.0)),
             "geometry": {k: float(v)
                          for k, v in (a.get("geometry") or {}).items()},
-            "settings": dict(a.get("settings") or {}),
+            "settings": _adopt_tone_options(dict(a.get("settings") or {})),
         })
     return out
 
@@ -659,7 +674,7 @@ def _restore_image(file_path: str, state: dict, live_merge_sources=None,
         merge_sources = None
         merge_demosaic = True
         merge_mono = False
-    adj = dict(state.get("adjustment_settings") or {})
+    adj = _adopt_tone_options(dict(state.get("adjustment_settings") or {}))
     # Sharpening defaults to 25 for NEW images, but a catalog written before the
     # Details section has no sharpen_* keys — falling through to SLIDER_DEFAULTS
     # would silently re-sharpen every scan ever made. A non-empty saved dict that

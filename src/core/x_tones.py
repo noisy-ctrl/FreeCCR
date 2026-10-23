@@ -1,11 +1,11 @@
-"""Highlights x / Shadows x / Punch x: the measured tone tools,
-measured from the measured exports (spec/x-tone-tools.md).
+"""Highlights L / Shadows ⅃ / Contrast L ⅃ (keys highlights_x / shadows_x /
+punch_x): tone tools stored as measured 3D tables (spec/x-tone-tools.md).
 
 Each tool is a change added to FreeCCR's display values (0..1), stored on a
-33^3 grid per tool and sign as the quadratic through the measured 0, 50 and 100:
-change = A t + B t^2, t = |slider| / 100. The grid is built by
-tools/fit_x_tones.py from HALD exports; the measured black..white is mapped onto
-FreeCCR's, so every near-neutral tone sits inside what the measured render measured.
+33^3 grid per tool and sign as the quadratic through the measured 0, 50 and
+100: change = A t + B t^2, t = |slider| / 100. The grid is built by
+tools/fit_x_tones.py from graded HALD images, with their black..white mapped
+onto FreeCCR's, so every near-neutral tone sits inside what was measured.
 """
 import os
 import threading
@@ -170,11 +170,11 @@ def _turns_back(hx, sx, px, shape, n):
 
 def _unfolded(hx, sx, px, shape, n):
     """Options that steepen a tool can turn the tone curve back on itself on
-    the measured steepest stretches: a Range far from the middle (it reads the
+    their steepest stretches: a Range far from the middle (it reads the
     change at a remapped tone) or a Keep fading a large change over a short
     stretch. Pull the ranges towards the middle, then widen the kept stretch,
     just enough that the grey axis never turns back (a Range then reads "as
-    wide as it can go"). Default options are the measured and are left alone."""
+    wide as it can go"). Default options are left alone."""
     if not _turns_back(hx, sx, px, shape, n):
         return shape
     out = dict(shape)
