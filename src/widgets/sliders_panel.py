@@ -173,7 +173,7 @@ _BASIC_LABELS = {
     "gamma": "Gamma", "highlights": "Highlights", "white_point": "White Point",
     "shadows": "Shadows", "black_point": "Black Point", "contrast": "Contrast",
     "highlights_x": "Highlights L", "shadows_x": "Shadows \u2143",
-    "punch_x": "Punch \u00d7",
+    "punch_x": "Contrast L \u2143",
     "saturation": "Saturation", "sat_rolloff": "Saturation Roll-off",
     "vibrance": "Vibrance",
     "sub_saturation": "Subtracted Sat", "colour_organics": "Colour Organics",
@@ -260,7 +260,7 @@ def paste_options(clip, default_for):
         rows.append(("Colour", "curves", "Curves"))
     if normalize_xtone_shape(clip.get("xtone_shape")):
         from widgets.x_tone_popup import describe_xtone_shape
-        rows.append(("Adjustments", "xtone_shape", "Highlights L / Shadows \u2143 / Punch \u00d7 options  ("
+        rows.append(("Adjustments", "xtone_shape", "Highlights L / Shadows \u2143 / Contrast L \u2143 options  ("
                      + describe_xtone_shape(clip["xtone_shape"]) + ")"))
     if normalize_golden_shape(clip.get("golden_shape")):
         from widgets.golden_popup import describe_golden
@@ -1172,7 +1172,7 @@ class SlidersPanel(QWidget):
         # (ADJUSTMENT_KEYS zip).
         self.highlights_x_slider_layout = self.create_slider("Highlights L")
         self.shadows_x_slider_layout = self.create_slider("Shadows \u2143")
-        self.punch_x_slider_layout = self.create_slider("Punch \u00d7")
+        self.punch_x_slider_layout = self.create_slider("Contrast L \u2143")
         self._xtone_shape = None         # active layer's options (None = default)
         self._xtone_popup = None
         self._xtone_labels = {}
@@ -2394,7 +2394,7 @@ class SlidersPanel(QWidget):
                "Lifts (or deepens) the lower tones; white stays put. Like the measured render, "
                "+ also lifts black a little (a fade) \u2014 Keep black point "
                "stops that."),
-        "px": ("Punch \u00d7: the measured Punch, measured. "
+        "px": ("Contrast L \u2143: the measured Punch, measured. "
                "Contrast through the upper midtones, both ends moving slightly."),
     }
     XTONE_LABEL_TIP = "Right-click: options"

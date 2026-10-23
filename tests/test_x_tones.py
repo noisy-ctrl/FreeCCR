@@ -283,7 +283,7 @@ def test_three_sliders_after_black_point(panel):
     assert keys[i + 1:i + 4] == ["highlights_x", "shadows_x", "punch_x"]
     assert keys[i + 4] == "contrast"
     for key, text in (("highlights_x", "Highlights L"), ("shadows_x", "Shadows ⅃"),
-                      ("punch_x", "Punch ×")):
+                      ("punch_x", "Contrast L ⅃")):
         lbl, slider = _row_label(panel, key)
         assert lbl.text() == text
         assert slider.value_range() == (-100, 100)
@@ -405,6 +405,6 @@ def test_l_sliders_sit_under_the_controls_they_measure():
                                p.shadows_x_slider_layout, p.black_point_slider_layout,
                                p.punch_x_slider_layout)))
     assert [t for _y, t in rows] == ["Highlights", "Highlights L", "White Point", "Shadows",
-                                     "Shadows ⅃", "Black Point", "Punch ×"]
+                                     "Shadows ⅃", "Black Point", "Contrast L ⅃"]
     keys = SlidersPanel.ADJUSTMENT_KEYS
     assert keys.index("highlights_x") > keys.index("black_point")      # zip order kept

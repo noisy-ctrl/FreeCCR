@@ -181,3 +181,10 @@ amount, or faint ±100 at 0), Reset. Kept on screen (`place_on_screen`).
 - Why harmonic fill and not fading the guessed region: fading the change by
   distance outside the measured colours created its own gradients and doubled the
   folds.
+
+## Revision 2026-10-23: Punch × is shown as "Contrast L ⅃"
+
+Label only (slider, popup title, tooltip, paste row): it moves both ends
+of the tone scale, so it takes both marks of its neighbours Highlights L and
+Shadows ⅃. The key stays `punch_x`, so catalogs and copied settings are
+unchanged.
