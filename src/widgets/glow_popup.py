@@ -15,20 +15,25 @@ from ui import theme
 LABEL_W = 96
 
 ROWS = (
-    ("size", "Size", ("Tight", "Wide"),
-     "How far the light spreads from the highlights, as a share of the "
-     "picture (the same at every size you view or export it)."),
-    ("start", "Start", ("Lower", "Higher"),
-     "How bright a tone has to be to glow. Lower lets more of the bright "
-     "tones glow; higher keeps it to the brightest lights."),
+    ("reach", "Reach", ("Tight", "Wide"),
+     "How far the glow spreads from a highlight's edge before it fades out, "
+     "as a share of the picture's long side (the same at every size you view "
+     "or export it). A highlight that fills the frame glows over it anyway."),
+    ("above", "Start", ("Lower", "Brightest"),
+     "The display level a tone has to reach to glow (the glow is full at "
+     "white). 95 % keeps it to the near-white highlights; lower it to let "
+     "warm lamps and bright skin glow too."),
 )
+
+# what each option's number means, for the popup and the paste row
+FORMATS = {"reach": lambda v: f"{v / 10:.1f} %", "above": lambda v: f"{v} %"}
 
 
 def describe_glow(shape):
     shape = normalize_glow_shape(shape)
     if shape is None:
         return "default"
-    return ", ".join(f"{k} {shape[k]}" for k in GLOW_SHAPE_DEFAULT
+    return ", ".join(f"{k} {FORMATS[k](shape[k])}" for k in GLOW_SHAPE_DEFAULT
                      if shape[k] != GLOW_SHAPE_DEFAULT[k]) or "default"
 
 
@@ -38,13 +43,13 @@ SS = 2         # drawn at twice the size and scaled down (soft edges)
 
 def _spot_pixmap(amount, shape, w=200, h=40):
     """A bright window and a small lamp on a dark ground, as displayed. The
-    strip is a crop (the middle third) of a wider picture, because Size is a
+    strip is a crop (the middle third) of a wider picture, because Reach is a
     share of the picture's long side: a strip rendered as a whole picture of
     its own would show the glow three times smaller than on a frame."""
     s, W = SS, w * CROP
     img = np.full((h * s, W * s, 3), 0.06, np.float32)
     x0 = (W - w) // 2
-    img[12 * s:28 * s, (x0 + 40) * s:(x0 + 70) * s] = (1.0, 0.92, 0.78)    # a warm window
+    img[12 * s:28 * s, (x0 + 40) * s:(x0 + 70) * s] = (1.0, 0.97, 0.90)    # a bright window
     img[18 * s:22 * s, (x0 + 140) * s:(x0 + 144) * s] = (1.0, 1.0, 1.0)     # a small lamp
     out = apply_glow(img, amount, shape) if amount else img
     out = cv2.resize(out, (W, h), interpolation=cv2.INTER_AREA)[:, x0:x0 + w]
@@ -90,14 +95,14 @@ class GlowPopup(QFrame):
             sl.setValue(int(shape[key]))
             sl.setToolTip(tip)
             sl.valueChanged.connect(self._emit)
-            val = QLabel(str(sl.value()))
-            val.setFixedWidth(28)
+            val = QLabel(FORMATS[key](sl.value()))
+            val.setFixedWidth(42)
             row.addWidget(lbl)
             row.addWidget(sl, 1)
             row.addWidget(val)
             lay.addLayout(row)
             ends = QHBoxLayout()
-            ends.setContentsMargins(LABEL_W + row.spacing(), 0, 28 + row.spacing(), 0)
+            ends.setContentsMargins(LABEL_W + row.spacing(), 0, 42 + row.spacing(), 0)
             for text, align in ((left, Qt.AlignLeft), (right, Qt.AlignRight)):
                 e = QLabel(text)
                 e.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 10px;")
@@ -146,7 +151,7 @@ class GlowPopup(QFrame):
 
     def _refresh(self):
         for k, s in self.sliders.items():
-            self.values_lbl[k].setText(str(s.value()))
+            self.values_lbl[k].setText(FORMATS[k](s.value()))
         shape = self.values()
         self.before.setPixmap(_spot_pixmap(0, shape))
         # at 0 the strip shows what 60 would do, so the options can be judged

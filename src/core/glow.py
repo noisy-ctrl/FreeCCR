@@ -5,13 +5,16 @@ On display values (sRGB-encoded 0..1), float32 throughout, the light itself
 handled in LINEAR light (glow is light adding up):
 
 - sources: each pixel's linear RGB times a soft knee on its lightness (OKLab
-  L of the decision view, so grain can't switch a pixel on and off), so only
-  tones round and above Start give light, in their own colour;
+  L of the decision view, so grain can't switch a pixel on and off): from
+  the display level Start (default 95 %) up to white, so only the brightest
+  tones give light, in their own colour (revision 3, 2026-10-23: it began at
+  OKLab L 0.65, and skies and pale walls bloomed);
 - spread: box-averaged down to a size where the narrow kernel is still >= 4
   px, blurred with two Gaussians (sigma and 3 sigma, 0.65 / 0.35: a core with a
   longer tail, like real diffusion) and scaled back up - a field this smooth
-  scales up without steps. Sigma is a fraction of the picture's long side, so
-  the glow is the same at every render size;
+  scales up without steps. Reach (default 5 %, 2-10 %) is how far from a
+  highlight's edge the glow fades out (twice the tail's sigma), as a share of
+  the picture's long side, so the glow is the same at every render size;
 - the brightest areas keep their own detail: they take little of their own
   glow (a wider ramp than the source knee, so a ramp stays monotone), read on
   a lightness smoothed along edges at half the glow's size, so a highlight's
@@ -30,13 +33,17 @@ import numpy as np
 from core.oklab import _lin, _enc, _M1, _M2, guided_smooth, guided_filter, scaled_radius, \
     smooth, DENOISE_R, DENOISE_EPS
 
-GLOW_SHAPE_DEFAULT = {"size": 40, "start": 75}
-GLOW_LIMITS = {"size": (0, 100), "start": (50, 95)}
+# Revision 3 (2026-10-23): new keys, so options saved under the old meaning
+# ("size" 0..100, "start" OKLab L x 100) fall back to the defaults.
+#   reach: how far the glow spreads, tenths of a percent of the long side
+#   above: the display level (%) the glow starts from; full at white
+GLOW_SHAPE_DEFAULT = {"reach": 50, "above": 95}
+GLOW_LIMITS = {"reach": (20, 100), "above": (85, 99)}
 GAIN = 0.6                # glow field x this at amount 100
-SIZE_MIN, SIZE_MAX = 0.003, 0.04   # sigma as a fraction of the long side
 CORE_W, TAIL_W, TAIL_X = 0.65, 0.35, 3.0
-KNEE = 0.10               # source knee: start -/+ this (OKLab L)
-HOLD, HOLD_KNEE = 1.0, 0.20    # how much a bright area keeps out of its own glow
+REACH_SIGMAS = 2.0 * TAIL_X   # reach = this many core sigmas (twice the tail's)
+HOLD = 1.0                # how much a bright area keeps out of its own glow
+HOLD_SPAN = 0.30          # ... ramping in from this far (OKLab L) below Start, full at white
 HOLD_R = 0.5              # the hold's lightness smoothing radius, x sigma
 HOLD_EPS = 0.10 ** 2      # ... edge-preserving: texture smooths, outlines stay
 MIN_SIGMA_PX = 4.0        # the narrow kernel's sigma at the size it is blurred
@@ -58,9 +65,26 @@ def normalize_glow_shape(shape):
     return None if out == GLOW_SHAPE_DEFAULT else out
 
 
-def sigma_frac(size):
-    """Narrow-kernel sigma as a fraction of the long side for Size 0..100."""
-    return SIZE_MIN * (SIZE_MAX / SIZE_MIN) ** (float(size) / 100.0)
+def grey_lightness(level):
+    """OKLab L of a grey at display level `level` (0..1): cbrt of its linear
+    value (OKLab's matrices keep a grey grey)."""
+    v = float(level)
+    lin = v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4
+    return float(np.cbrt(lin))
+
+
+def sigma_frac(shape):
+    """Core-kernel sigma as a fraction of the long side for these options."""
+    return shape["reach"] / 1000.0 / REACH_SIGMAS
+
+
+def knees(shape):
+    """(source start, source width, hold start, hold width) in OKLab L: the
+    sources ramp from Start's lightness to white; the hold from HOLD_SPAN
+    below Start to white (wider, so a ramp stays monotone)."""
+    lo = grey_lightness(shape["above"] / 100.0)
+    h_lo = lo - HOLD_SPAN
+    return lo, 1.0 - lo, h_lo, 1.0 - h_lo
 
 
 def _lightness(lin, chunk=1 << 20):
@@ -144,10 +168,10 @@ def glow_field(img01, amount, shape, with_lin=False, area=None):
     H, W = a.shape[:2]
     lin = _lin(a).astype(np.float32)
     L = _lightness(lin)
-    start = shape["start"] / 100.0
-    src = smooth((L - (start - KNEE)) / (2 * KNEE)).astype(np.float32)
+    lo, width, h_lo, h_w = knees(shape)
+    src = smooth((L - lo) / width).astype(np.float32)
     b = lin * src[..., None]
-    sigma_px = sigma_frac(shape["size"]) * max(H, W)
+    sigma_px = sigma_frac(shape) * max(H, W)
     area = normalize_glow_area(area)
     if area is None:
         g = _spread(np.ascontiguousarray(b), sigma_px)
@@ -157,7 +181,7 @@ def glow_field(img01, amount, shape, with_lin=False, area=None):
         gm = _spread(m, sigma_px)
         g = g / np.maximum(gm, np.float32(MASK_EPS))[..., None]
     Lh = guided_filter(L, L, max(1, int(round(HOLD_R * sigma_px))), HOLD_EPS)
-    hold = 1.0 - HOLD * smooth((Lh - (start - HOLD_KNEE)) / (2 * HOLD_KNEE))
+    hold = 1.0 - HOLD * smooth((Lh - h_lo) / h_w)
     k = np.float32(min(float(amount), 100.0) / 100.0 * GAIN) * hold.astype(np.float32)
     g = g.astype(np.float32, copy=False)
     g *= k[..., None]

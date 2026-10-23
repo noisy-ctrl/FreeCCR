@@ -2772,12 +2772,13 @@ class SlidersPanel(QWidget):
             self.end_undo_burst()
 
     # --- Glow options (spec/highlight-glow.md) -------------------------------
-    GLOW_HINT = ("Glow: a soft highlight glow. Bright areas bloom gently into "
-                 "their surroundings, like a diffusion filter on the enlarger, "
-                 "in their own colour (warm light glows warm). The brightest "
-                 "areas keep their own detail, nothing clips, and tones away "
-                 "from any highlight are left exactly as they were.")
-    GLOW_LABEL_TIP = "Right-click: size, start"
+    GLOW_HINT = ("Glow: a soft highlight glow. The near-white highlights (above "
+                 "95 % by default) bloom gently into their surroundings, like a "
+                 "diffusion filter on the enlarger, in their own colour, and the "
+                 "glow fades out within about 5 % of the frame. The highlights "
+                 "keep their own detail, nothing clips, and tones away from any "
+                 "highlight are left exactly as they were.")
+    GLOW_LABEL_TIP = "Right-click: reach, start"
 
     def _update_glow_label(self):
         lbl = getattr(self, "_glow_label", None)

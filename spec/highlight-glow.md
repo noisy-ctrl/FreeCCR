@@ -117,3 +117,34 @@ crop the values don't matter (cropped away). No crop, or a crop of the
 whole unrotated frame (`normalize_glow_area` → None): the old path, byte
 for byte. After: 0 levels of lift from the surround (< 2e-6).
 
+
+## Revision 3 (2026-10-23): only the near-white highlights, and tight
+
+The user's direction: glow should come only from tones above about 95 %
+(almost always), and stay tight, about 5 % of the frame, unless the highlight
+itself fills the frame.
+
+- **Start** is now a display level, 85–99 %, default **95 %**: the source
+  knee runs from the OKLab L of that grey (`glow.grey_lightness`: cbrt of its
+  linear value; 95 % → L 0.961) to white, a smoothstep on the decision
+  lightness as before. It began at L 0.65 (Start 75 − the 0.10 knee), so
+  skies and pale walls bloomed. A warm lamp at (1, 0.92, 0.78) is 93 % bright
+  overall and no longer glows at the default; Start lower lets it.
+- **Size** became **Reach**: how far from a highlight's edge the glow fades
+  out, as a share of the long side, 2–10 %, default **5 %**. Reach = twice the
+  tail's sigma = 6 core sigmas (`REACH_SIGMAS`). Measured on a white disc
+  (r = 60 px on 1080): the glow at Reach is 5 % of its value at the edge and
+  under 0.002 at twice Reach. A highlight that fills the frame glows over it
+  anyway (the reach is from its edge). Size went to 4 % sigma (24 % reach).
+- The hold ramps from 0.30 below Start's lightness to full at white
+  (`HOLD_SPAN`; it was Start ± 0.20), so a ramp stays monotone and a
+  highlight still keeps its own detail.
+- New option keys, `reach` (tenths of a percent) and `above` (%), so options
+  saved as `size` / `start` under the old meaning fall back to the defaults
+  instead of being misread. The popup shows them as "5.0 %" / "95 %".
+- The GPU twin takes the same knees from `glow.knees`; its kernels are
+  unchanged.
+
+Tests: the old ones on the new options, plus "only near-white glows by
+default, and it stays tight" (an 85 % wall is returned exactly; the fall-off
+by Reach).

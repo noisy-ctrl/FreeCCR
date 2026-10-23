@@ -28,7 +28,7 @@ def _lab(rgb):
     return to_oklab(np.asarray(rgb, np.float32).reshape(-1, 3))
 
 
-def _lamp(H=540, W=1080, ground=0.06, lamp=(1.0, 0.92, 0.78), r=20):
+def _lamp(H=540, W=1080, ground=0.06, lamp=(1.0, 0.98, 0.94), r=20):
     """A bright disc on a dark ground, centred (on the pixel grid's own
     centre, so a downsampled copy lines up with a smaller render)."""
     yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
@@ -41,7 +41,7 @@ def test_zero_is_an_exact_no_op():
     img = _img()
     a = adjust_image(img, contrast=10, saturation=5)
     np.testing.assert_array_equal(a, adjust_image(img, contrast=10, saturation=5,
-                                                  glow=0, glow_shape={"size": 90}))
+                                                  glow=0, glow_shape={"reach": 90}))
     np.testing.assert_array_equal(adjust_image_opencl(img, contrast=10),
                                   adjust_image_opencl(img, contrast=10, glow=0))
     x = np.random.default_rng(0).random((20, 30, 3)).astype(np.float32)
@@ -61,7 +61,7 @@ def test_a_light_glows_into_the_dark_falling_off_with_distance():
 
 def test_the_glow_keeps_the_light_s_colour():
     img = _lamp(lamp=(1.0, 0.85, 0.6))                             # a warm lamp
-    out = gl.apply_glow(img, 100)
+    out = gl.apply_glow(img, 100, {"above": 85})                   # (93 % bright: below the default)
     d = out[270, 540 + 35] - img[270, 540 + 35]
     assert d[0] > d[1] > d[2] > 0                                  # warm spill
 
@@ -70,7 +70,7 @@ def test_never_darker_never_clipped():
     rng = np.random.default_rng(3)
     img = rng.random((200, 300, 3)).astype(np.float32)
     img[60:120, 100:180] = 1.0
-    out = gl.apply_glow(img, 100, {"size": 100, "start": 50})
+    out = gl.apply_glow(img, 100, {"reach": 100, "above": 85})
     assert out.min() >= 0.0 and out.max() <= 1.0
     assert np.all(out >= img - 1e-6)
 
@@ -81,7 +81,7 @@ def test_a_big_highlight_keeps_its_own_detail():
     H, W = 540, 1080
     img = np.full((H, W, 3), 0.08, np.float32)
     rng = np.random.default_rng(1)
-    tex = (0.86 + 0.06 * np.sin(np.arange(400) / 3.0))[None, :, None] + rng.normal(0, 0.01, (300, 400, 1))
+    tex = (0.955 + 0.03 * np.sin(np.arange(400) / 3.0))[None, :, None] + rng.normal(0, 0.008, (300, 400, 1))
     img[120:420, 340:740] = np.clip(tex, 0, 1)
     out = gl.apply_glow(img, 100)
     inside = (out - img)[200:340, 420:660].mean(axis=2)
@@ -149,20 +149,38 @@ def test_the_same_glow_at_preview_and_export_size():
     assert np.abs(a[ring] - b[ring]).max() < 0.01
 
 
-def test_size_widens_it_and_start_moves_where_it_begins():
+def test_reach_widens_it_and_start_moves_where_it_begins():
     img = _lamp()
-    tight = (gl.apply_glow(img, 100, {"size": 10}) - img)[270, 540 + 80].mean()
-    wide = (gl.apply_glow(img, 100, {"size": 90}) - img)[270, 540 + 80].mean()
-    assert wide > 3 * tight
-    grey = _lamp(lamp=(0.7, 0.7, 0.7))                               # a mid-bright patch
-    low = (gl.apply_glow(grey, 100, {"start": 50}) - grey)[270, 540 + 40].mean()
-    high = (gl.apply_glow(grey, 100, {"start": 95}) - grey)[270, 540 + 40].mean()
-    assert low > 0.005 and high < 0.1 * low
+    tight = (gl.apply_glow(img, 100, {"reach": 20}) - img)[270, 540 + 80].mean()
+    wide = (gl.apply_glow(img, 100, {"reach": 100}) - img)[270, 540 + 80].mean()
+    assert wide > 0.002 and wide > 3 * tight
+    grey = _lamp(lamp=(0.92, 0.92, 0.92))                            # a 92 % patch
+    low = (gl.apply_glow(grey, 100, {"above": 85}) - grey)[270, 540 + 40].mean()
+    high = (gl.apply_glow(grey, 100) - grey)[270, 540 + 40].mean()   # default 95 %
+    assert low > 0.005 and high == 0.0
+
+
+def test_only_near_white_glows_by_default_and_it_stays_tight():
+    """Revision 3: a pale sky / sunlit wall at 85 % doesn't glow at all at
+    the defaults; a near-white light's glow has faded to a few percent of
+    its value at the edge by Reach (5 % of the long side) and is gone by
+    twice that."""
+    wall = _lamp(lamp=(0.85, 0.85, 0.85), r=120)
+    np.testing.assert_array_equal(gl.apply_glow(wall, 100), wall)
+    H, W, r = 540, 1080, 60
+    img = _lamp(H=H, W=W, r=r, lamp=(1.0, 1.0, 1.0))
+    d = (gl.apply_glow(img, 100) - img)[270, 540 + r + 1:].mean(axis=1)
+    edge = d[1]
+    reach_px = int(0.05 * W)
+    assert edge > 0.05 and d[reach_px] < 0.06 * edge and d[2 * reach_px] < 0.002
 
 
 def test_options_are_normalised():
     assert gl.normalize_glow_shape(dict(gl.GLOW_SHAPE_DEFAULT)) is None
-    assert gl.normalize_glow_shape({"size": 500}) == dict(gl.GLOW_SHAPE_DEFAULT, size=100)
+    assert gl.normalize_glow_shape({"reach": 500}) == dict(gl.GLOW_SHAPE_DEFAULT, reach=100)
+    assert gl.normalize_glow_shape({"above": 10}) == dict(gl.GLOW_SHAPE_DEFAULT, above=85)
+    # options saved under the old keys (size / start) mean the defaults now
+    assert gl.normalize_glow_shape({"size": 90, "start": 60}) is None
     assert gl.normalize_glow_shape("junk") is None
 
 
@@ -176,7 +194,7 @@ def test_gpu_matches_cpu(ws):
     rng = np.random.default_rng(1)
     img = (encode_window(rng.uniform(-0.1, 1.1, (30, 40, 3)).astype(np.float32))
            if ws else _img(2, (30, 40, 3)))
-    kw = dict(glow=80, glow_shape={"size": 60}, shadow_neutralise=40,
+    kw = dict(glow=80, glow_shape={"reach": 70, "above": 85}, shadow_neutralise=40,
               golden_highlights=50, contrast=10, saturation=20)
     a = adjust_image(img, ws_windowed=ws, **kw).astype(np.int64)
     b = adjust_image_opencl(img, ws_windowed=ws, **kw).astype(np.int64)
@@ -194,8 +212,8 @@ def test_runs_last_after_shadow_neutralise():
 def test_image_passes_the_setting(monkeypatch):
     from core.ccr_image import CCRImage
     seen = _capture(monkeypatch)
-    CCRImage.apply_adjustments(_Stub({"glow": 55, "glow_shape": {"size": 20}}), _img())
-    assert seen["glow"] == 55 and seen["glow_shape"] == {"size": 20}
+    CCRImage.apply_adjustments(_Stub({"glow": 55, "glow_shape": {"reach": 20}}), _img())
+    assert seen["glow"] == 55 and seen["glow_shape"] == {"reach": 20}
     seen.clear()
     CCRImage._adjust_for_area(_Stub({}), _img(), {"glow": 20})
     assert seen["glow"] == 20
@@ -236,14 +254,14 @@ def test_popup_writes_options_with_one_undo(panel, monkeypatch):
     _wire(panel, monkeypatch, img)
     panel._open_glow_popup(panel.mapToGlobal(panel.rect().center()))
     pop = panel._glow_popup
-    pop.sliders["size"].setValue(70)
-    pop.sliders["start"].setValue(85)
-    assert img.adjustment_settings["glow_shape"] == {"size": 70, "start": 85}
+    pop.sliders["reach"].setValue(70)
+    pop.sliders["above"].setValue(90)
+    assert img.adjustment_settings["glow_shape"] == {"reach": 70, "above": 90}
     assert panel._glow_label.font().underline()
     pop.close()
     assert img.undo == 1
     panel.sliders[panel.adjustment_keys.index("saturation")].setValue(7)
-    assert img.adjustment_settings["glow_shape"]["size"] == 70
+    assert img.adjustment_settings["glow_shape"]["reach"] == 70
     panel._open_glow_popup(panel.mapToGlobal(panel.rect().center()))
     panel._glow_popup.reset()
     assert "glow_shape" not in img.adjustment_settings
@@ -252,9 +270,9 @@ def test_popup_writes_options_with_one_undo(panel, monkeypatch):
 
 def test_paste_copy_and_sync(panel, monkeypatch):
     from widgets.sliders_panel import paste_options
-    clip = {"adjustments": {}, "glow_shape": {"size": 70}}
+    clip = {"adjustments": {}, "glow_shape": {"reach": 70}}
     row = [r for r in paste_options(clip, lambda k: 0) if r[1] == "glow_shape"]
-    assert row and "size 70" in row[0][2]
+    assert row and "reach 7.0 %" in row[0][2]
     img = _Img({"contrast": 5})
     _wire(panel, monkeypatch, img)
     panel.current_idx = 1
@@ -262,12 +280,12 @@ def test_paste_copy_and_sync(panel, monkeypatch):
                            flags={}, profile="color", crop=(None, 0.0), rotation=0,
                            flip_h=False, flip_v=False, fine_rotation=0)
     panel._apply_paste(0, {"glow_shape"})
-    assert img.adjustment_settings["glow_shape"]["size"] == 70
-    src = _Img({"glow": 40, "glow_shape": {"start": 60}})
+    assert img.adjustment_settings["glow_shape"]["reach"] == 70
+    src = _Img({"glow": 40, "glow_shape": {"above": 90}})
     _wire(panel, monkeypatch, src)
     panel.current_idx = 5
     panel.copy_settings_from_index(0)
-    assert panel.clipboard["glow_shape"]["start"] == 60
+    assert panel.clipboard["glow_shape"]["above"] == 90
     assert panel.clipboard["adjustments"]["glow"] == 40
 
     from core.ccr_backend import ccr_backend
@@ -282,13 +300,13 @@ def test_paste_copy_and_sync(panel, monkeypatch):
     panel._sync_group_selection = {gid: gid == "sat" for gid, _l, _k in SYNC_GROUPS}
     panel._perform_sync_to_all()
     assert dst.adjustment_settings["glow"] == 40
-    assert dst.adjustment_settings["glow_shape"]["start"] == 60
+    assert dst.adjustment_settings["glow_shape"]["above"] == 90
 
 
 def test_reset_clears_the_options(panel, monkeypatch):
-    img = _Img({"glow": 30, "glow_shape": {"size": 90}})
+    img = _Img({"glow": 30, "glow_shape": {"reach": 90}})
     _wire(panel, monkeypatch, img)
-    panel._glow_shape = {"size": 90}
+    panel._glow_shape = {"reach": 90}
     panel._update_glow_label()
     assert panel._glow_label.font().underline()
     panel.on_reset_clicked()
@@ -307,8 +325,8 @@ def test_show_where_it_lands_follows_the_popup(panel, monkeypatch):
     pop = panel._glow_popup
     pop.mask_check.setChecked(True)
     assert calls[-1] == {}
-    pop.sliders["size"].setValue(80)
-    assert calls[-1]["size"] == 80
+    pop.sliders["reach"].setValue(80)
+    assert calls[-1]["reach"] == 80
     pop.close()
     assert calls[-1] is None
 
@@ -335,7 +353,14 @@ def test_popup_strip_shows_the_light_spreading():
 def test_canvas_layer_is_amber_where_the_glow_lands(tmp_path, monkeypatch):
     from test_false_colour import _canvas, _HOSTS  # noqa: F401
     from PySide6.QtGui import QImage
+    from PySide6.QtGui import QPixmap
     ip, _img_ = _canvas(tmp_path, monkeypatch)
+    # show a small white lamp on a dark ground (the canvas's own picture is a
+    # ramp, where every tone near white is held out of its own glow)
+    lamp = np.ascontiguousarray((_lamp(H=90, W=150, r=6, lamp=(1.0, 1.0, 1.0)) * 255
+                                 + 0.5).astype(np.uint8))
+    ip.pixmap_item.setPixmap(QPixmap.fromImage(
+        QImage(lamp.data, 150, 90, 450, QImage.Format_RGB888).copy()))
     ip.set_glow_mask({})
     item = ip._gm_item
     assert item is not None and item.isVisible()
@@ -343,7 +368,7 @@ def test_canvas_layer_is_amber_where_the_glow_lands(tmp_path, monkeypatch):
     w, h = q.width(), q.height()
     px = np.frombuffer(q.constBits(), np.uint8).reshape(h, q.bytesPerLine())[:, :w * 4].reshape(h, w, 4)
     alpha = px[..., 3].astype(int)
-    assert alpha.max() > 10                        # a ramp glows only a little
+    assert alpha.max() > 10
     y, x = np.unravel_index(alpha.argmax(), alpha.shape)
     # amber (a little rounding: the layer is stored premultiplied)
     assert np.abs(px[y, x, :3].astype(int) - (255, 170, 30)).max() <= 255 // alpha.max() + 1
@@ -357,7 +382,7 @@ def test_canvas_layer_is_amber_where_the_glow_lands(tmp_path, monkeypatch):
 # only light inside the crop glows (revision 2)
 # --------------------------------------------------------------------------- #
 
-def _framed(H=540, W=810, border=0.95, inside=0.10, m=60):
+def _framed(H=540, W=810, border=1.0, inside=0.10, m=60):
     """A dark picture inside a bright surround (the white holder a negative
     scan turns into), crop box = the picture."""
     img = np.full((H, W, 3), border, np.float32)
@@ -382,7 +407,7 @@ def test_a_bright_area_at_the_crop_edge_is_not_dimmed():
     dark beside it as if the field went on, so the edge doesn't fade."""
     H, W, m = 540, 810, 60
     img = np.full((H, W, 3), 0.08, np.float32)
-    img[:, :W // 2] = 0.95                                 # bright left half, through the edge
+    img[:, :W // 2] = 1.0                                  # bright left half, through the edge
     area = ((m / W, m / H, (W - m) / W, (H - m) / H), 0.0)
     out = gl.apply_glow(img, 100, None, area) - img
     col = W // 2 + 15                                      # just right of the bright field
@@ -426,7 +451,7 @@ def test_gpu_matches_cpu_inside_a_rotated_crop(monkeypatch):
     monkeypatch.setenv("FREECCR_GPU_FINISH", "1")
     img, _ = _framed()
     area = ((0.1, 0.12, 0.88, 0.9), 4.0)
-    for shape in (None, {"size": 100}, {"size": 5}):
+    for shape in (None, {"reach": 100}, {"reach": 20}):
         cpu = gl.apply_glow(img, 100, shape, area)
         gpu = fg.finish_numpy_image(cp._opencl_cache['ctx'], cp._opencl_cache['queue'],
                                     img, glow=100, glow_shape=shape, glow_area=area)

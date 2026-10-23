@@ -798,8 +798,8 @@ class FinishGPU:
         self._run1("glow_L", n, rgb.data, L.data, lin.data, _i(n))
         Ls = self.guided_smooth(L, W, H, ok.scaled_radius(gw.DENOISE_R, (H, W)),
                                 gw.DENOISE_EPS[0])
-        start = shape["start"] / 100.0
-        sigma_px = gw.sigma_frac(shape["size"]) * max(H, W)
+        lo, width, h_lo, h_w = gw.knees(shape)
+        sigma_px = gw.sigma_frac(shape) * max(H, W)
         f = max(1, int(sigma_px // gw.MIN_SIGMA_PX))
         if f > 1:
             Ws, Hs = max(1, round(W / f)), max(1, round(H / f))
@@ -820,7 +820,7 @@ class FinishGPU:
             mask = hbuf_m = self.empty(1)
         self.k["glow_area_h"](q, (Ws, H), None, lin.data, Ls.data, hbuf.data,
                               xoff.data, xsrc.data, xw.data,
-                              _fl(start - gw.KNEE), _fl(2 * gw.KNEE),
+                              _fl(lo), _fl(width),
                               _i(W), _i(H), _i(Ws), _i(1 if area else 0),
                               mask.data, hbuf_m.data)
         s = sigma_px * Ws / float(W)
@@ -850,8 +850,7 @@ class FinishGPU:
                              _i(1 if f > 1 else 0), *[b.data for b in bufs],
                              _i(W), _i(H), _i(Ws),
                              _fl(min(float(amount), 100.0) / 100.0 * gw.GAIN),
-                             _fl(gw.HOLD), _fl(start - gw.HOLD_KNEE),
-                             _fl(2 * gw.HOLD_KNEE), _fl(gw.G_EPS),
+                             _fl(gw.HOLD), _fl(h_lo), _fl(h_w), _fl(gw.G_EPS),
                              _i(1 if area else 0), field_m.data, _fl(gw.MASK_EPS))
 
     def shadow_lift(self, rgb, moved, W, H, amount, shape):

@@ -150,7 +150,7 @@ GOLDEN_CASES = [None, {"hue": 60, "start": 40, "clean": 0, "neutral": 60, "smoot
                 {"smooth": 0}]
 SHADOW_CASES = [None, {"range": 45, "reach": 100, "depth": 70, "smooth": 0},
                 {"depth": 100, "smooth": 100}]
-GLOW_CASES = [None, {"size": 0, "start": 50}, {"size": 100, "start": 95}, {"size": 20}]
+GLOW_CASES = [None, {"reach": 20, "above": 85}, {"reach": 100, "above": 99}, {"reach": 30, "above": 88}]
 
 
 @pytest.mark.parametrize("shape", GOLDEN_CASES)
@@ -212,7 +212,7 @@ def test_zero_and_untouched_pixels_are_exact(gpu):
 def test_gpu_results_stay_in_range_and_glow_never_darkens(gpu):
     ctx, q, g = gpu
     x = _scene()
-    out = fg.finish_numpy_image(ctx, q, x, glow=100, glow_shape={"size": 100, "start": 50})
+    out = fg.finish_numpy_image(ctx, q, x, glow=100, glow_shape={"reach": 100, "above": 85})
     assert out.min() >= 0 and out.max() <= 1.0 + 1e-7
     assert np.all(out >= x - 1e-6)
 
