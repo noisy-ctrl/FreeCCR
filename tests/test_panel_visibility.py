@@ -92,10 +92,11 @@ def test_no_panel_page_without_a_panel():
     assert "Panel" not in names
 
 
-def test_lab_finish_section_holds_the_two_tools_above_subtracted_sat(panel):
-    """Golden Highlights and Shadow Neutralise sit in their own section (open
-    by default) above Subtracted Sat; hiding it hides both lines round it and
-    leaves the sliders (and their values) in place."""
+def test_lab_finish_section_sits_under_colour_organics(panel):
+    """The Lab Finish tools sit in their own section (open by default) under
+    Colour Organics, which sits directly under Vibrance; hiding the section
+    hides both lines round it and leaves the sliders (and their values) in
+    place."""
     from PySide6.QtWidgets import QApplication
     sec = panel.lab_finish_section
     assert sec._toggle_btn.isChecked() and sec._content.isVisibleTo(sec)
@@ -105,9 +106,10 @@ def test_lab_finish_section_holds_the_two_tools_above_subtracted_sat(panel):
     panel.show()
     QApplication.processEvents()
     y = lambda w: w.mapTo(panel, w.rect().topLeft()).y()
-    sub = panel.sub_saturation_slider_layout.itemAt(0).widget()
+    org = panel.colour_organics_slider_layout.itemAt(0).widget()
     vib = panel.vibrance_slider_layout.itemAt(0).widget()
-    assert y(vib) < y(sec) < y(sub)
+    assert y(vib) < y(org) < y(sec)
+    assert not hasattr(panel, "sub_saturation_slider_layout")
     panel.set_hidden_sections({"lab_finish"})
     assert not _shown(sec)
     assert not _shown(panel._section_separators["lab_finish"])

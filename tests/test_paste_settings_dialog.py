@@ -191,7 +191,7 @@ class TestPasteOptions:
     def test_labels(self):
         assert adjustment_label("ch_r_gain") == "Red Gain"
         assert adjustment_label("balance_b") == "Balance Blue"
-        assert adjustment_label("sub_saturation") == "Subtracted Sat"
+        assert adjustment_label("colour_organics") == "Colour Organics"
 
 
 # --- the dialog -------------------------------------------------------------

@@ -117,7 +117,8 @@ def test_slider_helper_text_and_group():
     keys = SlidersPanel.ADJUSTMENT_KEYS
     # Golden Highlights and Shadow Neutralise sit between them
     # (spec/golden-highlights.md, spec/shadow-neutralise.md)
-    assert keys.index("golden_highlights") == keys.index("sub_saturation") + 1
+    assert "sub_saturation" not in keys                    # removed 2026-10-23
+    assert keys.index("golden_highlights") == keys.index("vibrance") + 1
     assert keys.index("shadow_neutralise") == keys.index("golden_highlights") + 1
     assert keys.index("glow") == keys.index("shadow_neutralise") + 1
     assert keys.index("colour_organics") == keys.index("glow") + 1
@@ -130,3 +131,23 @@ def test_slider_helper_text_and_group():
     tip = p.colour_organics_slider_layout.itemAt(0).widget().toolTip()
     assert "lab scanners" in tip and "print" in tip
     assert not hasattr(p, "colour_organics_hint")     # no line in the panel
+
+
+def test_subtracted_sat_slider_is_gone_and_old_values_are_dropped(monkeypatch):
+    """Removed 2026-10-23 (the per-colour Subtractive Saturations section
+    covers it): no slider, no sync entry, and a value an older edit stored no
+    longer reaches the render."""
+    from PySide6.QtWidgets import QApplication
+    QApplication.instance() or QApplication([])
+    from widgets.sliders_panel import SlidersPanel, SYNC_GROUPS
+    sys.path.insert(0, os.path.dirname(__file__))
+    from test_x_tones import _Stub, _capture, _img
+    from core.ccr_image import CCRImage
+    assert "sub_saturation" not in SlidersPanel.ADJUSTMENT_KEYS
+    assert all("sub_saturation" not in k for _g, _l, k in SYNC_GROUPS)
+    p = SlidersPanel()
+    assert not any(lbl.text() == "Subtracted Sat" for lbl in
+                   p.findChildren(type(p._organics_label)))
+    seen = _capture(monkeypatch)
+    CCRImage.apply_adjustments(_Stub({"sub_saturation": 40}), _img())
+    assert seen.get("sub_saturation", 0) == 0

@@ -213,3 +213,13 @@ is now".
   at grain level and needs the warp in numpy on the OpenCL path, so it is
   left for a separate change.
 
+## Revision 2026-10-23 (b): shown under Vibrance; Subtracted Sat removed
+
+Colour Organics is shown directly under Vibrance again, above the Lab
+Finish section (layout only: it is still created after Glow, which is what
+`ADJUSTMENT_KEYS` zips with). The global Subtracted Sat slider is gone: the
+per-colour Subtractive Saturations section covers it. Its key left
+`ADJUSTMENT_KEYS` and the sat sync group, and `CCRImage` no longer passes
+it, so a value stored by an older edit is dropped (chosen over keeping it
+hidden). The processor stage stays, at 0.
+

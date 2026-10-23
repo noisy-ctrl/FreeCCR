@@ -45,7 +45,7 @@ SYNC_GROUPS = [
      ("brightness", "gamma", "highlights", "white_point",
       "shadows", "black_point", "highlights_x", "shadows_x", "punch_x",
       "contrast")),
-    ("sat", "Saturation", ("saturation", "sat_rolloff", "vibrance", "sub_saturation",
+    ("sat", "Saturation", ("saturation", "sat_rolloff", "vibrance",
                             "golden_highlights", "shadow_neutralise", "glow",
                             "colour_organics")),
     ("crop", "Crop", ()),
@@ -176,7 +176,7 @@ _BASIC_LABELS = {
     "punch_x": "Contrast L \u2143",
     "saturation": "Saturation", "sat_rolloff": "Saturation Roll-off",
     "vibrance": "Vibrance",
-    "sub_saturation": "Subtracted Sat", "colour_organics": "Colour Organics",
+    "colour_organics": "Colour Organics",
     "golden_highlights": "Golden Highlights",
     "shadow_neutralise": "Shadow Neutralise",
     "glow": "Glow",
@@ -709,7 +709,9 @@ class SlidersPanel(QWidget):
         # spec/saturation-rolloff.md, spec/vibrance.md.
         "sat_rolloff",
         "vibrance",
-        "sub_saturation",
+        # (No "sub_saturation" since 2026-10-23: the per-colour Subtractive
+        # Saturations section covers it. A value an older edit stored is
+        # ignored - CCRImage no longer passes it to the render.)
         # Golden Highlights sits directly above Colour Organics
         # (spec/golden-highlights.md), then Colour Organics, the last of the
         # colour sliders (spec/colour-organics.md)
@@ -876,7 +878,7 @@ class SlidersPanel(QWidget):
         self.slider_labels = [
             "Temperature", "Tint", "Brightness", "Gamma",
             "Highlights", "White Point", "Shadows", "Black Point", "Contrast", "Saturation",
-            "Vibrance", "Subtracted Sat"
+            "Vibrance"
         ]
 
         self.current_idx = None
@@ -1249,12 +1251,12 @@ class SlidersPanel(QWidget):
         # Vibrance: saturation weighted towards muted colours, skin tones partly
         # protected. Created right after Saturation (ADJUSTMENT_KEYS zip).
         self.vibrance_slider_layout = self.create_slider("Vibrance")
-        self.sub_saturation_slider_layout = self.create_slider("Subtracted Sat")
         # Colour Organics: hues drawn into print families, shown 0..100 and
         # stored 0..200 (shown 50 = the old 100; past where the depth would
         # make hues swap order the pull widens instead). Its
         # explanation is the label's tooltip (no line in the panel).
-        # Created right after Subtracted Sat (ADJUSTMENT_KEYS zip).
+        # Created after Glow (ADJUSTMENT_KEYS zip); shown directly under
+        # Vibrance.
         # spec/colour-organics.md
         # Golden Highlights: the gold of a lab scan's sunlit highlights, added
         # at unchanged brightness; right-click for hue / start / clean whites.
@@ -1328,9 +1330,10 @@ class SlidersPanel(QWidget):
         scroll_layout.addLayout(self.saturation_slider_layout)
         scroll_layout.addLayout(self.sat_rolloff_slider_layout)
         scroll_layout.addLayout(self.vibrance_slider_layout)
-        # Lab Finish: Golden Highlights and Shadow Neutralise in their own
-        # section, above Subtracted Sat, open by default and hideable in
+        # Colour Organics directly under Vibrance (2026-10-23), then the Lab
+        # Finish tools in their own section, open by default and hideable in
         # Settings -> Panel like the other sections.
+        scroll_layout.addLayout(self.colour_organics_slider_layout)
         sep = theme.section_separator()
         scroll_layout.addWidget(sep)
         self._section_separators["lab_finish"] = sep
@@ -1344,8 +1347,6 @@ class SlidersPanel(QWidget):
         sep = theme.section_separator()
         scroll_layout.addWidget(sep)
         self._lab_finish_sep_below = sep
-        scroll_layout.addLayout(self.sub_saturation_slider_layout)
-        scroll_layout.addLayout(self.colour_organics_slider_layout)
 
         # --- Reset / Compare / Sync buttons ---
         buttons_layout = theme.apply_button_row(QHBoxLayout())
