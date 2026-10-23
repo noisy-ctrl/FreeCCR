@@ -52,7 +52,8 @@ _gpu_finish_broken = False
 
 
 def _finish_on_gpu(ctx, queue, img_buf, H, W, golden_highlights, golden_shape,
-                   shadow_neutralise, shadow_shape, glow, glow_shape) -> bool:
+                   shadow_neutralise, shadow_shape, glow, glow_shape,
+                   glow_area=None) -> bool:
     """Golden Highlights / Shadow Neutralise / Glow on the main kernel's
     buffer, on the GPU. True when done there; False to use numpy (none on,
     not a GPU device, FREECCR_GPU_FINISH=0, or it failed)."""
@@ -67,7 +68,7 @@ def _finish_on_gpu(ctx, queue, img_buf, H, W, golden_highlights, golden_shape,
             return False
         finish_gpu.for_queue(ctx, queue).finish(
             img_buf, H, W, golden_highlights, golden_shape, shadow_neutralise,
-            shadow_shape, glow, glow_shape)
+            shadow_shape, glow, glow_shape, glow_area)
         return True
     except Exception as e:
         print(f"GPU finishing failed, using numpy from now on: {e}")
@@ -3916,6 +3917,9 @@ def adjust_image(
     # Appended last.
     glow: float = 0.0,
     glow_shape=None,
+    # Glow's crop ((x1, y1, x2, y2) normalised, angle) or None: only light
+    # inside it glows (spec/highlight-glow.md, revision 2). Appended last.
+    glow_area=None,
 ) -> np.ndarray:
     """
     Apply temperature, tint, exposure, brightness, blackpoint, whitepoint, highlights, shadows,
@@ -4149,7 +4153,7 @@ def adjust_image(
     # Glow: light spreading over the finished picture, the very last stage.
     if glow and glow > 0:
         img = apply_glow(np.clip(img / 65535.0, 0.0, 1.0).astype(np.float32),
-                         glow, glow_shape) * 65535.0
+                         glow, glow_shape, glow_area) * 65535.0
 
     img = np.clip(img, 0, 65535)
     return img.astype(np.uint16)
@@ -4446,6 +4450,7 @@ def adjust_image_opencl(
     # Glow — appended last, see adjust_image.
     glow: float = 0.0,
     glow_shape=None,
+    glow_area=None,
 ) -> np.ndarray:
     """
     GPU-accelerated (OpenCL) version of adjust_image.
@@ -4630,7 +4635,7 @@ def adjust_image_opencl(
                           golden_shape=golden_shape,
                           shadow_neutralise=shadow_neutralise,
                           shadow_shape=shadow_shape,
-                          glow=glow, glow_shape=glow_shape)
+                          glow=glow, glow_shape=glow_shape, glow_area=glow_area)
 
     try:
       # Serialize GPU submissions: the hi-res zoom worker may run this
@@ -4698,7 +4703,8 @@ def adjust_image_opencl(
         # picture leaves the GPU once (spec/gpu-finishing-tools.md).
         finished = _finish_on_gpu(ctx, queue, img_buf, img.shape[0], img.shape[1],
                                   golden_highlights, golden_shape,
-                                  shadow_neutralise, shadow_shape, glow, glow_shape)
+                                  shadow_neutralise, shadow_shape, glow, glow_shape,
+                                  glow_area)
 
         # Get results and reshape
         result = img_buf.get().reshape(img.shape)
@@ -4717,7 +4723,7 @@ def adjust_image_opencl(
       # ... and Glow last of all.
       if glow and glow > 0:
           result = apply_glow(np.clip(result / 65535.0, 0.0, 1.0).astype(np.float32),
-                              glow, glow_shape) * 65535.0
+                              glow, glow_shape, glow_area) * 65535.0
       return np.clip(result, 0, 65535).astype(np.uint16)
 
     except Exception as e:
@@ -4746,7 +4752,7 @@ def adjust_image_opencl(
                           golden_shape=golden_shape,
                           shadow_neutralise=shadow_neutralise,
                           shadow_shape=shadow_shape,
-                          glow=glow, glow_shape=glow_shape)
+                          glow=glow, glow_shape=glow_shape, glow_area=glow_area)
 
 
 

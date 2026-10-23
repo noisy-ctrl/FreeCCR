@@ -96,3 +96,24 @@ ramp stays monotone; grain is never stretched; the glow field is smooth at
 where it begins; options normalise; GPU == CPU; panel: slider in Lab Finish
 under Shadow Neutralise, popup writes `glow_shape` with one undo, paste row,
 copy, sync, the mask follows the popup.
+
+## Revision 2 (2026-10-23): only light inside the crop glows
+
+Renders are of the whole frame and the crop comes after, so light OUTSIDE a
+crop (the white holder a negative scan turns into, sprocket holes, light
+round the film) bloomed into the picture's edges. Measured on a dark picture
+in a white surround at 100: +116 8-bit levels at the edge, +36 at 20 px in.
+
+Now `CCRImage` passes the crop (`glow_area` = normalised box + angle,
+appended LAST to `adjust_image` / `adjust_image_opencl`, and to
+`FinishGPU.finish`). The sources are multiplied by the crop box's coverage
+`m` (analytic, one-pixel soft edge, `glow.crop_mask`; the GPU's `glow_mask`
+computes the same) and the glow is the NORMALISED spread
+`spread(b·m) / max(spread(m), 1e-3)`: inside the crop every pixel sees the
+average light of the part of its neighbourhood that is picture, so the edge
+neither takes light from outside nor dims (a bright field running into the
+edge glows the dark beside it as in the middle, within 15 %). Outside the
+crop the values don't matter (cropped away). No crop, or a crop of the
+whole unrotated frame (`normalize_glow_area` → None): the old path, byte
+for byte. After: 0 levels of lift from the surround (< 2e-6).
+

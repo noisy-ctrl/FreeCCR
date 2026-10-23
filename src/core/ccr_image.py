@@ -229,6 +229,16 @@ def _to_uint16_full_range(img: np.ndarray) -> np.ndarray:
     return np.clip(img.astype(np.float64) * scale, 0, 65535).astype(np.uint16)
 
 
+def _glow_area_of(img):
+    """Glow's crop for this image's renders: (crop rect, angle), or None. The
+    render is of the whole frame (the crop comes after), so Glow is told
+    where the picture is, and light outside it can't glow into its edges."""
+    rect = getattr(img, "crop_rect", None)
+    if not rect:
+        return None
+    return (tuple(rect), float(getattr(img, "crop_angle", 0.0) or 0.0))
+
+
 class CCRImage:
     def __init__(
         self,
@@ -2123,6 +2133,7 @@ class CCRImage:
                      # (spec/highlight-glow.md); per layer.
                      glow=s.get('glow', 0),
                      glow_shape=s.get('glow_shape'),
+                     glow_area=_glow_area_of(self),
                      # Per-color-band sliders ride the same GPU pass (or the
                      # CPU fallback); None keeps the inactive case free.
                      band_settings=(s if any(s.get(k, 0)
@@ -2268,6 +2279,7 @@ class CCRImage:
                      # (spec/highlight-glow.md); per layer.
                      glow=s.get('glow', 0),
                      glow_shape=s.get('glow_shape'),
+                     glow_area=_glow_area_of(self),
                      balance_r=s.get('balance_r', 0),
                      balance_g=s.get('balance_g', 0),
                      balance_b=s.get('balance_b', 0),

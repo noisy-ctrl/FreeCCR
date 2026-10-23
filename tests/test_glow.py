@@ -351,3 +351,84 @@ def test_canvas_layer_is_amber_where_the_glow_lands(tmp_path, monkeypatch):
     assert ip._gm_item.isVisible()
     ip.set_glow_mask(None)
     assert not ip._gm_item.isVisible()
+
+
+# --------------------------------------------------------------------------- #
+# only light inside the crop glows (revision 2)
+# --------------------------------------------------------------------------- #
+
+def _framed(H=540, W=810, border=0.95, inside=0.10, m=60):
+    """A dark picture inside a bright surround (the white holder a negative
+    scan turns into), crop box = the picture."""
+    img = np.full((H, W, 3), border, np.float32)
+    img[m:H - m, m:W - m] = inside
+    area = ((m / W, m / H, (W - m) / W, (H - m) / H), 0.0)
+    return img, area
+
+
+def test_light_outside_the_crop_does_not_glow_into_it():
+    img, area = _framed()
+    dark = np.full_like(img, 0.10)                       # same picture, no holder
+    a = gl.apply_glow(img, 100, None, area)[60:-60, 60:-60]
+    b = gl.apply_glow(dark, 100, None, area)[60:-60, 60:-60]
+    np.testing.assert_allclose(a, b, atol=2e-6)
+    # without the crop it did bloom into the edge
+    c = gl.apply_glow(img, 100)[60:-60, 60:-60]
+    assert (c - b)[:, :3].mean() > 0.02
+
+
+def test_a_bright_area_at_the_crop_edge_is_not_dimmed():
+    """Normalised spreading: a bright field reaching the crop edge glows the
+    dark beside it as if the field went on, so the edge doesn't fade."""
+    H, W, m = 540, 810, 60
+    img = np.full((H, W, 3), 0.08, np.float32)
+    img[:, :W // 2] = 0.95                                 # bright left half, through the edge
+    area = ((m / W, m / H, (W - m) / W, (H - m) / H), 0.0)
+    out = gl.apply_glow(img, 100, None, area) - img
+    col = W // 2 + 15                                      # just right of the bright field
+    mid, edge = out[H // 2, col].mean(), out[m + 2, col].mean()
+    assert abs(edge - mid) < 0.15 * mid
+
+
+def test_no_crop_and_a_full_frame_crop_render_as_before():
+    x = _lamp()
+    ref = gl.apply_glow(x, 100)
+    for area in (None, ((0.0, 0.0, 1.0, 1.0), 0.0), ((0, 0, 0, 0), 0.0)):
+        np.testing.assert_array_equal(gl.apply_glow(x, 100, None, area), ref)
+
+
+def test_crop_mask_follows_a_rotated_box():
+    area = gl.normalize_glow_area(((0.2, 0.2, 0.8, 0.8), 10.0))
+    m = gl.crop_mask(area, 200, 300)
+    assert m[100, 150] == 1.0 and m[5, 5] == 0.0
+    assert 0.0 <= m.min() and m.max() <= 1.0
+    soft = m[(m > 0) & (m < 1)]
+    assert soft.size > 0                                   # a one-pixel soft edge
+
+
+def test_image_passes_its_crop(monkeypatch):
+    from core.ccr_image import CCRImage
+    seen = _capture(monkeypatch)
+    stub = _Stub({"glow": 50})
+    stub.crop_rect, stub.crop_angle = (0.1, 0.1, 0.9, 0.9), 2.5
+    CCRImage.apply_adjustments(stub, _img())
+    assert seen["glow_area"] == ((0.1, 0.1, 0.9, 0.9), 2.5)
+    seen.clear()
+    CCRImage.apply_adjustments(_Stub({"glow": 50}), _img())
+    assert seen["glow_area"] is None
+
+
+def test_gpu_matches_cpu_inside_a_rotated_crop(monkeypatch):
+    from core import ccr_processor as cp
+    from core import finish_gpu as fg
+    if not cp.OPENCL_AVAILABLE or not cp._initialize_opencl():
+        pytest.skip("no OpenCL")
+    monkeypatch.setenv("FREECCR_GPU_FINISH", "1")
+    img, _ = _framed()
+    area = ((0.1, 0.12, 0.88, 0.9), 4.0)
+    for shape in (None, {"size": 100}, {"size": 5}):
+        cpu = gl.apply_glow(img, 100, shape, area)
+        gpu = fg.finish_numpy_image(cp._opencl_cache['ctx'], cp._opencl_cache['queue'],
+                                    img, glow=100, glow_shape=shape, glow_area=area)
+        d = np.abs(cpu.astype(np.float64) - gpu) * 65535
+        assert d.max() <= 3 and np.mean(d <= 1) > 0.999

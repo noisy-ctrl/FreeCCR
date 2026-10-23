@@ -18,7 +18,12 @@ handled in LINEAR light (glow is light adding up):
   texture can't modulate its own glow (that flattened it);
 - screened on in linear light, 1 - (1 - lin)(1 - g): never above 1, never
   darker, local slope (1 - g) <= 1 so grain is never stretched;
-- pixels with g < 1e-6 are returned exactly."""
+- pixels with g < 1e-6 are returned exactly;
+- with a crop (`area`), only light INSIDE it glows: the sources are masked
+  to the crop box and the spread normalised by the spread of the mask
+  (normalised convolution), so the white holder or sprocket holes outside a
+  crop can't bloom into the picture's edges, and the edges don't dim either.
+  No crop: exactly as before."""
 import cv2
 import numpy as np
 
@@ -36,6 +41,7 @@ HOLD_R = 0.5              # the hold's lightness smoothing radius, x sigma
 HOLD_EPS = 0.10 ** 2      # ... edge-preserving: texture smooths, outlines stay
 MIN_SIGMA_PX = 4.0        # the narrow kernel's sigma at the size it is blurred
 G_EPS = 1e-6
+MASK_EPS = 1e-3           # the mask's spread is floored here (outside the crop)
 
 
 def normalize_glow_shape(shape):
@@ -88,9 +94,52 @@ def _spread(b, sigma_px):
     return np.maximum(g, 0.0)
 
 
-def glow_field(img01, amount, shape, with_lin=False):
+def normalize_glow_area(area):
+    """((x1, y1, x2, y2) normalised crop box, angle in degrees) or None when
+    there is no crop, it is degenerate, or it is the whole unrotated frame."""
+    if not area:
+        return None
+    try:
+        rect, angle = area
+        x1, y1, x2, y2 = (float(v) for v in rect)
+        angle = float(angle or 0.0)
+    except (TypeError, ValueError):
+        return None
+    x1, x2 = sorted((min(max(x1, 0.0), 1.0), min(max(x2, 0.0), 1.0)))
+    y1, y2 = sorted((min(max(y1, 0.0), 1.0), min(max(y2, 0.0), 1.0)))
+    if x2 - x1 <= 1e-6 or y2 - y1 <= 1e-6:
+        return None
+    if angle == 0.0 and x1 <= 0.0 and y1 <= 0.0 and x2 >= 1.0 and y2 >= 1.0:
+        return None
+    return (x1, y1, x2, y2), angle
+
+
+def area_geometry(area, H, W):
+    """The crop box in render pixels: centre, cos/sin of its angle, half
+    sizes (the box apply_crop_to_image samples: C + R(angle) q)."""
+    (x1, y1, x2, y2), angle = area
+    t = np.radians(angle)
+    return ((x1 + x2) / 2 * W, (y1 + y2) / 2 * H, float(np.cos(t)), float(np.sin(t)),
+            (x2 - x1) * W / 2, (y2 - y1) * H / 2)
+
+
+def crop_mask(area, H, W):
+    """Coverage of each pixel by the crop box (0..1, a one-pixel soft edge),
+    float32 HxW; analytic, so the GPU computes exactly the same."""
+    cx, cy, c, s, hw, hh = area_geometry(area, H, W)
+    dx = (np.arange(W, dtype=np.float32) + np.float32(0.5)) - np.float32(cx)
+    dy = (np.arange(H, dtype=np.float32) + np.float32(0.5)) - np.float32(cy)
+    qx = np.float32(c) * dx[None, :] + np.float32(s) * dy[:, None]
+    qy = np.float32(-s) * dx[None, :] + np.float32(c) * dy[:, None]
+    mx = np.clip(np.float32(hw) - np.abs(qx) + np.float32(0.5), 0.0, 1.0)
+    my = np.clip(np.float32(hh) - np.abs(qy) + np.float32(0.5), 0.0, 1.0)
+    return (mx * my).astype(np.float32)
+
+
+def glow_field(img01, amount, shape, with_lin=False, area=None):
     """The linear-light glow g (HxWx3) to screen on (amount included), and,
-    with `with_lin`, the picture's linear RGB computed on the way."""
+    with `with_lin`, the picture's linear RGB computed on the way. With a
+    crop `area`, only light inside it spreads (normalised at its edges)."""
     a = np.asarray(img01, np.float32)
     H, W = a.shape[:2]
     lin = _lin(a).astype(np.float32)
@@ -99,7 +148,14 @@ def glow_field(img01, amount, shape, with_lin=False):
     src = smooth((L - (start - KNEE)) / (2 * KNEE)).astype(np.float32)
     b = lin * src[..., None]
     sigma_px = sigma_frac(shape["size"]) * max(H, W)
-    g = _spread(np.ascontiguousarray(b), sigma_px)
+    area = normalize_glow_area(area)
+    if area is None:
+        g = _spread(np.ascontiguousarray(b), sigma_px)
+    else:
+        m = crop_mask(area, H, W)
+        g = _spread(np.ascontiguousarray(b * m[..., None]), sigma_px)
+        gm = _spread(m, sigma_px)
+        g = g / np.maximum(gm, np.float32(MASK_EPS))[..., None]
     Lh = guided_filter(L, L, max(1, int(round(HOLD_R * sigma_px))), HOLD_EPS)
     hold = 1.0 - HOLD * smooth((Lh - (start - HOLD_KNEE)) / (2 * HOLD_KNEE))
     k = np.float32(min(float(amount), 100.0) / 100.0 * GAIN) * hold.astype(np.float32)
@@ -134,14 +190,14 @@ def weight_map(rgb01, shape=None):
     return np.clip(_cmax(d) * 4.0, 0.0, 1.0).astype(np.float32)
 
 
-def apply_glow(img01, amount, shape=None):
+def apply_glow(img01, amount, shape=None, area=None):
     """Glow on an HxWx3 float image in 0..1. A new float32 array; the input
-    itself at 0."""
+    itself at 0. `area`: the crop (normalize_glow_area), or None."""
     if not amount or amount <= 0:
         return img01
     shape = normalize_glow_shape(shape) or dict(GLOW_SHAPE_DEFAULT)
     a = np.asarray(img01, np.float32)
-    g, lin = glow_field(a, amount, shape, with_lin=True)
+    g, lin = glow_field(a, amount, shape, with_lin=True, area=area)
     sel = _cmax(g) >= G_EPS
     n = int(np.count_nonzero(sel))
     if n == 0:

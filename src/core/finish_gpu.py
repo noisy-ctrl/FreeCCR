@@ -356,20 +356,45 @@ __kernel void shadow_apply(__global float* rgb, __global const float* m,
 
 /* Glow: the AREA downsample of the sources lin x smoothstep(L), the sources
    computed on the fly. Horizontal pass: every source row, Ws outputs. */
+/* glow.crop_mask: coverage of each pixel by the crop box, one-pixel edge */
+__kernel void glow_mask(__global float* m, int W, int H, float cx, float cy,
+                        float c, float s, float hw, float hh) {{
+    int x = get_global_id(0);
+    int y = get_global_id(1);
+    if (x >= W || y >= H) return;
+    float dx = ((float)x + 0.5f) - cx;
+    float dy = ((float)y + 0.5f) - cy;
+    float qx = c * dx + s * dy;
+    float qy = (-s) * dx + c * dy;
+    float mx = clamp(hw - fabs(qx) + 0.5f, 0.0f, 1.0f);
+    float my = clamp(hh - fabs(qy) + 0.5f, 0.0f, 1.0f);
+    m[(size_t)y * W + x] = mx * my;
+}}
+
 __kernel void glow_area_h(__global const float* lin_rgb, __global const float* Ls,
                           __global float* hbuf, __global const int* xoff,
                           __global const int* xsrc, __global const float* xw,
-                          float s_lo, float s_span, int W, int H, int Ws) {{
+                          float s_lo, float s_span, int W, int H, int Ws,
+                          int masked, __global const float* mask,
+                          __global float* hbuf_m) {{
     int dx = get_global_id(0);
     int y = get_global_id(1);
     if (dx >= Ws || y >= H) return;
     float3 acc = (float3)(0.0f);
+    float macc = 0.0f;
     for (int k = xoff[dx]; k < xoff[dx + 1]; k++) {{
         size_t p = (size_t)y * W + xsrc[k];
         float src = sstep((Ls[p] - s_lo) / s_span);
-        acc += (vload3(p, lin_rgb) * src) * xw[k];
+        if (masked) {{
+            float mk = mask[p];
+            acc += ((vload3(p, lin_rgb) * src) * mk) * xw[k];
+            macc += mk * xw[k];
+        }} else {{
+            acc += (vload3(p, lin_rgb) * src) * xw[k];
+        }}
     }}
     vstore3(acc, (size_t)y * Ws + dx, hbuf);
+    if (masked) vstore3((float3)(macc), (size_t)y * Ws + dx, hbuf_m);
 }}
 
 __kernel void glow_area_v(__global const float* hbuf, __global float* small,
@@ -426,7 +451,8 @@ __kernel void glow_apply(__global float* rgb, __global const float* lin_rgb,
                          __global const float* xa, __global const int* ys0,
                          __global const int* ys1, __global const float* yb,
                          int W, int H, int Ws, float kamt, float hold_c,
-                         float h_lo, float h_span, float geps) {{
+                         float h_lo, float h_span, float geps,
+                         int masked, __global const float* field_m, float meps) {{
     int x = get_global_id(0);
     int y = get_global_id(1);
     if (x >= W || y >= H) return;
@@ -443,6 +469,21 @@ __kernel void glow_apply(__global float* rgb, __global const float* lin_rgb,
         g = vload3(i, field);
     }}
     g = fmax(g, (float3)(0.0f));
+    if (masked) {{
+        float gm;
+        if (reduced) {{
+            float a1 = xa[x], a0 = 1.0f - a1, b1 = yb[y], b0 = 1.0f - b1;
+            float r0 = field_m[3 * ((size_t)ys0[y] * Ws + xs0[x])] * a0
+                     + field_m[3 * ((size_t)ys0[y] * Ws + xs1[x])] * a1;
+            float r1 = field_m[3 * ((size_t)ys1[y] * Ws + xs0[x])] * a0
+                     + field_m[3 * ((size_t)ys1[y] * Ws + xs1[x])] * a1;
+            gm = r0 * b0 + r1 * b1;
+        }} else {{
+            gm = field_m[3 * i];
+        }}
+        gm = fmax(gm, 0.0f);
+        g = g / fmax(gm, meps);
+    }}
     float hold = 1.0f - hold_c * sstep((Lh[i] - h_lo) / h_span);
     g = g * (kamt * hold);
     g = clamp(g, 0.0f, 1.0f);
@@ -547,7 +588,7 @@ def gaussian_kernel(sigma):
 _KERNELS = ("zero_u8", "chunk_max", "unpack01", "pack16", "lab_planes", "glow_L",
             "box_h", "box_v", "mul", "gf_self_ab", "gf_ab", "gf_out", "matte_tail", "golden_weight",
             "golden_apply", "shadow_weight", "shadow_apply", "glow_area_h",
-            "glow_area_v", "gauss_h", "gauss_v", "glow_mix", "glow_apply")
+            "glow_area_v", "gauss_h", "gauss_v", "glow_mix", "glow_apply", "glow_mask")
 
 _last = None
 
@@ -714,8 +755,9 @@ class FinishGPU:
                    _fl(kk * sn.DEPTH_MAX * shape["depth"] / 100.0), _fl(end),
                    _fl(sn.M_EPS), _i(n))
 
-    def glow(self, rgb, moved, W, H, amount, shape):
+    def glow(self, rgb, moved, W, H, amount, shape, area=None):
         shape = gw.normalize_glow_shape(shape) or dict(gw.GLOW_SHAPE_DEFAULT)
+        area = gw.normalize_glow_area(area)
         q = self.queue
         n = W * H
         L, lin = self.empty(n), self.empty(n * 3)
@@ -734,18 +776,32 @@ class FinishGPU:
         xoff, xsrc, xw = (self.upload(a) for a in xt)
         yoff, ysrc, yw = (self.upload(a) for a in yt)
         hbuf = self.empty(H * Ws * 3)
+        if area is not None:
+            cx, cy, c, sn_, hw, hh = gw.area_geometry(area, H, W)
+            mask = self.empty(n)
+            self.k["glow_mask"](q, (W, H), None, mask.data, _i(W), _i(H), _fl(cx),
+                                _fl(cy), _fl(c), _fl(sn_), _fl(hw), _fl(hh))
+            hbuf_m = self.empty(H * Ws * 3)
+        else:
+            mask = hbuf_m = self.empty(1)
         self.k["glow_area_h"](q, (Ws, H), None, lin.data, Ls.data, hbuf.data,
                               xoff.data, xsrc.data, xw.data,
                               _fl(start - gw.KNEE), _fl(2 * gw.KNEE),
-                              _i(W), _i(H), _i(Ws))
-        small = self.empty(Hs * Ws * 3)
-        self.k["glow_area_v"](q, (Ws, Hs), None, hbuf.data, small.data,
-                              yoff.data, ysrc.data, yw.data, _i(Ws), _i(Hs))
+                              _i(W), _i(H), _i(Ws), _i(1 if area else 0),
+                              mask.data, hbuf_m.data)
         s = sigma_px * Ws / float(W)
-        blurred = [self.gauss3(small, Ws, Hs, sig) for sig in (s, s * gw.TAIL_X)]
-        field = self.empty(Hs * Ws * 3)
-        self._run1("glow_mix", Hs * Ws * 3, blurred[0].data, blurred[1].data,
-                   field.data, _fl(gw.CORE_W), _fl(gw.TAIL_W), _i(Hs * Ws * 3))
+
+        def spread(hb):
+            small = self.empty(Hs * Ws * 3)
+            self.k["glow_area_v"](q, (Ws, Hs), None, hb.data, small.data,
+                                  yoff.data, ysrc.data, yw.data, _i(Ws), _i(Hs))
+            blurred = [self.gauss3(small, Ws, Hs, sig) for sig in (s, s * gw.TAIL_X)]
+            out = self.empty(Hs * Ws * 3)
+            self._run1("glow_mix", Hs * Ws * 3, blurred[0].data, blurred[1].data,
+                       out.data, _fl(gw.CORE_W), _fl(gw.TAIL_W), _i(Hs * Ws * 3))
+            return out
+        field = spread(hbuf)
+        field_m = spread(hbuf_m) if area is not None else self.empty(1)
         Lh = self.guided_filter(Ls, Ls, W, H, max(1, int(round(gw.HOLD_R * sigma_px))),
                                 gw.HOLD_EPS)
         if f > 1:
@@ -761,11 +817,12 @@ class FinishGPU:
                              _i(W), _i(H), _i(Ws),
                              _fl(min(float(amount), 100.0) / 100.0 * gw.GAIN),
                              _fl(gw.HOLD), _fl(start - gw.HOLD_KNEE),
-                             _fl(2 * gw.HOLD_KNEE), _fl(gw.G_EPS))
+                             _fl(2 * gw.HOLD_KNEE), _fl(gw.G_EPS),
+                             _i(1 if area else 0), field_m.data, _fl(gw.MASK_EPS))
 
     # -- the chain ---------------------------------------------------------
     def finish(self, img_buf, H, W, golden=0.0, golden_shape=None, shadow=0.0,
-               shadow_shape=None, glow=0.0, glow_shape=None):
+               shadow_shape=None, glow=0.0, glow_shape=None, glow_area=None):
         """Run the active tools on the main kernel's buffer (H*W x 3 float,
         0..65535), in place. Pixels no tool moved keep their exact value; on
         any error before the last step the buffer is untouched."""
@@ -779,7 +836,7 @@ class FinishGPU:
         if shadow and shadow > 0:
             self.shadow(rgb, moved, W, H, float(shadow), shadow_shape)
         if glow and glow > 0:
-            self.glow(rgb, moved, W, H, float(glow), glow_shape)
+            self.glow(rgb, moved, W, H, float(glow), glow_shape, glow_area)
         self._run1("pack16", n, rgb.data, moved.data, img_buf.data, _i(n))
         del rgb, moved
         if n > BIG_RENDER:
@@ -788,12 +845,13 @@ class FinishGPU:
 
 
 def finish_numpy_image(ctx, queue, img01, golden=0.0, golden_shape=None, shadow=0.0,
-                       shadow_shape=None, glow=0.0, glow_shape=None):
+                       shadow_shape=None, glow=0.0, glow_shape=None, glow_area=None):
     """Convenience for tests and the bench: the GPU chain on an HxWx3 float
     image in 0..1 (as the numpy tools take it). Returns HxWx3 float32."""
     a = np.ascontiguousarray(np.asarray(img01, np.float32))
     H, W = a.shape[:2]
     g = for_queue(ctx, queue)
     buf = cla.to_device(queue, (a * np.float32(65535.0)).reshape(-1, 3))
-    g.finish(buf, H, W, golden, golden_shape, shadow, shadow_shape, glow, glow_shape)
+    g.finish(buf, H, W, golden, golden_shape, shadow, shadow_shape, glow, glow_shape,
+             glow_area)
     return buf.get().reshape(H, W, 3) / np.float32(65535.0)
