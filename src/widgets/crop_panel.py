@@ -192,9 +192,10 @@ class CropPanel(QWidget):
         self.auto_btn = QPushButton("Auto")
         self.auto_btn.setFixedHeight(theme.CONTROL_H)
         self.auto_btn.setToolTip(
-            "Find this frame's picture area on the raw scan, past the holder, "
-            "the film rebate and the sprocket rows, and straighten it. The box "
-            "is only a suggestion: adjust it if needed, then Done.")
+            "The same as Auto Crop: find this frame's picture area on the raw "
+            "scan, past the holder, the film rebate and the sprocket rows, and "
+            "straighten it. The box is only a suggestion: adjust it if needed, "
+            "then Done. An unsure find leaves the box as it was.")
         theme.style_button(self.auto_btn, "secondary")
         self.auto_btn.clicked.connect(self._on_auto)
         layout.addWidget(self.auto_btn)
@@ -246,9 +247,10 @@ class CropPanel(QWidget):
             return
         if res.rect is None:
             msg = f"No frame found: {res.reason or 'no clear edges'}. The box is unchanged."
-        elif res.confidence == "low":
-            msg = (f"Found {res.summary()}, but low confidence ({res.reason}). "
-                   "Check the box before Done.")
+        elif not res.usable:
+            msg = (f"Found {res.summary()}, but only with low confidence "
+                   f"({res.reason or 'unclear edges'}), so the box is left as it "
+                   "was, as Auto Crop does. Draw it by hand if needed.")
         else:
             msg = f"Found {res.summary()} ({res.confidence} confidence). Adjust if needed, then Done."
             if res.soft:

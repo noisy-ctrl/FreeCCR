@@ -341,6 +341,41 @@ def test_crop_panel_auto_sets_pending_box_without_committing(backend, tmp_path, 
     ip.crop_mode = False
 
 
+def test_crop_panel_auto_is_auto_crop(backend, tmp_path, monkeypatch):
+    """spec/auto-crop-buttons.md revision 2026-10-23: the Crop panel's Auto
+    runs the same function as Auto Crop, with its confidence gate - an unsure
+    find leaves the box as it was."""
+    sys.path.insert(0, os.path.dirname(__file__))
+    import test_full_res_zoom as fz
+    from core.auto_crop import FrameCrop
+    ip = fz._setup()
+    monkeypatch.setattr(ip, "_draw_crop_overlay", lambda: None)
+    ip.crop_mode = True
+    calls = []
+    found = {"res": FrameCrop((0.1, 0.1, 0.9, 0.9), angle=0.2, confidence="low",
+                              reason="faint edge")}
+
+    def suggest(im):
+        calls.append(im)
+        return found["res"]
+    monkeypatch.setattr(backend, "auto_crop_suggestion", suggest)
+    from PySide6.QtCore import QRectF
+    ip._pending_crop_local = QRectF(5, 6, 50, 40)
+    res = ip.auto_detect_crop()
+    assert not res.usable and ip._pending_crop_local == QRectF(5, 6, 50, 40)
+    found["res"] = FrameCrop((0.1, 0.2, 0.8, 0.9), angle=0.5, confidence="medium")
+    ip.auto_detect_crop()
+    w = ip.current_pixmap.width()
+    assert ip._pending_crop_local.left() == pytest.approx(0.1 * w)
+    img = backend.images[ip.current_idx]
+    applied = []
+    monkeypatch.setattr(backend, "apply_auto_crop",
+                        lambda im, fc: applied.append(fc) or False)
+    backend.auto_crop_one(img)                             # the button: same function
+    assert len(calls) == 3 and applied == [found["res"]]
+    ip.crop_mode = False
+
+
 # --- the Auto Crop buttons (spec/auto-crop-buttons.md) ---------------------------
 
 @pytest.fixture

@@ -3712,8 +3712,8 @@ class SlidersPanel(QWidget):
         else:
             why = frame.reason or f"{frame.confidence} confidence"
             self.set_temporary_hint(
-                f"Auto crop left this frame as it was: {why}. The Crop panel's "
-                "Auto button shows what it found.", duration=7000)
+                f"Auto crop left this frame as it was: {why}. Press Crop to "
+                "draw it by hand.", duration=7000)
 
     def _on_auto_crop_all(self):
         imgs = ccr_backend.auto_crop_candidates()

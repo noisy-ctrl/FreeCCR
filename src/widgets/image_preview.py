@@ -4395,10 +4395,12 @@ class ImagePreview(QWidget):
         self._draw_crop_overlay()
 
     def auto_detect_crop(self):
-        """Crop panel Auto: find the frame on the raw scan and put it in as the
-        pending box + straighten. Nothing is committed until Done (so it can be
-        reviewed and adjusted). Returns the core.auto_crop.FrameCrop, or None
-        when not in crop mode. See spec/auto-crop.md."""
+        """Crop panel Auto: exactly what Auto Crop would set (the same
+        function, the same confidence gate), put in as the pending box +
+        straighten. Nothing is committed until Done (so it can be reviewed and
+        adjusted); an unsure find (low confidence) leaves the box as it was,
+        as Auto Crop does. Returns the core.auto_crop.FrameCrop, or None when
+        not in crop mode. See spec/auto-crop.md, spec/auto-crop-buttons.md."""
         if not self.crop_mode or self.current_idx is None or self.current_pixmap is None:
             return None
         img = ccr_backend.get_image_by_index(self.current_idx)
@@ -4406,10 +4408,10 @@ class ImagePreview(QWidget):
             return None
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            res = ccr_backend.detect_frame_crop(img)
+            res = ccr_backend.auto_crop_suggestion(img)
         finally:
             QApplication.restoreOverrideCursor()
-        if res.rect is None:
+        if not res.usable:
             return res
         w, h = self.current_pixmap.width(), self.current_pixmap.height()
         x1, y1, x2, y2 = res.rect

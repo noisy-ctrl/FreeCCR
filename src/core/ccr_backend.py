@@ -2809,12 +2809,19 @@ class CCRBackend:
         img.auto_crop_rect = img.crop_rect     # so Re-crop all knows it set this one
         return True
 
+    def auto_crop_suggestion(self, img):
+        """What Auto Crop would set for `img` (a FrameCrop; it is only set when
+        `.usable`, i.e. high or medium confidence). Shared by the Auto Crop
+        button and the Crop panel's Find Frame Auto, so the two always agree
+        (spec/auto-crop-buttons.md, revision 2026-10-23)."""
+        return self.detect_frame_crop(img)
+
     def auto_crop_one(self, img):
         """Auto Crop (the current frame): find the frame on the raw scan, with
         what has been learned, and set it as the crop when usable. Runs on any
         frame, converted or not, and replaces whatever crop it had (one undo
         step). Returns (FrameCrop, applied)."""
-        frame = self.detect_frame_crop(img)
+        frame = self.auto_crop_suggestion(img)
         applied = self.apply_auto_crop(img, frame)
         if applied:
             img.update_thumbnail_and_preview()

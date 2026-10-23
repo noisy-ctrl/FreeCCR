@@ -23,6 +23,11 @@ its own, usable before or after converting, and drop the tickbox.
   ("Auto crop: 34 cropped (…); 2 left as they were (…)"). It replaces
   Re-crop all frames, which did the same on an already cropped roll.
 - The Crop panel's **Auto** stays: a suggestion to adjust before Done.
+  Since 2026-10-23 it is the SAME function as Auto Crop
+  (`CCRBackend.auto_crop_suggestion`) with the same confidence gate: a
+  low-confidence find no longer replaces the box (it had shown unsure,
+  sometimes wrong boxes, which is why Auto Crop seemed to work better); the
+  status says what it found and why it was left.
 - Convert no longer crops. The `convert/auto_crop` setting is removed.
 
 ## Integration
