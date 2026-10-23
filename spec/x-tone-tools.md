@@ -134,8 +134,10 @@ numpy helper) and the three tools run in numpy and are zeroed for the kernel
 
 ## UI
 
-Three sliders, labels "Highlights L", "Shadows ⅃", "Punch ×", under Black
-Point. Label tooltip: what the tool does + "Right-click: options"; underlined
+Three sliders, labels "Highlights L", "Shadows ⅃", "Punch ×". Shown
+(2026-10-23) Highlights L directly under Highlights, Shadows ⅃ directly under
+Shadows, Punch × under Black Point; created (and in `ADJUSTMENT_KEYS`) after
+Black Point as before, so only the layout order changed. Label tooltip: what the tool does + "Right-click: options"; underlined
 when options are not default. Popup (`widgets/x_tone_popup.py`): the
 options above, a curve preview (the tool on the grey axis at the current
 amount, or faint ±100 at 0), Reset. Kept on screen (`place_on_screen`).

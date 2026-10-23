@@ -386,3 +386,25 @@ def test_sync_without_tone_group_keeps_target_options(panel, monkeypatch):
     _sync(panel, monkeypatch, src, dst, tone=False)
     assert dst.adjustment_settings["saturation"] == 40
     assert dst.adjustment_settings["xtone_shape"]["sx_keep"] is True
+
+
+def test_l_sliders_sit_under_the_controls_they_measure():
+    """Highlights L directly under Highlights, Shadows ⅃ directly under
+    Shadows (shown order; the creation order the keys zip with is unchanged)."""
+    from PySide6.QtWidgets import QApplication
+    QApplication.instance() or QApplication([])
+    from widgets.sliders_panel import SlidersPanel
+    p = SlidersPanel()
+    p.resize(380, 2400)
+    p.show()
+    QApplication.processEvents()
+    rows = sorted(((lay.itemAt(0).widget().mapTo(p, lay.itemAt(0).widget().rect().topLeft()).y(),
+                    lay.itemAt(0).widget().text())
+                   for lay in (p.highlights_slider_layout, p.highlights_x_slider_layout,
+                               p.white_point_slider_layout, p.shadows_slider_layout,
+                               p.shadows_x_slider_layout, p.black_point_slider_layout,
+                               p.punch_x_slider_layout)))
+    assert [t for _y, t in rows] == ["Highlights", "Highlights L", "White Point", "Shadows",
+                                     "Shadows ⅃", "Black Point", "Punch ×"]
+    keys = SlidersPanel.ADJUSTMENT_KEYS
+    assert keys.index("highlights_x") > keys.index("black_point")      # zip order kept
