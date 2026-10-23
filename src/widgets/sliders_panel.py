@@ -1644,7 +1644,7 @@ class SlidersPanel(QWidget):
         self.save_film_stock_btn.clicked.connect(self._on_save_film_stock)
         self.delete_film_stock_btn.clicked.connect(self._on_delete_film_stock)
         self.convert_current_bwp_btn.clicked.connect(self._on_convert_current_bwpoint)
-        self.convert_all_bwp_btn.clicked.connect(self._on_convert_all_bwpoint)
+        self.convert_all_bwp_btn.clicked.connect(lambda: self._on_convert_all_bwpoint())
 
         # --- Hint label — fixed at bottom, outside scroll area ---
         self.hint_label = QLabel()
@@ -4010,16 +4010,17 @@ class SlidersPanel(QWidget):
         black = (ci.get("bw") or (None, None))[0] or ccr_backend.black_point_bgr
         return (tuple(black), tuple(white)) if black is not None else None
 
-    def _on_convert_all_bwpoint(self):
+    def _on_convert_all_bwpoint(self, confirmed=False):
         # Auto black point anchors each frame on its own border; a frame with
         # nothing to anchor to is converted unanchored and named in the summary.
+        # `confirmed`: the toolbar Convert's dialogue already asked.
         if (not getattr(ccr_backend, "auto_black_point", False)
                 and not self._confirm_no_anchor_convert()):
             return
         n = len(ccr_backend.images)
         if n == 0:
             return
-        if QMessageBox.question(
+        if not confirmed and QMessageBox.question(
                 self, "Convert All Images",
                 f"Convert all {n} image{'s' if n != 1 else ''} with the current "
                 "black/white point? Any existing conversions will be replaced.",

@@ -935,6 +935,8 @@ class ImagePreview(QWidget):
         add_spacer()
 
         self.convert_action = QAction("Convert", self)
+        self.convert_action.setToolTip(
+            "Convert the current frame or all frames (asks which).")
         self.convert_action.triggered.connect(self.convert_ccr)
         self.toolbar.addAction(self.convert_action)
         add_spacer()
@@ -2202,13 +2204,46 @@ class ImagePreview(QWidget):
             action.blockSignals(was)
             action.setToolTip(f"{name} (this frame is mirrored)" if on else name)
 
+    def _ask_convert_scope(self):
+        """The toolbar Convert's question: "current", "all" or None (Cancel)."""
+        box = QMessageBox(self)
+        box.setWindowTitle("Convert")
+        box.setIcon(QMessageBox.Question)
+        box.setText("Convert the current frame, or every frame?")
+        box.setInformativeText(
+            "The same as Convert Current / Convert All in the panel, with the "
+            "Film B/W Point settings. A frame with a reference frame drawn "
+            "(right-drag) converts from it when converted on its own.")
+        current = box.addButton("Convert Current", QMessageBox.AcceptRole)
+        every = box.addButton("Convert All", QMessageBox.AcceptRole)
+        box.addButton(QMessageBox.Cancel)
+        box.setDefaultButton(current)
+        box.exec()
+        clicked = box.clickedButton()
+        return "current" if clicked is current else "all" if clicked is every else None
+
     def convert_ccr(self):
+        """Toolbar Convert: asks Convert Current / Convert All / Cancel
+        (spec/convert-button-choice.md)."""
         if self.current_idx is None:
             QMessageBox.warning(self, "No Image Selected", "Please select an image to convert.")
             return
-        if ccr_backend.get_reference_frame_by_index(self.current_idx) is None:
-            QMessageBox.warning(self, "No Reference Frame", "Please draw a reference frame before converting.")
+        scope = self._ask_convert_scope()
+        if scope is None:
             return
+        panel = getattr(self.parent().parent(), "sliders_panel", None)
+        if scope == "all":
+            if panel is not None:
+                panel._on_convert_all_bwpoint(confirmed=True)
+            return
+        if ccr_backend.get_reference_frame_by_index(self.current_idx) is not None:
+            self._convert_current_by_reference()
+        elif panel is not None:
+            panel._on_convert_current_bwpoint()
+
+    def _convert_current_by_reference(self):
+        """The reference-frame conversion of the current frame (what the
+        toolbar Convert did on its own before it asked)."""
         ccr_backend.convert_negative_by_index(self.current_idx)
         self.update_preview(self.current_idx)
         self.parent().parent().thumbnail_list.update_thumbnail(self.current_idx)
