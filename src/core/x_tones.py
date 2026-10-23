@@ -1,4 +1,4 @@
-"""Highlights L / Shadows ⅃ / Contrast L ⅃ (keys highlights_x / shadows_x /
+"""Highlights ⅃ / Shadows L / Contrast L ⅃ (keys highlights_x / shadows_x /
 punch_x): tone tools stored as measured 3D tables (spec/x-tone-tools.md).
 
 Each tool is a change added to FreeCCR's display values (0..1), stored on a

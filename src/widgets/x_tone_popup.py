@@ -1,4 +1,4 @@
-"""Right-click popup for Highlights L / Shadows ⅃ / Contrast L ⅃: range and
+"""Right-click popup for Highlights ⅃ / Shadows L / Contrast L ⅃: range and
 keep-endpoint options with a live curve preview. See spec/x-tone-tools.md."""
 
 import numpy as np
@@ -10,7 +10,20 @@ from PySide6.QtWidgets import (QFrame, QWidget, QVBoxLayout, QHBoxLayout, QLabel
 from core.x_tones import XTONE_SHAPE_DEFAULT, grey_curve, normalize_xtone_shape
 from ui import theme
 
-TOOL_NAMES = {"hx": "Highlights L", "sx": "Shadows \u2143", "px": "Contrast L \u2143"}
+TOOL_NAMES = {"hx": "Highlights ⅃", "sx": "Shadows L", "px": "Contrast L \u2143"}
+# The L / ⅃ marks are drawn in red (in the panel and the popup titles) so
+# these read apart from the plain tone controls.
+MARK_COLOUR = "#e5534b"
+
+
+def marked_html(name):
+    """Rich text of a tool name with its trailing L / ⅃ marks in red:
+    "Shadows L" -> 'Shadows <span ...>L</span>'."""
+    head, sep, marks = name.partition(" ")
+    if not sep or not marks or set(marks.replace(" ", "")) - {"L", "\u2143"}:
+        return name
+    return f'{head} <span style="color:{MARK_COLOUR};">{marks}</span>'
+
 SLIDER_KEYS = {"hx": "highlights_x", "sx": "shadows_x", "px": "punch_x"}
 # Which options each tool has: (option key, label, tooltip)
 RANGE_TIPS = {
@@ -24,7 +37,7 @@ RANGE_TIPS = {
 KEEP_WHITE_TIP = ("Pure white stays exactly white: the change fades out over "
                   "the brightest quarter of the tones, so nothing new clips.")
 KEEP_BLACK_TIP = ("Pure black stays exactly black: the change fades in over the "
-                  "darkest quarter of the tones (Shadows \u2143 lifts black at +; "
+                  "darkest quarter of the tones (Shadows L lifts black at +; "
                   "this keeps a true black).")
 CHECKS = {
     "hx": (("hx_keep", "Keep white point", KEEP_WHITE_TIP),),
@@ -122,7 +135,8 @@ class XTonePopup(QFrame):
         lay.setContentsMargins(12, 10, 12, 10)
         lay.setSpacing(6)
 
-        title = QLabel(f"{TOOL_NAMES[tool]} options")
+        title = QLabel(marked_html(TOOL_NAMES[tool]) + " options")
+        title.setTextFormat(Qt.RichText)
         f = title.font()
         f.setBold(True)
         title.setFont(f)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Highlights L / Shadows ⅃ / Contrast L ⅃, the measured tone tables
+"""Highlights ⅃ / Shadows L / Contrast L ⅃, the measured tone tables
 (spec/x-tone-tools.md). Also hosts the small panel helpers the popup
 tests share (they lived in the removed Highlights/Shadows range tests)."""
 
@@ -283,13 +283,24 @@ def test_three_sliders_after_black_point(panel):
     i = keys.index("black_point")
     assert keys[i + 1:i + 4] == ["highlights_x", "shadows_x", "punch_x"]
     assert keys[i + 4] == "contrast"
-    for key, text in (("highlights_x", "Highlights L"), ("shadows_x", "Shadows ⅃"),
+    for key, text in (("highlights_x", "Highlights ⅃"), ("shadows_x", "Shadows L"),
                       ("punch_x", "Contrast L ⅃")):
         lbl, slider = _row_label(panel, key)
-        assert lbl.text() == text
+        assert lbl.accessibleName() == text
+        # the marks in red (rich text), the name itself plain
+        assert lbl.textFormat() == Qt.RichText and "#e5534b" in lbl.text()
+        assert lbl.text().startswith(text.split(" ")[0] + " <span")
         assert slider.value_range() == (-100, 100)
         assert lbl.contextMenuPolicy() == Qt.CustomContextMenu
         assert "Right-click" in lbl.toolTip() and lbl.toolTip().startswith(text)
+
+
+def test_marked_html():
+    from widgets.x_tone_popup import marked_html, MARK_COLOUR
+    assert marked_html("Shadows L") == f'Shadows <span style="color:{MARK_COLOUR};">L</span>'
+    assert marked_html("Contrast L \u2143").endswith(">L \u2143</span>")
+    assert marked_html("Highlights") == "Highlights"
+    assert marked_html("Glow Size") == "Glow Size"          # not a mark: left alone
 
 
 def test_highlights_and_shadows_have_no_popup_any_more(panel):
@@ -390,7 +401,7 @@ def test_sync_without_tone_group_keeps_target_options(panel, monkeypatch):
 
 
 def test_l_sliders_sit_under_the_controls_they_measure():
-    """Highlights L directly under Highlights, Shadows ⅃ directly under
+    """Highlights ⅃ directly under Highlights, Shadows L directly under
     Shadows (shown order; the creation order the keys zip with is unchanged)."""
     from PySide6.QtWidgets import QApplication
     QApplication.instance() or QApplication([])
@@ -400,13 +411,13 @@ def test_l_sliders_sit_under_the_controls_they_measure():
     p.show()
     QApplication.processEvents()
     rows = sorted(((lay.itemAt(0).widget().mapTo(p, lay.itemAt(0).widget().rect().topLeft()).y(),
-                    lay.itemAt(0).widget().text())
+                    lay.itemAt(0).widget().accessibleName() or lay.itemAt(0).widget().text())
                    for lay in (p.highlights_slider_layout, p.highlights_x_slider_layout,
                                p.white_point_slider_layout, p.shadows_slider_layout,
                                p.shadows_x_slider_layout, p.black_point_slider_layout,
                                p.punch_x_slider_layout)))
-    assert [t for _y, t in rows] == ["Highlights", "Highlights L", "White Point", "Shadows",
-                                     "Shadows ⅃", "Black Point", "Contrast L ⅃"]
+    assert [t for _y, t in rows] == ["Highlights", "Highlights ⅃", "White Point", "Shadows",
+                                     "Shadows L", "Black Point", "Contrast L ⅃"]
     keys = SlidersPanel.ADJUSTMENT_KEYS
     assert keys.index("highlights_x") > keys.index("black_point")      # zip order kept
 

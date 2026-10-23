@@ -64,7 +64,7 @@ def test_place_on_screen_uses_the_real_screen():
 
 
 def test_both_popups_are_placed_on_screen(monkeypatch):
-    """The Colour Organics and Highlights L / Shadows ⅃ / Contrast L ⅃ popups open through it."""
+    """The Colour Organics and Highlights ⅃ / Shadows L / Contrast L ⅃ popups open through it."""
     import inspect
     from widgets import sliders_panel
     src = inspect.getsource(sliders_panel.SlidersPanel._open_organics_popup)

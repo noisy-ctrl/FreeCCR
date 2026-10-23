@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build core/x_tones.npz: the Highlights L / Shadows ⅃ / Contrast L ⅃
+"""Build core/x_tones.npz: the Highlights ⅃ / Shadows L / Contrast L ⅃
 tables, measured from graded HALD images as changes on FreeCCR's display
 values (spec/x-tone-tools.md).
 

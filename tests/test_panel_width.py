@@ -42,6 +42,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
+from PySide6.QtCore import Qt  # noqa: E402
 from PySide6.QtGui import QFont, QFontDatabase, QFontMetrics  # noqa: E402
 from PySide6.QtWidgets import (QApplication, QComboBox, QLabel,  # noqa: E402
                                QScrollArea)
@@ -150,9 +151,14 @@ def test_every_gutter_label_fits():
     labels = [w for w in panel.findChildren(_QL)
               if w.minimumWidth() == w.maximumWidth() == theme.LABEL_COL_W and w.text()]
     assert len(labels) > 20
+
+    def shown(w):
+        # a rich-text label (the red L / \u2143 marks) shows its plain name,
+        # kept as the accessible name; its markup takes no room
+        return w.accessibleName() or w.text() if w.textFormat() == Qt.RichText else w.text()
     for w in labels:
-        assert fm.horizontalAdvance(w.text()) <= theme.LABEL_COL_W - theme.GAP_TIGHT, w.text()
-    assert max(labels, key=lambda w: fm.horizontalAdvance(w.text())).text() == LONGEST_LABEL
+        assert fm.horizontalAdvance(shown(w)) <= theme.LABEL_COL_W - theme.GAP_TIGHT, shown(w)
+    assert shown(max(labels, key=lambda w: fm.horizontalAdvance(shown(w)))) == LONGEST_LABEL
 
 
 @needs_ui_font

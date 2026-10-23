@@ -3836,7 +3836,7 @@ def _apply_highlights_shadows(img, highlights, shadows):
 
 
 def _apply_xtones(img, highlights_x, shadows_x, punch_x, xtone_shape):
-    """Highlights L / Shadows ⅃ / Contrast L ⅃ (spec/x-tone-tools.md) on a float
+    """Highlights ⅃ / Shadows L / Contrast L ⅃ (spec/x-tone-tools.md) on a float
     image in 0..65535."""
     from core.x_tones import apply_x_tones
     return apply_x_tones(np.clip(img / 65535.0, 0.0, 1.0).astype(np.float32),
@@ -3901,7 +3901,7 @@ def adjust_image(
     # Colour Organics families / reach from the right-click popup; None =
     # default. Appended last.
     organics_shape=None,
-    # Highlights L / Shadows ⅃ / Contrast L ⅃ (spec/x-tone-tools.md), -100..100,
+    # Highlights ⅃ / Shadows L / Contrast L ⅃ (spec/x-tone-tools.md), -100..100,
     # and their right-click options (None = default). Appended last.
     highlights_x: float = 0.0,
     shadows_x: float = 0.0,
@@ -4049,7 +4049,7 @@ def adjust_image(
     if highlights != 0.0 or shadows != 0.0:
         img = _apply_highlights_shadows(img, highlights, shadows)
 
-    # Highlights L / Shadows ⅃ / Contrast L ⅃: measured tone tables
+    # Highlights ⅃ / Shadows L / Contrast L ⅃: measured tone tables
     # (spec/x-tone-tools.md). Tone tools on the display image, right after
     # Highlights / Shadows.
     if highlights_x or shadows_x or punch_x:
@@ -4446,7 +4446,7 @@ def adjust_image_opencl(
     # Colour Organics — appended last, see adjust_image.
     colour_organics: float = 0.0,
     organics_shape=None,
-    # Highlights L / Shadows ⅃ / Contrast L ⅃ — appended last, see adjust_image.
+    # Highlights ⅃ / Shadows L / Contrast L ⅃ — appended last, see adjust_image.
     highlights_x: float = 0.0,
     shadows_x: float = 0.0,
     punch_x: float = 0.0,
@@ -4577,7 +4577,7 @@ def adjust_image_opencl(
         (float(band_settings.get('band_feather', _BAND_FEATHER_DEFAULT) or 0) > 0) and \
         any(band_settings.get(k, 0) for k in BAND_ADJUSTMENT_KEYS)
     use_gpu = not feather_active and _initialize_opencl()
-    # Highlights L / Shadows ⅃ / Contrast L ⅃ (spec/x-tone-tools.md) are numpy
+    # Highlights ⅃ / Shadows L / Contrast L ⅃ (spec/x-tone-tools.md) are numpy
     # lookups the kernel doesn't have. Run every kernel stage that precedes
     # them (Channel Levels on a non-windowed base, Gain, Brightness,
     # Highlights/Shadows — WB is already consumed above) plus the tools here,
