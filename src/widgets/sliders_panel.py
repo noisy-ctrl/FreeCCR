@@ -1255,9 +1255,22 @@ class SlidersPanel(QWidget):
         scroll_layout.addLayout(self.saturation_slider_layout)
         scroll_layout.addLayout(self.sat_rolloff_slider_layout)
         scroll_layout.addLayout(self.vibrance_slider_layout)
+        # Lab Finish: Golden Highlights and Shadow Neutralise in their own
+        # section, above Subtracted Sat, open by default and hideable in
+        # Settings -> Panel like the other sections.
+        sep = theme.section_separator()
+        scroll_layout.addWidget(sep)
+        self._section_separators["lab_finish"] = sep
+        self.lab_finish_section = CollapsibleSection("Lab Finish")
+        self.lab_finish_section.add_layout(self.golden_slider_layout)
+        self.lab_finish_section.add_layout(self.shadow_neutralise_slider_layout)
+        self.lab_finish_section._toggle_btn.setChecked(True)
+        self.lab_finish_section._on_toggle(True)
+        scroll_layout.addWidget(self.lab_finish_section)
+        sep = theme.section_separator()
+        scroll_layout.addWidget(sep)
+        self._lab_finish_sep_below = sep
         scroll_layout.addLayout(self.sub_saturation_slider_layout)
-        scroll_layout.addLayout(self.golden_slider_layout)
-        scroll_layout.addLayout(self.shadow_neutralise_slider_layout)
         scroll_layout.addLayout(self.colour_organics_slider_layout)
 
         # --- Reset / Compare / Sync buttons ---
@@ -2169,6 +2182,8 @@ class SlidersPanel(QWidget):
     # --- Settings -> Panel: show / hide sections (spec/panel-visibility.md) ----
     HIDEABLE_SECTIONS = (("printer_lights", "Printer Lights", "printer_section"),
                          ("crosstalk", "Crosstalk Correction", "crosstalk_section"),
+                         ("lab_finish", "Lab Finish (Golden Highlights, Shadow Neutralise)",
+                          "lab_finish_section"),
                          ("levels", "Channel Levels (incl. Film Look, Cineon)", "od_section"),
                          ("balance", "Channel Balance", "balance_section"),
                          ("curves", "Curves", "curves_section"),
@@ -2198,6 +2213,10 @@ class SlidersPanel(QWidget):
             sep = self._section_separators.get(sid)
             if sep is not None:
                 sep.setVisible(visible)
+            if sid == "lab_finish":                  # it sits mid-list: one below too
+                below = getattr(self, "_lab_finish_sep_below", None)
+                if below is not None:
+                    below.setVisible(visible)
 
     # --- Printer Lights (spec/printer-lights.md) ------------------------------
     PRINTER_POINT_UNITS = 3     # Shift-slider units per printer point (0.02 density)

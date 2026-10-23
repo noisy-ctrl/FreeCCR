@@ -34,8 +34,8 @@ def _shown(widget):
 
 def test_every_section_listed_and_present(panel):
     ids = [sid for sid, _l, _a in panel.HIDEABLE_SECTIONS]
-    assert ids == ["printer_lights", "crosstalk", "levels", "balance", "curves",
-                   "bands", "noise", "details"]
+    assert ids == ["printer_lights", "crosstalk", "lab_finish", "levels", "balance",
+                   "curves", "bands", "noise", "details"]
     for _sid, _label, attr in panel.HIDEABLE_SECTIONS:
         assert getattr(panel, attr) is not None
 
@@ -90,3 +90,29 @@ def test_no_panel_page_without_a_panel():
     _LIVE.append(dlg)
     names = [dlg._sidebar.item(i).text() for i in range(dlg._sidebar.count())]
     assert "Panel" not in names
+
+
+def test_lab_finish_section_holds_the_two_tools_above_subtracted_sat(panel):
+    """Golden Highlights and Shadow Neutralise sit in their own section (open
+    by default) above Subtracted Sat; hiding it hides both lines round it and
+    leaves the sliders (and their values) in place."""
+    from PySide6.QtWidgets import QApplication
+    sec = panel.lab_finish_section
+    assert sec._toggle_btn.isChecked() and sec._content.isVisibleTo(sec)
+    for lay in (panel.golden_slider_layout, panel.shadow_neutralise_slider_layout):
+        assert sec.isAncestorOf(lay.itemAt(0).widget())
+    panel.resize(380, 2400)
+    panel.show()
+    QApplication.processEvents()
+    y = lambda w: w.mapTo(panel, w.rect().topLeft()).y()
+    sub = panel.sub_saturation_slider_layout.itemAt(0).widget()
+    vib = panel.vibrance_slider_layout.itemAt(0).widget()
+    assert y(vib) < y(sec) < y(sub)
+    panel.set_hidden_sections({"lab_finish"})
+    assert not _shown(sec)
+    assert not _shown(panel._section_separators["lab_finish"])
+    assert not _shown(panel._lab_finish_sep_below)
+    keys = panel.adjustment_keys
+    assert "golden_highlights" in keys and "shadow_neutralise" in keys
+    panel.set_hidden_sections(set())
+    assert _shown(sec) and _shown(panel._lab_finish_sep_below)

@@ -7,10 +7,17 @@ short: Settings → **Panel** lists the collapsible tools with a tickbox each.
 
 ## Sections
 
-Printer Lights, Crosstalk Correction, Channel Levels (with Film Look and
-Cineon inside it), Channel Balance, Curves, Subtractive Saturations, Chroma
-Noise Reduction, Details. Master Gain, the tone sliders and the B/W-point
-controls are always shown.
+Printer Lights, Crosstalk Correction, Lab Finish (Golden Highlights and
+Shadow Neutralise), Channel Levels (with Film Look and Cineon inside it),
+Channel Balance, Curves, Subtractive Saturations, Chroma Noise Reduction,
+Details. Master Gain, the tone sliders and the B/W-point controls are always
+shown.
+
+**Lab Finish** (2026-10-23) is a collapsible of its own, open by default, in
+the saturation group between Vibrance and Subtracted Sat. It sits mid-list,
+so it has a line above AND below; both hide with it (`_lab_finish_sep_below`
+is the extra one). Its two sliders were created where they always were, so
+`ADJUSTMENT_KEYS` and stored settings are unchanged: only the layout moved.
 
 ## Behaviour
 
