@@ -316,3 +316,47 @@ def test_overlay_checkbox_sits_next_to_negatives(images):
     assert view.overlay_check.text() == "Overlay" and not view.overlay_check.isChecked()
     view.overlay_check.setChecked(True)
     assert sheet.overlay is True
+
+
+def test_overlay_off_hides_the_crop_status_and_the_legend(images, monkeypatch):
+    """Overlay off: the frames as they are - no crop status under them (it
+    names the overlay's outline colour) and no colour legend in the footer;
+    names and formats stay."""
+    from PySide6.QtCore import QSettings
+    monkeypatch.setattr(QSettings, "setValue", lambda self, k, v: None)
+    for im in images:
+        im.crop_rect = (0.1, 0.1, 0.9, 0.9)
+        im.auto_crop_rect = im.crop_rect
+    sheet = cs.ContactSheet()
+    sheet.overlay = True
+    sheet.update(force=True)
+    lay = sheet.layout()
+
+    def arr():
+        q = sheet.image().convertToFormat(QImage.Format_RGB888)
+        w, h = q.width(), q.height()
+        return np.frombuffer(q.constBits(), np.uint8).reshape(
+            h, q.bytesPerLine())[:, :w * 3].reshape(h, w, 3).astype(int)
+
+    def coloured(a, rect, rgb, tol=40):
+        x0, y0 = int(rect.left()), int(rect.top())
+        x1, y1 = int(rect.right()), int(rect.bottom())
+        patch = a[y0:y1, x0:x1]
+        return int((np.abs(patch - np.array(rgb)).max(axis=-1) < tol).sum())
+    from PySide6.QtCore import QRectF
+    cell, img_r = lay.cell(0), lay.image_rect(0)
+    caption = QRectF(cell.x(), img_r.bottom() + 1, cell.width(), cell.bottom() - img_r.bottom())
+    footer = QRectF(lay.width * 0.6, lay.height - cs.MARGIN - lay.foot_h,
+                    lay.width * 0.4 - cs.MARGIN, lay.foot_h)
+    auto = cs.SOURCES["auto"][0]
+    a = arr()
+    assert coloured(a, caption, auto) > 5 and coloured(a, footer, auto) > 5
+    sheet.set_overlay(False)
+    a = arr()
+    assert coloured(a, caption, auto) == 0                  # no "Auto crop" status
+    assert coloured(a, footer, auto) == 0                   # no legend
+    assert np.abs(a[int(footer.top()):int(footer.bottom()),
+                    int(footer.left()):int(footer.right())] - np.array(cs.BG)).max() < 3
+    sheet.set_overlay(True)
+    a = arr()
+    assert coloured(a, caption, auto) > 5 and coloured(a, footer, auto) > 5

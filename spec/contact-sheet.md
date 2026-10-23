@@ -117,6 +117,8 @@ a conversion shows up by itself.
 An **Overlay** checkbox sits right after Negatives in the sheet's bar (on by
 default, remembered as `sheet/overlay`). Off draws every frame as it is: no
 dimmed outside, no crop outline, no dashed "unsure" box (`draw_frame(...,
-overlay=False)`); the captions under each frame (number, name, format, where
-the crop came from) and the footer legend stay. It is part of each frame's
+overlay=False)`); the captions under each frame keep the number, name and
+format. Revision 2026-10-23: the crop status ("Confirmed", "Auto crop", ...)
+and the footer's colour legend go with the overlay too: they name the
+outline's colours, so with no outline they only cluttered the sheet. It is part of each frame's
 signature, so toggling redraws every cell, and Export writes what is shown.

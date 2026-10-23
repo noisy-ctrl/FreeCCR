@@ -321,7 +321,8 @@ class ContactSheet(QObject):
         self.update(force=True)
 
     def set_overlay(self, on):
-        """Show or hide every frame's crop overlay (the captions stay)."""
+        """Show or hide every frame's crop overlay, with the crop status in
+        the captions and the colour legend (names and formats stay)."""
         self.overlay = bool(on)
         self._settings.setValue("sheet/overlay", self.overlay)
         self.update(force=True)
@@ -415,6 +416,15 @@ class ContactSheet(QObject):
         p.setFont(f)
         cap = QRectF(cell.x(), top.bottom(), cell.width(), 6.0 * u)
         x = cap.x()
+        if not self.overlay:
+            # Overlay off: the frames as they are - no crop status (it
+            # describes the overlay's outline); the film format stays.
+            if fmt:
+                p.setPen(QColor(205, 205, 205))
+                p.drawText(cap, Qt.AlignLeft | Qt.AlignVCenter,
+                           p.fontMetrics().elidedText(film_formats.label(fmt),
+                                                      Qt.ElideRight, int(cap.width())))
+            return
         if fmt:
             # the film format, then where the crop came from in its colour
             text = film_formats.label(fmt) + "  ·  "
@@ -448,6 +458,9 @@ class ContactSheet(QObject):
         p.drawText(QRectF(MARGIN, y - th / 2, lay.width * 0.6, th), Qt.AlignLeft | Qt.AlignVCenter,
                    f"{n} frame{'s' if n != 1 else ''} · "
                    + (summary + " · " if summary else "") + time.strftime("%d %b %Y"))
+        if not self.overlay:
+            p.end()                 # no crop colours shown, so no legend for them
+            return
         x = lay.width - MARGIN
         for key in reversed(LEGEND):
             label = SOURCES[key][1]
@@ -604,8 +617,9 @@ class ContactSheetView(QWidget):
         self.overlay_check = QCheckBox("Overlay")
         self.overlay_check.setToolTip(
             "Show each frame's crop: the area outside it dimmed and the crop "
-            "outlined in the colour of where it came from. Off shows the "
-            "frames as they are; the captions stay. Also what Export writes.")
+            "outlined in the colour of where it came from, its status under "
+            "the frame and the colour legend. Off shows the frames as they are, "
+            "with just their names and formats. Also what Export writes.")
         self.overlay_check.setChecked(self.sheet.overlay)
         self.overlay_check.toggled.connect(self.sheet.set_overlay)
         b.addWidget(self.overlay_check)
