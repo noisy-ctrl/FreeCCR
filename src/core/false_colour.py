@@ -1,4 +1,4 @@
-"""False colour: the classic classic exposure scale over a greyscale picture, and
+"""False colour: a classic exposure scale over a greyscale picture, and
 the HDR glow drawn as dots. Display tools only; nothing here ever reaches an
 export. See spec/false-colour.md."""
 from __future__ import annotations
@@ -7,8 +7,8 @@ import numpy as np
 
 # (low, high, RGB, label, meaning): signal level as a fraction of white, on
 # the finished picture's video luma (Rec.709 weights on the display values),
-# the way a monitor's false colour reads the signal. classic camera's classic
-# bands; everything outside them is shown as greyscale.
+# the way a monitor's false colour reads the signal; the classic cinema
+# camera bands; everything outside them is shown as greyscale.
 BANDS = (
     (0.000, 0.025, (148, 50, 210), "0–2.5 %", "black clipping"),
     (0.025, 0.040, (40, 110, 240), "2.5–4 %", "just above black clipping"),

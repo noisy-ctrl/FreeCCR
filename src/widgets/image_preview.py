@@ -817,8 +817,13 @@ class ImagePreview(QWidget):
         # Toolbar
         self.toolbar = QToolBar()
         self.toolbar.setIconSize(QSize(24, 24))
+        # 1 px between buttons (the theme's 2 px elsewhere): with text buttons
+        # this toolbar is long, and it must fit the canvas at the window's
+        # minimum width in a Mac-wide font or Export drops into the overflow
+        # arrow (tests/test_panel_width.py). The 3 px spacers mark the groups.
+        self.toolbar.setStyleSheet("QToolBar { spacing: 1px; }")
 
-        def add_spacer(width=5):
+        def add_spacer(width=3):
             spacer = QWidget()
             spacer.setFixedWidth(width)
             spacer.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
@@ -898,17 +903,15 @@ class ImagePreview(QWidget):
         self.toolbar.addAction(self.hdr_tint_action)
         add_spacer()
 
-        # False colour: the classic classic exposure scale over a greyscale view.
-        # A display mode only, off at startup, never saved
-        # (spec/false-colour.md).
-        # Icon only (the stripes of its scale): the toolbar has no room for
-        # another text label without pushing Export off the end.
-        self.fc_action = QAction(theme.false_colour_icon(), "False colour", self)
+        # False colour: a classic exposure scale over a greyscale view. A
+        # display mode only, off at startup, never saved (spec/false-colour.md).
+        # A text button, like HDR (it was the scale's stripes as an icon).
+        self.fc_action = QAction("False colour", self)
         self.fc_action.setCheckable(True)
         self.fc_action.setToolTip(
-            "Show the picture in greyscale with the classic false-colour exposure "
-            "bands: purple/blue near black, green mid grey, pink one stop "
-            "over, yellow/red near and at white. Preview only.")
+            "Show the picture in greyscale with false-colour exposure bands: "
+            "purple/blue near black, green mid grey, pink one stop over, "
+            "yellow/red near and at white. Preview only.")
         self.fc_action.triggered.connect(self.set_false_colour)
         self.toolbar.addAction(self.fc_action)
         add_spacer()
@@ -918,7 +921,10 @@ class ImagePreview(QWidget):
         # state. Grouped with the area-editing tools (a separator before it).
         self.toolbar.addSeparator()
         add_spacer()
-        self.dust_action = QAction("🧹 Dust Removal", self)
+        # "Dust", not "Dust Removal": the text False colour button needs the
+        # room, and the toolbar must still fit at a 14-inch Mac's full width
+        # without pushing Export into the overflow menu (a test checks).
+        self.dust_action = QAction("🧹 Dust", self)
         self.dust_action.setCheckable(True)
         self.dust_action.setToolTip(
             "Spot out dust, hair and small scratches. Opens the Dust Removal "
@@ -1815,7 +1821,7 @@ class ImagePreview(QWidget):
 
     def set_false_colour(self, on):
         """Show or hide the false-colour view: the displayed picture in
-        greyscale with the classic classic exposure bands, as its own layer, plus
+        greyscale with the classic exposure bands, as its own layer, plus
         a legend in the corner. Display only, off at startup, never saved."""
         self._false_colour = bool(on)
         action = getattr(self, "fc_action", None)

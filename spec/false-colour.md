@@ -1,7 +1,7 @@
 # False colour (and the HDR glow as dots)
 
 An exposure check like a cinema monitor's false colour: the picture in
-greyscale, with classic camera's classic signal bands painted in colour. Because
+greyscale, with the classic cinema-camera signal bands painted in colour. Because
 that scale uses pink, the HDR glow view (spec/hdr-gain-map-export.md) moves
 from a magenta tint to a pattern of dots, so both can be on at once.
 
@@ -30,7 +30,7 @@ from a magenta tint to a pattern of dots, so both can be on at once.
 
 ## Non-goals
 
-- the classic newer stop-based scale (camera 35), custom bands, a waveform
+- A newer stop-based scale, custom bands, a waveform
   readout of the level under the cursor.
 - Anything in the exports, thumbnails, histogram, scopes or colour probe.
 
@@ -79,3 +79,13 @@ so neither layer reaches them.
 3. Canvas: the toggle shows a child layer covering the picture with exactly
    `false_colour` of the displayed pixmap; scopes capture unchanged; legend
    shown bottom-left, hidden when off; the HDR dots sit above it.
+
+## 2026-10-23: a text button, no brand names
+
+The toolbar button reads **False colour** (it was the scale's colour stripes
+as an icon; `theme.false_colour_icon` is gone), like the ☀ HDR button. To keep
+the canvas toolbar inside the canvas at the window's minimum width in a
+Mac-wide font, "🧹 Dust Removal" became "🧹 Dust" (the panel keeps its full
+title), the group spacers went 5 → 3 px and the toolbar's button spacing
+2 → 1 px; `test_preview_toolbar_fits_at_the_smallest_window` checks it at
+1.06× the test font. No camera maker is named anywhere in the UI or docs.

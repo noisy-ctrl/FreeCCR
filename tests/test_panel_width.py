@@ -407,3 +407,32 @@ def test_eliding_combo_leaves_the_popup_list_intact(window):
     combo.blockSignals(True)
     combo.removeItem(combo.count() - 1)
     combo.blockSignals(False)
+
+
+# The macOS system font measures about 6 % wider than the headless test font
+# ("Subtracted Sat": 89 px vs 84).
+MAC_FONT = 1.06
+
+
+@needs_ui_font
+def test_preview_toolbar_fits_at_the_smallest_window():
+    """The canvas toolbar must fit the canvas at its minimum width, in a
+    Mac-wide font, or Qt hides its last buttons (Export) behind an overflow
+    arrow. Text buttons (False colour, HDR, ...) are what make it long."""
+    base = _app.font()
+    stressed = QFont(base)
+    stressed.setPointSizeF(base.pointSizeF() * MAC_FONT)
+    try:
+        _app.setFont(stressed)
+        win = MainWindow()
+        win.resize(1200, 800)
+        _app.processEvents()
+        ip = win.image_preview
+        need = ip.toolbar.sizeHint().width()
+        assert need <= ip.minimumWidth(), (
+            f"the toolbar needs {need}px at {MAC_FONT}x the UI font, the canvas "
+            f"can be as narrow as {ip.minimumWidth()}px")
+        texts = [a.text() for a in ip.toolbar.actions()]
+        assert "False colour" in texts and not any("classic" in a.toolTip() for a in ip.toolbar.actions())
+    finally:
+        _app.setFont(base)
