@@ -120,7 +120,8 @@ def test_slider_helper_text_and_group():
     assert "sub_saturation" not in keys                    # removed 2026-10-23
     assert keys.index("golden_highlights") == keys.index("vibrance") + 1
     assert keys.index("shadow_neutralise") == keys.index("golden_highlights") + 1
-    assert keys.index("glow") == keys.index("shadow_neutralise") + 1
+    assert keys.index("shadow_lift") == keys.index("shadow_neutralise") + 1
+    assert keys.index("glow") == keys.index("shadow_lift") + 1
     assert keys.index("colour_organics") == keys.index("glow") + 1
     assert "colour_organics" in dict((g, k) for g, _l, k in SYNC_GROUPS)["sat"]
     assert _BASIC_LABELS["colour_organics"] == "Colour Organics"

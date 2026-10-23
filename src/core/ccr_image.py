@@ -2134,6 +2134,8 @@ class CCRImage:
                      glow=s.get('glow', 0),
                      glow_shape=s.get('glow_shape'),
                      glow_area=_glow_area_of(self),
+                     shadow_lift=s.get('shadow_lift', 0),
+                     shadow_lift_shape=s.get('shadow_lift_shape'),
                      # Per-color-band sliders ride the same GPU pass (or the
                      # CPU fallback); None keeps the inactive case free.
                      band_settings=(s if any(s.get(k, 0)
@@ -2280,6 +2282,8 @@ class CCRImage:
                      glow=s.get('glow', 0),
                      glow_shape=s.get('glow_shape'),
                      glow_area=_glow_area_of(self),
+                     shadow_lift=s.get('shadow_lift', 0),
+                     shadow_lift_shape=s.get('shadow_lift_shape'),
                      balance_r=s.get('balance_r', 0),
                      balance_g=s.get('balance_g', 0),
                      balance_b=s.get('balance_b', 0),

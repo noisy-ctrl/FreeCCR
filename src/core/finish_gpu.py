@@ -29,6 +29,7 @@ from core import oklab as ok
 from core import golden as gd
 from core import shadow_neutral as sn
 from core import glow as gw
+from core import shadow_lift as lf
 
 RUN = 32                    # pixels per work item in the sliding box filter
 BIG_RENDER = 8_000_000      # pixels: above this the memory pool is emptied after
@@ -120,6 +121,19 @@ inline float3 fit_move(float3 lab, float3 d) {{
     if (outside3(lin)) {{
         float lo = 0.0f, hi = 1.0f;
         for (int i = 0; i < FIT_STEPS; i++) {{
+            float mid = 0.5f * (lo + hi);
+            if (!outside3(lab_lin(lab + mid * d))) lo = mid; else hi = mid;
+        }}
+        lin = lab_lin(lab + lo * d);
+    }}
+    return (float3)(lin_srgb(lin.x), lin_srgb(lin.y), lin_srgb(lin.z));
+}}
+
+inline float3 fit_move_n(float3 lab, float3 d, int steps) {{
+    float3 lin = lab_lin(lab + d);
+    if (outside3(lin)) {{
+        float lo = 0.0f, hi = 1.0f;
+        for (int i = 0; i < steps; i++) {{
             float mid = 0.5f * (lo + hi);
             if (!outside3(lab_lin(lab + mid * d))) lo = mid; else hi = mid;
         }}
@@ -351,6 +365,25 @@ __kernel void shadow_apply(__global float* rgb, __global const float* m,
     if (!mv) return;
     float3 nw = (float3)(depth_on ? lab.x * s : lab.x, lab.y * f, lab.z * f);
     vstore3(clamp(fit_move(lab, nw - lab), 0.0f, 1.0f), i, rgb);
+    moved[i] = 1;
+}}
+
+/* core.shadow_lift: the tone curve per pixel, colour scaled with it */
+__kernel void lift_apply(__global float* rgb, __global uchar* moved, float a,
+                         float R, float F, float Rf, float eps, int steps, int n) {{
+    int i = get_global_id(0);
+    if (i >= n) return;
+    float3 lab = rgb_lab(vload3(i, rgb));
+    float L = lab.x;
+    float t = clamp(L / R, 0.0f, 1.0f);
+    float w = (1.0f - t) * (1.0f - t);
+    float s = 1.0f + a * w;
+    float L1 = L * s;
+    float u = 1.0f - clamp(L1 / Rf, 0.0f, 1.0f);
+    float L2 = F > 0.0f ? L1 + F * u * u : L1;
+    if (!(fabs(L2 - L) > eps)) return;
+    float3 nw = (float3)(L2, lab.y * s, lab.z * s);
+    vstore3(clamp(fit_move_n(lab, nw - lab, steps), 0.0f, 1.0f), i, rgb);
     moved[i] = 1;
 }}
 
@@ -588,7 +621,8 @@ def gaussian_kernel(sigma):
 _KERNELS = ("zero_u8", "chunk_max", "unpack01", "pack16", "lab_planes", "glow_L",
             "box_h", "box_v", "mul", "gf_self_ab", "gf_ab", "gf_out", "matte_tail", "golden_weight",
             "golden_apply", "shadow_weight", "shadow_apply", "glow_area_h",
-            "glow_area_v", "gauss_h", "gauss_v", "glow_mix", "glow_apply", "glow_mask")
+            "glow_area_v", "gauss_h", "gauss_v", "glow_mix", "glow_apply", "glow_mask",
+            "lift_apply")
 
 _last = None
 
@@ -820,9 +854,17 @@ class FinishGPU:
                              _fl(2 * gw.HOLD_KNEE), _fl(gw.G_EPS),
                              _i(1 if area else 0), field_m.data, _fl(gw.MASK_EPS))
 
+    def shadow_lift(self, rgb, moved, W, H, amount, shape):
+        shape = lf.normalize_lift_shape(shape) or dict(lf.LIFT_SHAPE_DEFAULT)
+        a, R, F, Rf = lf._params(amount, shape)
+        n = W * H
+        self._run1("lift_apply", n, rgb.data, moved.data, _fl(a), _fl(R), _fl(F),
+                   _fl(Rf), _fl(lf.L_EPS), _i(lf.FIT_STEPS), _i(n))
+
     # -- the chain ---------------------------------------------------------
     def finish(self, img_buf, H, W, golden=0.0, golden_shape=None, shadow=0.0,
-               shadow_shape=None, glow=0.0, glow_shape=None, glow_area=None):
+               shadow_shape=None, glow=0.0, glow_shape=None, glow_area=None,
+               shadow_lift=0.0, shadow_lift_shape=None):
         """Run the active tools on the main kernel's buffer (H*W x 3 float,
         0..65535), in place. Pixels no tool moved keep their exact value; on
         any error before the last step the buffer is untouched."""
@@ -835,6 +877,8 @@ class FinishGPU:
             self.golden(rgb, moved, W, H, float(golden), golden_shape)
         if shadow and shadow > 0:
             self.shadow(rgb, moved, W, H, float(shadow), shadow_shape)
+        if shadow_lift and shadow_lift > 0:
+            self.shadow_lift(rgb, moved, W, H, float(shadow_lift), shadow_lift_shape)
         if glow and glow > 0:
             self.glow(rgb, moved, W, H, float(glow), glow_shape, glow_area)
         self._run1("pack16", n, rgb.data, moved.data, img_buf.data, _i(n))
@@ -845,7 +889,8 @@ class FinishGPU:
 
 
 def finish_numpy_image(ctx, queue, img01, golden=0.0, golden_shape=None, shadow=0.0,
-                       shadow_shape=None, glow=0.0, glow_shape=None, glow_area=None):
+                       shadow_shape=None, glow=0.0, glow_shape=None, glow_area=None,
+                       shadow_lift=0.0, shadow_lift_shape=None):
     """Convenience for tests and the bench: the GPU chain on an HxWx3 float
     image in 0..1 (as the numpy tools take it). Returns HxWx3 float32."""
     a = np.ascontiguousarray(np.asarray(img01, np.float32))
@@ -853,5 +898,5 @@ def finish_numpy_image(ctx, queue, img01, golden=0.0, golden_shape=None, shadow=
     g = for_queue(ctx, queue)
     buf = cla.to_device(queue, (a * np.float32(65535.0)).reshape(-1, 3))
     g.finish(buf, H, W, golden, golden_shape, shadow, shadow_shape, glow, glow_shape,
-             glow_area)
+             glow_area, shadow_lift, shadow_lift_shape)
     return buf.get().reshape(H, W, 3) / np.float32(65535.0)

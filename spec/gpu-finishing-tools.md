@@ -154,3 +154,12 @@ size/start incl. f = 1 and a tiny strip that needs repeated reflection):
   full-size passes; it could not be timed here (no GPU in the container):
   `tools/bench_finishing.py` measures it on the machine that has one.
 
+
+## Revision (2026-10-23): Shadow Lift
+
+Shadow Lift (spec/shadow-lift.md) joins the chain between Shadow Neutralise
+and Glow as one per-pixel kernel (`lift_apply`: the OKLab tone curve and
+`fit_move`'s 12-step bisection). Measured against numpy: ≤ 0.14 codes on a
+real picture; on uniformly random colours ≤ 33 codes on 0.001 % of pixels,
+all already on a face of the gamut, where float32 rounding picks a different
+bisection step (0.13 of an 8-bit level).

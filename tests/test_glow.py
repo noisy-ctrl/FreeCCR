@@ -213,17 +213,17 @@ def panel():
     return SlidersPanel()
 
 
-def test_slider_sits_in_lab_finish_under_shadow_neutralise(panel):
+def test_slider_sits_in_lab_finish_under_shadow_lift(panel):
     from PySide6.QtCore import Qt
     keys = panel.adjustment_keys
     i = keys.index("glow")
-    assert keys[i - 1] == "shadow_neutralise" and keys[i + 1] == "colour_organics"
+    assert keys[i - 1] == "shadow_lift" and keys[i + 1] == "colour_organics"
     assert panel.sliders[i].value_range() == (0, 100) and panel.sliders[i].value() == 0
     sec = panel.lab_finish_section
     labels = [lay.itemAt(0).widget() for lay in (panel.golden_slider_layout,
               panel.shadow_neutralise_slider_layout, panel.glow_slider_layout)]
     assert all(sec.isAncestorOf(lb) for lb in labels)
-    assert sec._content_layout.indexOf(panel.glow_slider_layout) == 2
+    assert sec._content_layout.indexOf(panel.glow_slider_layout) == 3   # the last of four
     lbl = panel._glow_label
     assert lbl.text() == "Glow"
     assert lbl.contextMenuPolicy() == Qt.CustomContextMenu and "Right-click" in lbl.toolTip()

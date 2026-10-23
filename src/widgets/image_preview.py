@@ -1744,6 +1744,9 @@ class ImagePreview(QWidget):
         # Glow's map is already scaled to read full where the glow is strong
         "glow": ("core.glow", "normalize_glow_shape", "GLOW_SHAPE_DEFAULT",
                  1.0, (255, 170, 30)),
+        # Shadow Lift: green (no deep shadow is green), full in the deepest
+        "lift": ("core.shadow_lift", "normalize_lift_shape", "LIFT_SHAPE_DEFAULT",
+                 1.0, (90, 220, 120)),
     }
 
     def set_gold_mask(self, shape):
@@ -1759,6 +1762,10 @@ class ImagePreview(QWidget):
     def set_glow_mask(self, shape):
         """The same for Glow (an amber wash where the glow lands)."""
         self._set_tool_mask("glow", shape)
+
+    def set_lift_mask(self, shape):
+        """The same for Shadow Lift (a green wash where it opens the shadows)."""
+        self._set_tool_mask("lift", shape)
 
     def _set_tool_mask(self, kind, shape):
         import importlib
