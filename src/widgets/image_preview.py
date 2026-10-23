@@ -911,9 +911,16 @@ class ImagePreview(QWidget):
         self.fc_action.setToolTip(
             "Show the picture in greyscale with false-colour exposure bands: "
             "purple/blue near black, green mid grey, pink one stop over, "
-            "yellow/red near and at white. Preview only.")
+            "yellow/red near and at white. Preview only.\n"
+            "Right-click for the stop-zone scale instead.")
         self.fc_action.triggered.connect(self.set_false_colour)
         self.toolbar.addAction(self.fc_action)
+        # Right-click: which scale (spec/false-colour.md, stop zones)
+        _fc_btn = self.toolbar.widgetForAction(self.fc_action)
+        if _fc_btn is not None:
+            _fc_btn.setContextMenuPolicy(Qt.CustomContextMenu)
+            _fc_btn.customContextMenuRequested.connect(
+                lambda pos, b=_fc_btn: self._show_fc_menu(b.mapToGlobal(pos)))
         add_spacer()
 
         # Dust removal: opens the Dust Removal panel (covers the sliders) and a
@@ -1165,6 +1172,9 @@ class ImagePreview(QWidget):
         self._fc_item = None
         self._fc_cache = None            # (cacheKey of the shown pixmap, layer)
         self._fc_legend = None
+        # Which scale (bands / zones) and, for zones, what they read
+        # (negative / picture); remembered between launches.
+        self._fc_scale, self._zone_source = self._stored_fc_scale()
         # Golden Highlights / Shadow Neutralise "show where it acts"
         # (spec/golden-highlights.md, spec/shadow-neutralise.md): one layer,
         # shown while a tool's options popup asks for it; None = off.
@@ -1903,11 +1913,179 @@ class ImagePreview(QWidget):
             action.blockSignals(was)
         self._refresh_fc_overlay()
 
+    # --- Stop zones (spec/false-colour.md, 2026-10-23) ----------------------
+    _FC_SCALE_KEY = "view/false_colour_scale"
+    _FC_SOURCE_KEY = "view/false_colour_zone_source"
+
+    @classmethod
+    def _stored_fc_scale(cls):
+        from PySide6.QtCore import QSettings
+        from core.false_colour import ZONE_SCALES, ZONE_SOURCES
+        try:
+            st = QSettings("FreeCCR", "FreeCCR")
+            scale = st.value(cls._FC_SCALE_KEY, "bands", type=str)
+            source = st.value(cls._FC_SOURCE_KEY, "negative", type=str)
+        except Exception:
+            scale, source = "bands", "negative"
+        return (scale if scale in ZONE_SCALES else "bands",
+                source if source in ZONE_SOURCES else "negative")
+
+    def fc_scale(self):
+        """(scale, zone source): ("bands" | "zones", "negative" | "picture")."""
+        return getattr(self, "_fc_scale", "bands"), getattr(self, "_zone_source", "negative")
+
+    def set_fc_scale(self, scale=None, source=None):
+        """Pick the false-colour scale ("bands" / "zones") and what the zones
+        read ("negative" / "picture"); remembered between launches. Turns
+        False colour on when called from the right-click menu's choices."""
+        from PySide6.QtCore import QSettings
+        from core.false_colour import ZONE_SCALES, ZONE_SOURCES
+        if scale in ZONE_SCALES:
+            self._fc_scale = scale
+        if source in ZONE_SOURCES:
+            self._zone_source = source
+        try:
+            st = QSettings("FreeCCR", "FreeCCR")
+            st.setValue(self._FC_SCALE_KEY, self._fc_scale)
+            st.setValue(self._FC_SOURCE_KEY, self._zone_source)
+        except Exception:
+            pass
+        self._fc_cache = None
+        legend = getattr(self, "_fc_legend", None)
+        if legend is not None:
+            legend.hide()                # gone now, not at the next event loop turn
+            legend.deleteLater()
+            self._fc_legend = None
+            self._fc_legend_kind = None
+        self._refresh_fc_overlay()
+
+    def _show_fc_menu(self, global_pos):
+        from PySide6.QtWidgets import QMenu
+        from PySide6.QtGui import QActionGroup
+        scale, source = self.fc_scale()
+        menu = QMenu(self)
+        g1 = QActionGroup(menu)
+        for key, text in (("bands", "Exposure bands (signal level)"),
+                          ("zones", "Stop zones (stops from mid grey)")):
+            a = menu.addAction(text)
+            a.setCheckable(True)
+            a.setChecked(scale == key)
+            g1.addAction(a)
+            a.triggered.connect(lambda _c=False, k=key: self._pick_fc(scale=k))
+        menu.addSeparator()
+        head = menu.addAction("Stop zones read:")
+        head.setEnabled(False)
+        g2 = QActionGroup(menu)
+        for key, text in (("negative", "The negative (its exposure on the film)"),
+                          ("picture", "The finished picture")):
+            a = menu.addAction("   " + text)
+            a.setCheckable(True)
+            a.setChecked(source == key)
+            g2.addAction(a)
+            a.triggered.connect(lambda _c=False, k=key: self._pick_fc(source=k))
+        self._fc_menu = menu
+        menu.popup(global_pos)
+
+    def _pick_fc(self, scale=None, source=None):
+        self.set_fc_scale(scale, source)
+        if not getattr(self, "_false_colour", False):
+            self.set_false_colour(True)
+
+    def _zone_reads_negative(self, img):
+        """The negative reading applies to a negative (converted or not);
+        Positive mode reads the picture."""
+        return (self.fc_scale()[1] == "negative" and img is not None
+                and not getattr(ccr_backend, "positive_mode", False))
+
+    @staticmethod
+    def _zone_base(img, raw):
+        """The film base for the negative reading: the conversion's black
+        point, else the sampled one, else the frame's clearest film."""
+        from core.false_colour import film_base
+        ci = getattr(img, "conversion_inputs", None) or {}
+        bw = ci.get("bw") if ci.get("mode") == "bw" else None
+        if bw and bw[0] is not None:
+            return tuple(float(v) for v in bw[0]), "black point"
+        bp = getattr(ccr_backend, "black_point_bgr", None)
+        if bp is not None:
+            return tuple(float(v) for v in bp), "black point"
+        return film_base(raw), "clearest film in the frame"
+
+    def _zone_index_for_negative(self, img):
+        """The zone-index map (uint8, the raw preview's size, un-rotated and
+        uncropped, like the preview) of the frame's negative, cached on the
+        image: a converted frame's raw is re-read (about 0.4 s) once."""
+        import cv2
+        from core.false_colour import negative_stops, zone_index
+        key = (getattr(img, "file_path", None),
+               repr(getattr(img, "source_ops", None)),
+               getattr(img, "profile_signature", None),
+               repr((getattr(img, "conversion_inputs", None) or {}).get("bw")),
+               repr(getattr(ccr_backend, "black_point_bgr", None)))
+        hit = getattr(img, "_zone_cache", None)
+        if hit is not None and hit[0] == key:
+            return hit[1], hit[2]
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            raw = ccr_backend.raw_preview(img)
+        finally:
+            QApplication.restoreOverrideCursor()
+        if raw is None or getattr(raw, "ndim", 0) != 3:
+            return None, None
+        base, how = self._zone_base(img, raw)
+        stops = negative_stops(raw, base)
+        # a 1 px blur so grain doesn't speckle the zone edges (a reading, not
+        # the picture: nothing here reaches the pixels)
+        stops = cv2.GaussianBlur(stops, (0, 0), 1.0)
+        idx = zone_index(stops)
+        img._zone_cache = (key, idx, how)
+        return idx, how
+
+    def _zone_negative_pixmap(self, img):
+        """The negative's stop zones as a full-frame pixmap, cropped like the
+        displayed preview (as the HDR glow layer is)."""
+        from core.false_colour import zones_rgb
+        idx, how = self._zone_index_for_negative(img)
+        self._zone_how = how
+        if idx is None:
+            return None
+        rgb = np.ascontiguousarray(zones_rgb(idx))
+        h, w = rgb.shape[:2]
+        layer = QPixmap.fromImage(QImage(rgb.data, w, h, 3 * w,
+                                         QImage.Format_RGB888).copy())
+        if self._crop_display_transform is not None:
+            crop = getattr(img, "crop_rect", None)
+            if crop is not None and self._crop_display_angle:
+                extracted = self._extract_rotated_crop(layer, crop,
+                                                       self._crop_display_angle)
+                layer = extracted[0] if extracted is not None else None
+            elif crop is not None:
+                px_rect = self._crop_rect_to_pixels(crop, layer)
+                layer = layer.copy(px_rect) if px_rect is not None else None
+        return layer
+
     def _fc_pixmap_for(self, target):
         """The false-colour layer for a displayed pixmap, cached on its
         cacheKey; computed at up to FC_MAX_LONG on the long side."""
-        from core.false_colour import false_colour
-        key = target.cacheKey()
+        from core.false_colour import false_colour, stop_zones
+        scale, _source = self.fc_scale()
+        img = (ccr_backend.get_image_by_index(self.current_idx)
+               if self.current_idx is not None else None)
+        if scale == "zones" and self._zone_reads_negative(img):
+            key = ("neg", target.cacheKey(), id(getattr(img, "_zone_cache", None)),
+                   self._crop_display_transform is not None)
+            if self._fc_cache is not None and self._fc_cache[0] == key:
+                return self._fc_cache[1]
+            pm = self._zone_negative_pixmap(img)
+            if pm is not None and not pm.isNull():
+                key = ("neg", target.cacheKey(), id(getattr(img, "_zone_cache", None)),
+                       self._crop_display_transform is not None)
+                self._fc_cache = (key, pm)
+                return pm
+            # no raw to read: fall back to the picture
+        convert = false_colour if scale == "bands" else stop_zones
+        self._zone_how = None
+        key = (scale, target.cacheKey())
         if self._fc_cache is not None and self._fc_cache[0] == key:
             return self._fc_cache[1]
         src = target
@@ -1919,7 +2097,7 @@ class ImagePreview(QWidget):
         w, h = qimg.width(), qimg.height()
         buf = np.frombuffer(qimg.constBits(), np.uint8)
         rgb = buf.reshape(h, qimg.bytesPerLine())[:, :w * 3].reshape(h, w, 3)
-        fc = np.ascontiguousarray(false_colour(rgb))
+        fc = np.ascontiguousarray(convert(rgb))
         pm = QPixmap.fromImage(QImage(fc.data, w, h, 3 * w,
                                       QImage.Format_RGB888).copy())
         self._fc_cache = (key, pm)
@@ -1952,9 +2130,43 @@ class ImagePreview(QWidget):
         self._fc_item.setVisible(True)
         self._place_fc_legend()
 
+    def _zone_legend_html(self):
+        from core.false_colour import ZONES, GREY_DENSITY
+        cells = "".join(
+            f'<td style="background-color: rgb({r},{g},{b});" width="22">'
+            f'&nbsp;</td>' for _l, _lo, _hi, (r, g, b) in ZONES)
+        labels = "".join(f'<td align="center">{lab}</td>' for lab, *_ in ZONES)
+        img = (ccr_backend.get_image_by_index(self.current_idx)
+               if self.current_idx is not None else None)
+        if self._zone_reads_negative(img):
+            how = getattr(self, "_zone_how", None) or "black point"
+            note = (f"Stops from mid grey, read from the negative: its density "
+                    f"above the film base ({how}), mid grey at "
+                    f"{GREY_DENSITY:.2f}. The grade doesn't change it.")
+        else:
+            note = ("Stops from mid grey (18 %) in the finished picture's light. "
+                    "White is about +2\u00bd, so +3 and up don't appear.")
+        return ('<table cellspacing="1" cellpadding="0"><tr>' + cells + "</tr><tr>"
+                + labels + "</tr></table>"
+                + f'<div style="color:#bdbdbd; font-size:10px;">{note}</div>')
+
     def _fc_legend_widget(self):
         from PySide6.QtWidgets import QLabel
         from core.false_colour import BANDS
+        if self._fc_legend is None and self.fc_scale()[0] == "zones":
+            lab = QLabel(self.view.viewport())
+            lab.setTextFormat(Qt.RichText)
+            lab.setWordWrap(True)
+            lab.setFixedWidth(400)
+            lab.setText(self._zone_legend_html())
+            lab.setStyleSheet(
+                f"QLabel {{ background-color: rgba(20, 20, 20, 210); "
+                f"color: {theme.TEXT}; font-size: 11px; padding: 6px; "
+                f"border-radius: {theme.RADIUS_MD}px; }}")
+            lab.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            lab.adjustSize()
+            self._fc_legend = lab
+            self._fc_legend_kind = "zones"
         if self._fc_legend is None:
             rows = []
             for _lo, _hi, (r, g, b), label, meaning in BANDS:
@@ -1988,6 +2200,8 @@ class ImagePreview(QWidget):
                 legend.hide()
             return
         lab = self._fc_legend_widget()
+        if getattr(self, "_fc_legend_kind", None) == "zones" and self.fc_scale()[0] == "zones":
+            lab.setText(self._zone_legend_html())    # follows the frame's reading
         vp = self.view.viewport()
         lab.adjustSize()
         lab.move(8, max(0, vp.height() - lab.height() - 8))

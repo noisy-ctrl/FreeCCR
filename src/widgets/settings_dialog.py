@@ -303,6 +303,31 @@ class SettingsDialog(QDialog):
             "6000 px, about half the work of Full when zoomed in.\n"
             "Fast: the 1080 px preview only, and zoom detail from the half-size "
             "decode. Least memory and time; best for a slower computer."))
+        # False colour's scale (spec/false-colour.md, stop zones): also on
+        # the toolbar button's right-click menu; both are remembered.
+        row = QHBoxLayout()
+        row.addWidget(QLabel("False colour"))
+        self._combo_fc_scale = QComboBox()
+        for label, key in (("Exposure bands (signal level)", "bands"),
+                           ("Stop zones (stops from mid grey)", "zones")):
+            self._combo_fc_scale.addItem(label, key)
+        row.addWidget(self._combo_fc_scale, 1)
+        gz.addLayout(row)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Stop zones read"))
+        self._combo_zone_source = QComboBox()
+        for label, key in (("The negative (its exposure on the film)", "negative"),
+                           ("The finished picture", "picture")):
+            self._combo_zone_source.addItem(label, key)
+        row.addWidget(self._combo_zone_source, 1)
+        gz.addLayout(row)
+        gz.addWidget(self._muted(
+            "Stop zones colour the picture by stops from mid grey, 15 zones from "
+            "\u22126 to +6. Read from the negative they show how the film was "
+            "exposed (density above the film base, mid grey at 0.70), whatever "
+            "the grade; read from the finished picture they follow the grade, "
+            "but white is only about +2\u00bd stops there. Positive mode always "
+            "reads the picture."))
         lay.addWidget(grp_zoom)
 
         grp_keys = QGroupBox("Keyboard")
@@ -664,6 +689,12 @@ class SettingsDialog(QDialog):
             self._combo_preview_detail.findData(
                 getattr(ccr_backend, "preview_detail", "full"))))
         self._combo_preview_detail.blockSignals(False)
+        scale, source = self._live_fc_scale()
+        for combo, value in ((self._combo_fc_scale, scale),
+                             (self._combo_zone_source, source)):
+            combo.blockSignals(True)
+            combo.setCurrentIndex(max(0, combo.findData(value)))
+            combo.blockSignals(False)
         # Input colour space: the ask toggle, the remembered default, and the
         # space used when that default is "manual".
         self._cb_tiff_ask.blockSignals(True)
@@ -686,6 +717,12 @@ class SettingsDialog(QDialog):
         self._combo_awb_algo.setCurrentIndex(
             idx if idx >= 0 else self._combo_awb_algo.findData(AWB_DEFAULT))
         self._combo_awb_algo.blockSignals(False)
+
+    def _live_fc_scale(self):
+        ip = getattr(self._mw, "image_preview", None)
+        if ip is not None and hasattr(ip, "fc_scale"):
+            return ip.fc_scale()
+        return "bands", "negative"
 
     @staticmethod
     def _backend_merge_detail() -> str:
@@ -763,6 +800,13 @@ class SettingsDialog(QDialog):
         if (bool(self._cb_mono_raw.isChecked())
                 != bool(getattr(ccr_backend, "mono_raw", False))):
             self._mw.on_mono_raw_toggled(bool(self._cb_mono_raw.isChecked()))
+        # False colour scale: display-only.
+        staged_fc = (self._combo_fc_scale.currentData(),
+                     self._combo_zone_source.currentData())
+        if staged_fc != self._live_fc_scale():
+            ip = getattr(self._mw, "image_preview", None)
+            if ip is not None and hasattr(ip, "set_fc_scale"):
+                ip.set_fc_scale(*staged_fc)
         # Panel visibility: display-only, so no reprocess.
         if self._panel_checks:
             panel = self._mw.sliders_panel

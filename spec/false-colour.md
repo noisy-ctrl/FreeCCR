@@ -30,8 +30,8 @@ from a magenta tint to a pattern of dots, so both can be on at once.
 
 ## Non-goals
 
-- A newer stop-based scale, custom bands, a waveform
-  readout of the level under the cursor.
+- Custom bands, a waveform readout of the level under the cursor.
+  (A stop-based scale was added on 2026-10-23: see the last section.)
 - Anything in the exports, thumbnails, histogram, scopes or colour probe.
 
 ## Processing
@@ -89,3 +89,46 @@ Mac-wide font, "🧹 Dust Removal" became "🧹 Dust" (the panel keeps its full
 title), the group spacers went 5 → 3 px and the toolbar's button spacing
 2 → 1 px; `test_preview_toolbar_fits_at_the_smallest_window` checks it at
 1.06× the test font. No camera maker is named anywhere in the UI or docs.
+
+## 2026-10-23: stop zones
+
+A second scale, picked on the **False colour** button's right-click menu or
+in Settings → General → Preview, remembered between launches
+(`view/false_colour_scale` = `bands` | `zones`,
+`view/false_colour_zone_source` = `negative` | `picture`). Picking a scale from
+the menu turns False colour on.
+
+**Zones** (`core/false_colour.ZONES`): 15, in stops from mid grey, `[low,
+high)`: −6 (≤ −5.5, black), −5 … −2 whole stops, −1 (−1.5..−0.75), −½
+(−0.75..−0.25), 0 (±0.25, grey), +½, +1 (0.75..1.5), +2 … +5, +6 (≥ 5.5,
+white); colours after the user's reference (purple, blues, greens either side
+of grey; yellows, oranges, reds above). No product or brand is named.
+
+**What they read.** Such a scale needs a scene-referred (log) signal: on a
+finished, display-referred picture white is only log2(1/0.18) ≈ +2.47 stops
+over 18 % grey, so +3 … +6 can never appear (the same reason a monitor's stop
+scale wants a log feed, not a graded one). So by default the zones read the
+**negative**: a film negative recorded the scene in log.
+
+- `negative_stops(raw, base)`: the green record's density above the film
+  base, `d = log10(base_g / raw_g)` on the unconverted linear scan
+  (`CCRBackend.raw_preview`: the live raw before converting, a 1080 px
+  re-read after — the conversion is untouched), against a normally exposed
+  grey at **0.70** above base with film gamma **0.6**, i.e. one stop =
+  0.6·log10 2 = 0.18 density (the Cineon / lab-aim convention). The film base
+  itself is ≈ −3.9 stops: a negative holds nothing below it, which is why
+  −4 … −6 only show at the base. A 1 px Gaussian on the stops keeps grain
+  from speckling the zone edges (a reading only).
+- The base: the conversion's black point (`conversion_inputs["bw"][0]`), else
+  the sampled black point, else the frame's clearest film (each channel's
+  99.9th percentile). The legend says which.
+- The map is cached on the image (`_zone_cache`, uint8 zone indices; keyed on
+  file, slice ops, profile, conversion and black point), so a converted frame's
+  raw is re-read once, and cropped like the preview exactly as the HDR glow
+  layer is. The grade does not change it — by design, it is the exposure.
+- **The finished picture** (`picture_stops`): its luminance in linear light
+  (sRGB decoded, Rec.709 weights) against 18 %. Follows the grade; tops out
+  at zone +2. Positive mode always reads the picture.
+
+Legend: the 15 swatches in a row with their labels and one line saying what
+is read. Tests: `tests/test_false_colour_zones.py`.
