@@ -3836,7 +3836,7 @@ class SlidersPanel(QWidget):
                 # The roll fallback is the base the other frames measured when
                 # they were converted (spec/auto-black-point-always.md §3).
                 black, auto_source = ccr_backend.resolve_auto_black_point(
-                    auto_res, ccr_backend.recorded_roll_black(img))
+                    auto_res, ccr_backend.recorded_roll_black(img), img.resized_raw)
                 if black is None and not self._confirm_no_anchor_convert(
                         auto_res.summary()):
                     self.set_temporary_hint(
@@ -3905,6 +3905,14 @@ class SlidersPanel(QWidget):
                 self.set_temporary_hint(
                     f"Converted with auto black point: {auto_res.summary()}, "
                     f"{auto_res.confidence} confidence (outlined){wp_note}.", duration=7000)
+                if hasattr(mw.image_preview, "flash_auto_bp_strip"):
+                    mw.image_preview.flash_auto_bp_strip(auto_res.rect)
+                self._flash_wp_areas(awp_rec)
+            elif auto_source == "own":
+                self.set_temporary_hint(
+                    f"Converted with this frame's own border ({auto_res.summary()}): "
+                    "the sampled / roll black point is darker than parts of this "
+                    f"picture, so it can't be its film base{wp_note}.", duration=8000)
                 if hasattr(mw.image_preview, "flash_auto_bp_strip"):
                     mw.image_preview.flash_auto_bp_strip(auto_res.rect)
                 self._flash_wp_areas(awp_rec)

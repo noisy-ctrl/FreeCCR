@@ -2896,17 +2896,33 @@ class CCRBackend:
                    else (f"{result.confidence} confidence" if result is not None else "not run"))
             summary["notes"].append(f"{name}: {why}")
 
-    def resolve_auto_black_point(self, result, consensus=None):
+    def resolve_auto_black_point(self, result, consensus=None, raw=None):
         """(black_point, source) for one frame: its own measurement when
-        confident, else the sampled black point, else the roll consensus."""
-        from core.auto_black_point import LOW
-        if result is not None and result.black_point is not None and result.confidence != LOW:
-            return tuple(result.black_point), "auto"
+        confident, else the sampled black point, else the roll consensus.
+
+        With the frame's `raw`, a fallback that cannot be this frame's base -
+        more than 1 % of its picture is clearer than it, while the frame's own
+        (low-confidence) border is not - gives way to that border (source
+        "own"): the film base is the clearest thing on the film, so a base the
+        picture is clearer than turns those areas, and the whole conversion,
+        too dark. That is what a black point sampled on another roll or under
+        another light did."""
+        from core.auto_black_point import LOW, clearer_share, CLEARER_MAX
+        own = (tuple(result.black_point)
+               if result is not None and result.black_point is not None else None)
+        if own is not None and result.confidence != LOW:
+            return own, "auto"
         if self.black_point_bgr is not None:
-            return tuple(self.black_point_bgr), "sampled"
-        if consensus is not None:
-            return tuple(consensus), "roll"
-        return None, "none"
+            fallback, source = tuple(self.black_point_bgr), "sampled"
+        elif consensus is not None:
+            fallback, source = tuple(consensus), "roll"
+        else:
+            return None, "none"
+        if (raw is not None and own is not None
+                and clearer_share(raw, fallback) > CLEARER_MAX
+                and clearer_share(raw, own) <= CLEARER_MAX):
+            return own, "own"
+        return fallback, source
 
     def recorded_roll_black(self, img, min_frames=2):
         """For Convert Current: the median film base of the OTHER frames that
@@ -3097,7 +3113,7 @@ class CCRBackend:
             return cache[2]
         hl = None
         try:
-            black, _src = self.resolve_auto_black_point(find_rebate(raw))
+            black, _src = self.resolve_auto_black_point(find_rebate(raw), raw=raw)
             if black is not None:
                 hl = measure_highlights(raw, black, rect)
         except Exception:
@@ -3237,7 +3253,8 @@ class CCRBackend:
             step(0, i)                                    # detection
         kept = [(r, img.resized_raw) for r, img in zip(results, self.images) if r is not None]
         consensus = roll_check([r for r, _ in kept], [raw for _, raw in kept])
-        resolved = [self.resolve_auto_black_point(res, consensus) for res in results]
+        resolved = [self.resolve_auto_black_point(res, consensus, img.resized_raw)
+                    for res, img in zip(results, self.images)]
         highlights = [None] * total
         rects = [self._FIND] * total
         if use_awp:
@@ -3267,7 +3284,11 @@ class CCRBackend:
                     summary[res.confidence] += 1
                 else:
                     summary["fallback"] += 1
-                    if res is not None and res.reason:
+                    if source == "own":
+                        summary["notes"].append(
+                            "kept its own border: the fallback base is darker "
+                            "than parts of its picture")
+                    elif res is not None and res.reason:
                         summary["notes"].append(res.reason)
                 awp_rec = None
                 if use_awp:

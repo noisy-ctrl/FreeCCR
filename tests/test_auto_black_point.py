@@ -20,7 +20,7 @@ BASE = np.array([0.42, 0.35, 0.38]) * 65535
 
 
 def frame(base=BASE, h=720, w=1080, edges=("top", "bottom", "left", "right"),
-          seed=0, tilt=0.0, gap=None, clip_level=None):
+          seed=0, tilt=0.0, gap=None, clip_level=None, grain=0.01):
     """Synthetic raw scan: black holder, a clear-film border band (base +
     grain) on the given edges, and a denser textured image inside."""
     rng = np.random.default_rng(seed)
@@ -46,7 +46,7 @@ def frame(base=BASE, h=720, w=1080, edges=("top", "bottom", "left", "right"),
         import cv2
         M = cv2.getRotationMatrix2D((w / 2, h / 2), tilt, 1.0)
         img = cv2.warpAffine(img.astype(np.float32), M, (w, h)).astype(np.float64)
-    img *= 1 + 0.01 * rng.standard_normal(img.shape)          # grain
+    img *= 1 + grain * rng.standard_normal(img.shape)         # grain
     if gap is not None:                                        # light round the film
         img[2:20, 200:900] = gap
     if clip_level is not None:
@@ -293,3 +293,49 @@ def test_convert_current_falls_back_to_the_bases_other_frames_measured(backend, 
     low = RebateResult(None, LOW, reason="none")
     assert backend.resolve_auto_black_point(low, backend.recorded_roll_black(me)) == \
         ((11.0, 21.0, 31.0), "roll")
+
+
+# --- the base is the frame's brightest thing (2026-10-24) ---------------------
+
+def test_a_quiet_scan_whose_base_is_the_frames_maximum_is_not_clipped():
+    """On a trichrome merge (little grain, a holder that blocks all other
+    light) the clear film IS the frame's brightest pixel. That used to read as
+    "clipped" (within 2 % of the frame's max) on every such frame - all five
+    of the user's merges - and Convert fell back to a stale sampled black
+    point. Only a pile AT the ceiling is clipping."""
+    r = find_rebate(frame(grain=0.0005))
+    assert r.confidence == HIGH, r.reason
+    np.testing.assert_allclose(r.black_point, BASE, rtol=0.01)
+
+
+def test_a_pile_at_the_ceiling_is_still_clipping_and_named_in_array_order():
+    clip = BASE * np.array([0.97, 1.5, 1.5])       # channel 0 (blue, BGR) clips
+    r = find_rebate(frame(clip_level=clip))
+    assert r.confidence == LOW and "clipped" in r.reason and "B" in r.reason
+    assert "R" not in r.reason.split("clipped in")[1].split(":")[0]
+
+
+def test_a_fallback_darker_than_the_picture_gives_way_to_the_frames_own_border():
+    """resolve_auto_black_point with the raw: a sampled (or roll) black point
+    that more than 1 % of the picture is clearer than cannot be this frame's
+    base; the frame's own border, low confidence or not, is used instead."""
+    from core.ccr_backend import ccr_backend
+    raw = frame()
+    raw[300:420, 380:640] = (0.9 * BASE).astype(np.uint16)          # deep shadows, near base
+    own = RebateResult(tuple(BASE), LOW, "top", (0, 0, 1, 0.05), "border clipped")
+    saved = ccr_backend.black_point_bgr
+    try:
+        ccr_backend.black_point_bgr = tuple(0.5 * BASE)          # another roll's base
+        bp, src = ccr_backend.resolve_auto_black_point(own, None, raw)
+        assert src == "own" and bp == tuple(BASE)
+        # without the raw (or with a plausible fallback) nothing changes
+        assert ccr_backend.resolve_auto_black_point(own, None)[1] == "sampled"
+        ccr_backend.black_point_bgr = tuple(1.05 * BASE)
+        assert ccr_backend.resolve_auto_black_point(own, None, raw)[1] == "sampled"
+        ccr_backend.black_point_bgr = None
+        bp, src = ccr_backend.resolve_auto_black_point(own, tuple(0.5 * BASE), raw)
+        assert src == "own"
+        good = RebateResult(tuple(BASE), HIGH, "top", (0, 0, 1, 0.05), "2 edges agree")
+        assert ccr_backend.resolve_auto_black_point(good, None, raw)[1] == "auto"
+    finally:
+        ccr_backend.black_point_bgr = saved

@@ -93,3 +93,31 @@ skipped with a message.
 - Backend/panel: per-frame black points land in `conversion_inputs`; fallback
   uses the sampled point; the checkbox persists; the no-anchor warning is
   skipped with auto on.
+
+## Revision 2026-10-24: the base may be the frame's maximum
+
+Field report: Convert Current sometimes gave a near-black frame; sampling the
+Black Point by hand on that frame fixed it. On the user's trichrome merges
+(five frames, "Light balanced film base"), `find_rebate` found the right
+border on every frame (two agreeing edges, flat to 0.1-1 %) but called it
+**clipped**: the pick was within 2 % of the frame's brightest pixel in a
+channel (ratios 0.99), the "2 % anyway" part of the near-ceiling rule. On a
+quiet scan, where the holder blocks all other light and there is little
+grain, the clear film IS the frame's maximum, so that rule failed every such
+frame. Convert then fell back to the sampled black point, taken earlier on
+another frame and light, darker than this base, and everything clearer than
+it (most of the picture, in the linear two-point map) went to black.
+
+- Clipping is now a PILE at the ceiling: the pick's own pixels with >= 2 %
+  at >= 0.999 x the frame's max in a channel (`PILE_SHARE`, `Band.ceil_share`;
+  the user's frames: <= 0.07 %), or (as before) within 10 % of the ceiling in
+  a channel another edge clipped. Measured on the five frames: 4 high, 1
+  medium (one usable edge), each base its own.
+- Channel names in the reasons follow the array order, B G R (they said "R"
+  for channel 0, which is blue).
+- `CCRBackend.resolve_auto_black_point(result, consensus, raw)`: a fallback
+  (sampled or roll) that more than 1 % of the picture is clearer than
+  (`clearer_share` > `CLEARER_MAX`), while the frame's own low-confidence
+  border is not, gives way to that border, source `"own"` (a hint on Convert
+  Current, a note in Convert All's summary). A 40 % darker stale black point
+  left 23-58 % of the user's pictures clearer than it.

@@ -16,6 +16,8 @@ BAND_SPAN = 0.60          # band measured over the central 60 % of the edge
 MAX_SPREAD = 0.06         # flatness: IQR / median per channel
 CLIP_SHARE = 0.25         # >= 25 % of a band's pixels sitting at the frame's
                           # ceiling in a channel = clipped (grain never does that)
+PILE_SHARE = 0.02         # the picked band itself: >= 2 % of its pixels AT the
+                          # ceiling in a channel = clipping there (a pile)
 MIN_STEP = 1.02           # band must be >= 2 % brighter than the image inside it
 AGREE = 0.08              # two bands agree when every channel is within 8 %
 ROLL_JUMP = 0.35          # all channels off the roll consensus by > 35 % -> suspect
@@ -32,6 +34,7 @@ class Band:
     step: float                  # band luminance / inner luminance
     valid: bool = False
     why: str = ""
+    ceil_share: tuple = (0.0, 0.0, 0.0)   # share of its pixels at the ceiling, per channel
 
 
 @dataclass
@@ -105,6 +108,7 @@ def _band(raw, side, interior_p99, vmax):
         rect = ((w - b0) / w, lo / h, (w - a0) / w, hi / h)
     band = Band(side, med, spread, rect, step)
     allpx = np.concatenate(pix)
+    band.ceil_share = tuple(float(np.mean(allpx[:, c] >= 0.999 * vmax[c])) for c in range(3))
     if np.any(spread > MAX_SPREAD):
         band.why = "not an even strip"
     elif any(np.mean(allpx[:, c] >= 0.999 * vmax[c]) >= CLIP_SHARE for c in range(3)):
@@ -139,7 +143,7 @@ def find_rebate(raw) -> RebateResult:
     if not valid:
         clipped = [b for b in bands if b.why == "clipped"]
         if clipped:
-            chans = "/".join("RGB"[c] for c in range(3)
+            chans = "/".join("BGR"[c] for c in range(3)
                              if any(np.mean(b.value[c] >= 0.98 * vmax[c]) for b in clipped))
             return RebateResult(None, LOW, reason=f"border clipped in {chans or 'a channel'}: "
                                 "expose that channel shorter", bands=bands)
@@ -162,13 +166,18 @@ def find_rebate(raw) -> RebateResult:
         conf = MEDIUM
         reason = "one usable edge" if len(valid) == 1 else "edges disagree; brightest used"
     # A border at (or within reach of) the sensor ceiling is not a measurement:
-    # if any edge clipped, or the pick sits within 10 % of the ceiling in a
-    # channel where another edge clipped / 2 % anyway, fall back and say why.
-    names = "RGB"
+    # fall back and say why when the pick's own pixels pile up at the ceiling
+    # in a channel, or it sits within 10 % of the ceiling in a channel where
+    # another edge clipped. Merely being within 2 % of the frame's brightest
+    # pixel is NOT clipping: the film base is the clearest thing on the film,
+    # so on a quiet scan (a trichrome merge, a holder that blocks all other
+    # light) it IS the frame's maximum - that rule failed every such frame and
+    # Convert fell back to a stale sampled black point (dark conversions).
+    names = "BGR"                 # the scan's array order (black_point_bgr)
     clipped_ch = {c for b in bands if b.why == "clipped" for c in range(3)
                   if b.value[c] >= 0.98 * vmax[c]}
     near = [c for c in range(3)
-            if pick.value[c] >= 0.98 * vmax[c]
+            if pick.ceil_share[c] >= PILE_SHARE
             or (c in clipped_ch and pick.value[c] >= 0.90 * vmax[c])]
     if near:
         chans = "/".join(names[c] for c in near)
