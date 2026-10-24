@@ -22,6 +22,8 @@
     <string>????</string>
     <key>LSRequiresNativeExecution</key>
     <true/>
+    <key>NSCameraUsageDescription</key>
+    <string>FreeCCR's Live Capture Monitor shows your camera's live picture for framing and focusing.</string>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSRequiresAquaSystemAppearance</key>

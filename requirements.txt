@@ -6,6 +6,8 @@ rawpy
 tifffile
 imagecodecs
 requests
+# Scanlight control in File -> Live Capture Monitor (optional at run time)
+pyserial
 nuitka
 pyopencl
 # AI dust detection. The DirectML build runs the detector on any Windows GPU

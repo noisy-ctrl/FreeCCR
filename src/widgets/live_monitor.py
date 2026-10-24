@@ -606,6 +606,7 @@ class LiveCaptureMonitor(QWidget):
         port = str(_settings().value("live/port", "") or "")
         if port:
             self.light.set_auto_port(port)
+            self.light.rescan()                   # connect now, not on the next 3 s scan
         if hasattr(self.feed, "isRunning") and not self.feed.isRunning():
             self.feed.start()
         self._push_params()
@@ -617,7 +618,7 @@ class LiveCaptureMonitor(QWidget):
     def _on_permission(self, granted):
         if self._closing:
             return
-        if not granted:
+        if granted is False:
             self.canvas.set_message(
                 "Camera access was refused.\nAllow it in System Settings → Privacy & "
                 "Security → Camera (for the app that runs FreeCCR), then Find Cameras.")
@@ -968,7 +969,9 @@ class LiveCaptureMonitor(QWidget):
         elif kind == "none":
             self.canvas.set_message(
                 "No camera found.\nCheck the capture device is plugged in and the camera "
-                "is sending its HDMI picture, then Find Cameras.")
+                "is sending its HDMI picture, then Find Cameras.\nOn a Mac, the app that "
+                "runs FreeCCR also needs camera access: System Settings → Privacy & "
+                "Security → Camera.")
         elif kind == "lost":
             self.canvas.set_message("The camera stopped sending frames.\nFind Cameras to "
                                     "reconnect.")

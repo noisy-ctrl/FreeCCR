@@ -77,6 +77,8 @@ python -m nuitka \
     --include-package-data=imagecodecs \
     --include-data-dir="$PYOPENCL_CL_DIR=pyopencl/cl" \
     --enable-plugin=pyside6 \
+    --include-qt-plugins=permissions \
+    --include-package=serial \
     --include-data-dir=src/icons=icons \
     --include-data-files=src/core/x_tones.npz=core/x_tones.npz \
     --include-data-dir=LICENSES=LICENSES \

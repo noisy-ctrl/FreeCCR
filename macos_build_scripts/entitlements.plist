@@ -11,6 +11,10 @@
     <!-- Allow loading of dynamically linked libraries -->
     <key>com.apple.security.cs.disable-library-validation</key>
     <true/>
+    <!-- The camera, for File -> Live Capture Monitor (a hardened-runtime app
+         is refused camera access without it) -->
+    <key>com.apple.security.device.camera</key>
+    <true/>
     <!-- Allow debugging (optional, can remove for production) -->
     <key>com.apple.security.get-task-allow</key>
     <false/>

@@ -393,3 +393,15 @@ def test_file_menu_opens_one_monitor(monkeypatch):
     made[0].close()
     _app.processEvents()
     assert w._live_monitor is None
+
+
+def test_reconnects_to_the_remembered_port_on_opening():
+    lm._settings().setValue("live/port", "/dev/cu.usbmodem1")
+    mon, feed, light, dev = _monitor(connect=False)
+    try:
+        for _ in range(5):
+            _app.processEvents()
+        assert light.is_open() and light.port == "/dev/cu.usbmodem1"
+        assert ("find", None, "auto") in feed.log or any(e[0] == "find" for e in feed.log)
+    finally:
+        _close(mon)

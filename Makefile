@@ -29,6 +29,7 @@ build-windows: install-deps install-nuitka
 	--include-data-dir=src/icons=icons --windows-icon-from-ico=src/icons/freeccr_logo.ico \
 	--include-data-files=src/core/x_tones.npz=core/x_tones.npz \
 	--include-data-dir=LICENSES=LICENSES \
+	--include-package=serial \
 	--windows-console-mode=attach --output-filename=FreeCCR \
 	src/main.py
 

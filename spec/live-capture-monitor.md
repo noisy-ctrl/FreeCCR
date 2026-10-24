@@ -227,11 +227,17 @@ session-only (they describe one roll on one evening).
   device with `OPENCV_AVFOUNDATION_SKIP_AUTH=1`, because OpenCV can't ask
   from another thread: it prints "can not spin main run loop from other
   thread" and the camera fails to start.
-- Refused: the canvas says so and points to System Settings → Privacy &
-  Security → Camera. Running from source, the permission belongs to the
-  terminal app that started FreeCCR.
-- The macOS bundle's `Info.plist` gains `NSCameraUsageDescription`; without
-  it macOS refuses camera access to a bundled app.
+- Refused before (System Settings says no): the canvas says so and points
+  to System Settings → Privacy & Security → Camera. Running from source, the
+  permission belongs to the terminal app that started FreeCCR, and Qt's
+  request can't be trusted there (it needs the camera usage text in the
+  app's own Info.plist, which a plain Python has not got), so when the
+  status is undetermined the cameras are simply tried; "No camera found"
+  then also mentions camera access.
+- The macOS bundle's `Info.plist` gains `NSCameraUsageDescription`, the
+  entitlements `com.apple.security.device.camera` (hardened runtime), and
+  the build includes Qt's `permissions` plugins; without them macOS refuses
+  camera access to a bundled app.
 
 ### 5.3 Finding cameras and formats
 - **Find Cameras** (and the first open) probes indices 0..5 on the worker,
@@ -356,8 +362,10 @@ per frame with `cv2.LUT`:
 - **Highlight**: eyedropper on a neutral highlight in the picture.
 - **Mid Grey**: eyedropper on a neutral mid-tone (optional).
 - **Auto**: base = the brightest even band near the frame edges (Auto black
-  point's rebate search, tried on the feed first), else each channel's
-  99.5th percentile; highlight = each channel's 0.5th percentile inside the
+  point's rebate search, tried on the feed first), else the clearest film in
+  view: the frame averaged in 8×8 blocks, blocks touching bare light left
+  out, the median of the brightest tenth (a 99.5th percentile of single
+  pixels read noise as clearer film: +6 levels, a blue rebate); highlight = each channel's 0.5th percentile inside the
   frame guide if it is on, else the middle 80 %.
 - Until a base is set, Negative uses Auto.
 
@@ -393,7 +401,8 @@ coalesced to at most one per 16 ms, and the last value is always sent.
   says the port is open but silent and another program may have it, and the
   dot turns amber. It never retries in a loop.
 - The last connected port is reconnected automatically when it appears
-  (checked every 3 s on the worker).
+  (checked every 3 s on the worker), but not after the user's Disconnect,
+  until they connect again.
 - **Unplugged**: a read or write error closes the port, shows "Disconnected",
   and automatic reconnection resumes. (The reference's reader stopped on an
   error while the window still said connected.)
@@ -473,6 +482,7 @@ are worth confirming against its FPS readout and behaviour.
 | 13 | Edge amplify per RGB channel | amplified colour noise | luma only (§5.6) |
 | 14 | Warmth/tint gains above 1 and brightness as an added offset | one channel's highlights clip first; black lifts | normalised gains, a brightness curve, optional mid-grey point (§6) |
 | 15 | Invert / Levels buttons hidden when White is off | toolbar jumps | disabled with a reason (§3.2) |
+| 16 | Auto-connect to the remembered port every 3 s, even after Disconnect | the light reconnects by itself | a Disconnect stays disconnected until Connect (§7.3) |
 
 ## 11. Integration points
 - `ui/main_window.py`: the File menu action after **Hot Folder Tether…**; holds
@@ -526,6 +536,24 @@ are worth confirming against its FPS readout and behaviour.
 - **On your Mac** (a checklist for you, not run by me): FPS at 1080p60, the
   permission prompt, Retina sharpness at 1:1, connect / unplug / replug,
   trichrome timing with your camera and tether app.
+
+## 12a. As built (2026-10-24)
+- Modules: `core/capture_light.py` (protocol, Qt-free), `core/light_link.py`
+  (`LightLink` owns the port on its thread, `LightClient` for the GUI),
+  `core/capture_sequence.py`, `core/light_presets.py`, `core/live_feed.py`
+  (`LiveFeed` thread, `Processor`, geometry, filters), `core/live_negative.py`,
+  `widgets/live_canvas.py`, `widgets/live_monitor.py`.
+- Shipped tables on the §6.1 wedges (integer tables, so noise reads a little
+  higher than the float model): two-point 6.6 / 15.8 / 1.8 levels of cast,
+  three-point 5.3 / 9.7 / 1.5; noise 1.7–2.0 either way.
+- Per-frame cost on this 2-CPU container at 1080p: about 20 ms plain, 40–50
+  with Reduce noise and Edge amplify, 75–85 with everything on; a Mac M4 Pro
+  is several times faster. `FREECCR_LIVE_TIMING=1` prints each frame's time.
+- The sharpness meter is measured at most 30 times a second; false colour
+  is one colour-map lookup on the Rec.709 luma (a pixel within half a level
+  of a band edge may fall either side).
+- On connecting, panel levels set before the light was connected are sent;
+  an untouched panel (all 0) leaves the light as it is.
 
 ## 13. Decisions (2026-10-24, the user's answers)
 1. The light is named **Scanlight** (its model name). Its maker and any other

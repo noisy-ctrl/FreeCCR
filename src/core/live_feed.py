@@ -699,8 +699,11 @@ class LiveFeed(WorkerThread):
 # camera permission (macOS): asked on the main thread
 # --------------------------------------------------------------------------- #
 def request_camera_permission(app, done):
-    """Calls done(True/False). Granted or not applicable -> True; refused ->
-    False; undetermined -> asks the system, then calls back."""
+    """Calls done(True / False / None) on the main thread: True granted (or
+    not applicable), False refused before (System Settings), None asked but
+    not confirmed. Qt's macOS permission request needs the camera usage
+    text in the app's Info.plist; FreeCCR run from source has none, so its
+    answer can't be trusted and the cameras are simply tried (None)."""
     try:
         from PySide6.QtCore import QCameraPermission, Qt as _Qt
         perm = QCameraPermission()
@@ -712,11 +715,12 @@ def request_camera_permission(app, done):
             done(False)
             return
 
-        def answered(p):
+        def answered(*_a):
             try:
-                done(app.checkPermission(QCameraPermission()) == _Qt.PermissionStatus.Granted)
+                ok = app.checkPermission(QCameraPermission()) == _Qt.PermissionStatus.Granted
             except Exception:
-                done(True)
+                ok = False
+            done(True if ok else None)
         app.requestPermission(perm, app, answered)
     except Exception:
         done(True)
