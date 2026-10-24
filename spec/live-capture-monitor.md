@@ -1,6 +1,7 @@
 # Spec: Live Capture Monitor
 
-Status: DRAFT v1 for review (2026-10-24). No code yet.
+Status: REFINED v2 (2026-10-24): the user's answers to v1's open questions
+are in §13; the rest of v1 stands.
 Owner: FreeCCR
 Feature branch: `feature/live-capture-monitor`
 
@@ -8,8 +9,9 @@ Feature branch: `feature/live-capture-monitor`
 
 **File → Live Capture Monitor…** opens a window for camera scanning: the
 camera's live HDMI output (through a USB capture device) for framing and
-focusing, control of a USB-serial LED backlight (Red, Green, Blue, White,
-Infrared) and of the camera shutter it can trigger, and the three-exposure
+focusing, control of the **Scanlight** (the user's RGB LED film-scanning
+light, over USB serial: Red, Green, Blue, White, Infrared) and of the camera
+shutter it can trigger, and the three-exposure
 R → G → B capture that FreeCCR's 3-way merge is made for. It is built in
 FreeCCR's own look and conventions: the theme tokens, the canvas toolbar,
 slider rows, sections and right-click options popups.
@@ -27,7 +29,7 @@ combine page is included, now or later.
   second screen beside the main window.
 - A smooth, sharp live view at the feed's own rate, with framing aids (frame
   guide, alignment line), focusing aids (noise reduction, edge amplify,
-  peaking, a sharpness meter) and exposure aids (FreeCCR's histogram, clip
+  a sharpness meter) and exposure aids (FreeCCR's histogram, clip
   corners and false colour, on the live feed).
 - A rough positive of the white-lit negative for judging the frame.
 - Light control: connect, the five LED channels, presets, solo keys, idle
@@ -48,7 +50,8 @@ combine page is included, now or later.
   numbers are never handed to the main window's conversion (§6.4).
 - Detecting other tether apps by process name (the reference does; it only
   proves an app is open).
-- Naming the light, its maker or any other software, in the app or the repo.
+- Naming the light's maker or any other software, in the app or the repo.
+  (The light is called Scanlight, its model name; the user OK'd that.)
 
 ## 3. Window and layout
 
@@ -63,25 +66,27 @@ something (the channel sliders and rings, the overlays: frame guide white
 over a dark halo with faint thirds, alignment line cyan).
 
 ```
-┌ toolbar: Reduce noise  Edge amplify  Peaking  Sharpness  False colour ──┬ side panel ┐
+┌ toolbar: Reduce noise  Edge amplify  Sharpness  False colour ───────────┬ side panel ┐
 │          Frame guide  Alignment | Negative              [Fit ▾]  Panel │ histogram  │
-│                                                                        │ Light      │
+│                                                                        │ Scanlight  │
 │                          live view                                     │ LED        │
 │                                                                        │ Presets    │
 │  [sharpness readout]                                                   │ Capture    │
 ├ status: Camera [Camera 1 · 1920×1080 ▾] Find Cameras  59.9 fps · …    │ + Negative │
-│                               Tethering: off  [Start Tethering…]      │   Preview  │
+│                         Hot folder: off  [Start Hot Folder Tether…]   │   Preview  │
 └────────────────────────────────────────────────────────────────────────┴────────────┘
 ```
 
 ### 3.1 Opening and closing
-- File menu: **Live Capture Monitor…**, after **Tethering…**. One window; the
+- File menu: **Live Capture Monitor…**, after **Hot Folder Tether…**. One window; the
   action raises it if it is already open. Geometry remembered
   (`live/geometry`).
 - The window owns the camera and the serial port while open. Both are
   exclusive: another program can't use them meanwhile. Closing the window
-  stops the feed and closes the port; quitting FreeCCR closes the window.
-- Closing leaves the light as it was last set (open question 3).
+  stops a running sequence, **turns the light off** (every channel 0), then
+  closes the port and stops the feed; quitting FreeCCR closes the window the
+  same way.
+- On opening, the window asks about Hot Folder Tether (§3.8).
 
 ### 3.2 Toolbar (top of the canvas, like the main canvas's)
 Text toggles, checkable, styled as the main toolbar's False colour / HDR.
@@ -92,14 +97,14 @@ pattern: slider rows, value labels, Reset).
 |---|---|---|
 | Reduce noise | on | Strength |
 | Edge amplify | off | Amount, Radius |
-| Peaking | off | Threshold, Intensity, Width (open question 4) |
 | Sharpness | off | Draw Area…, Whole Frame, Reset Best |
 | False colour | off | none (exposure bands only, §5.8) |
 | Frame guide | off | Format (FreeCCR's film formats), Free, Size / Position / Rotation nudges, Reset |
 | Alignment | off | Place Line… (then click the picture) |
 | Negative | off | none (its controls are in the panel) |
 
-Then a stretch, the **zoom** combo (Fit, Fit Guide, 1:1, 2:1) and **Panel**
+No focus peaking: the user had it removed from the reference because Edge
+amplify works better. Then a stretch, the **zoom** combo (Fit, Fit Guide, 1:1, 2:1) and **Panel**
 (hides the side panel for a full-width view; remembered).
 
 **Negative** is disabled, not hidden, while White is at 0, with the tooltip
@@ -124,15 +129,15 @@ made the toolbar jump about.
 - **Camera** combo ("Camera 1 · 1920×1080"), **Find Cameras**, then muted:
   measured frames per second and the format the device actually gave
   (§5.3).
-- Right: **Tethering: off / on → folder, N captured** from the main window's
-  own Tethering, and **Start Tethering… / Stop Tethering** (calls
+- Right: **Hot folder: off / “folder”, N captured** from the main window's
+  Hot Folder Tether, and **Start Hot Folder Tether… / Stop** (calls
   `MainWindow.toggle_tethering`). The camera's tether app writes the frames;
-  FreeCCR's Tethering imports them.
+  Hot Folder Tether loads them.
 
 ### 3.5 Side panel (`theme.PANEL_W`, scrolls, FreeCCR headings and separators)
 1. **Histogram**: `HistogramWidget`, caption "Live", from the feed about four
    times a second, with its clip corners.
-2. **Light**: status dot, port combo (likely USB ports first), **Rescan**,
+2. **Scanlight**: status dot, port combo (likely USB ports first), **Rescan**,
    **Connect / Disconnect**; one muted line: "Responding · 5.1 V · 38 °C",
    "Port open but silent: another program may have it", "Not connected", or
    "Light control needs the pyserial package".
@@ -159,12 +164,27 @@ Window-scoped `QShortcut`s (`Qt.WindowShortcut`), so they do nothing while
 the main window is in front: **1 2 3 4** solo, **S** shoot, **Esc** stops a
 sequence, **F** Fit / 1:1. Qt doesn't fire a printable-key shortcut while a
 text field or spin box has focus, so typing a number never lights a channel
-(the reference's app-wide filter only spared plain text fields). Open
-question 6: should S and 1–4 also work from the main window?
+(the reference's app-wide filter only spared plain text fields). They mean
+nothing in the main window (the presets are light levels), so they are not
+there.
 
 ### 3.7 Settings (Settings → General → Live capture)
 - Dim the light when idle after N minutes (0 = never; default 5).
 - Video format: Automatic (default) / Prefer uncompressed / Prefer MJPEG.
+- Ask about Hot Folder Tether when the monitor opens (default on; §3.8).
+
+### 3.8 Hot Folder Tether prompt
+On opening the monitor (unless turned off in the prompt or Settings):
+- Not running: "Turn on Hot Folder Tether? The frames your camera's tether
+  app saves into a folder are loaded into FreeCCR as you shoot."
+  **Turn On…** / **Not Now**.
+- Running: "Hot Folder Tether is watching “Roll 12” (7 captured). Close that
+  session and start a new one for this scan?" **Start New…** /
+  **Keep Current**.
+- **Turn On…** and **Start New…** stop any running session
+  (`MainWindow.stop_tethering`) and start one (`enter_tethering`, with its
+  own folder picker and questions); cancelling the picker leaves it off.
+- A "Don't ask again" box in the prompt clears `live/ask_tether`.
 
 ## 4. Data model
 
@@ -176,13 +196,14 @@ QSettings only (FreeCCR's convention), under `live/`:
 | `live/camera_index` | last working camera index |
 | `live/video_format` | `auto` / `raw` / `mjpeg` |
 | `live/toggles` | JSON: which toolbar toggles were on |
-| `live/denoise`, `live/edge_amp`, `live/peaking` | JSON options dicts |
+| `live/denoise`, `live/edge_amp` | JSON options dicts |
 | `live/guide` | JSON `{cx, cy, w, h, angle, format}` in sensor fractions |
 | `live/align_x` | sensor fraction 0..1 |
 | `live/port` | last connected port name |
 | `live/presets` | JSON `{"presets": [{name, r, g, b, w, ir}], "selected": i}` |
 | `live/timing` | JSON `{focus_ms, pulse_ms, hold_ms, period_ms}` |
 | `live/idle_minutes` | int |
+| `live/ask_tether` | bool, default true |
 
 Nothing goes in catalogs or image settings. Negative Preview values are
 session-only (they describe one roll on one evening).
@@ -238,7 +259,7 @@ In order, at sensor resolution on the visible part only:
    and the Negative preview read this; the sharpness meter reads the fresh
    frame (§5.7).
 3. **Negative** LUT (§6), one `cv2.LUT` per channel.
-4. **Edge amplify** (§5.6) and **Peaking** (§5.6).
+4. **Edge amplify** (§5.6).
 5. Resize to the canvas's device pixels: `INTER_AREA` when shrinking,
    `INTER_LINEAR` when enlarging past 1:1.
 6. **False colour** bands on the displayed result (§5.8).
@@ -257,10 +278,6 @@ per-frame time is logged with `FREECCR_LIVE_TIMING=1`.
   values), the change added equally to R, G and B, so colour noise isn't
   amplified (the reference sharpened each channel). Amount 0–300 %
   (default 150), radius 0.5–3 px (default 1.2).
-- **Peaking**: a white halo on edges: `|Laplacian(luma)|` through a
-  smoothstep from Threshold to Threshold × 4, widened by Width (dilation),
-  scaled by Intensity and added to the displayed picture. The reference had
-  this code with no button; offered as a toggle (open question 4).
 
 ### 5.7 Sharpness meter
 - Score: variance of the Laplacian of the lightly blurred luma in the area
@@ -422,7 +439,7 @@ during the exposure and the frame mixes two colours. FreeCCR can't read the
 camera's setting live, so:
 - the Capture caption always shows the cycle time and "Hold must be longer
   than the camera's shutter time";
-- with Tethering on, the first frame that arrives after a Shoot is checked:
+- with Hot Folder Tether on, the first frame that arrives after a Shoot is checked:
   if its EXIF exposure time is longer than Hold, the caption turns to a
   warning naming both ("Hold 200 ms is shorter than the 1/4 s exposure").
 
@@ -456,11 +473,10 @@ are worth confirming against its FPS readout and behaviour.
 | 13 | Edge amplify per RGB channel | amplified colour noise | luma only (§5.6) |
 | 14 | Warmth/tint gains above 1 and brightness as an added offset | one channel's highlights clip first; black lifts | normalised gains, a brightness curve, optional mid-grey point (§6) |
 | 15 | Invert / Levels buttons hidden when White is off | toolbar jumps | disabled with a reason (§3.2) |
-| 16 | Peaking implemented with no button | dead code | a toggle, if wanted (§5.6) |
 
 ## 11. Integration points
-- `ui/main_window.py`: the File menu action after **Tethering…**; holds the
-  single window; closes it in `closeEvent`; exposes Tethering state for the
+- `ui/main_window.py`: the File menu action after **Hot Folder Tether…**; holds
+  the single window; closes it in `closeEvent`; exposes the tether state for the
   status strip and emits each newly tethered file's path (for §8.3).
 - New: `widgets/live_monitor.py` (window, toolbar, side panel, popups),
   `widgets/live_canvas.py` (painting, overlays, zoom, mouse),
@@ -511,19 +527,23 @@ are worth confirming against its FPS readout and behaviour.
   permission prompt, Retina sharpness at 1:1, connect / unplug / replug,
   trichrome timing with your camera and tether app.
 
-## 13. Open questions
-1. "Light" is the generic name used throughout; is that right, or do you
-   want the device named?
-2. A separate window (recommended, can sit on a second screen) or a page in
-   the main window?
-3. On closing the monitor: leave the light as it is (recommended), or turn it
-   off?
-4. Peaking: include it (the reference had it, unused)?
-5. Later, separately: FreeCCR's Tethering imports single frames, so a
-   trichrome triplet arrives as three. Group each three into one 3-way merge
-   as they land? That would be its own spec.
-6. S and 1–4: only in the monitor window (recommended), or from the main
-   window too?
+## 13. Decisions (2026-10-24, the user's answers)
+1. The light is named **Scanlight** (its model name). Its maker and any other
+   software are still not named.
+2. A **separate window**.
+3. Closing the monitor **turns the light off** (§3.1).
+4. **No peaking**: it was removed from the reference at the user's request
+   (Edge amplify works better).
+5. Opening the monitor **asks about Hot Folder Tether**, closing a running
+   session first if the user starts a new one (§3.8). The watch-folder
+   feature is renamed **Hot Folder Tether** (its own branch,
+   `ui/hot-folder-tether-name`).
+6. The keys are **monitor-window only** (§3.6).
+
+Still open, for later and separately: Hot Folder Tether loads each file as
+its own frame, so a trichrome shot arrives as three single-colour frames
+rather than one merged colour frame (as Open does with 3-way merge on).
+Grouping each three into one merge as they arrive would be its own spec.
 
 ## 14. Build order (one branch, one commit per step)
 1. Protocol, link and sequence (Qt-free, fully tested) with the Light, LED,
@@ -532,4 +552,5 @@ are worth confirming against its FPS readout and behaviour.
 3. View filters, sharpness meter, histogram / clip / false colour.
 4. Frame guide and alignment line.
 5. Negative preview.
-6. Settings group, File menu, build script and plist changes, CLAUDE.md.
+6. Settings group, File menu and the Hot Folder Tether prompt, build script
+   and plist changes, CLAUDE.md.
