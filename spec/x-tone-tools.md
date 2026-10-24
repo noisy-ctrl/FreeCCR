@@ -128,7 +128,8 @@ three tools run in numpy and are zeroed for the kernel, so parity is exact.
 ## UI
 
 Three sliders. Shown Highlights ⅃ directly under Highlights, Shadows L
-directly under Shadows, Contrast L ⅃ under Black Point; created (and in
+directly under Shadows, Contrast L ⅃ directly under Contrast (moved there
+from under Black Point on 2026-10-24); created (and in
 `ADJUSTMENT_KEYS`) after Black Point, so only the layout order differs. Label
 tooltip: what the tool does + "Right-click: options"; underlined when
 options are not default. Popup (`widgets/x_tone_popup.py`): the options

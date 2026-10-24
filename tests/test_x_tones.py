@@ -402,7 +402,8 @@ def test_sync_without_tone_group_keeps_target_options(panel, monkeypatch):
 
 def test_l_sliders_sit_under_the_controls_they_measure():
     """Highlights ⅃ directly under Highlights, Shadows L directly under
-    Shadows (shown order; the creation order the keys zip with is unchanged)."""
+    Shadows, Contrast L ⅃ directly under Contrast (shown order; the creation
+    order the keys zip with is unchanged)."""
     from PySide6.QtWidgets import QApplication
     QApplication.instance() or QApplication([])
     from widgets.sliders_panel import SlidersPanel
@@ -415,9 +416,11 @@ def test_l_sliders_sit_under_the_controls_they_measure():
                    for lay in (p.highlights_slider_layout, p.highlights_x_slider_layout,
                                p.white_point_slider_layout, p.shadows_slider_layout,
                                p.shadows_x_slider_layout, p.black_point_slider_layout,
-                               p.punch_x_slider_layout)))
+                               p.contrast_slider_layout, p.punch_x_slider_layout,
+                               p.saturation_slider_layout)))
     assert [t for _y, t in rows] == ["Highlights", "Highlights ⅃", "White Point", "Shadows",
-                                     "Shadows L", "Black Point", "Contrast L ⅃"]
+                                     "Shadows L", "Black Point", "Contrast", "Contrast L ⅃",
+                                     "Saturation"]
     keys = SlidersPanel.ADJUSTMENT_KEYS
     assert keys.index("highlights_x") > keys.index("black_point")      # zip order kept
 

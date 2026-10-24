@@ -1351,16 +1351,18 @@ class SlidersPanel(QWidget):
         scroll_layout.addLayout(self.brightness_slider_layout)
         scroll_layout.addLayout(self.gamma_slider_layout)
         # Shown order only (the creation order above is what ADJUSTMENT_KEYS
-        # zips with): Highlights ⅃ sits under Highlights and Shadows L under
-        # Shadows, each next to the plain control it is the richer version of.
+        # zips with): Highlights ⅃ sits under Highlights, Shadows L under
+        # Shadows and Contrast L ⅃ under Contrast (2026-10-24; it was under
+        # Black Point), each next to the plain control it is the richer
+        # version of.
         scroll_layout.addLayout(self.highlights_slider_layout)
         scroll_layout.addLayout(self.highlights_x_slider_layout)
         scroll_layout.addLayout(self.white_point_slider_layout)
         scroll_layout.addLayout(self.shadows_slider_layout)
         scroll_layout.addLayout(self.shadows_x_slider_layout)
         scroll_layout.addLayout(self.black_point_slider_layout)
-        scroll_layout.addLayout(self.punch_x_slider_layout)
         scroll_layout.addLayout(self.contrast_slider_layout)
+        scroll_layout.addLayout(self.punch_x_slider_layout)
         scroll_layout.addLayout(self.saturation_slider_layout)
         scroll_layout.addLayout(self.sat_rolloff_slider_layout)
         scroll_layout.addLayout(self.vibrance_slider_layout)
