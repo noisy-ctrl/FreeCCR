@@ -155,6 +155,8 @@ src/utils/unicode_path_utils.py → Cross-platform Unicode filename handling
 
 **Trichrome captures are their own device space**: in a 3-way merge each channel's sensitivity is the sensor's response times *its own* light, and the channel balance comes from three independent exposures — so a white-light camera profile does not describe it. The IT8 wizard can therefore take a **triplet** as its target (`it8_profile.decode_target_merged` sets `is_merged`/`merge_sources` on a bare `CCRImage`, so `read_image` merges it and everything downstream treats it as one raw), and `_read_merged` applies the active DCP/ICC in the same pipeline position as the RAW branch, with `as_shot_wb=None` (no source frame's metadata describes a merge — the profile's baked neutral does). Profiles record which space they describe (`AsShotNeutral`-style private tags: DCP 52525, ICC `CCRk`) and a mismatch logs once. See `spec/trichrome-camera-profile.md`.
 
+**Hot Folder Tether is the watch-folder tethering** (renamed 2026-10-24 from "Tethering"): File → **Hot Folder Tether…** / **Stop Hot Folder Tether**, banner "Hot folder tether: “folder” · N captured". It watches a folder the camera's own tether app saves into. Code identifiers stay `tether_*`. See `spec/camera-tethering.md`.
+
 **Unicode path handling**: Windows non-ASCII filenames require `normalize_unicode_path()` and `validate_unicode_path()` from `src/utils/unicode_path_utils.py`. Always validate paths before passing to image loaders.
 
 **Resource resolution**: `resource_path()` in `image_preview.py` handles both dev and Nuitka-bundled contexts. Nuitka embeds `src/icons/` and `LICENSES/` directories at build time.

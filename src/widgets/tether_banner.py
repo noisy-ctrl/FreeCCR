@@ -1,4 +1,4 @@
-"""Slim non-modal status strip shown while tethering (watch-folder) is active.
+"""Slim non-modal status strip shown while Hot Folder Tether (watch-folder) is active.
 
 Inserted into ImagePreview's own internal layout (see spec §9.1.5) — NOT wrapped
 around image_preview, which would break its parent().parent() chains.
@@ -53,5 +53,5 @@ class TetherBanner(QWidget):
 
     def set_status(self, folder, count, note=""):
         self._status.setText(
-            f"Tethering — “{folder}”  ·  {count} captured")
+            f"Hot folder tether: “{folder}”  ·  {count} captured")
         self._note.setText(note or "")

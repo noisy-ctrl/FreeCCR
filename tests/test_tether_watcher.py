@@ -350,3 +350,27 @@ def test_session_start_clears_bwpoint(tmp_path, monkeypatch):
         assert "No black point" in w.tether_banner._note.text()
     finally:
         w.stop_tethering()
+
+
+def test_named_hot_folder_tether(tmp_path, monkeypatch):
+    """The feature is called Hot Folder Tether in the menu, the banner and
+    its messages (spec/camera-tethering.md, renamed 2026-10-24)."""
+    from PySide6.QtWidgets import QFileDialog
+    from ui.main_window import MainWindow
+    from widgets.tether_banner import TetherBanner
+    w = MainWindow()
+    assert w.tether_action.text() == "Hot Folder Tether…"
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory",
+                        lambda *a, **k: str(tmp_path))
+    monkeypatch.setattr(w._settings, "setValue", lambda *a, **k: None)
+    w.enter_tethering()
+    try:
+        assert w.tether_action.text() == "Stop Hot Folder Tether"
+        assert w.tether_banner._status.text().startswith("Hot folder tether: ")
+    finally:
+        w.stop_tethering()
+    assert w.tether_action.text() == "Hot Folder Tether…"
+    b = TetherBanner()
+    b.set_status("Roll 1", 3)
+    assert b._status.text() == "Hot folder tether: “Roll 1”  ·  3 captured"
+    assert "Tethering" not in b._status.text()

@@ -780,7 +780,7 @@ class MainWindow(QMainWindow):
         open_folder_action = file_menu.addAction("Open Folder")
         open_folder_action.triggered.connect(self.open_folder)
 
-        self.tether_action = file_menu.addAction("Tethering…")
+        self.tether_action = file_menu.addAction("Hot Folder Tether…")
         self.tether_action.triggered.connect(self.toggle_tethering)
 
         file_menu.addSeparator()
@@ -1846,7 +1846,7 @@ class MainWindow(QMainWindow):
             existing = [e.name for e in os.scandir(folder)
                         if e.is_file() and is_supported(e.name)]
         except OSError as e:
-            QMessageBox.warning(self, "Tethering Error",
+            QMessageBox.warning(self, "Hot Folder Tether Error",
                                 f"Could not read the folder:\n\n{e}")
             return
         import_paths = []
@@ -1892,7 +1892,7 @@ class MainWindow(QMainWindow):
         self._tether_thread.start()
 
         self._tether_active = True
-        self.tether_action.setText("Stop Tethering")
+        self.tether_action.setText("Stop Hot Folder Tether")
         self.image_preview.show_tether_banner(
             self._tether_folder_label(), self._tether_count, self._tether_note())
 
@@ -1905,7 +1905,7 @@ class MainWindow(QMainWindow):
             self._dispatch_to_worker(p)
 
         self.sliders_panel.set_temporary_hint(
-            f"Tethering — watching “{self._tether_folder_label()}”. "
+            f"Hot folder tether: watching “{self._tether_folder_label()}”. "
             f"Captures appear here automatically.", duration=5000)
 
     def _dispatch_to_worker(self, path):
@@ -2052,9 +2052,9 @@ class MainWindow(QMainWindow):
             self._tether_save_timer = None
         self._stop_tether_worker()
         self.image_preview.hide_tether_banner()
-        self.tether_action.setText("Tethering…")
+        self.tether_action.setText("Hot Folder Tether…")
         ccr_backend.save_catalog()
-        self.sliders_panel.set_temporary_hint("Tethering stopped.", duration=3000)
+        self.sliders_panel.set_temporary_hint("Hot folder tether stopped.", duration=3000)
 
     def _stop_tether_worker(self):
         """Cancel + join the worker thread (mirrors _stop_loader_if_running)."""

@@ -1,5 +1,8 @@
 # Spec: Tethering (Watch-Folder Capture)
 
+> **Renamed 2026-10-24: "Hot Folder Tether".** The File menu item is **Hot Folder Tether…** / **Stop Hot Folder Tether**, the banner reads "Hot folder tether: “folder” · N captured", and the messages say "Hot folder tether". It watches a folder that the camera's own tether app saves into; the name says so. Code identifiers (`tether_*`) are unchanged.
+
+
 Status: REFINED v2
 Owner: FreeCCR
 Feature branch: `feature/tethering-watch-folder`
