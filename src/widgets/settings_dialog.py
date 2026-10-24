@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QAbstractSpinBox, QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog,
     QGroupBox, QSlider,
     QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMessageBox, QPushButton,
-    QScrollArea,
+    QScrollArea, QSpinBox,
     QStackedWidget, QVBoxLayout, QWidget,
 )
 
@@ -342,6 +342,38 @@ class SettingsDialog(QDialog):
             "these would edit sliders you cannot see, and they claim six single "
             "letters. While off the keys are not used at all."))
         lay.addWidget(grp_keys)
+
+        # File -> Live Capture Monitor (spec/live-capture-monitor.md §3.7)
+        grp_live = QGroupBox("Live capture")
+        gl = QVBoxLayout(grp_live)
+        gl.setSpacing(theme.GAP_ROW)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Dim the Scanlight when idle after"))
+        self._spin_live_idle = QSpinBox()
+        self._spin_live_idle.setRange(0, 60)
+        self._spin_live_idle.setSuffix(" min")
+        self._spin_live_idle.setSpecialValueText("never")
+        row.addWidget(self._spin_live_idle)
+        row.addStretch(1)
+        gl.addLayout(row)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Video format"))
+        self._combo_live_format = QComboBox()
+        for label, key in (("Automatic", "auto"), ("Prefer uncompressed", "raw"),
+                           ("Prefer MJPEG", "mjpeg")):
+            self._combo_live_format.addItem(label, key)
+        row.addWidget(self._combo_live_format, 1)
+        gl.addLayout(row)
+        self._cb_live_ask_tether = QCheckBox(
+            "Ask about Hot Folder Tether when the monitor opens")
+        gl.addWidget(self._cb_live_ask_tether)
+        gl.addWidget(self._muted(
+            "Dimming: the lit channels breathe low while nothing is used, and come "
+            "back when you move the pointer over the monitor, press a key, or the "
+            "picture changes. The video format applies from the next camera "
+            "opened; MJPEG's compression can hide or fake fine detail while "
+            "focusing."))
+        lay.addWidget(grp_live)
 
         lay.addStretch(1)
         return page
@@ -689,6 +721,15 @@ class SettingsDialog(QDialog):
             self._combo_preview_detail.findData(
                 getattr(ccr_backend, "preview_detail", "full"))))
         self._combo_preview_detail.blockSignals(False)
+        from PySide6.QtCore import QSettings
+        _st = QSettings("FreeCCR", "FreeCCR")
+        try:
+            self._spin_live_idle.setValue(int(_st.value("live/idle_minutes", 5)))
+        except (TypeError, ValueError):
+            self._spin_live_idle.setValue(5)
+        self._combo_live_format.setCurrentIndex(max(0, self._combo_live_format.findData(
+            str(_st.value("live/video_format", "auto") or "auto"))))
+        self._cb_live_ask_tether.setChecked(_st.value("live/ask_tether", True, type=bool))
         scale, source = self._live_fc_scale()
         for combo, value in ((self._combo_fc_scale, scale),
                              (self._combo_zone_source, source)):
@@ -807,6 +848,12 @@ class SettingsDialog(QDialog):
             ip = getattr(self._mw, "image_preview", None)
             if ip is not None and hasattr(ip, "set_fc_scale"):
                 ip.set_fc_scale(*staged_fc)
+        # Live capture: read by the monitor when it needs them.
+        from PySide6.QtCore import QSettings
+        _st = QSettings("FreeCCR", "FreeCCR")
+        _st.setValue("live/idle_minutes", int(self._spin_live_idle.value()))
+        _st.setValue("live/video_format", self._combo_live_format.currentData() or "auto")
+        _st.setValue("live/ask_tether", bool(self._cb_live_ask_tether.isChecked()))
         # Panel visibility: display-only, so no reprocess.
         if self._panel_checks:
             panel = self._mw.sliders_panel

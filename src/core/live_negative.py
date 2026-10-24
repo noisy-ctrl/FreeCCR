@@ -84,10 +84,29 @@ def _picture_area(frame, guide=None):
     return frame[h // 10: h - h // 10, w // 10: w - w // 10]
 
 
+def _brightest_film(frame):
+    """The clearest film in view: the frame averaged in 8x8 blocks (so noise
+    can't push it up the way a high percentile of single pixels does), blocks
+    touching bare light (sprocket holes, gaps) left out, then the median of
+    the brightest tenth."""
+    import cv2
+    h, w = frame.shape[:2]
+    k = 8 if min(h, w) >= 64 else 1
+    blocks = cv2.resize(frame, (max(1, w // k), max(1, h // k)), interpolation=cv2.INTER_AREA)
+    peak = cv2.dilate(frame, np.ones((3, 3), np.uint8)) if k > 1 else frame
+    peak = cv2.resize(peak, (blocks.shape[1], blocks.shape[0]), interpolation=cv2.INTER_NEAREST)
+    flat = blocks.reshape(-1, 3).astype(np.float64)
+    clear = peak.reshape(-1, 3).max(axis=1) < CLIP_LEVEL
+    keep = flat[clear] if clear.sum() >= 20 else flat
+    lum = keep.mean(axis=1)
+    top = keep[lum >= np.percentile(lum, 90)]
+    return tuple(float(x) for x in np.median(top, axis=0))
+
+
 def auto_points(frame, guide=None):
     """(base, highlight, note) from a BGR feed frame. The base is the
     brightest even border band (Auto black point's rebate search), else the
-    99.5th percentile of the pixels that aren't near white; the highlight
+    clearest film in view (`_brightest_film`); the highlight
     is each channel's 0.5th percentile of the picture area (the frame guide
     when on, else the middle 80 %)."""
     frame = np.asarray(frame)
@@ -101,11 +120,7 @@ def auto_points(frame, guide=None):
     except Exception:
         base = None
     if base is None:
-        flat = frame.reshape(-1, 3)[::7]
-        keep = flat[flat.max(axis=1) < CLIP_LEVEL]
-        if len(keep) < 100:
-            keep = flat
-        base = tuple(float(x) for x in np.percentile(keep, 99.5, axis=0))
+        base = _brightest_film(frame)
         note = "Film base: the brightest film in view (no clear border)"
     area = _picture_area(frame, guide).reshape(-1, 3)[::3]
     hi = tuple(float(x) for x in np.percentile(area, 0.5, axis=0))

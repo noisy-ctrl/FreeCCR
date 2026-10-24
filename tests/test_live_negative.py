@@ -124,3 +124,23 @@ def test_tables_apply_with_cv2_lut():
     lut = ln.tables((62, 128, 214), (14, 30, 70))
     frame = np.full((4, 4, 3), (62, 128, 214), np.uint8)
     assert cv2.LUT(frame, lut).max() == 0
+
+
+def test_fallback_base_is_not_pushed_up_by_noise_or_holes():
+    """No clean border band (holder edges, holes in the rebate): the base is
+    the clearest film's level, not a high percentile of noisy pixels (which
+    put it ~6 levels too bright and tinted the rebate blue)."""
+    rng = np.random.default_rng(5)
+    h, w = 540, 960
+    frame = np.empty((h, w, 3), np.float32)
+    frame[:] = (62, 128, 214)
+    frame[100:440, 150:810] = (30, 60, 120)
+    for x in range(160, 810, 70):
+        frame[45:75, x:x + 34] = 252
+        frame[465:495, x:x + 34] = 252
+    frame[:20] = 18
+    frame[-20:] = 18
+    frame += rng.normal(0, 2.2, frame.shape)
+    frame = np.clip(frame, 0, 255).astype(np.uint8)
+    base, hi, note = ln.auto_points(frame)
+    assert base == pytest.approx((62, 128, 214), abs=1.5)

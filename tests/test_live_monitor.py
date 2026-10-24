@@ -1,0 +1,395 @@
+#!/usr/bin/env python3
+"""The Live Capture Monitor window (spec/live-capture-monitor.md): opening
+from the File menu, the Hot Folder Tether prompt, the LED panel, presets and
+keys, a trichrome Shoot on a fake Scanlight, idle dimming, the Negative
+preview, and closing (light off, port and camera released)."""
+
+import os
+import sys
+import time
+
+import numpy as np
+import pytest
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+sys.path.insert(0, os.path.dirname(__file__))
+
+from PySide6.QtCore import QObject, Signal, QSettings, Qt  # noqa: E402
+from PySide6.QtTest import QTest  # noqa: E402
+from PySide6.QtWidgets import QApplication, QSpinBox  # noqa: E402
+
+_app = QApplication.instance() or QApplication([])
+
+from core import capture_light as cl  # noqa: E402
+from core import capture_sequence as cs  # noqa: E402
+from core import live_feed as lf  # noqa: E402
+from core.light_link import LightLink, LightClient  # noqa: E402
+from widgets import live_monitor as lm  # noqa: E402
+from test_live_capture_light import FakeDevice, FakeSerial  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def iso_settings(tmp_path, monkeypatch):
+    path = str(tmp_path / "live.ini")
+    monkeypatch.setattr(lm, "_settings", lambda: QSettings(path, QSettings.IniFormat))
+    return path
+
+
+class FakeFeed(QObject):
+    frame_ready = Signal()
+    cameras_found = Signal(list)
+    status = Signal(str, str)
+
+    def __init__(self):
+        super().__init__()
+        self.params = None
+        self.log = []
+        self.running = False
+        self.result = None
+        self.full = None
+        self.samples = {}
+        self.index, self.size, self.fourcc = 1, (1920, 1080), ""
+
+    def set_params(self, p):
+        self.params = p
+
+    def start(self):
+        self.running = True
+
+    def isRunning(self):
+        return self.running
+
+    def open_camera(self, i, fmt="auto"):
+        self.log.append(("open", i, fmt))
+
+    def find_cameras(self, pref=None, fmt="auto"):
+        self.log.append(("find", pref, fmt))
+
+    def take(self):
+        r, self.result = self.result, None
+        return r
+
+    def sample(self, sx, sy):
+        return self.samples.get("any")
+
+    def last_full_frame(self):
+        return self.full
+
+    def stop(self):
+        self.running = False
+        self.log.append(("stop",))
+
+    def wait(self, ms=0):
+        return True
+
+
+def _light():
+    dev = FakeDevice()
+    made = []
+
+    def factory():
+        s = FakeSerial(dev)
+        made.append(s)
+        return s
+    link = LightLink(serial_factory=factory, port_lister=lambda: ["/dev/cu.usbmodem1"],
+                     sleep=lambda s: None, available=True)
+    return LightClient(link=link, threaded=False), dev, made
+
+
+def _monitor(mw=None, connect=True):
+    feed = FakeFeed()
+    light, dev, made = _light()
+    mon = lm.LiveCaptureMonitor(main_window=mw, feed=feed, light=light)
+    mon._hot_folder_choice = lambda *a: ("keep", False)
+    mon.resize(1300, 820)
+    mon.show()
+    _app.processEvents()
+    if connect:
+        light.open_port("/dev/cu.usbmodem1")
+        light.link.tick()
+    return mon, feed, light, dev
+
+
+def _close(mon):
+    mon.close()
+    _app.processEvents()
+
+
+def test_led_groups_exclude_and_reach_the_light():
+    mon, feed, light, dev = _monitor()
+    try:
+        assert light.is_open() and light.state == "ok"
+        dev.written.clear()
+        mon.led_sliders["w"].setValue(200)
+        assert dev.written[-1] == cl.colour_packet({"w": 200})
+        assert mon.actions["negative"].isEnabled()
+        light.link._last_colour = -1e9
+        mon.led_sliders["g"].setValue(100)
+        assert mon.led_sliders["w"].value() == 0           # the other group goes off
+        assert not mon.actions["negative"].isEnabled()     # no white: no positive
+        assert mon.led_values["g"].text() == "39.2 %"
+    finally:
+        _close(mon)
+
+
+def test_solo_rings_and_keys_only_in_this_window_and_not_while_typing():
+    mon, feed, light, dev = _monitor()
+    try:
+        pre = mon._preset()
+        mon.rings["b"].click()
+        assert mon._levels == cl.solo(pre, "b")
+        mon.canvas.setFocus()
+        QTest.keyClick(mon.canvas, Qt.Key_1)
+        assert mon._levels == cl.solo(pre, "r")
+        spin = QSpinBox(mon)
+        spin.show()
+        spin.setFocus()
+        spin.selectAll()
+        _app.processEvents()
+        QTest.keyClick(spin, Qt.Key_2)
+        assert mon._levels == cl.solo(pre, "r")            # the digit went into the box
+        assert spin.value() == 2
+    finally:
+        _close(mon)
+
+
+def test_shoot_runs_the_trichrome_sequence_on_the_light():
+    mon, feed, light, dev = _monitor()
+    try:
+        mon._timing = cs.clean_timing({"focus_ms": 0, "pulse_ms": 10, "hold_ms": 0, "period_ms": 0})
+        mon.trichrome.setChecked(True)
+        pre = mon._preset()
+        dev.written.clear()
+        QTest.keyClick(mon.canvas, Qt.Key_S)
+        assert mon.sequence.running and mon.shoot_btn.text().startswith("Stop")
+        t0 = time.time()
+        while mon.sequence.running and time.time() - t0 < 5:
+            _app.processEvents()
+            light.link._last_colour = -1e9
+            light.link.tick()
+            time.sleep(0.005)
+        assert not mon.sequence.running and mon.shoot_btn.text().startswith("Shoot")
+        w = [p for p in dev.written if p != cl.fw_version_packet()]
+        colours = [p for p in w if p[1] == cl.H2D_SET_COLOUR]
+        assert colours[0] == cl.colour_packet(cl.solo(pre, "r"))
+        assert cl.colour_packet(cl.solo(pre, "g")) in colours
+        assert cl.colour_packet(cl.solo(pre, "b")) in colours
+        assert colours[-1] == cl.colour_packet({"w": pre["w"]})
+        assert sum(1 for p in w if p[1] == cl.H2D_SHUTTER) == 3
+    finally:
+        _close(mon)
+
+
+def test_shoot_needs_the_light():
+    mon, feed, light, dev = _monitor(connect=False)
+    try:
+        assert not mon.shoot_btn.isEnabled()
+        mon.shoot()
+        assert not mon.sequence.running
+    finally:
+        _close(mon)
+
+
+def test_hold_shorter_than_the_exposure_is_flagged(monkeypatch):
+    mon, feed, light, dev = _monitor()
+    try:
+        monkeypatch.setattr(cs, "exposure_seconds", lambda p: 0.25)
+        mon._await_exposure = True
+        mon._on_tether_captured("/x/DSCF0001.RAF")
+        txt = mon.capture_caption.text()
+        assert "200 ms" in txt and "1/4 s" in txt and "DSCF0001.RAF" in txt
+        mon._on_tether_captured("/x/DSCF0002.RAF")          # only the first is checked
+        assert "DSCF0001" in mon.capture_caption.text()
+    finally:
+        _close(mon)
+
+
+def test_idle_dims_then_wakes_exactly(iso_settings):
+    mon, feed, light, dev = _monitor()
+    try:
+        lm._settings().setValue("live/idle_minutes", 1)
+        mon.led_sliders["w"].setValue(220)
+        mon._last_use -= 61
+        mon._check_idle()
+        assert mon._sleeping == {"r": 0, "g": 0, "b": 0, "w": 220, "ir": 0}
+        assert "dimmed" in mon.light_status.text()
+        mon._breathe()
+        light.link._last_colour = -1e9
+        light.link.tick()
+        lvl = dev.written[-1][3 + 3]                          # W byte
+        assert 12 <= lvl <= 64
+        mon._used()
+        light.link._last_colour = -1e9
+        light.link.tick()
+        assert mon._sleeping is None
+        assert dev.written[-1] == cl.colour_packet({"w": 220})
+        lm._settings().setValue("live/idle_minutes", 0)       # never
+        mon._last_use -= 10_000
+        mon._check_idle()
+        assert mon._sleeping is None
+    finally:
+        _close(mon)
+
+
+def test_frames_histogram_and_the_negative_preview():
+    mon, feed, light, dev = _monitor()
+    try:
+        frame = np.full((540, 960, 3), (62, 128, 214), np.uint8)
+        frame[60:480, 80:880] = (25, 55, 110)
+        feed.full = frame
+        proc = lf.Processor()
+        feed.result = proc.process(frame, lf.ViewParams(canvas_w=960, canvas_h=540))
+        feed.frame_ready.emit()
+        _app.processEvents()
+        assert mon.canvas.result is not None
+        assert mon.histogram._data is not None
+        mon.led_sliders["w"].setValue(200)
+        mon.actions["negative"].setChecked(True)
+        assert mon._neg_tables is not None and feed.params.negative is not None
+        assert "Film base" in mon.neg_note.text()
+        # an eyedropper sample replaces the base
+        feed.samples["any"] = (60.0, 125.0, 210.0)
+        mon._on_neg_button("base")
+        assert mon.canvas.mode == "pick"
+        mon.canvas.picked.emit(100.0, 100.0)
+        assert mon._neg["base"] == (60.0, 125.0, 210.0)
+        mon.neg_sliders["temperature"].setValue(40)
+        assert feed.params.negative is not None
+        mon.led_sliders["w"].setValue(0)
+        assert not mon.actions["negative"].isChecked() and feed.params.negative is None
+    finally:
+        _close(mon)
+
+
+def test_closing_turns_the_light_off_and_releases_everything():
+    mon, feed, light, dev = _monitor()
+    mon.led_sliders["w"].setValue(180)
+    dev.written.clear()
+    _close(mon)
+    assert dev.written == [cl.colour_packet(cl.OFF)]
+    assert not light.link.is_open()
+    assert ("stop",) in feed.log
+
+
+def test_the_panel_fits_its_width():
+    mon, feed, light, dev = _monitor()
+    try:
+        assert mon.panel.minimumSizeHint().width() <= lm.theme.PANEL_W
+    finally:
+        _close(mon)
+
+
+def test_presets_save_as_and_persist(monkeypatch, iso_settings):
+    mon, feed, light, dev = _monitor()
+    try:
+        from PySide6.QtWidgets import QInputDialog
+        monkeypatch.setattr(QInputDialog, "getText", lambda *a, **k: ("Portra", True))
+        mon.led_sliders["r"].setValue(210)
+        mon._on_save_as()
+        assert mon.preset_combo.currentText() == "Portra"
+        assert mon.rings["r"].value == 210
+        stored = lm._settings().value("live/presets")
+        assert "Portra" in stored
+    finally:
+        _close(mon)
+
+
+# --------------------------------------------------------------------------- #
+# with FreeCCR's main window
+# --------------------------------------------------------------------------- #
+class _MW(QObject):
+    tether_captured = Signal(str)
+
+    def __init__(self, active=False):
+        super().__init__()
+        self._tether_active = active
+        self._tether_count = 7
+        self.calls = []
+
+    def _tether_folder_label(self):
+        return "Roll 12"
+
+    def stop_tethering(self):
+        self.calls.append("stop")
+        self._tether_active = False
+
+    def enter_tethering(self):
+        self.calls.append("enter")
+        self._tether_active = True
+
+    def toggle_tethering(self):
+        self.calls.append("toggle")
+
+
+@pytest.mark.parametrize("active,choice,want", [
+    (False, "start", ["enter"]), (True, "start", ["stop", "enter"]),
+    (False, "keep", []), (True, "keep", [])])
+def test_hot_folder_prompt(active, choice, want):
+    mw = _MW(active)
+    mon, feed, light, dev = _monitor(mw)
+    try:
+        seen = []
+        mon._hot_folder_choice = lambda a, l, c: (seen.append((a, l, c)) or (choice, False))
+        mon.ask_hot_folder()
+        assert mw.calls == want
+        assert seen == [(active, "Roll 12" if active else "", 7)]
+    finally:
+        _close(mon)
+
+
+def test_dont_ask_again_is_remembered():
+    mw = _MW()
+    mon, feed, light, dev = _monitor(mw)
+    try:
+        asked = []
+        mon._hot_folder_choice = lambda *a: (asked.append(1) or ("keep", True))
+        mon.ask_hot_folder()
+        mon.ask_hot_folder()
+        assert asked == [1]
+    finally:
+        _close(mon)
+
+
+def test_status_strip_shows_the_hot_folder():
+    mw = _MW(active=True)
+    mon, feed, light, dev = _monitor(mw)
+    try:
+        mon._refresh_status_strip()
+        assert mon.tether_label.text() == "Hot folder: “Roll 12”, 7 captured"
+        assert mon.tether_btn.text() == "Stop Hot Folder Tether"
+        mon.tether_btn.click()
+        assert mw.calls == ["toggle"]
+    finally:
+        _close(mon)
+
+
+def test_file_menu_opens_one_monitor(monkeypatch):
+    from ui.main_window import MainWindow
+    made = []
+
+    class Light(LightClient):
+        def __init__(self):
+            link = LightLink(serial_factory=lambda: FakeSerial(FakeDevice()),
+                             port_lister=lambda: [], sleep=lambda s: None, available=True)
+            super().__init__(link=link, threaded=False)
+
+    real = lm.LiveCaptureMonitor
+
+    def make(main_window=None):
+        m = real(main_window=main_window, feed=FakeFeed(), light=Light())
+        m._hot_folder_choice = lambda *a: ("keep", False)
+        made.append(m)
+        return m
+    monkeypatch.setattr(lm, "LiveCaptureMonitor", make)
+    w = MainWindow()
+    assert w.live_monitor_action.text() == "Live Capture Monitor…"
+    acts = [a.text() for a in w.menuBar().actions()[0].menu().actions()]
+    assert acts.index("Live Capture Monitor…") == acts.index("Hot Folder Tether…") + 1
+    w.live_monitor_action.trigger()
+    w.live_monitor_action.trigger()
+    assert len(made) == 1 and w._live_monitor is made[0]
+    made[0].close()
+    _app.processEvents()
+    assert w._live_monitor is None

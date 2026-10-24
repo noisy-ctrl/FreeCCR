@@ -168,8 +168,13 @@ class _AppWideHook(QObject):
 
 
 class MainWindow(QMainWindow):
+    # A file Hot Folder Tether just loaded (its path). The Live Capture
+    # Monitor checks the first one after a Shoot against its Hold time.
+    tether_captured = Signal(str)
+
     def __init__(self):
         super().__init__()
+        self._live_monitor = None
         self.setWindowTitle("FreeCCR")
         self.setGeometry(100, 100, 1860, 1080)
         app_icon = QIcon("./icons/freeccr_logo.png")
@@ -505,6 +510,10 @@ class MainWindow(QMainWindow):
             # before persisting, so no capture is mid-write into a locked catalog.
             if self._tether_active:
                 self.stop_tethering()
+            # The live monitor turns the Scanlight off and releases the
+            # camera and the serial port.
+            if self._live_monitor is not None:
+                self._live_monitor.close()
             # Stop any in-flight dust model download / detection thread so a
             # running QThread can't abort the process at teardown.
             if hasattr(self, "dust_panel"):
@@ -782,6 +791,10 @@ class MainWindow(QMainWindow):
 
         self.tether_action = file_menu.addAction("Hot Folder Tether…")
         self.tether_action.triggered.connect(self.toggle_tethering)
+
+        # The camera's live view and the Scanlight (spec/live-capture-monitor.md)
+        self.live_monitor_action = file_menu.addAction("Live Capture Monitor…")
+        self.live_monitor_action.triggered.connect(self.open_live_monitor)
 
         file_menu.addSeparator()
         export_action = file_menu.addAction("Export…")
@@ -1796,6 +1809,25 @@ class MainWindow(QMainWindow):
                 else "Nothing to open",
                 f"These command-line paths could not be opened:\n\n{shown}")
 
+    # --- Live Capture Monitor (spec/live-capture-monitor.md) ---------------
+    def open_live_monitor(self):
+        """One window: raised if it is already open."""
+        mon = self._live_monitor
+        if mon is None:
+            from widgets.live_monitor import LiveCaptureMonitor
+            mon = LiveCaptureMonitor(main_window=self)
+            mon.closed.connect(self._on_live_monitor_closed)
+            self._live_monitor = mon
+        mon.show()
+        mon.raise_()
+        mon.activateWindow()
+        return mon
+
+    def _on_live_monitor_closed(self):
+        mon, self._live_monitor = self._live_monitor, None
+        if mon is not None:
+            mon.deleteLater()
+
     # --- Tethering (watch-folder capture) ---------------------------------
     def toggle_tethering(self):
         if self._tether_active:
@@ -1961,6 +1993,7 @@ class MainWindow(QMainWindow):
         name = getattr(img, "display_name", None) or os.path.basename(img.file_path)
         if self._tether_active:
             self._tether_count += 1
+            self.tether_captured.emit(img.file_path)
             self.image_preview.show_tether_banner(
                 self._tether_folder_label(), self._tether_count, self._tether_note())
             self.sliders_panel.set_temporary_hint(f"Captured {name}", duration=2500)
