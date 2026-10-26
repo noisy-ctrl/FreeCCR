@@ -21,10 +21,11 @@ LABELS = {"colour": "Colour · white light",
 SHORT = {"colour": "colour", "trichrome": "trichrome", "bw": "B&W"}
 DEFAULT = "colour"
 
-# A frame lit by one LED colour puts most of its signal in that channel: about
-# 0.7-0.9 of the R+G+B sum (the other photosites see only the LED's skirt).
-# White light through an orange negative peaks in red at ~0.45-0.5, so 0.6
-# separates them. A reasoned estimate, to be confirmed on real triplets.
+# A frame lit by one LED colour puts most of its signal in that channel.
+# Measured on 30 real trichrome RAFs (Bayer, 2026-10-26): red frames 0.85,
+# green 0.70-0.74, blue 0.68-0.70. The three frames of a shot summed (light
+# with all three LEDs in it) peak at 0.33-0.44, and white light through an
+# orange negative leads in red at about 0.45-0.5, so 0.60 sits between.
 LIGHT_SHARE_MIN = 0.60
 STALL_S = 30.0
 NAMES = ("red", "green", "blue")
@@ -130,8 +131,10 @@ def light_shares(path):
             if is_monochrome_sensor(raw.num_colors, raw.color_desc,
                                     getattr(raw, "raw_pattern", None)):
                 return None
-            mosaic = np.asarray(raw.raw_image_visible)[::5, ::5]
-            colors = np.asarray(raw.raw_colors_visible)[::5, ::5]
+            # copies: these are views into LibRaw's buffer, which is freed
+            # when the file closes (reading a view after that segfaults)
+            mosaic = np.array(raw.raw_image_visible[::5, ::5], copy=True)
+            colors = np.array(raw.raw_colors_visible[::5, ::5], copy=True)
             black = list(raw.black_level_per_channel)
             desc = bytes(raw.color_desc).decode("ascii", "ignore").upper()
         return shares_from_mosaic(mosaic, colors, desc, black)

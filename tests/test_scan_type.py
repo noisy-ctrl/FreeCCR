@@ -96,6 +96,47 @@ def test_judge_a_triplet():
     assert st.judge_triplet([None, green, None])[0]        # mono / unreadable: not judged
 
 
+def test_measured_triplets_pass_and_their_white_sum_fails():
+    """Shares measured on the user's 30 trichrome RAFs (Bayer, 2026-10-26):
+    the weakest single-LED frame (blue) reads 0.68, and the three frames of a
+    shot summed (light containing all three LEDs) peak at 0.44, so 0.60 sits
+    between them with room either side."""
+    red, green, blue = (0.85, 0.11, 0.04), (0.08, 0.70, 0.21), (0.04, 0.27, 0.68)
+    assert st.judge_triplet([red, green, blue])[0]
+    for summed in ((0.33, 0.35, 0.32), (0.20, 0.40, 0.40), (0.23, 0.33, 0.44)):
+        assert st.describe(summed) == "lit by white or mixed light"
+        assert not st.judge_triplet([red, summed, blue])[0]
+
+
+def test_light_shares_reads_the_mosaic_before_the_file_closes(monkeypatch):
+    """rawpy's raw_image_visible / raw_colors_visible are views into LibRaw's
+    buffer, freed when the file closes; reading them afterwards segfaulted on
+    a real RAF. Here closing wipes the buffer, so a view would read zeros."""
+    import types
+    m, c = _bayer(1200, 7000, 1500)
+    mosaic, colors = m.astype(np.uint16), c.astype(np.uint8)
+
+    class FakeRaw:
+        num_colors = 3
+        color_desc = b"RGBG"
+        raw_pattern = np.array([[0, 1], [3, 2]])
+        black_level_per_channel = [512] * 4
+        raw_image_visible = mosaic
+        raw_colors_visible = colors
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            mosaic[...] = 0          # the buffer is gone
+            colors[...] = 0
+            return False
+
+    monkeypatch.setitem(sys.modules, "rawpy", types.SimpleNamespace(imread=lambda p: FakeRaw()))
+    shares = st.light_shares("frame.RAF")
+    assert shares is not None and st.describe(shares) == "lit green"
+
+
 # --------------------------------------------------------------------------- #
 # the worker
 # --------------------------------------------------------------------------- #

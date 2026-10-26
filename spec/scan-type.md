@@ -108,8 +108,19 @@ k as its largest share and at least 0.60 of R + G + B (white light through
 an orange negative leads in red at about 0.45-0.5, so it fails). A
 monochrome sensor or an unreadable file isn't judged. A triplet that fails
 (a stray white frame, an order shifted by a missed shot) is not merged: it
-becomes a greyed-out tile (§5.2) saying which frame looks out of place. The
-0.60 is a reasoned estimate, to be confirmed on real triplets.
+becomes a greyed-out tile (§5.2) saying which frame looks out of place.
+
+Measured on the user's 30 trichrome RAFs (9 shots over two light settings,
+2026-10-26): every shot passes; red frames read 0.85, green 0.70-0.74, blue
+0.68-0.70 (the weakest). The three frames of a shot summed, a stand-in for
+light with all three LEDs on, peak at 0.33-0.44 and fail. So 0.60 has about
+0.08 of room above it and 0.16 below on this camera. A camera whose colour
+filters overlap more would lower the single-LED shares; the threshold is one
+constant (`LIGHT_SHARE_MIN`) if another setup needs it.
+
+The check copies the mosaic out of the RAW before the file closes: rawpy's
+`raw_image_visible` is a view into LibRaw's buffer, and reading it after the
+file closed crashed the app on the first real RAF.
 
 ### 5.4 Switching type mid-session
 A part-filled triplet when switching away from trichrome is loaded as single
