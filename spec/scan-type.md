@@ -110,7 +110,7 @@ monochrome sensor or an unreadable file isn't judged. A triplet that fails
 (a stray white frame, an order shifted by a missed shot) is not merged: it
 becomes a greyed-out tile (§5.2) saying which frame looks out of place.
 
-Measured on the user's 30 trichrome RAFs (9 shots over two light settings,
+Measured on the user's 30 trichrome RAFs (10 shots over two light settings,
 2026-10-26): every shot passes; red frames read 0.85, green 0.70-0.74, blue
 0.68-0.70 (the weakest). The three frames of a shot summed, a stand-in for
 light with all three LEDs on, peak at 0.33-0.44 and fail. So 0.60 has about
