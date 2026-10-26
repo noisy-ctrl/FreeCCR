@@ -504,12 +504,15 @@ class LiveFeed(WorkerThread):
     latest FrameResult and clears the notice."""
 
     frame_ready = Signal()
-    cameras_found = Signal(list)       # [(index, width, height), ...]
+    cameras_found = Signal(list)       # [(index, width, height), ...]  (OpenCV devices)
     status = Signal(str, str)          # kind, text: searching/open/none/lost/closed
 
     def __init__(self, opener=None, clock=time.monotonic, parent=None):
         super().__init__(parent)
         self._opener = opener or _cv_open
+        # Other sources by key prefix: "usb" -> UsbCamera.frame_source
+        # (spec/capture-routes.md §5.3). A source's key is a str "prefix:…".
+        self.sources = {}
         self._clock = clock
         self._lock = threading.Lock()
         self._cmds = []
@@ -532,11 +535,14 @@ class LiveFeed(WorkerThread):
         with self._lock:
             return self._params
 
-    def open_camera(self, index, fmt="auto"):
-        self._command(("open", int(index), fmt))
+    def open_camera(self, key, fmt="auto"):
+        """An OpenCV device index (int) or a source key ("usb:…")."""
+        self._command(("open", key if isinstance(key, str) else int(key), fmt))
 
-    def find_cameras(self, preferred=None, fmt="auto"):
-        self._command(("find", preferred, fmt))
+    def find_cameras(self, preferred=None, fmt="auto", open_found=True):
+        """Probe the OpenCV devices; open the preferred (or first) one unless
+        `open_found` is False (another source is wanted)."""
+        self._command(("find", preferred, fmt, open_found))
 
     def close_camera(self):
         self._command(("close",))
@@ -587,10 +593,10 @@ class LiveFeed(WorkerThread):
                     cap = self._release(cap)
                     found = self._probe(cmd[1], cmd[2])
                     self.cameras_found.emit(found)
-                    if found:
+                    if found and cmd[3]:
                         idx = cmd[1] if cmd[1] in [f[0] for f in found] else found[0][0]
                         cap = self._open(idx, cmd[2])
-                    else:
+                    elif not found:
                         self.status.emit("none", "")
             if self._stop:
                 break
@@ -604,6 +610,10 @@ class LiveFeed(WorkerThread):
                 ok, frame = False, None
             now = self._clock()
             if not ok or frame is None or frame.ndim != 3:
+                alive = getattr(cap, "alive", None)
+                if alive is not None and alive():
+                    fails_since = None        # a source pausing (opening, capturing)
+                    continue
                 fails_since = fails_since or now
                 if now - fails_since >= LOST_AFTER_S:
                     cap = self._release(cap)
@@ -633,9 +643,18 @@ class LiveFeed(WorkerThread):
         self._release(cap)
 
     def _open(self, index, fmt):
-        self.status.emit("searching", f"Opening camera {index}…")
+        source = None
+        if isinstance(index, str):
+            source = self.sources.get(index.split(":", 1)[0])
+        if isinstance(index, str):
+            self.status.emit("searching", "Opening the camera…")
+        else:
+            self.status.emit("searching", f"Opening camera {index}…")
         try:
-            cap = self._opener(index, fmt)
+            if isinstance(index, str):
+                cap = source(index, fmt) if source is not None else None
+            else:
+                cap = self._opener(index, fmt)
         except Exception:
             cap = None
         if cap is None:
@@ -646,6 +665,8 @@ class LiveFeed(WorkerThread):
             self.size = (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
         except Exception:
             self.size = None
+        if self.size and min(self.size) <= 0:
+            self.size = None                  # not known until the first frame
         self.fourcc = fourcc_text(cap)
         with self._lock:
             self.processor.denoiser.reset()

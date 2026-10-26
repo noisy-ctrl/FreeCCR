@@ -5,10 +5,15 @@ presets, the shutter and the trichrome sequence, in FreeCCR's own look.
 A separate, non-modal window. It owns the camera and the serial port while
 open; closing it stops a running sequence, turns the light off, closes the
 port and stops the feed. On opening it asks about Hot Folder Tether.
+
+A camera on its USB cable (spec/capture-routes.md) is listed beside the
+capture devices: its live view feeds the same picture tools, and as the
+Shutter it fires over USB and its files are brought into the hot folder.
 """
 import json
 import math
 import os
+import sys
 import time
 
 from PySide6.QtCore import Qt, QTimer, Signal, QSettings, QEvent, QPointF, QRectF
@@ -18,6 +23,7 @@ from PySide6.QtWidgets import (QWidget, QFrame, QHBoxLayout, QVBoxLayout, QLabel
                                QScrollArea, QSlider, QMenu, QInputDialog, QMessageBox,
                                QFileDialog, QApplication)
 
+from core import camera_backends as cb
 from core import capture_light as cl
 from core import capture_sequence as cs
 from core import light_presets as lp
@@ -209,7 +215,7 @@ class LiveCaptureMonitor(QWidget):
 
     closed = Signal()
 
-    def __init__(self, main_window=None, feed=None, light=None, parent=None):
+    def __init__(self, main_window=None, feed=None, light=None, usb=None, parent=None):
         super().__init__(parent, Qt.Window)
         self.setWindowTitle("Live Capture Monitor")
         self.setAttribute(Qt.WA_DeleteOnClose, False)
@@ -230,6 +236,12 @@ class LiveCaptureMonitor(QWidget):
         self._await_exposure = False
         self._ring_anim = None
         self._popup = None
+        self._cv_found = []              # [(index, w, h)] capture devices
+        self._usb_found = []             # [(key, label)] USB cameras
+        self._want_key = None            # the camera to open once it is listed
+        self._usb_model = ""
+        self._usb_dest = None
+        self._exposure = {}
 
         st = _settings()
         self._toggles = _json_setting("live/toggles", {"denoise": True})
@@ -245,8 +257,15 @@ class LiveCaptureMonitor(QWidget):
             from core.light_link import LightClient
             light = LightClient()
         self.light = light
+        if usb is None:
+            from core.usb_camera import UsbCamera
+            usb = UsbCamera()
+        self.usb = usb
+        if hasattr(self.feed, "sources"):
+            self.feed.sources["usb"] = self.usb.frame_source
         self.sequence = cs.CaptureSequence(_SequenceLight(self), on_step=self._on_step,
                                            on_finished=self._on_sequence_finished)
+        self._usb_shutter = _UsbShutter(self)
 
         self._build()
         self._load_view_state()
@@ -375,6 +394,16 @@ class LiveCaptureMonitor(QWidget):
         self.camera_info = _muted("")
         self.camera_info.setWordWrap(False)
         r.addWidget(self.camera_info)
+        self.cam_zoom_combo = QComboBox()
+        self.cam_zoom_combo.setToolTip("The camera's own live view magnification, "
+                                       "for focusing")
+        self.cam_zoom_combo.setVisible(False)
+        r.addWidget(self.cam_zoom_combo)
+        self.release_btn = QPushButton("Release Camera")
+        self.release_btn.setToolTip("macOS's own camera service is holding the camera: "
+                                    "end its hold so FreeCCR can open it")
+        self.release_btn.setVisible(False)
+        r.addWidget(self.release_btn)
         r.addStretch(1)
         self.tether_label = _muted("Hot folder: off")
         self.tether_label.setWordWrap(False)
@@ -499,6 +528,20 @@ class LiveCaptureMonitor(QWidget):
         r.addWidget(self.scan_combo, 1)
         r.addWidget(self.timing_btn)
         lay.addLayout(r)
+        r = QHBoxLayout()
+        theme.apply_button_row(r)
+        lab = QLabel("Shutter")
+        r.addWidget(lab)
+        self.shutter_combo = QComboBox()
+        theme.shrinkable_combo(self.shutter_combo)
+        self.shutter_combo.setToolTip(
+            "What fires the camera.\nScanlight: its release output, on the Timing "
+            "settings.\nUSB: the camera over its USB cable; each shot waits for its "
+            "file, which is brought into the hot folder. A single shot then doesn't "
+            "need the Scanlight; trichrome does (it sets the colours).")
+        self.shutter_combo.addItem("Scanlight", "scanlight")
+        r.addWidget(self.shutter_combo, 1)
+        lay.addLayout(r)
         self.shoot_btn = QPushButton("Shoot   (S)")
         self.shoot_btn.setFixedHeight(theme.CONTROL_H_LG)
         theme.style_button(self.shoot_btn, "primary")
@@ -568,6 +611,17 @@ class LiveCaptureMonitor(QWidget):
         self.feed.status.connect(self._on_feed_status)
         self.camera_combo.activated.connect(self._on_camera_chosen)
         self.find_btn.clicked.connect(self.find_cameras)
+        self.usb.cameras_found.connect(self._on_usb_cameras)
+        self.usb.state.connect(self._on_usb_state)
+        self.usb.file_saved.connect(self._on_usb_file)
+        self.usb.file_skipped.connect(self._on_usb_skipped)
+        self.usb.exposure_changed.connect(self._on_exposure)
+        self.usb.zoom_levels.connect(self._on_zoom_levels)
+        self.usb.fire_failed.connect(self._on_fire_failed)
+        self.shutter_combo.activated.connect(self._on_shutter_chosen)
+        self.cam_zoom_combo.activated.connect(
+            lambda i: self.usb.set_zoom(self.cam_zoom_combo.itemData(i)))
+        self.release_btn.clicked.connect(self._on_release_camera)
         self.light.state_changed.connect(self._on_light_state)
         self.light.telemetry_changed.connect(lambda t: self._refresh_light_status())
         self.light.ports_changed.connect(self._on_ports)
@@ -623,6 +677,8 @@ class LiveCaptureMonitor(QWidget):
             self.light.rescan()                   # connect now, not on the next 3 s scan
         if hasattr(self.feed, "isRunning") and not self.feed.isRunning():
             self.feed.start()
+        if hasattr(self.usb, "isRunning") and not self.usb.isRunning():
+            self.usb.start()
         self._push_params()
         lf.request_camera_permission(QApplication.instance(), self._on_permission)
         if not self._asked_tether:
@@ -640,13 +696,27 @@ class LiveCaptureMonitor(QWidget):
         self.find_cameras()
 
     def find_cameras(self):
+        """Capture devices (OpenCV) and USB cameras, both listed in the
+        Camera combo; the remembered one is opened when it turns up."""
+        key = str(_settings().value("live/camera_key", "") or "")
         pref = _settings().value("live/camera_index", None)
         try:
             pref = int(pref) if pref not in (None, "") else None
         except (TypeError, ValueError):
             pref = None
         self.canvas.set_message("Looking for cameras…")
-        self.feed.find_cameras(pref, self._video_format())
+        self._cv_found, self._usb_found = [], []
+        if cb.split_key(key) is not None:
+            self._want_key = key
+            self.feed.find_cameras(None, self._video_format(), open_found=False)
+        else:
+            self._want_key = None
+            self.feed.find_cameras(pref, self._video_format())
+        self.usb.scan()
+        hint = cb.install_hints()
+        self.find_btn.setToolTip(
+            "Look for capture devices (each is opened once to check it delivers a "
+            "picture) and cameras on USB." + (f"\n{hint}" if hint else ""))
 
     def _video_format(self):
         f = str(_settings().value("live/video_format", "auto") or "auto")
@@ -680,6 +750,12 @@ class LiveCaptureMonitor(QWidget):
                 self.feed.wait(3000)
         except Exception as ex:
             print(f"live monitor: feed stop: {ex}")
+        try:
+            self.usb.stop()
+            if hasattr(self.usb, "wait"):
+                self.usb.wait(3000)
+        except Exception as ex:
+            print(f"live monitor: usb camera stop: {ex}")
         self.closed.emit()
 
     # ------------------------------------------------------------------ #
@@ -744,6 +820,8 @@ class LiveCaptureMonitor(QWidget):
         if not self._await_exposure:
             return
         self._await_exposure = False
+        if self._shutter_is_usb():
+            return                       # a USB shot waits for its file: no Hold to check
         exp = cs.exposure_seconds(path)
         if exp and not cs.hold_covers(self._timing, exp):
             shown = f"1/{round(1 / exp)} s" if exp < 1 else f"{exp:g} s"
@@ -955,33 +1033,65 @@ class LiveCaptureMonitor(QWidget):
             self._rebuild_negative()
 
     def _on_cameras(self, found):
+        self._cv_found = list(found)
+        self._rebuild_camera_combo()
+
+    def _on_usb_cameras(self, found):
+        self._usb_found = list(found)
+        self._rebuild_camera_combo()
+        keys = [k for k, _l in self._usb_found]
+        if self._want_key in keys:
+            self.feed.open_camera(self._want_key, self._video_format())
+        elif self._want_key is not None:
+            # the remembered USB camera isn't there: fall back to a device
+            self._want_key = None
+            if self._cv_found and getattr(self.feed, "index", None) is None:
+                self.feed.open_camera(int(self._cv_found[0][0]), self._video_format())
+            elif not self._cv_found:
+                self._on_feed_status("none", "")
+
+    def _rebuild_camera_combo(self):
         self.camera_combo.clear()
-        if not found:
+        for idx, w, h in self._cv_found:
+            self.camera_combo.addItem(f"Camera {idx}  ·  {w}×{h}", idx)
+        for key, label in self._usb_found:
+            self.camera_combo.addItem(label, key)
+        if self.camera_combo.count() == 0:
             self.camera_combo.addItem("None found", None)
             return
-        for idx, w, h in found:
-            self.camera_combo.addItem(f"Camera {idx}  ·  {w}×{h}", idx)
-        cur = getattr(self.feed, "index", None)
+        cur = self._want_key or getattr(self.feed, "index", None)
         i = self.camera_combo.findData(cur)
         if i >= 0:
             self.camera_combo.setCurrentIndex(i)
 
     def _on_camera_chosen(self, i):
-        idx = self.camera_combo.itemData(i)
-        if idx is None:
+        key = self.camera_combo.itemData(i)
+        if key is None:
             return
-        _settings().setValue("live/camera_index", int(idx))
-        self.feed.open_camera(int(idx), self._video_format())
+        if isinstance(key, str):
+            _settings().setValue("live/camera_key", key)
+            _settings().setValue("live/shutter", "usb")    # its own shutter too
+            self._want_key = key
+            self.feed.open_camera(key, self._video_format())
+            return
+        _settings().setValue("live/camera_index", int(key))
+        _settings().setValue("live/camera_key", "")
+        self._want_key = None
+        self.feed.open_camera(int(key), self._video_format())
 
     def _on_feed_status(self, kind, text):
         if kind == "searching":
             if self.canvas.result is None:
                 self.canvas.set_message(text or "Looking for cameras…")
         elif kind == "open":
-            try:
-                _settings().setValue("live/camera_index", int(text))
-            except (TypeError, ValueError):
-                pass
+            if cb.split_key(text) is not None:
+                _settings().setValue("live/camera_key", text)
+            else:
+                try:
+                    _settings().setValue("live/camera_index", int(text))
+                    _settings().setValue("live/camera_key", "")
+                except (TypeError, ValueError):
+                    pass
             self.canvas.set_message("Waiting for the first frame…")
         elif kind == "none":
             self.canvas.set_message(
@@ -1009,8 +1119,14 @@ class LiveCaptureMonitor(QWidget):
         four = getattr(self.feed, "fourcc", "")
         if four:
             bits.append(four)
+        if self._exposure and self.usb.is_open():
+            bits.append(cb.exposure_text(self._exposure))
         self.camera_info.setText("  ·  ".join(bits))
         active, label, count = self._tether_state()
+        folder = self._tether_folder() if active else None
+        if folder != self._usb_dest:
+            self._usb_dest = folder
+            self.usb.set_dest(folder)
         if self._mw is None:
             self.tether_label.setText("")
             self.tether_btn.setVisible(False)
@@ -1156,8 +1272,7 @@ class LiveCaptureMonitor(QWidget):
         if self._sleeping is not None:
             text += "  ·  dimmed while idle"
         self.light_status.setText(text)
-        self.shoot_btn.setEnabled(is_open or self.sequence.running)
-        self.shoot_btn.setToolTip("" if is_open else "Connect the Scanlight to shoot")
+        self._refresh_shoot_enabled()
 
     def _set_sliders(self, levels):
         for k, s in self.led_sliders.items():
@@ -1282,11 +1397,24 @@ class LiveCaptureMonitor(QWidget):
         if self.sequence.running:
             self.sequence.stop()
             return
-        if not self.light.is_open():
-            return
+        tri = self.scan_type() == "trichrome"
         self._used()
-        if self.sequence.start(self._timing, self._preset(),
-                               self.scan_type() == "trichrome"):
+        if self._shutter_is_usb():
+            if tri and not self.light.is_open():
+                self._warn_caption("Trichrome needs the Scanlight connected: it sets "
+                                   "the red, green and blue.")
+                return
+            if not self._ensure_hot_folder():
+                self._warn_caption("Shooting over USB brings the files in through Hot "
+                                   "Folder Tether: turn it on to shoot.")
+                return
+            started = self.sequence.start(self._timing, self._preset(), tri,
+                                          shutter=self._usb_shutter)
+        else:
+            if not self.light.is_open():
+                return
+            started = self.sequence.start(self._timing, self._preset(), tri)
+        if started:
             self._await_exposure = True
             self.shoot_btn.setText("Stop   (Esc)")
             self._refresh_capture_caption()
@@ -1315,9 +1443,166 @@ class LiveCaptureMonitor(QWidget):
         self.shoot_btn.setText("Shoot   (S)")
         self._refresh_light_status()
         if reason == "disconnected":
+            self._warn_caption("Stopped: the Scanlight disconnected.")
+        elif reason == "timeout":
+            self._warn_caption(f"Stopped: no file from the camera after "
+                               f"{int(cs.FILE_TIMEOUT_S)} s.")
+        elif reason == "failed":
+            self._warn_caption("Stopped: the camera didn't fire.")
+        elif reason == "camera lost":
+            self._warn_caption("Stopped: the camera disconnected.")
+        # "no file": _on_usb_skipped says why
+        self._refresh_shoot_enabled()
+
+    # ------------------------------------------------------------------ #
+    # USB camera (spec/capture-routes.md)
+    # ------------------------------------------------------------------ #
+    def _warn_caption(self, text):
+        self.capture_caption.setStyleSheet(
+            f"color: {theme.WARN_TEXT}; font-size: {theme.FS_CAPTION}px;")
+        self.capture_caption.setText(text)
+
+    def _shutter_is_usb(self):
+        return self.shutter_combo.currentData() == "usb" and self.usb.is_open()
+
+    def _refresh_shoot_enabled(self):
+        if self.sequence.running:
+            self.shoot_btn.setEnabled(True)
+            self.shoot_btn.setToolTip("")
+            return
+        if self._shutter_is_usb():
+            ok = self.scan_type() != "trichrome" or self.light.is_open()
+            self.shoot_btn.setEnabled(ok)
+            self.shoot_btn.setToolTip("" if ok else "Trichrome needs the Scanlight connected")
+            return
+        ok = self.light.is_open()
+        self.shoot_btn.setEnabled(ok)
+        self.shoot_btn.setToolTip("" if ok else "Connect the Scanlight to shoot, or "
+                                  "choose a USB camera as the Shutter")
+
+    def _tether_folder(self):
+        mw = self._mw
+        if mw is None:
+            return None
+        if hasattr(mw, "tether_folder"):
+            return mw.tether_folder()
+        return getattr(mw, "_tether_folder", None)
+
+    def _ensure_hot_folder(self):
+        """True once Hot Folder Tether is on (asking to turn it on if it is
+        off); the USB camera is pointed at its folder."""
+        active, label, count = self._tether_state()
+        if not active and self._mw is not None:
+            choice, _dont = self._hot_folder_choice(False, label, count)
+            if choice == "start":
+                self._mw.enter_tethering()
+            active, label, count = self._tether_state()
+        if active:
+            self._usb_dest = self._tether_folder()
+            self.usb.set_dest(self._usb_dest)
+        self._refresh_status_strip()
+        return active
+
+    def _rebuild_shutter_combo(self):
+        want = str(_settings().value("live/shutter", "scanlight") or "scanlight")
+        self.shutter_combo.blockSignals(True)
+        self.shutter_combo.clear()
+        self.shutter_combo.addItem("Scanlight", "scanlight")
+        if self.usb.is_open():
+            self.shutter_combo.addItem(f"USB · {self._usb_model or 'camera'}", "usb")
+        i = self.shutter_combo.findData(want)
+        self.shutter_combo.setCurrentIndex(i if i >= 0 else 0)
+        self.shutter_combo.blockSignals(False)
+        self._refresh_shoot_enabled()
+        self._refresh_capture_caption()
+
+    def _on_shutter_chosen(self, i):
+        _settings().setValue("live/shutter", self.shutter_combo.itemData(i))
+        self._refresh_shoot_enabled()
+        self._refresh_capture_caption()
+
+    def _on_usb_state(self, kind, text):
+        self.release_btn.setVisible(kind == "busy" and sys.platform == "darwin")
+        if kind == "open":
+            self._usb_model = text
+            if self._usb_dest:
+                self.usb.set_dest(self._usb_dest)
+        elif kind == "busy":
+            self.canvas.set_message(
+                "macOS is holding the camera, so FreeCCR can't open it.\nRelease "
+                "Camera ends that hold (it may come back when the camera is replugged)."
+                if sys.platform == "darwin" else
+                "Another program is using the camera.\nClose it (or its tether "
+                "window), then Find Cameras.")
+        elif kind == "error":
+            self.canvas.set_message(f"The camera didn't open.\n{text}")
+        elif kind == "nopreview":
+            self.canvas.set_message(
+                "This camera has no live view over USB.\nIt can still shoot over USB "
+                "(Shutter); choose a capture device for the picture.")
+            return
+        elif kind == "lost":
+            self.canvas.set_message("The USB camera disconnected.\nFind Cameras to "
+                                    "reconnect.")
+        if kind in ("lost", "closed", "error", "busy"):
+            self._exposure = {}
+            self.cam_zoom_combo.setVisible(False)
+        self._rebuild_shutter_combo()
+        if kind == "lost" and self.sequence.running and self.sequence.camera_shutter:
+            self.sequence.abort("camera lost")      # after the rebuild: its caption stays
+        self._refresh_status_strip()
+
+    def _on_usb_file(self, path):
+        if self.sequence.running and self.sequence.camera_shutter:
+            self.sequence.frame_done(path)
+        elif not self.sequence.running:
             self.capture_caption.setStyleSheet(
-                f"color: {theme.WARN_TEXT}; font-size: {theme.FS_CAPTION}px;")
-            self.capture_caption.setText("Stopped: the Scanlight disconnected.")
+                f"color: {theme.TEXT_MUTED}; font-size: {theme.FS_CAPTION}px;")
+            self.capture_caption.setText(f"From the camera: {os.path.basename(path)}")
+
+    def _on_usb_skipped(self, name):
+        if self.sequence.running and self.sequence.camera_shutter:
+            self.sequence.abort("no file")
+        active, _label, _count = self._tether_state()
+        if active:
+            self._warn_caption(f"The camera took {name}, but it didn't arrive in the hot "
+                               "folder: check the camera software saves shots to this "
+                               "computer.")
+        else:
+            self._warn_caption(f"The camera took {name}, but Hot Folder Tether is off, so "
+                               "it stays on the camera. Turn the hot folder on to bring "
+                               "shots in.")
+
+    def _on_fire_failed(self, text):
+        self.sequence.fire_failed(text)
+        if not self.sequence.running:
+            self._warn_caption(text)
+
+    def _on_exposure(self, exp):
+        self._exposure = dict(exp or {})
+        self._refresh_status_strip()
+
+    def _on_zoom_levels(self, levels):
+        self.cam_zoom_combo.clear()
+        for lv in levels or []:
+            self.cam_zoom_combo.addItem(f"{lv}×", lv)
+        self.cam_zoom_combo.setVisible(bool(levels))
+
+    def _on_release_camera(self):
+        box = QMessageBox(self)
+        box.setWindowTitle("Release Camera")
+        box.setText("End macOS's hold on the camera?")
+        box.setInformativeText(
+            "macOS's own camera service (ptpcamerad) opens PTP cameras as soon as "
+            "they are plugged in, which stops FreeCCR opening them. FreeCCR will end "
+            "it and try again. macOS starts it again by itself when needed.")
+        go = box.addButton("Release", QMessageBox.AcceptRole)
+        box.addButton("Cancel", QMessageBox.RejectRole)
+        box.exec()
+        if box.clickedButton() is go:
+            self.release_btn.setVisible(False)
+            self.canvas.set_message("Opening the camera…")
+            self.usb.release_and_retry()
 
     def scan_type(self):
         return self.scan_combo.currentData()
@@ -1340,20 +1625,41 @@ class LiveCaptureMonitor(QWidget):
             self.scan_combo.blockSignals(False)
         self.neg_bw.setChecked(t == "bw")
         self._refresh_capture_caption()
+        self._refresh_shoot_enabled()
 
     def _refresh_capture_caption(self):
         tri = self.scan_type() == "trichrome"
-        total = cs.cycle_ms(self._timing, tri) / 1000.0
+        usb = self._shutter_is_usb()
+        total = cs.cycle_ms(self._timing, tri, camera=usb) / 1000.0
         self.capture_caption.setStyleSheet(
             f"color: {theme.TEXT_MUTED}; font-size: {theme.FS_CAPTION}px;")
         what = ("One triplet (red, green, blue)" if tri
                 else "One shot, with the light as it is,")
+        if usb:
+            settle = cs.settle_ms(self._timing)
+            self.capture_caption.setText(
+                f"One triplet (red, green, blue) over USB, ≈ {total:.0f} s: each colour "
+                f"is set {settle} ms before its shot, and each shot waits for its file."
+                if tri else
+                f"One shot over USB with the light as it is, ≈ {total:.0f} s: it waits "
+                "for the file.")
+            return
         self.capture_caption.setText(
             f"{what} ≈ {total:.1f} s. Hold after the pulse: "
             f"{self._timing['hold_ms']} ms; it must be longer than the camera's shutter time.")
 
     def _timing_popup(self):
         ms = lambda v: f"{v} ms"  # noqa: E731
+        if self._shutter_is_usb():
+            rows = [("focus_ms", "Settle", cs.TIMING_LIMITS["focus_ms"], ms,
+                     "Wait between setting a colour and firing the camera"),
+                    ("period_ms", "Period", cs.TIMING_LIMITS["period_ms"], ms,
+                     "The least time from one shot's start to the next")]
+            pop = OptionsPopup("USB shutter timing", rows, self._timing,
+                               cs.TIMING_DEFAULT, self, step=10)
+            pop.changed.connect(self._on_timing)
+            self._place(pop, self.timing_btn.mapToGlobal(self.timing_btn.rect().bottomLeft()))
+            return
         rows = [("focus_ms", "Focus", cs.TIMING_LIMITS["focus_ms"], ms,
                  "Focus (half-press) held before the pulse"),
                 ("pulse_ms", "Pulse", cs.TIMING_LIMITS["pulse_ms"], ms,
@@ -1447,6 +1753,17 @@ class LiveCaptureMonitor(QWidget):
         st.setValue("live/align_x", float(self.canvas.align_x))
         st.setValue("live/sharp_area", json.dumps(list(self.canvas.sharp_area))
                     if self.canvas.sharp_area else "")
+
+
+class _UsbShutter:
+    """The capture sequence's camera shutter: a USB camera, fired by the
+    worker; its file landing calls the sequence's frame_done."""
+
+    def __init__(self, win):
+        self.win = win
+
+    def fire(self):
+        self.win.usb.fire()
 
 
 class _SequenceLight:

@@ -1,6 +1,7 @@
-# Spec: Capture routes (other cameras, shutters and lights)
+# Spec: Capture routes — the USB camera route
 
-Status: DRAFT for review (2026-10-26). Open questions in §10.
+Status: REFINED v2, built (2026-10-26). The user's answers are in §10; as
+built in §11.
 Owner: FreeCCR
 Feature branch: `feature/capture-routes`
 Related: `spec/live-capture-monitor.md`, `spec/camera-tethering.md` (Hot
@@ -8,169 +9,231 @@ Folder Tether), `spec/scan-type.md`.
 
 ## 1. Summary
 
-Today the Live Capture Monitor assumes one setup: the camera's live view
-through an HDMI capture device, the Scanlight on USB serial, the shutter fired
-by the Scanlight's release output, and the camera maker's own tether app
-saving into the folder Hot Folder Tether watches. Each of those four is made a
-**route** with alternatives, so other setups work without that exact kit:
+The Live Capture Monitor assumed one setup: live view through an HDMI
+capture device, the shutter fired by the Scanlight's release output, and the
+camera maker's own tether app saving into the folder Hot Folder Tether
+watches. This adds a **USB camera** route: the camera's own live view, its
+shutter and its files over its USB cable, so a setup without a capture card,
+release cable or tether app still works.
 
-| | Route today | Added routes |
+Two open-source backends drive it, chosen by what is available:
+
+| Backend | Platforms | What it is |
 |---|---|---|
-| Live view | HDMI capture device | **USB camera** (the camera's own live view over its USB cable) |
-| Shutter | Scanlight release output | **USB camera**; **Manual** (you press the shutter) |
-| Files in | Hot folder (the maker's tether app) | **USB camera** (downloaded straight into the session folder) |
-| Light | Scanlight | **Manual light** (the monitor asks for each colour) |
+| **libgphoto2** (the `gphoto2` Python package) | macOS, Linux | Talks to the camera directly. Its camera table lists the Canon EOS 5D Mark III and IV (and Fujifilm GFX 50S/R) with capture and live view. |
+| **digiCamControl** | Windows | A free, open-source Windows camera-control app with a built-in web server on `localhost`. FreeCCR asks it for live view frames and to capture; it saves the files into the hot folder. |
 
-The USB camera route uses libgphoto2 (through the `gphoto2` Python package),
-which drives most Canon, Nikon, Sony and Fujifilm bodies over USB: its
-camera table lists the Canon EOS 5D Mark III and Mark IV (and the GFX 50S/R)
-with capture and live view. One cable then gives live view, the shutter and
-the files, with no capture card, release cable or separate tether app.
+libgphoto2 has no Windows build (and on Windows it needs the camera's USB
+driver replaced, which stops other software seeing the camera), so Windows
+goes through digiCamControl, which uses the normal driver.
+
+The files always arrive through **Hot Folder Tether**: libgphoto2's files are
+downloaded into the hot folder by FreeCCR, digiCamControl's session folder is
+pointed at it. So triplet grouping, the light check, Needs attention, B&W
+handling and the first-frame black point prompt are all unchanged.
 
 ## 2. Goals / Non-goals
 
 ### Goals
-- A **Camera** choice in the monitor: *HDMI capture device* (today) /
-  *USB camera* (listed by model when found) / *None*. The picture tools
-  (zoom, Edge amplify, false colour, Negative preview, sharpness, guides) work
-  the same on every route: they run on frames, wherever frames come from.
-- With a USB camera: Shoot fires it over USB and the RAW lands in the session
-  folder, where Hot Folder Tether picks it up exactly as now (triplets, the
-  light check, Needs attention all unchanged). Pressing the camera's own
-  shutter button is caught too.
-- A **Shutter** choice: *Scanlight* / *USB camera* / *Manual*.
-- A **Light** choice: *Scanlight* / *Manual*. Manual: the monitor shows the
-  colour to set ("Set the light to RED, then shoot") and moves on when the
-  frame arrives.
-- Trichrome on the USB-camera shutter is **event-driven**: set the colour,
-  wait the settle time, fire, wait for the file, next colour. No pulse/hold
-  timing to tune, and a dropped frame is a timeout that stops the sequence,
-  not a shifted triplet.
-- **Check setup**: one button that lists what is connected, takes a test
-  shot (or triplet) and reports whether files arrive, decode, and (trichrome)
-  how strongly each frame is lit by its own colour on this camera.
+- USB cameras appear in the monitor's **Camera** list beside the capture
+  devices ("USB · Canon EOS 5D Mark III", "digiCamControl · <camera>"); the
+  picture tools (zoom, Edge amplify, false colour, Negative preview,
+  sharpness, guides) work the same on them.
+- A **Shutter** choice in Capture: *Scanlight* (today) or *USB · <camera>*
+  (listed when a USB camera is open). Choosing a USB camera for the view
+  picks it for the shutter too; HDMI view + USB shutter is allowed.
+- With the USB shutter: Shoot fires the camera; single shots (colour, B&W)
+  don't need the Scanlight (the light is used as it is); trichrome still
+  needs it (to set the colours). The sequence is **event-driven**: colour →
+  settle → fire → wait for the file → next colour.
+- The camera's own shutter button works too: its files come in the same way.
+- RAW + JPEG: only the RAW is brought in (the hot folder's own rule).
+- Shutter speed, ISO and aperture shown read-only under the camera.
+- **Camera zoom** (Canon EOS live view 1× / 5× / 10×) for focusing, where
+  the backend offers it.
+- macOS: when the system's camera service holds the camera, say so and offer
+  **Release Camera**.
+- Windows: the Scanlight is found by its USB ID (Windows names serial ports
+  `COM3` etc., which the name-based ranking didn't recognise).
 
-### Non-goals
-- Windows for the USB camera route in v1: the `gphoto2` package has no
-  Windows build. Windows users keep the HDMI route and Hot Folder Tether with
-  their camera's own app (§7).
-- Camera makers' own SDKs (closed licences, per-maker code).
-- Changing exposure settings from the app in v1 (shown read-only: shutter
-  speed, ISO, aperture where the camera reports them). See §10 Q3.
-- Video recording.
+### Non-goals (v1)
+- Manual light and Check setup (proposed in draft v1; not chosen for now).
+- Setting exposure from the app.
+- Camera makers' own SDKs (closed).
+- Deleting files from the camera.
 
 ## 3. UX
 
-### 3.1 The monitor's Setup section (top of the controls)
-```
-Camera   [ USB · Canon EOS 5D Mark III ▾ ]   1/60 s · ISO 100 · f/8
-Shutter  [ USB camera ▾ ]
-Light    [ Scanlight · connected ▾ ]
-[ Check setup ]
-```
-- Camera lists capture devices (as now) and USB cameras by model; *None*
-  leaves the picture area blank with a note (shooting still works).
-- Shutter offers only what can work: USB camera when one is chosen, Scanlight
-  when it is connected, Manual always.
-- Choices persist (QSettings `live/camera_route`, `live/shutter`,
-  `live/light`), with the camera remembered by model.
-- Shoot is enabled when the shutter route can fire (today it needs the
-  Scanlight even for a single shot).
+### 3.1 Camera (status strip under the picture)
+The Camera combo lists capture devices as now, then USB cameras:
+`Camera 0 · 1920×1080`, `USB · Canon EOS 5D Mark III`,
+`digiCamControl · 5D Mark III`. **Find Cameras** searches both. The info text
+beside it shows `1/60 s · ISO 100 · f/8` for a USB camera, and a **Camera
+zoom** combo (1× / 5× / 10×) appears when the camera offers it.
 
-### 3.2 USB camera specifics
-- Live view frames are the camera's live-view JPEGs (smaller than HDMI;
-  around the camera's own screen size). On Canon EOS bodies the camera's live
-  view magnification (5× / 10×) is offered as **Camera zoom** for focusing, on
-  top of the app's own zoom.
-- When the file arrives the session folder gets it under the camera's own
-  name; Hot Folder Tether is started on that folder if it isn't already
-  (asking first, as the monitor does now).
-- **macOS**: the system's own camera service can hold the camera so nothing
-  else can open it. When that happens the monitor says so and offers
-  **Release camera** (ends that service's hold for this session; asks first).
+### 3.2 Shutter (Capture section)
+A row under Scanning: `Shutter [ Scanlight ▾ ]` / `[ USB · Canon EOS 5D
+Mark III ▾ ]`. Timing… applies to the Scanlight shutter; with the USB shutter
+only **Settle** (the Focus field, relabelled in the popup when USB is chosen)
+applies: the time between setting a colour and firing. The caption under
+Shoot says what happens: "Trichrome: R, G, B over USB, then White · about 6 s".
 
-### 3.3 Manual light
-The colour rings show which colour to set; Shoot (or the file arriving, with
-Manual shutter) moves on. Trichrome: "Set RED · shoot", "Set GREEN · shoot",
-"Set BLUE · shoot", then "Back to WHITE".
+### 3.3 Where files go
+Shooting over USB needs Hot Folder Tether: Shoot asks to turn it on if it is
+off (the same prompt the monitor shows on opening). libgphoto2 files are
+written as `<name>.part` and renamed when complete, so the hot folder never
+sees half a file; a name already in the folder gets `_1`, `_2`…
+digiCamControl: on opening, its session folder is set to the hot folder (and
+put back on closing).
 
-### 3.4 Check setup
-A small dialog: what was found (capture devices, USB cameras, light ports),
-then **Test shot** (single) or **Test triplet** (trichrome): fires, waits for
-the files, decodes them, shows the light shares per frame (§5.3 of
-spec/scan-type.md) and says whether the trichrome light check will pass on
-this camera. If the weakest own-colour share is close to the threshold it
-offers to set the threshold for this camera model (stored per model).
+### 3.4 Messages
+- No backend installed: the USB entries simply don't appear; the Find Cameras
+  tooltip says how to add them (the `gphoto2` package on Mac/Linux;
+  digiCamControl with its web server on, on Windows).
+- Camera held by macOS's camera service: "macOS is holding the camera" with
+  **Release Camera** (ends the service's hold; it may come back when the
+  camera is replugged).
+- Unplugged / lost: as the capture device's "stopped sending frames"; a
+  running sequence stops ("Stopped: the camera disconnected").
+- A shot whose file doesn't arrive within 30 s stops the sequence ("No file
+  from the camera after 30 s").
 
 ## 4. Data model
-- QSettings: `live/camera_route` (`hdmi` | `usb` | `none`), `live/usb_model`,
-  `live/shutter` (`scanlight` | `usb` | `manual`), `live/light`
-  (`scanlight` | `manual`), `scan/light_share_min/<model>`.
-- No catalog changes. Frames record `capture_type` as now.
+- QSettings: `live/camera_key` (the chosen camera: an int index or
+  `usb:<backend>:<id>`; `live/camera_index` kept for HDMI), `live/shutter`
+  (`scanlight` | `usb`), `live/dcc_port` (digiCamControl's web port, default
+  5513).
+- No catalog changes.
 
-## 5. Processing / architecture
-- `core/usb_camera.py`: `UsbCamera`, a `WorkerThread` that is the ONLY code
-  touching the camera (libgphoto2 calls block and one camera can't be shared
-  between threads), the way `LightLink` owns the serial port. Commands in
-  (preview on/off, capture, zoom), events out (frame JPEG, file added, status,
-  lost). Frames go through the same latest-wins mailbox as `LiveFeed`, then
-  `cv2.imdecode` into the same `Processor`.
-- `core/live_feed.py`: the frame source becomes pluggable (`OpenCvSource`,
-  `UsbCameraSource`); `Processor` is untouched.
-- `core/capture_sequence.py`: the shutter becomes an object with `fire()`
-  and a "frame done" signal; the timer path (Scanlight) stays as built, the
-  event path (USB, Manual) waits for the file with a timeout (default 20 s).
-- Downloading: on "file added" the worker saves the file into the session
-  folder with a temporary name and renames it when complete, so Hot Folder
-  Tether never sees half a file.
-- Packaging: `gphoto2` is an optional dependency (macOS and Linux wheels
-  bundle libgphoto2). Missing → the USB route is hidden with a note. Licences
-  (LGPL) go in `LICENSES/`. Builds include the package and its libraries.
+## 5. Architecture
+
+### 5.1 Backends (`core/camera_backends.py`, no Qt)
+Each backend is used from ONE thread only (libgphoto2 calls block and a
+camera can't be shared between threads):
+```
+available() -> bool
+list_cameras() -> [CameraInfo(key, label)]
+open(key, dest_dir)            # dest: the hot folder (may be None)
+close()
+set_dest(dest_dir)
+start_live() / stop_live()
+preview() -> jpeg bytes | None
+fire()                         # returns when the camera accepted it
+poll(timeout_s) -> [Event]     # ("file", path) saved into dest, ("lost",)
+exposure() -> {"shutter", "iso", "aperture"}
+zoom_levels() -> [str] ; set_zoom(level)
+```
+- `Gphoto2Backend`: `gp.Camera.autodetect`, port + abilities lookup, `init`;
+  `capture_preview`; `trigger_capture`; `wait_for_event` → FILE_ADDED
+  collected for a short quiet spell (0.3 s), RAW kept over a same-name JPEG,
+  `file_get` → `.part` → rename; config `shutterspeed` / `iso` /
+  `aperture` or `f-number`; `eoszoom` for camera zoom. Error code -53 (USB
+  claim) → `CameraBusy`; -52/-7/-34/-35 repeated → lost.
+- `DigiCamControlBackend`: HTTP on `127.0.0.1:<port>` (urllib, 1 s timeouts):
+  `?slc=list&param1=cameras` (serials), `?slc=set&param1=camera&param2=<id>`,
+  `?slc=get/set&param1=session.folder`, `?CMD=LiveViewWnd_Show/Hide`,
+  `/liveview.jpg`, `?slc=capture&param1=&param2=`,
+  `?slc=get&param1=lastcaptured` (a new name, not `-`, is a new file in the
+  session folder = the hot folder), `?slc=get&param1=shutterspeed|iso|aperture`.
+  Responses are read as JSON when they parse, else as text.
+- `FakeBackend` for tests (and a demo env var).
+
+### 5.2 The worker (`core/usb_camera.py`)
+`UsbCamera(WorkerThread)` owns the backends: a command queue in (scan, open,
+close, live, fire, zoom, dest, release), signals out (`cameras_found`,
+`state(kind, text)`, `file_saved(path)`, `exposure(dict)`, `fired()`).
+Live view frames are decoded (`cv2.imdecode`) into a one-slot latest-wins
+mailbox; `frame_source(key)` returns a capture-like object (`read`, `get`,
+`release`) that `LiveFeed` opens like an OpenCV device, so the `Processor`
+and everything after it is untouched.
+
+### 5.3 LiveFeed
+`open_camera(key)` takes an int (OpenCV) or a `"usb:…"` key, dispatched to
+the source registered for its prefix (`feed.sources["usb"]`). A USB source's
+`read()` waits up to 0.2 s for a new frame and repeats the last one meanwhile
+(live view pauses while the camera captures), so a capture isn't mistaken
+for a lost camera; it fails only when the worker reports the camera lost.
+
+### 5.4 The sequence
+`CaptureSequence.start(..., shutter=None)`: with a shutter object (USB) the
+shot is colour → settle (Focus, ≥ 50 ms) → `shutter.fire()` → wait for
+`frame_done()` (the monitor calls it on `file_saved`) or a 30 s timeout →
+next. Stop never abandons a shot in flight: it finishes when that file lands.
+Without a shutter: the timer sequence exactly as built.
 
 ## 6. Integration points
-- `widgets/live_monitor.py`: the Setup rows, Check setup, Manual light,
-  Shoot enabling, Camera zoom.
-- `core/live_feed.py`, `core/capture_sequence.py`, new `core/usb_camera.py`.
-- `ui/main_window.py`: unchanged apart from starting Hot Folder Tether on the
-  session folder when the USB route needs it.
-- `core/scan_type.py`: `LIGHT_SHARE_MIN` read per camera model when set.
-- `requirements.txt` (optional extra), build scripts, `LICENSES/`.
+- `core/camera_backends.py`, `core/usb_camera.py` (new).
+- `core/live_feed.py`: key dispatch, `sources`.
+- `core/capture_sequence.py`: event shutter.
+- `core/capture_light.py`: ports ranked by USB ID (RP2040 `0x2E8A` first).
+- `widgets/live_monitor.py`: camera list, Shutter row, exposure/zoom, Shoot
+  gating, hot folder prompt on USB Shoot, Release Camera, settle label.
+- `requirements.txt`: `gphoto2` as an optional line (commented, macOS/Linux);
+  build scripts include it when installed; `LICENSES/license-gphoto2.txt`.
+- `ui/main_window.py`: `tether_folder()` accessor.
 
-## 7. Windows
-The USB route isn't available. The monitor's HDMI route and Hot Folder
-Tether already work there with the camera maker's own tether app saving into
-the watched folder. The Check setup dialog says so instead of listing USB
-cameras.
+## 7. Edge cases
+- Live view and capture share one cable: the worker stops nothing itself;
+  libgphoto2 pauses live view during a capture and resumes on the next
+  preview call.
+- Two USB cameras: listed separately, one open at a time.
+- The camera writes to its card and to the computer: files on the card stay.
+- Hot Folder Tether stopped while the USB camera is open: downloads pause
+  (files stay on the camera) and the caption says so.
 
-## 8. Edge cases
-- The camera's card vs computer: files are taken from the camera's memory
-  after each shot and saved to the computer; whether a copy stays on the card
-  follows the camera's own setting.
-- Live view and capture on one cable: the worker pauses live view for the
-  capture and resumes it (some bodies need it), so the picture blinks once
-  per frame.
-- Camera unplugged mid-sequence: the sequence stops, the light goes to
-  White, the status says so (as the Scanlight disconnect does).
-- Two cameras connected: listed separately; one at a time.
+## 8. Test plan (`tests/test_capture_routes.py`)
+- Gphoto2Backend against a fake `gphoto2` module: list, open, preview, fire,
+  FILE_ADDED → `.part` → rename, RAW kept over JPEG, name clash suffix,
+  claim error → busy, I/O errors → lost, exposure, zoom.
+- DigiCamControlBackend against a local fake HTTP server: list, session folder
+  set and restored, live view frame, capture → new `lastcaptured` → file
+  event, JSON and text responses, server gone → lost.
+- UsbCamera worker with the FakeBackend: frames reach a LiveFeed through the
+  `usb:` key; `file_saved`; lost.
+- Sequence: event-driven single and trichrome, settle, timeout, Stop mid-shot
+  waits for the file, light needed only for trichrome.
+- Ports: a `COM5` with the RP2040 USB ID ranks first.
+- Monitor: USB cameras listed, Shutter row follows the view, Shoot over USB
+  asks for the hot folder when it's off, exposure text shown.
 
-## 9. Test plan
-- `UsbCamera` against a fake libgphoto2 module (events, file added, busy,
-  claimed by another process, unplug): the worker's queue, the mailbox, the
-  temporary-name download.
-- Sequence: event-driven trichrome with a fake shutter: order, settle, timeout
-  stops it, Stop mid-way.
-- Manual light: prompts in order; file arrival advances.
-- Route persistence and the Shutter list's availability rules.
-- Check setup: shares and the per-model threshold, with fake decoded frames.
-- No `gphoto2` installed: the route is hidden, nothing else changes.
+## 9. Licences
+libgphoto2 (LGPL-2.1+) and python-gphoto2 (LGPL-3.0+) are compatible with
+FreeCCR's AGPL-3.0; their licence text goes in `LICENSES/`. digiCamControl is
+a separate program the user installs; nothing of it is shipped.
 
-## 10. Open questions (for the user)
-1. **Order**: USB camera route first (it covers the 5D Mark III/IV case
-   end to end), then Manual light and Check setup? Or all together?
-2. **Your friend's computer**: Mac, Linux or Windows? (Windows means Hot
-   Folder Tether with the camera's own app for now.)
-3. **Exposure from the app**: read-only in v1, or set shutter speed per
-   colour for trichrome (balancing the channels with exposure instead of LED
-   levels)?
-4. **His light**: a Scanlight (its release output should fire a 5D through
-   an N3 adapter cable), another RGB light, or white light only?
+## 10. Decisions (2026-10-26, the user's answers)
+1. Build the USB camera route (Manual light and Check setup: not now).
+2. The friend scans on Windows: Windows is covered through digiCamControl.
+3. Naming open-source software in the app is fine; only closed-source
+   software and brands are not to be emulated and named.
+
+## 11. As built
+- `core/camera_backends.py`: `Gphoto2Backend`, `DigiCamControlBackend`,
+  `FakeBackend` (tests; `FREECCR_FAKE_USB_CAMERA=1` lists it in the app),
+  `default_backends()` (gphoto2 when installed; digiCamControl on Windows or
+  with `FREECCR_DCC=1`), `release_macos_camera_service()`, `keep_raw`,
+  `unique_path`, `exposure_text`. A camera without USB live view (libgphoto2
+  answers "unsupported") sets `no_preview`: the monitor says so and the camera
+  still shoots.
+- `core/usb_camera.py`: `UsbCamera` (the worker) and `UsbFrameSource`.
+  `open()` marks the camera "opening" at once so the source made for it is
+  alive while it opens (a camera can take seconds).
+- `core/live_feed.py`: `open_camera(key)`, `sources`, `find_cameras(...,
+  open_found)`; a source with `alive()` true is never reported lost.
+- `core/capture_sequence.py`: `start(..., shutter=)`, `frame_done`,
+  `fire_failed`, `abort`, `settle_ms`, `cycle_ms(camera=)`, FILE_TIMEOUT_S.
+- `core/capture_light.py`: `port_info_rank` (the Scanlight's USB ID first).
+- `widgets/live_monitor.py`: USB cameras in the Camera list, the Shutter row,
+  exposure text, Camera zoom, Release Camera (macOS), USB Shoot asking for the
+  hot folder, captions for timeouts and a lost camera, the USB Timing popup
+  (Settle, Period).
+- `ui/main_window.py`: `tether_folder()`.
+- Build: `macos_build_scripts/build_compatible.sh` bundles gphoto2 when it is
+  installed; `requirements.txt` notes it (not a requirement: older macOS has
+  no wheel); `LICENSES/license-gphoto2.txt`.
+- Tests: `tests/test_capture_routes.py`, including the real libgphoto2
+  against its own virtual camera (the `vusb` driver in the gphoto2 wheels):
+  list, open, exposure, fire, the file event and the `.part` download.
+- Not verified here (no hardware): a real 5D Mark III / IV over libgphoto2,
+  digiCamControl's actual reply format on Windows (both JSON and plain text
+  are handled), and the Nuitka-built app's bundled libgphoto2 drivers.

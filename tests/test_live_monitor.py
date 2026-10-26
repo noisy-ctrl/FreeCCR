@@ -66,7 +66,7 @@ class FakeFeed(QObject):
     def open_camera(self, i, fmt="auto"):
         self.log.append(("open", i, fmt))
 
-    def find_cameras(self, pref=None, fmt="auto"):
+    def find_cameras(self, pref=None, fmt="auto", open_found=True):
         self.log.append(("find", pref, fmt))
 
     def take(self):
@@ -100,10 +100,12 @@ def _light():
     return LightClient(link=link, threaded=False), dev, made
 
 
-def _monitor(mw=None, connect=True):
+def _monitor(mw=None, connect=True, usb=None):
+    from core.usb_camera import UsbCamera
     feed = FakeFeed()
     light, dev, made = _light()
-    mon = lm.LiveCaptureMonitor(main_window=mw, feed=feed, light=light)
+    mon = lm.LiveCaptureMonitor(main_window=mw, feed=feed, light=light,
+                                usb=usb if usb is not None else UsbCamera(backends=[]))
     mon._hot_folder_choice = lambda *a: ("keep", False)
     mon.resize(1300, 820)
     mon.show()

@@ -68,6 +68,16 @@ echo "Building with Nuitka..."
 PYOPENCL_CL_DIR=$(python -c "import pyopencl, os; print(os.path.join(os.path.dirname(pyopencl.__file__), 'cl'))")
 echo "PyOpenCL cl directory: $PYOPENCL_CL_DIR"
 
+# USB cameras in the Live Capture Monitor (spec/capture-routes.md): bundled
+# when the optional gphoto2 package is installed (pip install gphoto2; wheels
+# exist for macOS 14+ and bundle libgphoto2, whose camera and port drivers are
+# package data the package points libgphoto2 at on import).
+GPHOTO2_OPTS=""
+if python -c "import gphoto2" 2>/dev/null; then
+    GPHOTO2_OPTS="--include-package=gphoto2 --include-package-data=gphoto2"
+    echo "Including gphoto2 (USB cameras)"
+fi
+
 python -m nuitka \
     --clang \
     --standalone \
@@ -79,6 +89,7 @@ python -m nuitka \
     --enable-plugin=pyside6 \
     --include-qt-plugins=permissions \
     --include-package=serial \
+    $GPHOTO2_OPTS \
     --include-data-dir=src/icons=icons \
     --include-data-files=src/core/x_tones.npz=core/x_tones.npz \
     --include-data-dir=LICENSES=LICENSES \

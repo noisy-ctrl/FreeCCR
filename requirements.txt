@@ -8,6 +8,9 @@ imagecodecs
 requests
 # Scanlight control in File -> Live Capture Monitor (optional at run time)
 pyserial
+# USB cameras in the Live Capture Monitor on macOS 14+ / Linux (optional; not
+# installed by default because older macOS has no wheel):  pip install gphoto2
+# On Windows the same route goes through digiCamControl, a separate app.
 nuitka
 pyopencl
 # AI dust detection. The DirectML build runs the detector on any Windows GPU

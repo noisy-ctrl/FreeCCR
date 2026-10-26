@@ -21,6 +21,9 @@ TIMING_LIMITS = {"focus_ms": (0, 2000), "pulse_ms": (10, cl.PULSE_MAX_MS),
                  "hold_ms": (0, 5000), "period_ms": (0, 5000)}
 LEAD_MIN_MS = 50            # the colour is set at least this long before a pulse
 TRICHROME = ("r", "g", "b")
+# A camera shutter (spec/capture-routes.md §5.4): fire, then wait for the file.
+FILE_TIMEOUT_S = 30.0
+USB_SHOT_EST_MS = 2000      # firing to the file landing, for the progress ring
 
 
 def clean_timing(t):
@@ -40,11 +43,17 @@ def shot_ms(timing):
     return max(t["focus_ms"], LEAD_MIN_MS) + t["pulse_ms"] + t["hold_ms"]
 
 
-def cycle_ms(timing, trichrome=True):
+def settle_ms(timing):
+    """With a camera shutter: the wait between setting a colour and firing
+    (the Focus field)."""
+    return max(clean_timing(timing)["focus_ms"], LEAD_MIN_MS)
+
+
+def cycle_ms(timing, trichrome=True, camera=False):
     """How long a Shoot takes, start to finish (the gaps Period enforces
-    included)."""
+    included). With a camera shutter it is an estimate: the file decides."""
     t = clean_timing(timing)
-    one = shot_ms(t)
+    one = settle_ms(t) + USB_SHOT_EST_MS if camera else shot_ms(t)
     n = 3 if trichrome else 1
     return one + (n - 1) * max(one, t["period_ms"])
 
@@ -75,7 +84,12 @@ def _qt_schedule(ms, fn):
 class CaptureSequence:
     """`on_step(channel, duration_ms)` when a shot starts (channel is r/g/b
     in trichrome, None for a single shot); `on_finished(reason)` with
-    "done", "stopped" or "disconnected"."""
+    "done", "stopped", "disconnected", "timeout" or "failed".
+
+    With a `shutter` (an object with `fire()`: a USB camera) a shot is
+    colour -> settle -> fire -> wait for `frame_done()` (its file landed) or
+    FILE_TIMEOUT_S; the light is needed only to set trichrome colours.
+    Without one, the Scanlight's focus/pulse timers as before."""
 
     def __init__(self, light, schedule=None, clock=time.monotonic,
                  on_step=None, on_finished=None):
@@ -92,12 +106,16 @@ class CaptureSequence:
         self._trichrome = True
         self._last_shot = None       # clock() when the last shot started
         self._token = 0              # voids timers of a finished run
-        self._phase = "idle"         # idle | waiting | focus | pulse
+        self._phase = "idle"         # idle | waiting | focus | pulse | settle | exposing
+        self._shutter = None
+        self._shot = 0               # voids a shot's file timeout once it is done
 
-    def start(self, timing, preset, trichrome=True):
+    def start(self, timing, preset, trichrome=True, shutter=None):
         if self.running:
             return False
-        if not self.light.is_open():
+        self._shutter = shutter
+        self._trichrome = bool(trichrome)
+        if not self._light_ok():
             self._finish("disconnected", restore=False)
             return False
         self.running = True
@@ -105,7 +123,6 @@ class CaptureSequence:
         self._token += 1
         self._timing = clean_timing(timing)
         self._preset = {k: int((preset or {}).get(k, 0)) for k in cl.CHANNELS}
-        self._trichrome = bool(trichrome)
         self._queue = list(TRICHROME) if trichrome else [None]
         self._next()
         return True
@@ -119,8 +136,36 @@ class CaptureSequence:
         if self._phase == "focus":
             self.light.focus(False)
             self._finish("stopped")
-        elif self._phase == "waiting":
+        elif self._phase in ("waiting", "settle"):
             self._finish("stopped")
+        # "exposing": the shot's file is awaited, then it stops
+
+    def frame_done(self, path=None):
+        """The camera's file for the shot in flight has landed."""
+        if not self.running or self._phase != "exposing":
+            return
+        self._shot += 1
+        self._phase = "idle"
+        self._next()
+
+    @property
+    def camera_shutter(self):
+        """True while running (or last run) with a camera shutter."""
+        return self._shutter is not None
+
+    def abort(self, reason):
+        """End now (the camera or light is gone): nothing more can land."""
+        if self.running:
+            self._finish(reason)
+
+    def fire_failed(self, reason=""):
+        if self.running and self._phase == "exposing":
+            self._finish("failed")
+
+    def _light_ok(self):
+        if self._shutter is not None and not self._trichrome:
+            return True              # a single shot uses the light as it is
+        return self.light.is_open()
 
     # -- steps ------------------------------------------------------------
     def _later(self, ms, fn):
@@ -131,7 +176,7 @@ class CaptureSequence:
         if self._stop:
             self._finish("stopped")
             return
-        if not self.light.is_open():
+        if not self._light_ok():
             self._finish("disconnected")
             return
         if not self._queue:
@@ -148,6 +193,12 @@ class CaptureSequence:
         if channel is not None:
             self.light.set_levels(cl.solo(self._preset, channel))
         self._last_shot = self._clock()
+        if self._shutter is not None:
+            if self.on_step:
+                self.on_step(channel, settle_ms(self._timing) + USB_SHOT_EST_MS)
+            self._phase = "settle"
+            self._later(settle_ms(self._timing), self._fire_camera)
+            return
         if self.on_step:
             self.on_step(channel, shot_ms(self._timing))
         self.light.focus(True)
@@ -167,6 +218,18 @@ class CaptureSequence:
         self.light.focus(False)
         self._phase = "idle"
         self._next()
+
+    def _fire_camera(self):
+        if self._stop or not self._light_ok():
+            self._finish("stopped" if self._stop else "disconnected")
+            return
+        self._phase = "exposing"
+        self._shot += 1
+        shot = self._shot
+        self._later(FILE_TIMEOUT_S * 1000.0,
+                    lambda: self._finish("timeout")
+                    if (self._phase == "exposing" and self._shot == shot) else None)
+        self._shutter.fire()
 
     def _finish(self, reason, restore=True):
         was = self.running

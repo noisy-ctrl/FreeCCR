@@ -1855,6 +1855,11 @@ class MainWindow(QMainWindow):
         else:
             self.enter_tethering()
 
+    def tether_folder(self):
+        """The folder Hot Folder Tether is watching, or None when it is off
+        (the Live Capture Monitor's USB camera saves its shots there)."""
+        return self._tether_folder if self._tether_active else None
+
     def _tether_folder_label(self):
         if not self._tether_folder:
             return ""

@@ -130,15 +130,35 @@ def port_rank(name):
     return (1, n)
 
 
+# The Scanlight's controller is an RP2040: Raspberry Pi's USB vendor ID. On
+# Windows a port is just "COM5", so the name says nothing and the USB ID is
+# what finds the light (spec/capture-routes.md §2).
+SCANLIGHT_VIDS = frozenset({0x2E8A})
+
+
+def port_info_rank(device, vid=None, description=""):
+    """Rank a port from what the system says about it: the Scanlight's USB ID
+    first, then any USB serial port (by ID or name), then the rest, the
+    Mac's own ports last."""
+    if vid in SCANLIGHT_VIDS:
+        return (-1, str(device).lower())
+    base = port_rank(device)
+    if base[0] == 1 and vid is not None:
+        return (0, base[1])
+    return base
+
+
 def list_ports():
     """Serial port device names, likely ones first. [] without pyserial."""
     if not SERIAL_AVAILABLE:
         return []
     try:
-        names = [p.device for p in serial.tools.list_ports.comports()]
+        infos = list(serial.tools.list_ports.comports())
     except Exception:
         return []
-    return sorted(names, key=port_rank)
+    ranked = sorted(infos, key=lambda p: port_info_rank(
+        p.device, getattr(p, "vid", None), getattr(p, "description", "")))
+    return [p.device for p in ranked]
 
 
 def clean_levels(levels):
