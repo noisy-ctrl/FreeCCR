@@ -242,6 +242,7 @@ class LiveCaptureMonitor(QWidget):
         self._usb_model = ""
         self._usb_dest = None
         self._exposure = {}
+        self._addon_warned = set()       # cameras warned about this session
 
         st = _settings()
         self._toggles = _json_setting("live/toggles", {"denoise": True})
@@ -394,6 +395,10 @@ class LiveCaptureMonitor(QWidget):
         self.camera_info = _muted("")
         self.camera_info.setWordWrap(False)
         r.addWidget(self.camera_info)
+        self.addon_badge = QLabel("")
+        self.addon_badge.setStyleSheet(f"color: {theme.WARN_TEXT}; font-size: {theme.FS_CAPTION}px;")
+        self.addon_badge.setVisible(False)
+        r.addWidget(self.addon_badge)
         self.cam_zoom_combo = QComboBox()
         self.cam_zoom_combo.setToolTip("The camera's own live view magnification, "
                                        "for focusing")
@@ -617,6 +622,8 @@ class LiveCaptureMonitor(QWidget):
         self.usb.file_skipped.connect(self._on_usb_skipped)
         self.usb.exposure_changed.connect(self._on_exposure)
         self.usb.zoom_levels.connect(self._on_zoom_levels)
+        if hasattr(self.usb, "addons_found"):
+            self.usb.addons_found.connect(self._on_addons)
         self.usb.fire_failed.connect(self._on_fire_failed)
         self.shutter_combo.activated.connect(self._on_shutter_chosen)
         self.cam_zoom_combo.activated.connect(
@@ -1544,6 +1551,8 @@ class LiveCaptureMonitor(QWidget):
         elif kind == "lost":
             self.canvas.set_message("The USB camera disconnected.\nFind Cameras to "
                                     "reconnect.")
+        if kind in ("lost", "closed", "error", "busy", "open"):
+            self.addon_badge.setVisible(False)       # an open camera is checked afresh
         if kind in ("lost", "closed", "error", "busy"):
             self._exposure = {}
             self.cam_zoom_combo.setVisible(False)
@@ -1587,6 +1596,45 @@ class LiveCaptureMonitor(QWidget):
         for lv in levels or []:
             self.cam_zoom_combo.addItem(f"{lv}×", lv)
         self.cam_zoom_combo.setVisible(bool(levels))
+
+    ADDON_TEXT = (
+        "FreeCCR only uses the camera's standard USB controls and doesn't need "
+        "Magic Lantern. Magic Lantern is unofficial software that runs alongside "
+        "the camera's own firmware: its developers say it can't be guaranteed safe "
+        "and is used at your own risk, and a wrong setting written by it can stop a "
+        "camera starting up.\n\nIf the camera misbehaves while tethered, start it "
+        "without Magic Lantern: hold SET while switching it on, or use a card that "
+        "doesn't have it.")
+
+    def _on_addons(self, found):
+        """Unofficial add-ons on the open camera's card (spec/capture-routes.md
+        §12): a badge while it is open, and a warning once per camera."""
+        if cb.MAGIC_LANTERN not in (found or []):
+            return
+        self.addon_badge.setText("Magic Lantern on card")
+        self.addon_badge.setToolTip(self.ADDON_TEXT)
+        self.addon_badge.setVisible(True)
+        model = self._usb_model or "camera"
+        if model in self._addon_warned:
+            return
+        self._addon_warned.add(model)
+        if not _settings().value("live/warn_addons", True, type=bool):
+            return
+        if self._addon_notice(model, found):
+            _settings().setValue("live/warn_addons", False)
+
+    def _addon_notice(self, model, found):
+        """The warning box; returns "don't warn again". The test seam."""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("Magic Lantern")
+        box.setText(f"The card in the {model} has Magic Lantern on it.")
+        box.setInformativeText(self.ADDON_TEXT)
+        box.addButton("OK", QMessageBox.AcceptRole)
+        cb_ = QCheckBox("Don't warn me about this again")
+        box.setCheckBox(cb_)
+        box.exec()
+        return cb_.isChecked()
 
     def _on_release_camera(self):
         box = QMessageBox(self)

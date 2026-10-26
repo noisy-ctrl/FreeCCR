@@ -100,7 +100,7 @@ class _Widget:
 
 
 def fake_gp(cameras=(("Canon EOS 5D Mark III", "usb:001,004"),), shot=("IMG_0001.CR2", "IMG_0001.JPG"),
-            config=None):
+            config=None, card=None):
     gp = types.SimpleNamespace()
     gp.GPhoto2Error = GPhoto2Error
     gp.GP_EVENT_UNKNOWN, gp.GP_EVENT_TIMEOUT, gp.GP_EVENT_FILE_ADDED = 0, 1, 2
@@ -114,7 +114,7 @@ def fake_gp(cameras=(("Canon EOS 5D Mark III", "usb:001,004"),), shot=("IMG_0001
                                          "iso": _Widget(value="100"),
                                          "f-number": _Widget(value="f/8"),
                                          "eoszoom": _Widget(value="1")}),
-                                     set_configs=0)
+                                     set_configs=0, card=card)
     st = gp.state
 
     class Camera:
@@ -161,6 +161,19 @@ def fake_gp(cameras=(("Canon EOS 5D Mark III", "usb:001,004"),), shot=("IMG_0001
 
         def set_config(self, cfg):
             st.set_configs += 1
+
+        # the card: {"/": [stores], "/store": (files, folders)}; None = no listing
+        def folder_list_folders(self, path):
+            if st.card is None:
+                raise GPhoto2Error(-6)
+            if path == "/":
+                return _List([(n, None) for n in st.card["/"]])
+            return _List([(n, None) for n in st.card[path][1]])
+
+        def folder_list_files(self, path):
+            if st.card is None:
+                raise GPhoto2Error(-6)
+            return _List([(n, None) for n in st.card[path][0]])
 
     class PortInfoList:
         def load(self):
@@ -568,6 +581,7 @@ def test_ports_ranked_by_usb_id():
 # the monitor
 # --------------------------------------------------------------------------- #
 class FakeUsb(QObject):
+    addons_found = Signal(list)
     cameras_found = Signal(list)
     state = Signal(str, str)
     file_saved = Signal(str)
@@ -815,3 +829,112 @@ def test_monitor_stops_when_a_shot_never_arrives(mon_usb):
     assert not mon.sequence.running
     assert "didn't arrive in the hot folder" in mon.capture_caption.text()
     assert mon.shoot_btn.isEnabled()
+
+
+
+# --------------------------------------------------------------------------- #
+# Magic Lantern on the card (spec §12)
+# --------------------------------------------------------------------------- #
+def test_magic_lantern_is_recognised_by_its_two_items():
+    assert cb.addons_on_card(["autoexec.bin"], ["DCIM", "ML"]) == ["Magic Lantern"]
+    assert cb.addons_on_card(["AUTOEXEC.BIN"], ["ml", "MISC"]) == ["Magic Lantern"]
+    assert cb.addons_on_card(["autoexec.bin"], ["DCIM"]) == []      # one of the two isn't enough
+    assert cb.addons_on_card([], ["ML"]) == []
+
+
+def test_gphoto2_lists_every_card_for_add_ons(tmp_path):
+    card = {"/": ["store_00010001", "store_00020001"],
+            "/store_00010001": ([], ["DCIM"]),
+            "/store_00020001": (["AUTOEXEC.BIN"], ["DCIM", "ML"])}
+    b, gp, clock = _gp_backend(tmp_path, card=card)
+    b.list_cameras()
+    b.open("usb:001,004", None)
+    assert b.addons() == ["Magic Lantern"]
+    b2, gp2, _c = _gp_backend(tmp_path, card=None)                  # no listing: no finding
+    b2.list_cameras()
+    b2.open("usb:001,004", None)
+    assert b2.addons() == []
+    assert cb.DigiCamControlBackend().addons() == []
+
+
+_REAL_ML_SCRIPT = r'''
+import json, sys
+sys.path.insert(0, sys.argv[1])
+from core import camera_backends as cb
+b = cb.Gphoto2Backend()
+cams = b.list_cameras()
+b.open(cb.split_key(cams[0].key)[1], None)
+print(json.dumps(b.addons()))
+b.close()
+'''
+
+
+def test_real_libgphoto2_finds_magic_lantern_on_the_card(tmp_path):
+    gp = pytest.importorskip("gphoto2")
+    if not os.path.isdir(os.path.join(os.path.dirname(gp.__file__), "libgphoto2", "vusb")):
+        pytest.skip("this gphoto2 build has no virtual camera")
+    import subprocess
+    src = os.path.join(os.path.dirname(__file__), "..", "src")
+    out = {}
+    for with_ml in (True, False):
+        vdir = tmp_path / f"vcam_{with_ml}"
+        (vdir / "DCIM" / "100CANON").mkdir(parents=True)
+        cv2.imwrite(str(vdir / "DCIM" / "100CANON" / "IMG_0001.JPG"), np.zeros((8, 8, 3), np.uint8))
+        if with_ml:
+            (vdir / "ML" / "modules").mkdir(parents=True)
+            (vdir / "autoexec.bin").write_bytes(b"x")
+        r = subprocess.run([sys.executable, "-c", _REAL_ML_SCRIPT, src],
+                           env=dict(os.environ, VCAMERADIR=str(vdir)),
+                           capture_output=True, text=True, timeout=60)
+        assert r.returncode == 0, r.stderr[-2000:]
+        out[with_ml] = json.loads(r.stdout.strip().splitlines()[-1])
+    assert out == {True: ["Magic Lantern"], False: []}
+
+
+def test_worker_reports_add_ons_after_opening():
+    fake = cb.FakeBackend()
+    fake.card_addons = ["Magic Lantern"]
+    usb = UsbCamera(backends=[fake])
+    got = []
+    usb.addons_found.connect(got.append)
+    usb.start()
+    try:
+        usb.open("usb:fake:0")
+        assert _wait(lambda: got)
+        assert got == [["Magic Lantern"]]
+    finally:
+        usb.stop()
+        usb.wait(3000)
+
+
+def test_monitor_warns_once_and_shows_a_badge(mon_usb):
+    mon, feed, light, usb, mw, asked, lm = mon_usb
+    shown = []
+    mon._addon_notice = lambda model, found: (shown.append(model), False)[1]
+    usb.opened("Canon EOS 5D Mark III")
+    _app.processEvents()
+    usb.addons_found.emit(["Magic Lantern"])
+    _app.processEvents()
+    assert shown == ["Canon EOS 5D Mark III"]
+    assert mon.addon_badge.isVisibleTo(mon) and mon.addon_badge.text() == "Magic Lantern on card"
+    assert "own risk" in mon.addon_badge.toolTip() and "hold SET" in mon.addon_badge.toolTip()
+    assert "Canon" not in mon.ADDON_TEXT                 # the maker isn't named
+    usb.addons_found.emit(["Magic Lantern"])             # same camera again: no second box
+    _app.processEvents()
+    assert shown == ["Canon EOS 5D Mark III"]
+    usb.status = "closed"
+    usb.state.emit("closed", "")
+    _app.processEvents()
+    assert not mon.addon_badge.isVisibleTo(mon)
+    # "don't warn me again" turns the box off; the badge still shows
+    mon._addon_notice = lambda model, found: (shown.append(model), True)[1]
+    usb.opened("Canon EOS 5D Mark IV")
+    usb.addons_found.emit(["Magic Lantern"])
+    _app.processEvents()
+    assert shown[-1] == "Canon EOS 5D Mark IV"
+    assert lm._settings().value("live/warn_addons", True, type=bool) is False
+    mon._addon_warned.clear()
+    usb.addons_found.emit(["Magic Lantern"])
+    _app.processEvents()
+    assert shown[-1] == "Canon EOS 5D Mark IV" and len(shown) == 2
+    assert mon.addon_badge.isVisibleTo(mon)

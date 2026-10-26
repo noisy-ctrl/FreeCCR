@@ -84,6 +84,18 @@ def keep_raw(names):
     return out
 
 
+MAGIC_LANTERN = "Magic Lantern"
+
+
+def addons_on_card(files, folders):
+    """Unofficial camera add-ons whose files are at the top of a card:
+    Magic Lantern installs autoexec.bin and an ML folder (its install guide).
+    `files` / `folders` are the names at the card's top level."""
+    f = {str(n).lower() for n in files}
+    d = {str(n).lower() for n in folders}
+    return [MAGIC_LANTERN] if "autoexec.bin" in f and "ml" in d else []
+
+
 def unique_path(folder, name):
     """`folder/name`, or `folder/stem_1.ext`, `_2`… if that is taken (a new card
     restarts the camera's numbering)."""
@@ -303,6 +315,31 @@ class Gphoto2Backend:
                 pass
             raise CameraLost(str(e))
         return target
+
+    def addons(self):
+        """Unofficial add-ons found on the camera's card(s) (spec §12). A
+        listing that fails is no finding."""
+        if self.camera is None:
+            return []
+
+        def names(lst):
+            return [lst.get_name(i) for i in range(lst.count())]
+        found = []
+        try:
+            stores = names(self.camera.folder_list_folders("/"))
+        except Exception:
+            return []
+        for store in stores:
+            top = "/" + store.strip("/")
+            try:
+                files = names(self.camera.folder_list_files(top))
+                folders = names(self.camera.folder_list_folders(top))
+            except Exception:
+                continue
+            for a in addons_on_card(files, folders):
+                if a not in found:
+                    found.append(a)
+        return found
 
     def exposure(self):
         if self.camera is None:
@@ -559,6 +596,9 @@ class DigiCamControlBackend:
             pass
         return path
 
+    def addons(self):
+        return []                    # its web interface can't list the card
+
     def exposure(self):
         out = {}
         for field, key in (("shutter", "shutterspeed"), ("iso", "iso"), ("aperture", "aperture")):
@@ -600,6 +640,7 @@ class FakeBackend:
         self._due = []                # (time, name)
         self.zoom = "1"
         self.frames = 0
+        self.card_addons = []
 
     def available(self):
         return True
@@ -665,6 +706,9 @@ class FakeBackend:
                 out.append(("file", path))
         self._due = keep
         return out
+
+    def addons(self):
+        return list(self.card_addons)
 
     def exposure(self):
         return {"shutter": "1/60", "iso": "100", "aperture": "8"}

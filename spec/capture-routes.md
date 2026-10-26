@@ -237,3 +237,52 @@ a separate program the user installs; nothing of it is shipped.
 - Not verified here (no hardware): a real 5D Mark III / IV over libgphoto2,
   digiCamControl's actual reply format on Windows (both JSON and plain text
   are handled), and the Nuitka-built app's bundled libgphoto2 drivers.
+
+## 12. Magic Lantern notice (revision 2026-10-26, the user's request)
+
+### Goal
+Warn a user whose camera has Magic Lantern (open-source, unofficial
+software that runs alongside the camera's own firmware) on its card. Nothing
+in FreeCCR needs it or touches it; the notice is so that a camera that
+misbehaves while tethered can be ruled in or out.
+
+### Detection
+Magic Lantern installs `autoexec.bin` and an `ML` folder at the top of the
+card (its install guide). `Gphoto2Backend.addons()` lists each storage's top
+level after the camera opens (`folder_list_folders('/')`, then
+`folder_list_files` / `folder_list_folders` per store, names compared
+case-insensitively) and reports "Magic Lantern" when both are there. It
+means the card carries it; whether it booted can't be told over USB.
+- digiCamControl (Windows) and the HDMI route can't list the card: no
+  notice there.
+- A listing that fails is no finding (never an error).
+
+### UX
+- Once per session per camera, unless turned off: a warning box, "Magic
+  Lantern on this camera's card", saying FreeCCR only uses the camera's
+  standard USB controls and doesn't need it; that Magic Lantern is
+  unofficial software its own developers say can't be guaranteed safe and is
+  used at the user's own risk, and that a wrong setting written by it can stop
+  a camera starting up; and that if the camera misbehaves while tethered, it
+  can be started without Magic Lantern by holding SET while switching on, or
+  with a card that doesn't have it. Check box: "Don't warn me about this
+  again" (QSettings `live/warn_addons`, default on).
+- While that camera is open, a small warning-coloured "Magic Lantern on
+  card" beside the camera info, with the same text as its tooltip (shown even
+  when the box is turned off).
+- Brand names: the camera maker isn't named ("the camera's own firmware").
+
+### Architecture
+- `addons()` on every backend (`[]` for digiCamControl; the fake's is set
+  by tests); `UsbCamera` emits `addons_found(list)` after a successful open.
+- `LiveCaptureMonitor._on_addons` → `_addon_notice(model, found)` (the test
+  seam, returns don't-ask-again) and the badge.
+
+As built: as above; `addons_on_card` holds the rule, `FakeBackend.card_addons` the
+tests' finding.
+
+### Tests
+Fake libgphoto2 listings (found / only one of the two / listing error), the
+real libgphoto2 virtual camera with `autoexec.bin` and `ML/` in its folder,
+the worker's signal, and the monitor's box (shown once, suppressed by the
+setting) and badge (cleared when the camera closes).

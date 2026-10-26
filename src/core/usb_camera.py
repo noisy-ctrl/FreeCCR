@@ -29,6 +29,7 @@ class UsbCamera(WorkerThread):
     file_skipped = Signal(str)          # a shot's file had nowhere to go
     exposure_changed = Signal(dict)
     zoom_levels = Signal(list)
+    addons_found = Signal(list)         # unofficial add-ons on the card (spec §12)
     fired = Signal()
     fire_failed = Signal(str)
 
@@ -244,6 +245,12 @@ class UsbCamera(WorkerThread):
                 return
         self.state.emit("open", self.model)
         self.zoom_levels.emit(list(backend.zoom_levels()))
+        try:
+            found = list(backend.addons()) if hasattr(backend, "addons") else []
+        except Exception:
+            found = []
+        if found:
+            self.addons_found.emit(found)
 
     def _publish(self, data):
         frame = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
