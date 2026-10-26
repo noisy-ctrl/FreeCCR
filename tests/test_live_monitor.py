@@ -34,6 +34,8 @@ from test_live_capture_light import FakeDevice, FakeSerial  # noqa: E402
 def iso_settings(tmp_path, monkeypatch):
     path = str(tmp_path / "live.ini")
     monkeypatch.setattr(lm, "_settings", lambda: QSettings(path, QSettings.IniFormat))
+    from core.ccr_backend import ccr_backend
+    monkeypatch.setattr(ccr_backend, "scan_type", "colour", raising=False)
     return path
 
 
@@ -159,7 +161,7 @@ def test_shoot_runs_the_trichrome_sequence_on_the_light():
     mon, feed, light, dev = _monitor()
     try:
         mon._timing = cs.clean_timing({"focus_ms": 0, "pulse_ms": 10, "hold_ms": 0, "period_ms": 0})
-        mon.trichrome.setChecked(True)
+        mon._on_scan_type_chosen(mon.scan_combo.findData("trichrome"))
         pre = mon._preset()
         dev.written.clear()
         QTest.keyClick(mon.canvas, Qt.Key_S)

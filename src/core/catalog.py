@@ -257,6 +257,8 @@ def serialize_image(img) -> dict:
         # The film format picked for the frame in the Crop panel
         # (spec/film-formats.md). Additive: absent = not set.
         "film_format": getattr(img, "film_format", None),
+        # How it was scanned (spec/scan-type.md): colour / trichrome / bw / None
+        "capture_type": getattr(img, "capture_type", None),
         # The frame's white point choice and its hand-sampled White Point
         # (spec/white-point-choice.md). Additive: absent = the defaults.
         "wp_choice": getattr(img, "wp_choice", None),
@@ -736,6 +738,7 @@ def _restore_image(file_path: str, state: dict, live_merge_sources=None,
     img.auto_crop_rect = tuple(auto) if auto else None
     img.auto_crop_example = state.get("auto_crop_example")
     img.film_format = state.get("film_format")
+    img.capture_type = state.get("capture_type")
     img.wp_choice = state.get("wp_choice")
     ws = state.get("wp_sample")
     img.wp_sample = tuple(ws) if ws else None

@@ -171,6 +171,12 @@ class MainWindow(QMainWindow):
     # A file Hot Folder Tether just loaded (its path). The Live Capture
     # Monitor checks the first one after a Shoot against its Hold time.
     tether_captured = Signal(str)
+    # What is being scanned changed (spec/scan-type.md): "colour" |
+    # "trichrome" | "bw". The Live Capture Monitor follows it.
+    scan_type_changed = Signal(str)
+    # Queued to the Hot Folder Tether worker (it lives on its own thread).
+    _tether_triplet_req = Signal(object)
+    _tether_leftover_req = Signal(object)
 
     def __init__(self):
         super().__init__()
@@ -193,6 +199,7 @@ class MainWindow(QMainWindow):
         self.layout.setContentsMargins(0, 0, 0, 0)
 
         self.thumbnail_list = ThumbnailList(self.on_image_selected)
+        self.thumbnail_list.attention_action.connect(self._on_attention_action)
         self.thumbnail_list.setFixedWidth(216)
 
         self.image_preview = ImagePreview(self)
@@ -235,9 +242,13 @@ class MainWindow(QMainWindow):
         self._tether_unavailable = False
         self._tether_prompted = False          # B/W-point prompt shown this session?
         self._tether_import_existing = set()   # paths imported at start (no prompt)
+        self._tether_grouper = None            # trichrome: files waiting for a triplet
+        self._tether_attention = []            # greyed-out shots needing a decision
+        self._attention_seq = 0
         self._tether_lead_img = None           # the first new capture (film lead)
         self.tether_banner = TetherBanner()
         self.tether_banner.stopRequested.connect(self.stop_tethering)
+        self.tether_banner.scanTypeChanged.connect(self.set_scan_type)
         self.image_preview.set_tether_banner(self.tether_banner)
 
         # Contact sheet (spec/contact-sheet.md): a SIBLING of image_preview,
@@ -289,6 +300,15 @@ class MainWindow(QMainWindow):
         # spec/trichrome-mono-read.md.
         ccr_backend.rgb_merge_mono = self._settings.value(
             "import/rgb_merge_mono", False, type=bool)
+        # What is being scanned (spec/scan-type.md). The monitor's old
+        # Trichrome tick box is its first value when nothing is stored yet.
+        from core import scan_type as _st
+        stored = self._settings.value("scan/type", "", type=str)
+        if not stored:
+            legacy = self._settings.value("live/trichrome", None)
+            if legacy is not None:
+                stored = "trichrome" if str(legacy).lower() in ("true", "1") else "colour"
+        ccr_backend.scan_type = _st.clean(stored)
         # Restore the "replace originals with linear TIFF" opt-in. When on with
         # merge mode, a successful merge import offers (with confirmation) to bake
         # each frame to a linear TIFF and delete the source RAWs. See
@@ -1843,6 +1863,10 @@ class MainWindow(QMainWindow):
 
     def _tether_note(self):
         """Banner sub-text reflecting how captures will be handled."""
+        g = getattr(self, "_tether_grouper", None)
+        if (g is not None and g.pending
+                and getattr(ccr_backend, "scan_type", "") == "trichrome"):
+            return f"{len(g.pending)} of 3 frames of the next shot"
         if ccr_backend.positive_mode:
             return "Positive mode — captures import as positives."
         if ccr_backend.black_point_bgr is None:
@@ -1921,7 +1945,13 @@ class MainWindow(QMainWindow):
         self._tether_worker.moveToThread(self._tether_thread)
         self._tether_worker.captured.connect(self._on_capture)
         self._tether_worker.captureError.connect(self._on_capture_error)
+        self._tether_worker.needsAttention.connect(self._on_needs_attention)
+        self._tether_triplet_req.connect(self._tether_worker.process_triplet)
+        self._tether_leftover_req.connect(self._tether_worker.describe_leftover)
         self._tether_thread.start()
+        from core.scan_type import TripletGrouper
+        self._tether_grouper = TripletGrouper()
+        self.tether_banner.set_scan_type(ccr_backend.scan_type)
 
         self._tether_active = True
         self.tether_action.setText("Stop Hot Folder Tether")
@@ -1933,12 +1963,152 @@ class MainWindow(QMainWindow):
         self._tether_timer.timeout.connect(self._poll_tether_folder)
         self._tether_timer.start()
 
-        for p in import_paths:
-            self._dispatch_to_worker(p)
+        self._route_existing(import_paths)
 
         self.sliders_panel.set_temporary_hint(
             f"Hot folder tether: watching “{self._tether_folder_label()}”. "
             f"Captures appear here automatically.", duration=5000)
+
+    # --- scan type and trichrome grouping (spec/scan-type.md) ------------
+    def set_scan_type(self, t):
+        from core import scan_type as st
+        t = st.clean(t)
+        old = getattr(ccr_backend, "scan_type", st.DEFAULT)
+        if t == old:
+            return
+        ccr_backend.scan_type = t
+        self._settings.setValue("scan/type", t)
+        if self._tether_active and old == "trichrome" and self._tether_grouper is not None:
+            # a part-filled triplet loads as single frames when switching away
+            for p in self._tether_grouper.flush():
+                self._dispatch_to_worker(p)
+        self.tether_banner.set_scan_type(t)
+        self._refresh_tether_banner()
+        self.scan_type_changed.emit(t)
+
+    def _route_tether_file(self, path):
+        from core.ccr_merge import is_raw_path
+        if (getattr(ccr_backend, "scan_type", "colour") == "trichrome"
+                and self._tether_grouper is not None):
+            if not is_raw_path(path):
+                # merging reads the RAW: a JPEG-only arrival loads on its own
+                self.sliders_panel.set_temporary_hint(
+                    f"{os.path.basename(path)} isn't a RAW, so it can't join a trichrome "
+                    "merge; loaded on its own.", duration=5000)
+                self._dispatch_to_worker(path)
+                return
+            self._tether_grouper.add(path)
+            for trip in self._tether_grouper.take():
+                self._tether_triplet_req.emit({"paths": list(trip), "check": True})
+            self._refresh_tether_banner()
+            return
+        self._dispatch_to_worker(path)
+
+    def _route_existing(self, paths):
+        """Files already in the folder, when the user chose to import them."""
+        if getattr(ccr_backend, "scan_type", "colour") != "trichrome":
+            for p in paths:
+                self._dispatch_to_worker(p)
+            return
+        from core.ccr_merge import is_raw_path
+        from core import scan_type as st
+        raws = [p for p in paths if is_raw_path(p)]
+        for p in paths:
+            if p not in raws:
+                self._dispatch_to_worker(p)
+        trips, left = st.group_existing(raws)
+        for trip in trips:
+            self._tether_triplet_req.emit({"paths": list(trip), "check": True})
+        if left:
+            self._tether_leftover_req.emit({
+                "paths": left,
+                "reason": f"{len(left)} file(s) in the folder don't make a full red, "
+                          "green, blue shot"})
+
+    def _refresh_tether_banner(self):
+        if not self._tether_active:
+            return
+        self.image_preview.show_tether_banner(
+            self._tether_folder_label(), self._tether_count, self._tether_note())
+
+    def _on_needs_attention(self, entry):
+        """A shot that couldn't be merged: shown greyed out under the frames."""
+        reason = entry.get("reason", "")
+        if "should be lit" in reason:
+            short = "Not red, green, blue"
+        elif "merge failed" in reason:
+            short = "Merge failed"
+        elif "arrived" in reason or "waiting" in reason:
+            short = "Frames missing"
+        else:
+            short = "Left over"
+        self._attention_seq += 1
+        e = dict(entry)
+        e["id"] = f"a{self._attention_seq}"
+        e["short"] = short
+        self._tether_attention.append(e)
+        self.thumbnail_list.set_attention(self._tether_attention)
+        self.sliders_panel.set_temporary_hint(
+            f"A shot needs attention: {reason}. It's greyed out under the frames "
+            "(right-click it).", duration=6000)
+
+    def _on_attention_action(self, eid, action):
+        e = next((x for x in self._tether_attention if x["id"] == eid), None)
+        if e is None:
+            return
+        paths = list(e.get("paths") or [])
+        if action == "choose":
+            paths = self._choose_triplet_files(paths)
+            if paths is None:
+                return
+            self._load_triplet_now(paths, check=False)
+        elif action == "merge":
+            if len(paths) != 3:
+                return
+            self._load_triplet_now(paths, check=False)
+        elif action == "singles":
+            for p in paths:
+                self._load_single_now(p)
+        self._tether_attention = [x for x in self._tether_attention if x["id"] != eid]
+        self.thumbnail_list.set_attention(self._tether_attention)
+
+    def _choose_triplet_files(self, paths):
+        """The red, green and blue frames, chosen by hand (in name order)."""
+        from core import ccr_merge
+        start = (self._tether_folder or (os.path.dirname(paths[0]) if paths else ""))
+        chosen, _ = QFileDialog.getOpenFileNames(
+            self, "Choose the red, green and blue frames (3 RAW files)", start,
+            "RAW files (" + " ".join(f"*{e}" for e in sorted(ccr_merge.RAW_EXTENSIONS)) + ")")
+        if not chosen:
+            return None
+        ok, err = ccr_merge.validate_merge_inputs(chosen)
+        if not ok or len(chosen) != 3:
+            QMessageBox.warning(self, "Choose Files",
+                                err or "Choose exactly 3 RAW files: red, green, blue.")
+            return None
+        return ccr_merge.sort_for_merge(chosen)
+
+    def _load_triplet_now(self, paths, check):
+        if self._tether_worker is not None and self._tether_active:
+            self._tether_triplet_req.emit({"paths": list(paths), "check": check})
+            return
+        # no session running: merge here, like Open with 3-way merge
+        from core.tether_watcher import TetherWatchWorker
+        w = TetherWatchWorker()
+        w.captured.connect(self._on_capture)
+        w.captureError.connect(self._on_capture_error)
+        w.needsAttention.connect(self._on_needs_attention)
+        w.process_triplet({"paths": list(paths), "check": check})
+
+    def _load_single_now(self, path):
+        if self._tether_worker is not None and self._tether_active:
+            self._dispatch_to_worker(path)
+            return
+        from core.tether_watcher import TetherWatchWorker
+        w = TetherWatchWorker()
+        w.captured.connect(self._on_capture)
+        w.captureError.connect(self._on_capture_error)
+        w.process(path)
 
     def _dispatch_to_worker(self, path):
         if self._tether_worker is None:
@@ -1970,7 +2140,15 @@ class MainWindow(QMainWindow):
             self.image_preview.show_tether_banner(
                 self._tether_folder_label(), self._tether_count, self._tether_note())
         for name in self._tether_scanner.feed(entries):
-            self._dispatch_to_worker(os.path.join(self._tether_folder, name))
+            self._route_tether_file(os.path.join(self._tether_folder, name))
+        if self._tether_grouper is not None:
+            left = self._tether_grouper.stalled()
+            if left:
+                self._tether_leftover_req.emit({
+                    "paths": left,
+                    "reason": f"{len(left)} of the 3 frames of a shot arrived; the rest "
+                              f"didn't come within {int(self._tether_grouper.stall_s)} s"})
+            self._refresh_tether_banner()
 
     def _on_capture(self, img):
         # Inherit the editable "look" (adjustments, orientation, crop) of the
@@ -1984,8 +2162,24 @@ class MainWindow(QMainWindow):
         ccr_backend.images.append(img)
         ccr_backend.file_paths.append(img.file_path)
         idx = len(ccr_backend.images) - 1
+        rerender = False
         if template is not None:
             self._apply_tether_template(img, template)
+            rerender = True
+        # What it was scanned as decides its colour profile and is recorded
+        # (spec/scan-type.md): a merge is trichrome; a single file is colour
+        # or B&W by the scan type (a single file of a trichrome scan, loaded
+        # on its own, is neither).
+        st = getattr(ccr_backend, "scan_type", "colour")
+        if getattr(img, "is_merged", False):
+            img.capture_type = "trichrome"
+        else:
+            img.capture_type = {"bw": "bw", "colour": "colour"}.get(st)
+        want = "bw" if st == "bw" else "color"
+        if getattr(img, "color_profile", "color") != want:
+            img.color_profile = want
+            rerender = True
+        if rerender:
             # Re-bake preview/thumbnail so inherited adjustments are reflected
             # (rotation/flips/crop are applied by update_preview on selection).
             img.update_thumbnail_and_preview()
@@ -2077,6 +2271,14 @@ class MainWindow(QMainWindow):
         if not self._tether_active:
             return
         self._tether_active = False
+        if self._tether_grouper is not None:
+            left = self._tether_grouper.flush()
+            if left:
+                self._on_needs_attention({
+                    "paths": left, "thumbs": [],
+                    "reason": f"Hot Folder Tether stopped with {len(left)} frame(s) of a "
+                              "trichrome shot waiting for the rest"})
+            self._tether_grouper = None
         if self._tether_timer is not None:
             self._tether_timer.stop()
             self._tether_timer = None

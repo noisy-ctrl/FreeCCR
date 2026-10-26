@@ -1,6 +1,6 @@
 # Spec: Scan type (colour, trichrome, black and white)
 
-Status: DRAFT v1 for review (2026-10-26). No code yet.
+Status: REFINED v2, built (2026-10-26). The user's answers are in §10.
 Owner: FreeCCR
 Feature branch: `feature/scan-type`
 
@@ -8,7 +8,8 @@ Feature branch: `feature/scan-type`
 
 One app-wide setting says what is being scanned: **Colour** (one frame under
 white light), **Colour, trichrome** (three frames under red, green and blue,
-merged into one) or **Black & white** (one frame, rendered grey). The Live
+merged into one) or **Black & white** (one exposure, rendered grey, under
+whatever light is used: white or a single R, G or B channel). The Live
 Capture Monitor shoots accordingly, and Hot Folder Tether loads the frames
 accordingly: a trichrome scan arrives as ONE merged colour frame per shot,
 not three single-colour frames; a black-and-white scan arrives already set to
@@ -40,23 +41,25 @@ Black & White. Each frame remembers how it was scanned.
 ## 3. UX
 
 ### 3.1 Where it is chosen
+(The Hot Folder Tether *banner* is the amber strip across the top of the
+main window's picture while a session runs: "● Hot folder tether: “Roll 12”
+· 7 captured … Stop".)
 - **Live Capture Monitor → Capture**: a **Scanning** combo: Colour · white
   light / Colour · trichrome (R → G → B) / Black & white. It replaces the
   Trichrome checkbox (trichrome = the old checkbox on).
-- **Hot Folder Tether**: starting it (File menu, the monitor's prompt or the
-  monitor's button) shows the current choice in the folder picker step's
-  question box ("Scanning: Colour · trichrome. Change…"), and the banner
-  shows it with a small combo ("Hot folder tether: “Roll 12” · 7 captured ·
-  Scanning [Colour · trichrome ▾]") so it can be changed mid-session.
+- **Hot Folder Tether**: the banner shows it with a small combo ("Hot folder
+  tether: “Roll 12” · 7 captured … Scanning [Colour · trichrome ▾]") so it
+  can be seen and changed without the monitor, mid-session too; the
+  monitor's "Turn on Hot Folder Tether?" prompt names the current choice.
 - Changing it anywhere changes it everywhere (one setting).
 
 ### 3.2 What each type does
 
 | | Shoot (monitor) | Light between shots | Hot Folder Tether | Frame records |
 |---|---|---|---|---|
-| Colour · white light | one shot under the preset's White | White | each file one frame | `capture_type = "colour"` |
-| Colour · trichrome | R, G, B shots, then White | White | each three files one merged frame | `"trichrome"` |
-| Black & white | one shot under the preset's White | White | each file one frame, Color Profile Black & White | `"bw"` |
+| Colour · white light | one shot with the light as it is | unchanged | each file one frame | `capture_type = "colour"` |
+| Colour · trichrome | R, G, B shots, then the preset's White | White | each three files one merged frame | `"trichrome"` |
+| Black & white | one shot with the light as it is (white or a single channel) | unchanged | each file one frame, Color Profile Black & White | `"bw"` |
 
 The monitor's Negative preview turns its Black & white box on for a B&W
 scan.
@@ -84,18 +87,29 @@ same way a single tethered frame is (the session's black point, if set).
   same way; a count that isn't a multiple of three asks whether to load the
   leftover as single frames or leave it.
 
-### 5.2 A shot that went wrong
-If a triplet stays incomplete for more than 30 s after its last file (a
-missed shot), the banner offers **Load as single frames** and **Keep
-waiting**; nothing is guessed.
+### 5.2 A shot that can't be merged: greyed out under the frames
+A shot that can't be merged (§5.3), a triplet still incomplete 30 s after
+its last file (a missed shot), files left over at the start, or frames
+waiting when the session stops, is shown as a **greyed-out tile** in a
+"Needs attention" strip under the frame list: its frames side by side in
+grey, a short label ("Not red, green, blue", "Frames missing", "Left over",
+"Merge failed") and the reason and file names in the tooltip. It is NOT a
+frame in the list (list rows stay the image indices). Right-click:
+**Choose Files…** (pick the red, green and blue RAWs by hand; they merge in
+name order, unchecked), **Merge Anyway**, **Load as Single Frames**,
+**Remove** (the files on disk are untouched). Double-click = Choose Files.
+Nothing is guessed.
 
 ### 5.3 The colour check
-Before merging, each frame's brightest channel is checked on a quick
-half-size read: a red-lit frame is red-dominant, and so on. A triplet that
-isn't red, green, blue in that order (a stray white frame, one shot missed
-and the next started) is NOT merged: the banner says which frame looks out
-of place and offers **Merge anyway** / **Shift by one** / **Load as single
-frames**. (This is the only place the files' content is read for type.)
+Before merging, each frame's light is read off the RAW mosaic (black-
+subtracted channel means over every fifth photosite, both ways): a frame lit
+by one LED puts most of its signal in that channel. Frame k must have channel
+k as its largest share and at least 0.60 of R + G + B (white light through
+an orange negative leads in red at about 0.45-0.5, so it fails). A
+monochrome sensor or an unreadable file isn't judged. A triplet that fails
+(a stray white frame, an order shifted by a missed shot) is not merged: it
+becomes a greyed-out tile (§5.2) saying which frame looks out of place. The
+0.60 is a reasoned estimate, to be confirmed on real triplets.
 
 ### 5.4 Switching type mid-session
 A part-filled triplet when switching away from trichrome is loaded as single
@@ -109,10 +123,10 @@ the existing tether template already copies a previous frame's profile, and
 
 ## 7. Where `capture_type` is used (now and later)
 - Shown in the frame's info and the contact sheet's caption ("trichrome").
-- **Later, separately (open question 4):** a camera profile or Film Look
-  made for one capture type warns when used on another (camera profiles
-  already record white-light vs trichrome; a Film Look fitted on trichrome
-  merges doesn't describe white-light frames).
+- **Later (the user's choice):** a camera profile or Film Look made for one
+  capture type warns when used on another (camera profiles already record
+  white-light vs trichrome; a Film Look fitted on trichrome merges doesn't
+  describe white-light frames).
 
 ## 8. Integration points
 - `core/ccr_backend.py`: `scan_type`, persisted with the other import
@@ -141,12 +155,33 @@ the existing tether template already copies a previous frame's profile, and
 - Monitor: the Scanning combo drives Shoot (one shot vs three) and stays in
   step with the banner; old `live/trichrome` setting migrates to the combo.
 
-## 10. Open questions
-1. Is the combo on the Hot Folder Tether banner the right second place, or
-   should the type only be chosen in the monitor?
-2. A triplet that fails the colour check: pause and ask (as above), or just
-   load the three as single frames and say so?
-3. Black & white: always under White, or also offer a single colour (Green)
-   for B&W negatives?
-4. Profile / Film Look mismatch warnings by capture type: now, later, or
-   not at all?
+## 10. Decisions (2026-10-26, the user's answers)
+1. The banner (the amber strip shown while Hot Folder Tether runs) carries
+   the choice too, so it works without the monitor.
+2. A shot that can't be merged is a greyed-out tile: right-click to remove
+   it or choose the files by hand (plus Merge Anyway / Load as Single
+   Frames).
+3. Black & white is simply one exposure: Shoot doesn't care which light is
+   lit (white, or a single R, G or B channel), and neither does loading.
+   The same goes for Colour · white light: Shoot uses the light as it is.
+4. Profile / Film Look mismatch warnings: later.
+
+## 11. As built
+- `core/scan_type.py`: types and labels, `TripletGrouper`, `group_existing`,
+  `shares_from_mosaic` / `light_shares` / `judge_triplet`, `thumb_bgr`.
+- `core/tether_watcher.py`: `process_triplet` (check, then
+  `create_images_for_merge` with the Merge detail settings, then the same
+  conversion as a single frame), `describe_leftover`, `needsAttention`.
+- `ui/main_window.py`: `scan_type_changed`, `set_scan_type` (QSettings
+  `scan/type`; the monitor's old `live/trichrome` seeds it once),
+  `_route_tether_file` / `_route_existing`, the stall check in the poll,
+  `_on_needs_attention` / `_on_attention_action`, the banner's part-shot
+  note, and `_on_capture` setting `capture_type` and the colour profile.
+- `widgets/thumbnail_list.py`: the "Needs attention" strip
+  (`set_attention`, `attention_action`).
+- `widgets/tether_banner.py`: the Scanning combo.
+- `widgets/live_monitor.py`: the Scanning combo replaces the Trichrome box;
+  Black & white ticks the Negative preview's B&W.
+- `core/catalog.py`, `core/ccr_image.py`, `core/ccr_backend.py`:
+  `capture_type` (saved, restored, copied on Duplicate) and `scan_type`.
+- Tests: `tests/test_scan_type.py`.

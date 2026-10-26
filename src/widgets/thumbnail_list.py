@@ -1,6 +1,6 @@
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QListWidget, QListWidgetItem, QLabel, QDialog, QApplication, QPushButton, QMenu, QComboBox, QToolButton, QProgressBar
 from PySide6.QtGui import QPixmap, QIcon, QTransform, QPainter
-from PySide6.QtCore import Qt, QSize, QTimer
+from PySide6.QtCore import Qt, QSize, QTimer, Signal
 import os
 import logging
 import numpy as np
@@ -87,6 +87,10 @@ class LoadingDialog(QDialog):
         self.accept()
 
 class ThumbnailList(QWidget):
+    # A greyed-out "needs attention" tile was acted on: (entry id, action),
+    # action in "choose" | "merge" | "singles" | "remove" (spec/scan-type.md).
+    attention_action = Signal(str, str)
+
     def __init__(self, image_selected_callback):
         super().__init__()
         self.image_selected_callback = image_selected_callback
@@ -200,6 +204,30 @@ class ThumbnailList(QWidget):
             lambda _v: ui_activity.touch())
         self.layout.addWidget(self.thumbnail_list)
 
+        # Hot Folder Tether's trichrome shots that couldn't be merged (a frame
+        # missing, or not lit red, green, blue in order): greyed out here, OUT
+        # of the frame list so list rows stay == image indices. Right-click to
+        # choose the files, merge anyway, load singly or remove.
+        self.attention_label = QLabel("Needs attention")
+        self.attention_label.setStyleSheet(
+            f"color: {theme.WARN_TEXT}; font-size: {theme.FS_CAPTION}px; font-weight: bold;")
+        self.attention_list = QListWidget()
+        self.attention_list.setViewMode(QListWidget.IconMode)
+        self.attention_list.setIconSize(QSize(156, 52))
+        self.attention_list.setSpacing(6)
+        self.attention_list.setMovement(QListWidget.Static)
+        self.attention_list.setWrapping(False)
+        self.attention_list.setFlow(QListWidget.TopToBottom)
+        self.attention_list.setFixedWidth(196)
+        self.attention_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.attention_list.customContextMenuRequested.connect(self._attention_menu)
+        self.attention_list.itemDoubleClicked.connect(
+            lambda it: self.attention_action.emit(it.data(Qt.UserRole), "choose"))
+        self._attention = []
+        for w in (self.attention_label, self.attention_list):
+            w.setVisible(False)
+            self.layout.addWidget(w)
+
         self.count_label = QLabel("Total: 0 image(s)")
         self.count_label.setAlignment(Qt.AlignLeft)
         self.layout.addWidget(self.count_label)
@@ -303,6 +331,76 @@ class ThumbnailList(QWidget):
     def update_all_thumbnails(self):
         for idx in range(ccr_backend.get_image_count()):
             self.update_thumbnail(idx)
+
+    # --- needs attention (spec/scan-type.md §5) ---------------------------
+    @staticmethod
+    def _attention_tile(thumbs, size=(156, 52)):
+        """The shot's frames side by side, greyed out; a plain grey tile when
+        there are no previews."""
+        import cv2
+        w, h = size
+        canvas = np.full((h, w, 3), 58, np.uint8)
+        parts = [t for t in (thumbs or []) if t is not None]
+        if parts:
+            th = h - 8
+            parts = [cv2.resize(t, (max(1, round(t.shape[1] * th / t.shape[0])), th),
+                                interpolation=cv2.INTER_AREA) for t in parts]
+            total = sum(p.shape[1] for p in parts) + 4 * (len(parts) - 1)
+            scale = min(1.0, (w - 8) / max(1, total))
+            if scale < 1.0:
+                parts = [cv2.resize(p, (max(1, int(p.shape[1] * scale)), max(1, int(th * scale))),
+                                    interpolation=cv2.INTER_AREA) for p in parts]
+            x = (w - (sum(p.shape[1] for p in parts) + 4 * (len(parts) - 1))) // 2
+            for part in parts:
+                g = cv2.cvtColor(part, cv2.COLOR_BGR2GRAY)
+                g = (g.astype(np.float32) * 0.55 + 30).astype(np.uint8)
+                ph, pw = g.shape
+                y = (h - ph) // 2
+                canvas[y:y + ph, x:x + pw] = g[..., None]
+                x += pw + 4
+        from PySide6.QtGui import QImage
+        rgb = np.ascontiguousarray(canvas[..., ::-1])
+        q = QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888).copy()
+        return QPixmap.fromImage(q)
+
+    def set_attention(self, entries):
+        """entries: [{"id", "paths", "short", "reason", "thumbs"}]."""
+        self._attention = list(entries or [])
+        self.attention_list.clear()
+        for e in self._attention:
+            item = QListWidgetItem(e.get("short", "Needs attention"))
+            item.setIcon(QIcon(self._attention_tile(e.get("thumbs"))))
+            names = "\n".join(os.path.basename(p) for p in e.get("paths", []))
+            item.setToolTip(f"{e.get('reason', '')}\n\n{names}\n\n"
+                            "Right-click: choose the files, merge anyway, load as "
+                            "single frames, or remove. Double-click: choose the files.")
+            item.setData(Qt.UserRole, e["id"])
+            item.setForeground(Qt.gray)
+            self.attention_list.addItem(item)
+        has = bool(self._attention)
+        self.attention_label.setVisible(has)
+        self.attention_list.setVisible(has)
+        if has:
+            rows = min(2, len(self._attention))
+            self.attention_list.setFixedHeight(rows * 84 + 8)
+
+    def _attention_menu(self, pos):
+        item = self.attention_list.itemAt(pos)
+        if item is None:
+            return
+        eid = item.data(Qt.UserRole)
+        entry = next((e for e in self._attention if e["id"] == eid), {})
+        menu = QMenu(self)
+        acts = {menu.addAction("Choose Files…"): "choose"}
+        merge = menu.addAction("Merge Anyway")
+        merge.setEnabled(len(entry.get("paths", [])) == 3)
+        acts[merge] = "merge"
+        acts[menu.addAction("Load as Single Frames")] = "singles"
+        menu.addSeparator()
+        acts[menu.addAction("Remove")] = "remove"
+        chosen = menu.exec(self.attention_list.mapToGlobal(pos))
+        if chosen in acts:
+            self.attention_action.emit(eid, acts[chosen])
 
     def append_image_item(self, idx, select=True):
         """Append a single thumbnail item for a newly added backend image

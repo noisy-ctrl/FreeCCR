@@ -278,6 +278,9 @@ class CCRImage:
         # excluded from the per-file edit catalog. See spec/three-way-rgb-merge.md.
         self.is_merged = bool(is_merged)
         self.merge_sources = list(merge_sources) if merge_sources else None
+        # How it was scanned, when known (spec/scan-type.md): "colour",
+        # "trichrome", "bw"; None for anything not loaded by Hot Folder Tether.
+        self.capture_type = None
         # How this merge extracts each frame's channel — captured at import
         # (like merge_sources) so every re-read (zoom, export, linear TIFF,
         # slice, duplicate) reproduces the same decode at the same canonical

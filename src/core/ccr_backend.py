@@ -62,6 +62,11 @@ class CCRBackend:
         # rgb_merge_demosaic; captured per image (CCRImage.merge_mono).
         # Persisted by MainWindow. See spec/trichrome-mono-read.md.
         self.rgb_merge_mono: bool = False
+        # What is being scanned (spec/scan-type.md): "colour" (one exposure under
+        # white light), "trichrome" (R, G, B exposures merged), "bw" (one
+        # exposure, Black & White). Decides how Hot Folder Tether loads files.
+        # Persisted by MainWindow (scan/type).
+        self.scan_type: str = "colour"
         # Opt-in: after a successful merge import, bake each merged image to a
         # full-resolution linear TIFF, PERMANENTLY delete its three source RAWs,
         # and reload the list from the TIFFs (flatten a trichrome shoot to one
@@ -2108,6 +2113,7 @@ class CCRBackend:
             # copy can diverge without aliasing the source. Areas are cloned on
             # duplicate (whole-image copy), not transferred cross-image.
             dup.area_layers = copy.deepcopy(img.area_layers)
+            dup.capture_type = getattr(img, "capture_type", None)
             dup.is_duplicate = True
             # A duplicated slice becomes its OWN one-image round: a fresh
             # group means resetting the source's round never reaches into

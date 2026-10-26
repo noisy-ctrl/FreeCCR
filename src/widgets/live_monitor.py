@@ -253,7 +253,7 @@ class LiveCaptureMonitor(QWidget):
         self._wire()
         self._apply_toggles()
         self._refresh_presets()
-        self._refresh_capture_caption()
+        self._apply_scan_type(self.scan_type())
         self._on_ports(self.light.ports)          # the link may have reported already
         self._refresh_light_status()
         geo = st.value("live/geometry")
@@ -478,13 +478,25 @@ class LiveCaptureMonitor(QWidget):
         lay.addWidget(_heading("Capture"))
         r = QHBoxLayout()
         theme.apply_button_row(r)
-        self.trichrome = QCheckBox("Trichrome (R → G → B)")
-        self.trichrome.setChecked(bool(_settings().value("live/trichrome", True, type=bool)))
-        self.trichrome.setToolTip("Shoot one frame each under the preset's red, green and "
-                                  "blue, then return to white for the next negative")
+        # What is being scanned (spec/scan-type.md): decides what Shoot does
+        # and how Hot Folder Tether loads the files. One app-wide setting.
+        from core import scan_type as st
+        from core.ccr_backend import ccr_backend
+        self.scan_combo = QComboBox()
+        for t in st.SCAN_TYPES:
+            self.scan_combo.addItem(st.LABELS[t], t)
+        theme.shrinkable_combo(self.scan_combo)
+        self.scan_combo.setToolTip(
+            "What you are scanning.\nColour · white light and Black & white: one "
+            "shot with the light as it is (white, or a single colour).\nColour · "
+            "trichrome: one shot each under the preset's red, green and blue, then "
+            "back to white; Hot Folder Tether merges each three into one frame.\n"
+            "Black & white frames load in Black & White.")
+        self.scan_combo.setCurrentIndex(max(0, self.scan_combo.findData(
+            st.clean(getattr(ccr_backend, "scan_type", st.DEFAULT)))))
         self.timing_btn = QPushButton("Timing…")
         self.timing_btn.setToolTip("Focus, pulse, hold and period")
-        r.addWidget(self.trichrome, 1)
+        r.addWidget(self.scan_combo, 1)
         r.addWidget(self.timing_btn)
         lay.addLayout(r)
         self.shoot_btn = QPushButton("Shoot   (S)")
@@ -567,7 +579,7 @@ class LiveCaptureMonitor(QWidget):
         self.save_btn.clicked.connect(self._on_save)
         self.shoot_btn.clicked.connect(self.shoot)
         self.timing_btn.clicked.connect(self._timing_popup)
-        self.trichrome.toggled.connect(self._on_trichrome)
+        self.scan_combo.activated.connect(self._on_scan_type_chosen)
         self.tether_btn.clicked.connect(self._on_tether_button)
         for key, slot in (("1", lambda: self.solo("r")), ("2", lambda: self.solo("g")),
                           ("3", lambda: self.solo("b")), ("4", lambda: self.solo("w")),
@@ -592,6 +604,8 @@ class LiveCaptureMonitor(QWidget):
         self._ring_timer.timeout.connect(self._tick_ring)
         if self._mw is not None and hasattr(self._mw, "tether_captured"):
             self._mw.tether_captured.connect(self._on_tether_captured)
+        if self._mw is not None and hasattr(self._mw, "scan_type_changed"):
+            self._mw.scan_type_changed.connect(self._apply_scan_type)
 
     # ------------------------------------------------------------------ #
     # opening and closing
@@ -705,8 +719,11 @@ class LiveCaptureMonitor(QWidget):
             keep = box.addButton("Keep Current", QMessageBox.RejectRole)
         else:
             box.setText("Turn on Hot Folder Tether?")
-            box.setInformativeText("The frames your camera's tether app saves into a "
-                                   "folder are loaded into FreeCCR as you shoot.")
+            from core import scan_type as st
+            box.setInformativeText(
+                "The frames your camera's tether app saves into a folder are loaded "
+                f"into FreeCCR as you shoot.\n\nScanning: {st.LABELS[st.clean(self.scan_type())]} "
+                "(change it under Capture).")
             start = box.addButton("Turn On…", QMessageBox.AcceptRole)
             keep = box.addButton("Not Now", QMessageBox.RejectRole)
         box.setDefaultButton(start)
@@ -1268,7 +1285,8 @@ class LiveCaptureMonitor(QWidget):
         if not self.light.is_open():
             return
         self._used()
-        if self.sequence.start(self._timing, self._preset(), self.trichrome.isChecked()):
+        if self.sequence.start(self._timing, self._preset(),
+                               self.scan_type() == "trichrome"):
             self._await_exposure = True
             self.shoot_btn.setText("Stop   (Esc)")
             self._refresh_capture_caption()
@@ -1301,17 +1319,37 @@ class LiveCaptureMonitor(QWidget):
                 f"color: {theme.WARN_TEXT}; font-size: {theme.FS_CAPTION}px;")
             self.capture_caption.setText("Stopped: the Scanlight disconnected.")
 
-    def _on_trichrome(self, on):
-        _settings().setValue("live/trichrome", bool(on))
+    def scan_type(self):
+        return self.scan_combo.currentData()
+
+    def _on_scan_type_chosen(self, i):
+        t = self.scan_combo.itemData(i)
+        if self._mw is not None and hasattr(self._mw, "set_scan_type"):
+            self._mw.set_scan_type(t)        # persists and tells everyone
+        else:
+            from core.ccr_backend import ccr_backend
+            ccr_backend.scan_type = t
+            _settings().setValue("scan/type", t)
+        self._apply_scan_type(t)
+
+    def _apply_scan_type(self, t):
+        i = self.scan_combo.findData(t)
+        if i >= 0 and i != self.scan_combo.currentIndex():
+            self.scan_combo.blockSignals(True)
+            self.scan_combo.setCurrentIndex(i)
+            self.scan_combo.blockSignals(False)
+        self.neg_bw.setChecked(t == "bw")
         self._refresh_capture_caption()
 
     def _refresh_capture_caption(self):
-        tri = self.trichrome.isChecked()
+        tri = self.scan_type() == "trichrome"
         total = cs.cycle_ms(self._timing, tri) / 1000.0
         self.capture_caption.setStyleSheet(
             f"color: {theme.TEXT_MUTED}; font-size: {theme.FS_CAPTION}px;")
+        what = ("One triplet (red, green, blue)" if tri
+                else "One shot, with the light as it is,")
         self.capture_caption.setText(
-            f"One {'triplet' if tri else 'shot'} ≈ {total:.1f} s. Hold after the pulse: "
+            f"{what} ≈ {total:.1f} s. Hold after the pulse: "
             f"{self._timing['hold_ms']} ms; it must be longer than the camera's shutter time.")
 
     def _timing_popup(self):

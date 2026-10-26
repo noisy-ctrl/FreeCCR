@@ -144,6 +144,10 @@ class TetherWatchWorker(QObject):
     """
     captured = Signal(object)          # CCRImage
     captureError = Signal(str, str)    # (path, message)
+    # A trichrome triplet that failed the light check, or files left over:
+    # {"paths": [...], "reason": str, "thumbs": [BGR array or None, ...]}
+    # (spec/scan-type.md §5). The GUI shows it greyed out under the frames.
+    needsAttention = Signal(object)
 
     def __init__(self):
         super().__init__()
@@ -181,27 +185,79 @@ class TetherWatchWorker(QObject):
             if not imgs:
                 self.captureError.emit(path, "no image produced")
                 return
-            # Snapshot the conversion inputs once per file so a mid-decode flip
-            # (Positive mode / B/W point change) can't make one file half-convert.
-            black = ccr_backend.black_point_bgr
-            white = ccr_backend.white_point_bgr
-            positive = ccr_backend.positive_mode
-            # white may be None → default-slope conversion (black point only),
-            # where a selected film-stock preset supplies per-channel slopes.
-            slopes = ccr_backend.film_stock_slopes if white is None else None
-            convert = (not positive and black is not None)
-            for img in imgs:
-                if self._cancelled:
-                    return
-                if convert and not img.converted:
-                    self._convert(img, black, white, slopes)
-                self.captured.emit(img)
+            self._finish(imgs)
         except Exception as e:
             # Terse form: the GUI shows this inline in the hint strip, so a
             # tethered capture FreeCCR cannot decode still says why.
             from core.load_errors import describe_load_failure
             self.captureError.emit(
                 path, describe_load_failure(path, e, short=True))
+
+    @Slot(object)
+    def process_triplet(self, job):
+        """One trichrome shot: {"paths": (R, G, B), "check": bool}. Checked
+        first (each frame lit by its own colour) unless the user chose Merge
+        Anyway; then merged exactly as Open's 3-way merge does, and converted
+        like a single tethered frame. spec/scan-type.md §5."""
+        if self._cancelled:
+            return
+        paths = list(job.get("paths") or [])
+        if len(paths) != 3:
+            return
+        from core import scan_type as st
+        if job.get("check", True):
+            shares = [st.light_shares(p) for p in paths]
+            ok, _k, reason = st.judge_triplet(
+                shares, [os.path.basename(p) for p in paths])
+            if not ok:
+                self.needsAttention.emit({
+                    "paths": paths, "reason": reason,
+                    "thumbs": [st.thumb_bgr(p) for p in paths]})
+                return
+        try:
+            from core.catalog import create_images_for_merge
+            imgs = create_images_for_merge(
+                paths, merge_demosaic=ccr_backend.rgb_merge_demosaic,
+                catalog_data=self._catalog(),
+                merge_mono=getattr(ccr_backend, "rgb_merge_mono", False))
+            if not imgs:
+                self.captureError.emit(paths[0], "no image produced")
+                return
+            self._finish(imgs)
+        except Exception as e:
+            self.needsAttention.emit({
+                "paths": paths, "reason": f"the merge failed: {e}",
+                "thumbs": [st.thumb_bgr(p) for p in paths]})
+
+    @Slot(object)
+    def describe_leftover(self, job):
+        """Files that can't make a triplet (a missed shot, a stop part-way):
+        shown greyed out with their thumbnails, nothing guessed."""
+        if self._cancelled:
+            return
+        from core import scan_type as st
+        paths = list(job.get("paths") or [])
+        self.needsAttention.emit({
+            "paths": paths, "reason": job.get("reason", ""),
+            "thumbs": [st.thumb_bgr(p) for p in paths]})
+
+    def _finish(self, imgs):
+        """Convert (when the session has a black point) and hand over."""
+        # Snapshot the conversion inputs once per file so a mid-decode flip
+        # (Positive mode / B/W point change) can't make one file half-convert.
+        black = ccr_backend.black_point_bgr
+        white = ccr_backend.white_point_bgr
+        positive = ccr_backend.positive_mode
+        # white may be None → default-slope conversion (black point only),
+        # where a selected film-stock preset supplies per-channel slopes.
+        slopes = ccr_backend.film_stock_slopes if white is None else None
+        convert = (not positive and black is not None)
+        for img in imgs:
+            if self._cancelled:
+                return
+            if convert and not img.converted:
+                self._convert(img, black, white, slopes)
+            self.captured.emit(img)
 
     @staticmethod
     def _convert(img, black, white, slopes=None):
