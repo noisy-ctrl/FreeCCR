@@ -1534,6 +1534,13 @@ class LiveCaptureMonitor(QWidget):
             self._usb_model = text
             if self._usb_dest:
                 self.usb.set_dest(self._usb_dest)
+            key = getattr(self.usb, "key", None)
+            if text and key is not None:          # the model the camera reports
+                self._usb_found = [(k, f"USB · {text}" if k == key and k.startswith("usb:gphoto2:")
+                                    else lab) for k, lab in self._usb_found]
+                i = self.camera_combo.findData(key)
+                if i >= 0 and key.startswith("usb:gphoto2:"):
+                    self.camera_combo.setItemText(i, f"USB · {text}")
         elif kind == "busy":
             self.canvas.set_message(
                 "macOS is holding the camera, so FreeCCR can't open it.\nRelease "

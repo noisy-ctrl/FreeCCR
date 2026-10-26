@@ -286,3 +286,12 @@ Fake libgphoto2 listings (found / only one of the two / listing error), the
 real libgphoto2 virtual camera with `autoexec.bin` and `ML/` in its folder,
 the worker's signal, and the monitor's box (shown once, suppressed by the
 setting) and badge (cleared when the camera closes).
+
+## 13. The camera's own name (revision 2026-10-26)
+libgphoto2 matches a camera to its table by USB id, and Fujifilm reuses ids
+across models: a GFX 50S II matches the GFX100 entry (libgphoto2 issue 1282;
+it has no entry of its own as of its 2026-10-23 source). Once a camera is
+open, its label is the model it reports (`cameramodel`, with the
+`manufacturer`'s first word when the model lacks it); the table name is only
+used before opening. Whether a 50S II captures and streams live view through
+the GFX100 entry is untested.

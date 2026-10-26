@@ -938,3 +938,37 @@ def test_monitor_warns_once_and_shows_a_badge(mon_usb):
     _app.processEvents()
     assert shown[-1] == "Canon EOS 5D Mark IV" and len(shown) == 2
     assert mon.addon_badge.isVisibleTo(mon)
+
+
+
+def test_the_camera_s_own_model_name_wins_over_the_table(tmp_path):
+    """Fujifilm reuses USB ids: libgphoto2 matches a GFX 50S II to its GFX100
+    entry. The name shown is the one the camera reports."""
+    cfg = _Widget({"cameramodel": _Widget(value="GFX 50S II"),
+                   "manufacturer": _Widget(value="FUJIFILM")})
+    b, gp, clock = _gp_backend(tmp_path, cameras=(("Fujifilm GFX100", "usb:001,009"),), config=cfg)
+    assert b.list_cameras()[0].label == "USB · Fujifilm GFX100"
+    assert b.open("usb:001,009", None) == "FUJIFILM GFX 50S II"
+    canon = _Widget({"cameramodel": _Widget(value="Canon EOS 5D Mark III"),
+                     "manufacturer": _Widget(value="Canon Inc.")})
+    b2, gp2, _c = _gp_backend(tmp_path, config=canon)
+    b2.list_cameras()
+    assert b2.open("usb:001,004", None) == "Canon EOS 5D Mark III"    # no "Canon Canon"
+    b3, gp3, _c = _gp_backend(tmp_path, config=_Widget({}))           # nothing reported
+    b3.list_cameras()
+    assert b3.open("usb:001,004", None) == "Canon EOS 5D Mark III"
+
+
+def test_monitor_relabels_the_camera_with_its_own_name(mon_usb):
+    mon, feed, light, usb, mw, asked, lm = mon_usb
+    key = "usb:gphoto2:usb:001,009"
+    usb.cameras_found.emit([(key, "USB · Fujifilm GFX100")])
+    _app.processEvents()
+    usb.key = key
+    usb.opened("FUJIFILM GFX 50S II")
+    _app.processEvents()
+    i = mon.camera_combo.findData(key)
+    assert mon.camera_combo.itemText(i) == "USB · FUJIFILM GFX 50S II"
+    lm._settings().setValue("live/shutter", "usb")
+    mon._rebuild_shutter_combo()
+    assert mon.shutter_combo.currentText() == "USB · FUJIFILM GFX 50S II"

@@ -201,7 +201,25 @@ class Gphoto2Backend:
         self._pending, self._last_added, self._errors = [], None, 0
         self._zoom_ok = None
         self.no_preview = False
-        return self._models.get(ident, "")
+        return self.reported_model() or self._models.get(ident, "")
+
+    def reported_model(self):
+        """The model the camera itself reports. libgphoto2 matches a camera
+        to its table by USB id, and Fujifilm reuses ids across models (a
+        GFX 50S II matches the GFX100 entry), so the table name can be
+        another camera's."""
+        try:
+            cfg = self.camera.get_config()
+            model = str(cfg.get_child_by_name("cameramodel").get_value() or "").strip()
+        except Exception:
+            return ""
+        try:
+            maker = str(cfg.get_child_by_name("manufacturer").get_value() or "").split()
+        except Exception:
+            maker = []
+        if model and maker and maker[0].lower() not in model.lower():
+            model = f"{maker[0]} {model}"
+        return model
 
     def close(self):
         cam, self.camera = self.camera, None
