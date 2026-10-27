@@ -295,3 +295,16 @@ open, its label is the model it reports (`cameramodel`, with the
 `manufacturer`'s first word when the model lacks it); the table name is only
 used before opening. Whether a 50S II captures and streams live view through
 the GFX100 entry is untested.
+
+## 14. A setting with no value crashed the process (2026-10-27)
+On the user's GFX 50S II, walking the camera's settings with python-gphoto2
+2.6.4 killed Python (SIGSEGV in `CameraWidget.get_value` →
+`PyUnicode_FromString(NULL)`): for text / radio / menu widgets its wrapper
+checks the pointer to the result instead of the result, so a setting the
+camera leaves empty dereferences NULL. No exception is raised, so nothing in
+Python can catch it. `camera_backends.widget_value` reads string settings
+through libgphoto2's own `gp_widget_get_value` (ctypes, on the same library
+file the package loaded, so the same instance) and returns None when the
+value is NULL; numbers still go through python-gphoto2. Every setting the
+backend reads (`exposure`, `reported_model`) uses it. Tested on an empty
+widget made in libgphoto2 itself and across the virtual camera's settings.

@@ -972,3 +972,70 @@ def test_monitor_relabels_the_camera_with_its_own_name(mon_usb):
     lm._settings().setValue("live/shutter", "usb")
     mon._rebuild_shutter_combo()
     assert mon.shutter_combo.currentText() == "USB · FUJIFILM GFX 50S II"
+
+
+# --------------------------------------------------------------------------- #
+# reading settings without python-gphoto2's NULL-string crash
+# --------------------------------------------------------------------------- #
+def test_empty_text_setting_reads_as_none_not_a_crash():
+    """python-gphoto2's get_value() reads a NULL string and the process dies
+    (SIGSEGV, seen on a GFX 50S II). An empty libgphoto2 text widget, made
+    directly in the library, reads as None through the guard."""
+    gp = pytest.importorskip("gphoto2")
+    import ctypes
+    lib = cb._gp_library(gp)
+    assert lib is not None
+    lib.gp_widget_new.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_void_p]
+    lib.gp_widget_set_value.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    w = ctypes.c_void_p()
+    assert lib.gp_widget_new(gp.GP_WIDGET_TEXT, b"empty", ctypes.byref(w)) >= 0
+    assert cb._text_at(lib, w.value) is None             # no value: None, no crash
+    assert lib.gp_widget_set_value(w, ctypes.c_char_p(b"GFX50S II")) >= 0
+    assert cb._text_at(lib, w.value) == "GFX50S II"
+    lib.gp_widget_free.argtypes = [ctypes.c_void_p]
+    lib.gp_widget_free(w)
+
+
+def test_fake_widgets_still_read_directly():
+    w = _Widget(value="1/125")
+    assert cb.widget_value(fake_gp(), w) == "1/125"
+
+
+_REAL_WALK = r'''
+import json, sys
+sys.path.insert(0, sys.argv[1])
+import gphoto2 as gp
+from core import camera_backends as cb
+cam = gp.Camera(); cam.init()
+seen, same, empty = 0, 0, 0
+def walk(w):
+    global seen, same, empty
+    if w.get_type() not in (gp.GP_WIDGET_WINDOW, gp.GP_WIDGET_SECTION, gp.GP_WIDGET_BUTTON):
+        seen += 1
+        v = cb.widget_value(gp, w)
+        if v is None:
+            empty += 1
+        elif v == w.get_value():        # safe: the guard found a value
+            same += 1
+    for i in range(w.count_children()):
+        walk(w.get_child(i))
+walk(cam.get_config())
+cam.exit()
+print(json.dumps({"seen": seen, "same": same, "empty": empty}))
+'''
+
+
+def test_guarded_reads_match_on_the_virtual_camera(tmp_path):
+    gp = pytest.importorskip("gphoto2")
+    if not os.path.isdir(os.path.join(os.path.dirname(gp.__file__), "libgphoto2", "vusb")):
+        pytest.skip("this gphoto2 build has no virtual camera")
+    import subprocess
+    vdir = tmp_path / "vcam"
+    vdir.mkdir()
+    cv2.imwrite(str(vdir / "IMG_0001.JPG"), np.zeros((8, 8, 3), np.uint8))
+    src = os.path.join(os.path.dirname(__file__), "..", "src")
+    r = subprocess.run([sys.executable, "-c", _REAL_WALK, src], env=dict(os.environ, VCAMERADIR=str(vdir)),
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr[-2000:]
+    out = json.loads(r.stdout.strip().splitlines()[-1])
+    assert out["seen"] > 10 and out["same"] + out["empty"] == out["seen"]

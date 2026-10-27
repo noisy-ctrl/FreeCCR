@@ -135,6 +135,69 @@ def _import_gphoto2():
         return None
 
 
+# python-gphoto2 crashes the whole process (a NULL pointer read, SIGSEGV) when
+# get_value() meets a text / radio / menu setting the camera left without a
+# value: its NULL check tests the wrong pointer (seen on a Fujifilm GFX 50S II,
+# 2026-10-27). No Python exception is raised, so a try can't catch it. String
+# settings are therefore read through libgphoto2's own gp_widget_get_value,
+# with the NULL checked here.
+_GP_LIB = {}
+
+
+def _gp_library(gp):
+    """The libgphoto2 the gphoto2 package itself loaded (same file, so the
+    same library instance), or None."""
+    key = id(gp)
+    if key in _GP_LIB:
+        return _GP_LIB[key]
+    lib = None
+    base = os.path.dirname(getattr(gp, "__file__", "") or "")
+    if base:
+        import ctypes
+        import glob
+        cands = (sorted(glob.glob(os.path.join(base, ".dylibs", "libgphoto2.*dylib")))
+                 + sorted(glob.glob(os.path.join(base, "libgphoto2", "libgphoto2.so*")))
+                 + sorted(glob.glob(os.path.join(base, "libgphoto2", "libgphoto2*.dylib"))))
+        for c in cands:
+            if "port" in os.path.basename(c):
+                continue
+            try:
+                lib = ctypes.CDLL(c)
+                lib.gp_widget_get_value.restype = ctypes.c_int
+                lib.gp_widget_get_value.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+                break
+            except (OSError, AttributeError):
+                lib = None
+    _GP_LIB[key] = lib
+    return lib
+
+
+def _text_at(lib, address):
+    """The string value of the libgphoto2 widget at `address`, or None when
+    it has none."""
+    import ctypes
+    out = ctypes.c_char_p()
+    if lib.gp_widget_get_value(ctypes.c_void_p(address), ctypes.byref(out)) < 0:
+        return None
+    return out.value.decode("utf-8", "replace") if out.value else None
+
+
+def widget_value(gp, widget):
+    """A setting's value without the crash: strings via libgphoto2 itself
+    (None when empty, or when that library can't be reached), numbers via
+    python-gphoto2 (they have no pointer to be NULL)."""
+    this = getattr(widget, "this", None)
+    if this is None:
+        return widget.get_value()            # not a libgphoto2 widget (tests' fakes)
+    kind = widget.get_type()
+    if kind not in (gp.GP_WIDGET_TEXT, gp.GP_WIDGET_RADIO, gp.GP_WIDGET_MENU):
+        return widget.get_value()
+    lib = _gp_library(gp)
+    if lib is None:
+        return None
+    return _text_at(lib, int(this))
+
+
 class Gphoto2Backend:
     name = "gphoto2"
     SHUTTER_KEYS = ("shutterspeed", "shutterspeed2", "exposuretime")
@@ -210,11 +273,11 @@ class Gphoto2Backend:
         another camera's."""
         try:
             cfg = self.camera.get_config()
-            model = str(cfg.get_child_by_name("cameramodel").get_value() or "").strip()
+            model = str(widget_value(self.gp, cfg.get_child_by_name("cameramodel")) or "").strip()
         except Exception:
             return ""
         try:
-            maker = str(cfg.get_child_by_name("manufacturer").get_value() or "").split()
+            maker = str(widget_value(self.gp, cfg.get_child_by_name("manufacturer")) or "").split()
         except Exception:
             maker = []
         if model and maker and maker[0].lower() not in model.lower():
@@ -371,7 +434,7 @@ class Gphoto2Backend:
                             ("aperture", self.APERTURE_KEYS)):
             for k in keys:
                 try:
-                    v = cfg.get_child_by_name(k).get_value()
+                    v = widget_value(self.gp, cfg.get_child_by_name(k))
                 except Exception:
                     continue
                 if v not in (None, ""):
