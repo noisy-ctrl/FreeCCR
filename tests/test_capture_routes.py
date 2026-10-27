@@ -113,7 +113,7 @@ def fake_gp(cameras=(("Canon EOS 5D Mark III", "usb:001,004"),), shot=("IMG_0001
     gp.state = types.SimpleNamespace(init_error=None, preview_errors=[], events=[],
                                      fuji=False, in_live=False, captures=0,
                                      capture_error=None, capture_echo=False,
-                                     event_checks=0,
+                                     event_checks=0, file_errors=[],
                                      shot=list(shot), fired=0, inited=False, exited=False,
                                      config=config if config is not None else _Widget({
                                          "shutterspeed": _Widget(value="1/60"),
@@ -176,6 +176,8 @@ def fake_gp(cameras=(("Canon EOS 5D Mark III", "usb:001,004"),), shot=("IMG_0001
             return gp.GP_EVENT_TIMEOUT, None
 
         def file_get(self, folder, name, kind):
+            if st.file_errors:
+                raise GPhoto2Error(st.file_errors.pop(0))
             return _File(f"{folder}/{name}".encode())
 
         def get_config(self):
@@ -1257,8 +1259,8 @@ def test_capture_call_not_supported_falls_back_to_trigger(tmp_path):
 
 def test_event_checks_are_throttled_while_live_view_runs(tmp_path):
     """FreeCCR's loop is preview, then poll. Live and no shot on its way:
-    about one event check a second (each costs a Fujifilm a priority-mode
-    write and a storage listing). A shot on its way, or no live view: every
+    one event check every LIVE_EVENTS_EVERY_S (each costs a Fujifilm a
+    priority-mode write and a storage listing, ~0.3 s of picture). A shot on its way, or no live view: every
     poll checks."""
     b, gp, clock = _fuji_backend(tmp_path, shot=("DSCF0005.RAF",))
 
@@ -1272,8 +1274,9 @@ def test_event_checks_are_throttled_while_live_view_runs(tmp_path):
             clock.t += 0.02                            # 50 fps
         return got
 
+    every = cb.LIVE_EVENTS_EVERY_S
     gp.state.event_checks = 0
-    loop(3.0)
+    loop(3 * every)
     assert 3 <= gp.state.event_checks <= 4
     b.fire()                                           # capture call: file pending
     gp.state.event_checks = 0
@@ -1281,7 +1284,7 @@ def test_event_checks_are_throttled_while_live_view_runs(tmp_path):
     assert got == [("file", str(tmp_path / "DSCF0005.RAF"))]
     assert gp.state.event_checks >= int(cb.QUIET_S / 0.02)   # continuous until it's in
     gp.state.event_checks = 0
-    loop(2.0)
+    loop(2 * every)
     assert gp.state.event_checks <= 3                  # throttled again
     # a triggered shot (no live view asked since): continuous until its file
     gp.state.fuji = False
@@ -1362,3 +1365,46 @@ def test_real_libgphoto2_capture_call_brings_the_file_in_once(tmp_path):
     out = json.loads(r.stdout.strip().splitlines()[-1])
     assert len(out["files"]) == 1 and len(out["listing"]) == 1     # once, no .part
     assert os.path.getsize(out["files"][0]) > 0
+
+
+# --------------------------------------------------------------------------- #
+# test 5 (spec §18): the live view frame announced as a file; failed downloads
+# --------------------------------------------------------------------------- #
+def test_live_view_file_names():
+    assert cb.is_live_view_file("LIVE0001.JPG") and cb.is_live_view_file("live0012.jpg")
+    assert cb.is_live_view_file("/store_10000002/LIVE0001.JPG")
+    for name in ("DSCF0001.JPG", "LIVE0001.RAF", "LIVELY.JPG", "LIVE.JPG", "", None):
+        assert not cb.is_live_view_file(name)
+
+
+def test_a_live_view_frame_announced_as_a_file_is_not_a_shot(tmp_path):
+    """A GFX 50S II's event check announced /store_10000002/LIVE0001.JPG (the
+    live view frame libgphoto2 then deletes): never downloaded, never
+    reported as a shot that had nowhere to go."""
+    frame = (2, types.SimpleNamespace(folder="/store_10000002", name="LIVE0001.JPG"))
+    for dest in (str(tmp_path), None):
+        b, gp, clock = _fuji_backend(tmp_path, shot=("DSCF0001.RAF",))
+        b.set_dest(dest)
+        gp.state.events.append(frame)
+        assert _bring_in(b, clock) == [] and os.listdir(tmp_path) == []
+    # one announced in the middle of a shot doesn't join it
+    b, gp, clock = _fuji_backend(tmp_path, shot=("DSCF0001.RAF",))
+    b.preview()
+    b.fire()
+    gp.state.events.append(frame)
+    assert _bring_in(b, clock) == [("file", str(tmp_path / "DSCF0001.RAF"))]
+
+
+def test_a_file_that_cant_be_fetched_is_not_a_lost_camera(tmp_path):
+    b, gp, clock = _gp_backend(tmp_path, shot=("IMG_0001.CR2",))
+    b.list_cameras()
+    b.open("usb:001,004", str(tmp_path))
+    gp.state.file_errors = [-108]                    # file not found: gone again
+    b.fire()
+    assert _bring_in(b, clock) == [] and os.listdir(tmp_path) == []
+    b.fire()                                         # the next shot comes in
+    assert _bring_in(b, clock) == [("file", str(tmp_path / "IMG_0001.CR2"))]
+    gp.state.file_errors = [-52]                     # the camera unplugged mid-download
+    b.fire()
+    with pytest.raises(cb.CameraLost):
+        _bring_in(b, clock)

@@ -40,9 +40,10 @@ PREVIEW_GIVE_UP_S = 15.0
 # While live view runs and no shot is on its way, libgphoto2's event check is
 # made only this often (spec §17): on a Fujifilm each check also sets the
 # body's priority mode and lists its storage, and checking between every
-# frame held a GFX 50S II to ~3 fps where it gives 50 without. Nothing is
-# missed: libgphoto2 announces any file it hasn't seen at the next check.
-LIVE_EVENTS_EVERY_S = 1.0
+# frame held a GFX 50S II to 3.4 fps where it gives 50 without, and one a
+# second to 36 (test 5). Nothing is missed: libgphoto2 announces any file it
+# hasn't seen at the next check.
+LIVE_EVENTS_EVERY_S = 3.0   # each check stalls the GFX 50S II's picture ~0.3 s (test 5)
 LIVE_RECENT_S = 0.5        # live view was asked for this recently = it is running
 SHOT_WAIT_S = 30.0         # after firing, check events continuously this long
 LOST_AFTER_ERRORS = 3      # consecutive I/O failures before the camera counts as gone
@@ -100,6 +101,14 @@ def keep_raw(names):
 
 
 MAGIC_LANTERN = "Magic Lantern"
+
+
+def is_live_view_file(name):
+    """A Fujifilm body's live view frame (`LIVE0001.JPG` on its own store):
+    libgphoto2 announces it like a new file (test 5, spec §18). Never a shot."""
+    stem, ext = os.path.splitext(os.path.basename(name or ""))
+    return ext.lower() in (".jpg", ".jpeg") and stem.upper().startswith("LIVE") \
+        and stem[4:].isdigit()
 
 
 def addons_on_card(files, folders):
@@ -467,7 +476,8 @@ class Gphoto2Backend:
                 break
             self._errors = 0
             if kind == gp.GP_EVENT_FILE_ADDED:
-                self._add_file(data.folder, data.name)
+                if not is_live_view_file(data.name):
+                    self._add_file(data.folder, data.name)
                 wait_ms = 1
                 continue
             if kind == gp.GP_EVENT_TIMEOUT or self.clock() >= end:
@@ -485,7 +495,9 @@ class Gphoto2Backend:
                 if not self.dest:
                     out.append(("skipped", name))
                     continue
-                out.append(("file", self._download(folder, name)))
+                path = self._download(folder, name)
+                if path:
+                    out.append(("file", path))
         return out
 
     def _download(self, folder, name):
@@ -501,7 +513,12 @@ class Gphoto2Backend:
                 os.remove(part)
             except OSError:
                 pass
-            raise CameraLost(str(e))
+            # One file that can't be fetched (gone again, like a live view
+            # frame) is not a lost camera; repeated failures or no USB are.
+            self._failed(e)
+            print(f"usb camera: couldn't download {name}: {e}")
+            return None
+        self._errors = 0
         return target
 
     def addons(self):

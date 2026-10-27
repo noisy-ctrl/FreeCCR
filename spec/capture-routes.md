@@ -404,3 +404,30 @@ not the whole configuration. Test 5 (`gfx50sii_test_v5.py`) is to confirm
 this on the body: frame rate with no event checks, one before every frame,
 and one a second; then two full-call shots with live view running, and how
 soon live view comes back after each.
+
+## 18. Test 5 results (2026-10-27)
+On the GFX 50S II (same setup as §15):
+- Live view straight after connecting: first frame after 0.10 s, then
+  49.9 fps with no event checks; 3.4 fps with an event check before every
+  frame (FreeCCR until §17); 36.1 fps with one a second. So each Fujifilm
+  event check costs the picture ~0.3 s, and `LIVE_EVENTS_EVERY_S` is now
+  3 s (about 45 fps, with a short stall every 3 s).
+- The first event check announced `/store_10000002/LIVE0001.JPG`: the live
+  view frame itself, on a store of its own (libgphoto2 skips only handle
+  0x80000001 and deletes the frame once it has fetched it). FreeCCR would
+  have downloaded it into the hot folder or, with none, reported a shot
+  with nowhere to go. `is_live_view_file` (`LIVE` + digits, `.jpg`) drops
+  such files at the event. A download that fails now counts towards a lost
+  camera through `_failed` (no USB = lost at once; otherwise the next
+  successful call resets the count) and skips that file, rather than
+  declaring the camera lost on one file that vanished.
+- The full capture call with live view running WORKS (the §17 fix): 3.67 s
+  and 3.63 s to return the file, then 0.05 s to "download" it, as
+  `add_objectid_and_upload` already fetched it inside the call. About 3.7 s
+  a frame, as before.
+- After a shot, live view stays busy (116 and 115 busy answers in 30 s), yet
+  the second shot worked. Test 6 (`gfx50sii_test_v6.py`) tries what might
+  bring it back: deleting the shot from the camera once it is saved (the
+  body's store holds each shot it took; its numbering restarted at
+  DSCF0001, which suggests a tether buffer rather than the card), then
+  reconnecting.
