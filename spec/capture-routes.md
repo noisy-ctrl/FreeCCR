@@ -351,11 +351,56 @@ XGA (1024×768) at about 3 fps, with shutter speed and ISO shown. The test
 scripts only ever saw Device Busy because they asked straight after
 connecting or straight after a shot and then stopped; the monitor reads its
 settings first and keeps asking. So the camera refuses Initiate Open Capture
-for a while after connecting / after a capture, then accepts it (timing to be
-measured). Changes:
+for a while after a capture, then accepts it (test 4 measured no wait at all
+after connecting, §17). Changes:
 - "busy" is retried with a back-off (`PREVIEW_BUSY_BACKOFF_S`, 0.25 s) and
   live view is only given up after `PREVIEW_GIVE_UP_S` (15 s) of busy with no
   frame ever (it was 5 answers, which could give up before the camera was
   ready).
 - Exposure is read with `get_single_config` per setting, not the whole
   configuration every 3 s, which stalled the picture.
+
+## 17. Shooting while live view runs (test 4, 2026-10-27)
+Test 4 asked for live view straight after connecting: the first frame came in
+0.08 s with no busy answer, then 50 fps in a tight loop. So live view is
+neither refused nor slow on a fresh connection. The trigger call straight
+after it failed with `[-1] Unspecified error`. libgphoto2 2.5.34's source
+explains both findings:
+- `camera_trigger_capture`'s Fujifilm branch (AF request 0xD208 = 0x0200,
+  Initiate Capture, poll AFStatus, Shoot 0xD208 = 0x0304, Initiate Capture)
+  never ends live view. `camera_fuji_capture`, behind the full capture call
+  `gp_camera_capture`, starts with
+  `if (params->inliveview) ptp_terminateopencapture(...)`, then sets
+  PriorityMode, shoots and waits for the new object. So with live view
+  running, the full capture call is the one to use.
+- `camera_wait_for_event`'s Fujifilm branch writes PriorityMode = 1 and lists
+  the object handles on EVERY call (the body sends no ObjectAdded events, so
+  libgphoto2 makes them up from handles it hasn't seen). FreeCCR checked
+  events between every frame, which explains its ~3 fps against 50.
+Changes:
+- `Gphoto2Backend.fire()` uses `camera.capture(GP_CAPTURE_IMAGE)` when live
+  view has been ASKED for since the last shot (`_live_asked`, set before
+  `capture_preview` because a request that starts live view and then fails
+  leaves it running). The returned file goes into the shot's pending group
+  like an event's, so a RAW + JPEG pair still keeps the RAW. A file announced
+  again by an event in the same group is downloaded once; the guard is per
+  group, since some bodies name every shot alike (`capt0000.jpg`). Not
+  supported (-6) falls back to the trigger call. With no live view since the
+  last shot the trigger call stays: it is the one the GFX 50S II passed (§15)
+  and it doesn't hold the worker. `stop_live()` leaves `_live_asked` set: a
+  Fujifilm's live view only ends with the next capture call. The full call
+  blocks the worker for the exposure, which is fine for scanning exposures;
+  one longer than the sequence's 30 s file timeout would time out.
+- `poll()` checks events about once a second (`LIVE_EVENTS_EVERY_S`) while
+  live view was asked for in the last `LIVE_RECENT_S` (0.5 s) and no shot is
+  on its way. After `fire()` (until the shot's group is in, or `SHOT_WAIT_S`,
+  30 s) and with no live view it checks every turn as before. A file from the
+  camera's own button is still found, at most a second late. `stop_live()`
+  ends the throttle at once.
+- The worker pauses `IDLE_LIVE_S` (20 ms) in a turn with no frame and no
+  events, since a backed-off preview and a throttled check both return at once.
+`stop_live()` now reads only the `viewfinder` setting (`get_single_config`),
+not the whole configuration. Test 5 (`gfx50sii_test_v5.py`) is to confirm
+this on the body: frame rate with no event checks, one before every frame,
+and one a second; then two full-call shots with live view running, and how
+soon live view comes back after each.

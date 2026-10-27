@@ -37,6 +37,14 @@ QUIET_S = 0.3              # a shot's files (RAW + JPEG) arrive within this of e
 # live view.
 PREVIEW_BUSY_BACKOFF_S = 0.25
 PREVIEW_GIVE_UP_S = 15.0
+# While live view runs and no shot is on its way, libgphoto2's event check is
+# made only this often (spec §17): on a Fujifilm each check also sets the
+# body's priority mode and lists its storage, and checking between every
+# frame held a GFX 50S II to ~3 fps where it gives 50 without. Nothing is
+# missed: libgphoto2 announces any file it hasn't seen at the next check.
+LIVE_EVENTS_EVERY_S = 1.0
+LIVE_RECENT_S = 0.5        # live view was asked for this recently = it is running
+SHOT_WAIT_S = 30.0         # after firing, check events continuously this long
 LOST_AFTER_ERRORS = 3      # consecutive I/O failures before the camera counts as gone
 DCC_PORT = 5513
 
@@ -227,6 +235,14 @@ class Gphoto2Backend:
         self._busy_since = None      # first "busy" of the current run of them
         self._busy_until = 0.0       # don't ask again before this
         self._preview_frames = 0
+        self._reset_shot_state()
+
+    def _reset_shot_state(self):
+        self._live_asked = False     # live view asked of the camera since the last shot
+        self._last_preview = None    # when live view was last wanted
+        self._next_events = 0.0      # throttled event check, while live view runs
+        self._shot_until = 0.0       # a shot is on its way until its file or this
+        self._shot_files = []        # (folder, name) already taken for this shot
 
     def available(self):
         return self.gp is not None
@@ -277,6 +293,7 @@ class Gphoto2Backend:
         self._busy_since = None
         self._busy_until = 0.0
         self._preview_frames = 0
+        self._reset_shot_state()
         return self.reported_model() or self._models.get(ident, "")
 
     def reported_model(self):
@@ -314,13 +331,23 @@ class Gphoto2Backend:
     def stop_live(self):
         if self.camera is None:
             return
+        self._last_preview = None     # events are checked at the full rate again
         # Canon EOS keeps the mirror up and the screen dark until told
         # otherwise; ending live view is a config value there, absent elsewhere.
+        # One setting, not the whole configuration (~150 on a Fujifilm). A
+        # Fujifilm has no such setting: its live view ends with the next shot
+        # (libgphoto2's capture call), which is why `_live_asked` stays set.
         try:
-            cfg = self.camera.get_config()
-            w = cfg.get_child_by_name("viewfinder")
-            w.set_value(0)
-            self.camera.set_config(cfg)
+            single = getattr(self.camera, "get_single_config", None)
+            if single is not None:
+                w = single("viewfinder")
+                w.set_value(0)
+                self.camera.set_single_config("viewfinder", w)
+            else:
+                cfg = self.camera.get_config()
+                w = cfg.get_child_by_name("viewfinder")
+                w.set_value(0)
+                self.camera.set_config(cfg)
         except Exception:
             pass
 
@@ -337,8 +364,12 @@ class Gphoto2Backend:
         if self.camera is None:
             raise CameraLost("not open")
         now = self.clock()
+        self._last_preview = now
         if now < self._busy_until:
             return None                       # it said busy a moment ago
+        # Set before asking: a request that starts the camera's live view and
+        # then fails still leaves it running, and the next shot must end it.
+        self._live_asked = True
         try:
             cf = self.camera.capture_preview()
             data = bytes(memoryview(cf.get_data_and_size()))
@@ -364,14 +395,59 @@ class Gphoto2Backend:
         return data
 
     def fire(self):
+        """Take a picture; its file(s) come through `poll`.
+
+        With live view asked for since the last shot, libgphoto2's full
+        capture call is used: it ends the camera's live view first and waits
+        for the file. Its trigger call shoots without ending it, which a
+        Fujifilm refuses (GFX 50S II: "Unspecified error", spec §17). With no
+        live view the trigger call stays, as it doesn't hold this thread."""
+        gp = self.gp
         if self.camera is None:
             raise CameraLost("not open")
+        self._shot_files = []
         try:
-            self.camera.trigger_capture()
-        except self.gp.GPhoto2Error as e:
+            taken = None
+            if self._live_asked:
+                try:
+                    taken = self.camera.capture(getattr(gp, "GP_CAPTURE_IMAGE", 0))
+                except gp.GPhoto2Error as e:
+                    if self._code(e) != getattr(gp, "GP_ERROR_NOT_SUPPORTED", -6):
+                        raise
+                    taken = None
+                    self.camera.trigger_capture()
+            else:
+                self.camera.trigger_capture()
+        except gp.GPhoto2Error as e:
             self._failed(e)
             raise CameraLost(str(e)) if self._errors >= LOST_AFTER_ERRORS else RuntimeError(str(e))
         self._errors = 0
+        self._live_asked = False
+        self._shot_until = self.clock() + SHOT_WAIT_S
+        if taken is not None:
+            self._add_file(taken.folder, taken.name)
+
+    def _add_file(self, folder, name):
+        # A file the capture call returned might be announced again as an
+        # event: one download per file per shot's group. (Not across groups:
+        # some bodies name every shot alike, e.g. capt0000.jpg.)
+        if (folder, name) in self._shot_files:
+            return
+        self._shot_files.append((folder, name))
+        self._pending.append((folder, name))
+        self._last_added = self.clock()
+
+    def _events_due(self):
+        """Throttle the event check while live view runs and no shot is on
+        its way (LIVE_EVENTS_EVERY_S)."""
+        now = self.clock()
+        live = self._last_preview is not None and now - self._last_preview < LIVE_RECENT_S
+        if not live or self._pending or now < self._shot_until:
+            return True
+        if now < self._next_events:
+            return False
+        self._next_events = now + LIVE_EVENTS_EVERY_S
+        return True
 
     def poll(self, timeout_s):
         """Events since the last call: ("file", path) for each file brought
@@ -379,6 +455,8 @@ class Gphoto2Backend:
         gp = self.gp
         if self.camera is None:
             raise CameraLost("not open")
+        if not self._events_due():
+            return []
         end = self.clock() + max(0.0, timeout_s)
         wait_ms = max(1, int(timeout_s * 1000))
         while True:
@@ -389,8 +467,7 @@ class Gphoto2Backend:
                 break
             self._errors = 0
             if kind == gp.GP_EVENT_FILE_ADDED:
-                self._pending.append((data.folder, data.name))
-                self._last_added = self.clock()
+                self._add_file(data.folder, data.name)
                 wait_ms = 1
                 continue
             if kind == gp.GP_EVENT_TIMEOUT or self.clock() >= end:
@@ -398,6 +475,8 @@ class Gphoto2Backend:
             wait_ms = 1
         out = []
         if self._pending and self.clock() - (self._last_added or 0) >= QUIET_S:
+            self._shot_until = 0.0            # the shot's files are in
+            self._shot_files = []
             pending, self._pending = self._pending, []
             keep = set(keep_raw([n for _f, n in pending]))
             for folder, name in pending:

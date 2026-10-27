@@ -20,6 +20,7 @@ from utils.qt_threads import WorkerThread
 
 EXPOSURE_EVERY_S = 3.0
 FRAME_WAIT_S = 0.2          # a source read waits this long for a new frame
+IDLE_LIVE_S = 0.02          # live view wanted but nothing came this turn: pause
 
 
 class UsbCamera(WorkerThread):
@@ -141,6 +142,7 @@ class UsbCamera(WorkerThread):
                 self._wake.clear()
                 continue
             try:
+                data = None
                 if self._live and not getattr(self.backend, "no_preview", False):
                     data = self.backend.preview()
                     if data:
@@ -148,6 +150,11 @@ class UsbCamera(WorkerThread):
                     elif getattr(self.backend, "no_preview", False):
                         self.state.emit("nopreview", self.model)
                 events = self.backend.poll(0.01 if self._live else 0.1)
+                if self._live and not data and not events:
+                    # No frame (camera busy, backing off) and the event check
+                    # throttled: both return at once, so don't spin.
+                    self._wake.wait(IDLE_LIVE_S)
+                    self._wake.clear()
                 for kind, value in events:
                     if kind == "file":
                         self.file_saved.emit(value)
