@@ -325,5 +325,22 @@ Consequences, built:
   `PREVIEW_BUSY_LIMIT` (5) times is treated as having no USB live view
   (`no_preview`): the monitor says so and stops asking. A camera that has
   given frames is only busy mid-capture and keeps being asked.
-Still open: whether a failed live view spoils the next shot and whether a
-reconnect clears it (test 3 sent to the user).
+Test 3 (2026-10-27, with libgphoto2's debug log) settled the rest:
+- A failed live view does NOT spoil the next shot, and reconnecting works:
+  shot, failed live view, shot, reconnect, shot all succeeded.
+- Live view: libgphoto2 sends Initiate Open Capture (PTP 0x101C) and the
+  camera answers Device Busy (0x2019) within a millisecond, five times; it is
+  refused, not slow. (Next to try: PC Connection Mode "USB tether shooting
+  fixed".)
+- "Disconnect failed": on exit libgphoto2 tries to hand control back to the
+  body (Fuji PriorityMode 0xD207 → Camera) and the camera answers busy; the
+  port is closed anyway, so it is cosmetic, but the body may stay in USB
+  priority until it is switched off and on.
+- A shot is AF request → Shoot (property 0xD208 + Initiate Capture twice,
+  ~40 ms apart) then polling for the new object: ~0.8 s to the file, then
+  ~2.5 s to download one uncompressed RAF, so about 3.4 s a frame (≈ 11 s a
+  trichrome triplet). The user's contactless lens with release priority is
+  why the AF step never holds the shutter.
+- `f-number` is empty because the lens has no contacts: the camera reports
+  aperture 0, which is not in its own list of apertures, so libgphoto2 leaves
+  the setting without a value — any adapted manual lens will do the same.
