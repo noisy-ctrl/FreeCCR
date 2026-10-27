@@ -308,3 +308,22 @@ file the package loaded, so the same instance) and returns None when the
 value is NULL; numbers still go through python-gphoto2. Every setting the
 backend reads (`exposure`, `reported_model`) uses it. Tested on an empty
 widget made in libgphoto2 itself and across the virtual camera's settings.
+
+## 15. The GFX 50S II on test (2026-10-27)
+On the user's GFX 50S II (firmware 2.12, libgphoto2 2.5.34, matched to the
+GFX100 entry): trigger + wait for the file + download WORKS (one RAF,
+`/store_10000001/DSCF0001.raf`); live view answers `-110 I/O in progress`
+every time, before or after a shot, and closing then also answers busy; the
+`f-number` setting is the empty one that crashed python-gphoto2 (§14).
+Consequences, built:
+- The Shutter row lists every USB camera found, not only the open one, and
+  choosing one opens it as the shutter only (no live view asked). So the
+  50S II can fire over USB and bring its files in while the HDMI capture
+  device gives the picture, with no shutter cable and no maker's tether app.
+  The remembered shutter is reopened the same way at start.
+- A camera that has never given a frame and answers live view with busy
+  `PREVIEW_BUSY_LIMIT` (5) times is treated as having no USB live view
+  (`no_preview`): the monitor says so and stops asking. A camera that has
+  given frames is only busy mid-capture and keeps being asked.
+Still open: whether a failed live view spoils the next shot and whether a
+reconnect clears it (test 3 sent to the user).

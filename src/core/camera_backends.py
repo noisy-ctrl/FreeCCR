@@ -30,6 +30,7 @@ RAW_EXTS = {".cr2", ".cr3", ".crw", ".nef", ".nrw", ".arw", ".srf", ".sr2",
             ".raf", ".rw2", ".orf", ".pef", ".dng", ".3fr", ".fff", ".iiq",
             ".erf", ".mos", ".mrw", ".x3f", ".srw", ".rwl", ".gpr"}
 QUIET_S = 0.3              # a shot's files (RAW + JPEG) arrive within this of each other
+PREVIEW_BUSY_LIMIT = 5     # "busy" answers to live view, none ever answered: no live view
 LOST_AFTER_ERRORS = 3      # consecutive I/O failures before the camera counts as gone
 DCC_PORT = 5513
 
@@ -217,6 +218,8 @@ class Gphoto2Backend:
         self._errors = 0
         self._zoom_ok = None
         self.no_preview = False      # the camera has no live view over USB
+        self._preview_busy = 0
+        self._preview_frames = 0
 
     def available(self):
         return self.gp is not None
@@ -264,6 +267,8 @@ class Gphoto2Backend:
         self._pending, self._last_added, self._errors = [], None, 0
         self._zoom_ok = None
         self.no_preview = False
+        self._preview_busy = 0
+        self._preview_frames = 0
         return self.reported_model() or self._models.get(ident, "")
 
     def reported_model(self):
@@ -327,12 +332,24 @@ class Gphoto2Backend:
             cf = self.camera.capture_preview()
             data = bytes(memoryview(cf.get_data_and_size()))
         except self.gp.GPhoto2Error as e:
-            if self._code(e) == getattr(self.gp, "GP_ERROR_NOT_SUPPORTED", -6):
+            code = self._code(e)
+            if code == getattr(self.gp, "GP_ERROR_NOT_SUPPORTED", -6):
                 self.no_preview = True
+                return None
+            if code == self.gp.GP_ERROR_CAMERA_BUSY:
+                # A camera mid-capture answers busy for a moment; one that has
+                # never given a frame and keeps answering busy has no USB live
+                # view (a GFX 50S II on libgphoto2 2.5.34), so stop asking:
+                # shooting over USB still works.
+                self._preview_busy += 1
+                if not self._preview_frames and self._preview_busy >= PREVIEW_BUSY_LIMIT:
+                    self.no_preview = True
                 return None
             self._failed(e)
             return None
         self._errors = 0
+        self._preview_busy = 0
+        self._preview_frames += 1
         return data
 
     def fire(self):

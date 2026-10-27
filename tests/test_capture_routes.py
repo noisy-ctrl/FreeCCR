@@ -688,7 +688,7 @@ def test_monitor_lists_usb_cameras_and_shoots_over_usb(mon_usb):
     # choosing the USB camera opens it in the feed and makes it the shutter
     mon._on_camera_chosen(1)
     assert feed.log[-1] == ("open", "usb:gphoto2:usb:001,004", "auto")
-    assert lm._settings().value("live/shutter") == "usb"
+    assert lm._settings().value("live/shutter") == "usb:gphoto2:usb:001,004"
     assert not mon.shoot_btn.isEnabled()             # no Scanlight, no USB camera yet
     usb.opened()
     usb.exposure_changed.emit({"shutter": "1/60", "iso": "100", "aperture": "8"})
@@ -1039,3 +1039,68 @@ def test_guarded_reads_match_on_the_virtual_camera(tmp_path):
     assert r.returncode == 0, r.stderr[-2000:]
     out = json.loads(r.stdout.strip().splitlines()[-1])
     assert out["seen"] > 10 and out["same"] + out["empty"] == out["seen"]
+
+
+
+# --------------------------------------------------------------------------- #
+# the GFX 50S II case (2026-10-27): USB shooting works, USB live view doesn't
+# --------------------------------------------------------------------------- #
+def test_live_view_that_only_answers_busy_is_given_up(tmp_path):
+    b, gp, clock = _gp_backend(tmp_path)
+    b.list_cameras()
+    b.open("usb:001,004", None)
+    gp.state.preview_errors = [-110] * cb.PREVIEW_BUSY_LIMIT
+    for _ in range(cb.PREVIEW_BUSY_LIMIT - 1):
+        assert b.preview() is None and not b.no_preview
+    assert b.preview() is None and b.no_preview          # never a frame: no live view
+    # a camera that HAS given frames is only busy mid-capture: keep asking
+    b2, gp2, _c = _gp_backend(tmp_path)
+    b2.list_cameras()
+    b2.open("usb:001,004", None)
+    assert b2.preview() is not None
+    gp2.state.preview_errors = [-110] * (cb.PREVIEW_BUSY_LIMIT + 2)
+    for _ in range(cb.PREVIEW_BUSY_LIMIT + 2):
+        b2.preview()
+    assert not b2.no_preview
+
+
+def test_usb_shutter_with_a_capture_device_for_the_picture(mon_usb):
+    """HDMI for the picture, the camera's USB for the shutter and files."""
+    mon, feed, light, usb, mw, asked, lm = mon_usb
+    key = "usb:gphoto2:usb:001,003"
+    mon._on_cameras([(0, 1920, 1080)])
+    usb.cameras_found.emit([(key, "USB · Fuji Fujifilm GFX100")])
+    _app.processEvents()
+    feed.log.clear()
+    labels = [mon.shutter_combo.itemText(i) for i in range(mon.shutter_combo.count())]
+    assert labels == ["Scanlight", "USB · Fuji Fujifilm GFX100"]   # listed before it opens
+    mon.shutter_combo.setCurrentIndex(1)
+    mon.shutter_combo.activated.emit(1)
+    assert ("open", key) in usb.log                     # opened as the shutter...
+    assert not [e for e in feed.log if e[0] == "open"]  # ...not as the picture
+    usb.key = key
+    usb.opened("FUJIFILM GFX50S II")
+    _app.processEvents()
+    assert mon.shutter_combo.currentText() == "USB · FUJIFILM GFX50S II"
+    assert mon._shutter_is_usb() and mon.shoot_btn.isEnabled()
+    mw._tether_active = True
+    mon.shoot()
+    assert _wait(lambda: "fire" in usb.log)
+    usb.file_saved.emit(os.path.join(mw.folder, "DSCF0001.raf"))
+    _app.processEvents()
+    assert not mon.sequence.running
+
+
+def test_remembered_usb_shutter_opens_without_the_view(mon_usb):
+    mon, feed, light, usb, mw, asked, lm = mon_usb
+    key = "usb:gphoto2:usb:001,003"
+    lm._settings().setValue("live/camera_key", "")
+    lm._settings().setValue("live/shutter", key)
+    mon.find_cameras()
+    feed.log.clear()
+    usb.log.clear()
+    mon._on_cameras([(0, 1920, 1080)])
+    usb.cameras_found.emit([(key, "USB · Fuji Fujifilm GFX100")])
+    _app.processEvents()
+    assert ("open", key) in usb.log
+    assert not [e for e in feed.log if e[0] == "open" and e[1] == key]

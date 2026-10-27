@@ -1046,9 +1046,13 @@ class LiveCaptureMonitor(QWidget):
     def _on_usb_cameras(self, found):
         self._usb_found = list(found)
         self._rebuild_camera_combo()
+        self._rebuild_shutter_combo()
         keys = [k for k, _l in self._usb_found]
+        shutter = str(_settings().value("live/shutter", "") or "")
         if self._want_key in keys:
             self.feed.open_camera(self._want_key, self._video_format())
+        elif shutter in keys and not self.usb.is_open():
+            self.usb.open(shutter)               # the remembered USB shutter, no view
         elif self._want_key is not None:
             # the remembered USB camera isn't there: fall back to a device
             self._want_key = None
@@ -1077,7 +1081,7 @@ class LiveCaptureMonitor(QWidget):
             return
         if isinstance(key, str):
             _settings().setValue("live/camera_key", key)
-            _settings().setValue("live/shutter", "usb")    # its own shutter too
+            _settings().setValue("live/shutter", key)      # its own shutter too
             self._want_key = key
             self.feed.open_camera(key, self._video_format())
             return
@@ -1470,7 +1474,14 @@ class LiveCaptureMonitor(QWidget):
         self.capture_caption.setText(text)
 
     def _shutter_is_usb(self):
-        return self.shutter_combo.currentData() == "usb" and self.usb.is_open()
+        """The Shutter row names the USB camera that is open (an entry is its
+        key; "usb" is the open one, from older settings)."""
+        data = self.shutter_combo.currentData()
+        if not self.usb.is_open() or not isinstance(data, str):
+            return False
+        if data == "usb":
+            return True
+        return data.startswith("usb:") and getattr(self.usb, "key", data) == data
 
     def _refresh_shoot_enabled(self):
         if self.sequence.running:
@@ -1511,12 +1522,25 @@ class LiveCaptureMonitor(QWidget):
         return active
 
     def _rebuild_shutter_combo(self):
+        """Scanlight, then every USB camera found (one can be the shutter while
+        a capture device gives the picture: a camera with no USB live view)."""
         want = str(_settings().value("live/shutter", "scanlight") or "scanlight")
+        open_key = getattr(self.usb, "key", None) if self.usb.is_open() else None
+        items = [("Scanlight", "scanlight")]
+        for key, label in self._usb_found:
+            if key == open_key and self._usb_model:
+                label = f"USB · {self._usb_model}"
+            items.append((label, key))
+        keys = [k for _l, k in items]
+        if self.usb.is_open() and (open_key is None or open_key not in keys):
+            items.append((f"USB · {self._usb_model or 'camera'}", open_key or "usb"))
+            keys.append(open_key or "usb")
+        if want == "usb":                        # older setting: the open camera
+            want = open_key or "usb"
         self.shutter_combo.blockSignals(True)
         self.shutter_combo.clear()
-        self.shutter_combo.addItem("Scanlight", "scanlight")
-        if self.usb.is_open():
-            self.shutter_combo.addItem(f"USB · {self._usb_model or 'camera'}", "usb")
+        for label, key in items:
+            self.shutter_combo.addItem(label, key)
         i = self.shutter_combo.findData(want)
         self.shutter_combo.setCurrentIndex(i if i >= 0 else 0)
         self.shutter_combo.blockSignals(False)
@@ -1524,7 +1548,11 @@ class LiveCaptureMonitor(QWidget):
         self._refresh_capture_caption()
 
     def _on_shutter_chosen(self, i):
-        _settings().setValue("live/shutter", self.shutter_combo.itemData(i))
+        key = self.shutter_combo.itemData(i)
+        _settings().setValue("live/shutter", key)
+        if (isinstance(key, str) and key.startswith("usb:")
+                and (getattr(self.usb, "key", None) != key or not self.usb.is_open())):
+            self.usb.open(key)                   # as the shutter only: no live view asked
         self._refresh_shoot_enabled()
         self._refresh_capture_caption()
 
