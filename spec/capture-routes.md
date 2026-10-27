@@ -330,8 +330,8 @@ Test 3 (2026-10-27, with libgphoto2's debug log) settled the rest:
   shot, failed live view, shot, reconnect, shot all succeeded.
 - Live view: libgphoto2 sends Initiate Open Capture (PTP 0x101C) and the
   camera answers Device Busy (0x2019) within a millisecond, five times; it is
-  refused, not slow. (Next to try: PC Connection Mode "USB tether shooting
-  fixed".)
+  refused, not slow. The tests ran in PC Connection Mode "USB tether shooting
+  fixed"; "auto" refuses live view the same way.
 - "Disconnect failed": on exit libgphoto2 tries to hand control back to the
   body (Fuji PriorityMode 0xD207 → Camera) and the camera answers busy; the
   port is closed anyway, so it is cosmetic, but the body may stay in USB
