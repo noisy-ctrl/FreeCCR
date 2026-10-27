@@ -30,7 +30,13 @@ RAW_EXTS = {".cr2", ".cr3", ".crw", ".nef", ".nrw", ".arw", ".srf", ".sr2",
             ".raf", ".rw2", ".orf", ".pef", ".dng", ".3fr", ".fff", ".iiq",
             ".erf", ".mos", ".mrw", ".x3f", ".srw", ".rwl", ".gpr"}
 QUIET_S = 0.3              # a shot's files (RAW + JPEG) arrive within this of each other
-PREVIEW_BUSY_LIMIT = 5     # "busy" answers to live view, none ever answered: no live view
+# Live view that answers "busy": a GFX 50S II refuses it for a while after
+# connecting and after each shot, then gives frames (2026-10-27). So "busy" is
+# retried, no more than every PREVIEW_BUSY_BACKOFF_S, and only a camera busy
+# for PREVIEW_GIVE_UP_S without ever giving a frame counts as having no USB
+# live view.
+PREVIEW_BUSY_BACKOFF_S = 0.25
+PREVIEW_GIVE_UP_S = 15.0
 LOST_AFTER_ERRORS = 3      # consecutive I/O failures before the camera counts as gone
 DCC_PORT = 5513
 
@@ -218,7 +224,8 @@ class Gphoto2Backend:
         self._errors = 0
         self._zoom_ok = None
         self.no_preview = False      # the camera has no live view over USB
-        self._preview_busy = 0
+        self._busy_since = None      # first "busy" of the current run of them
+        self._busy_until = 0.0       # don't ask again before this
         self._preview_frames = 0
 
     def available(self):
@@ -267,7 +274,8 @@ class Gphoto2Backend:
         self._pending, self._last_added, self._errors = [], None, 0
         self._zoom_ok = None
         self.no_preview = False
-        self._preview_busy = 0
+        self._busy_since = None
+        self._busy_until = 0.0
         self._preview_frames = 0
         return self.reported_model() or self._models.get(ident, "")
 
@@ -328,6 +336,9 @@ class Gphoto2Backend:
     def preview(self):
         if self.camera is None:
             raise CameraLost("not open")
+        now = self.clock()
+        if now < self._busy_until:
+            return None                       # it said busy a moment ago
         try:
             cf = self.camera.capture_preview()
             data = bytes(memoryview(cf.get_data_and_size()))
@@ -337,18 +348,18 @@ class Gphoto2Backend:
                 self.no_preview = True
                 return None
             if code == self.gp.GP_ERROR_CAMERA_BUSY:
-                # A camera mid-capture answers busy for a moment; one that has
-                # never given a frame and keeps answering busy has no USB live
-                # view (a GFX 50S II on libgphoto2 2.5.34), so stop asking:
-                # shooting over USB still works.
-                self._preview_busy += 1
-                if not self._preview_frames and self._preview_busy >= PREVIEW_BUSY_LIMIT:
-                    self.no_preview = True
+                if self._busy_since is None:
+                    self._busy_since = now
+                self._busy_until = now + PREVIEW_BUSY_BACKOFF_S
+                if (not self._preview_frames
+                        and now - self._busy_since >= PREVIEW_GIVE_UP_S):
+                    self.no_preview = True    # shooting over USB still works
                 return None
             self._failed(e)
             return None
         self._errors = 0
-        self._preview_busy = 0
+        self._busy_since = None
+        self._busy_until = 0.0
         self._preview_frames += 1
         return data
 
@@ -440,8 +451,25 @@ class Gphoto2Backend:
         return found
 
     def exposure(self):
+        """Shutter, ISO, aperture. One setting at a time where libgphoto2 can
+        (reading the whole configuration is ~150 properties on a Fujifilm,
+        which stalls live view every time it is done)."""
         if self.camera is None:
             return {}
+        single = getattr(self.camera, "get_single_config", None)
+        if single is not None:
+            out = {}
+            for field, keys in (("shutter", self.SHUTTER_KEYS), ("iso", self.ISO_KEYS),
+                                ("aperture", self.APERTURE_KEYS)):
+                for k in keys:
+                    try:
+                        v = widget_value(self.gp, single(k))
+                    except Exception:
+                        continue
+                    if v not in (None, ""):
+                        out[field] = str(v)
+                        break
+            return out
         try:
             cfg = self.camera.get_config()
         except Exception:

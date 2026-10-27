@@ -322,7 +322,7 @@ Consequences, built:
   device gives the picture, with no shutter cable and no maker's tether app.
   The remembered shutter is reopened the same way at start.
 - A camera that has never given a frame and answers live view with busy
-  `PREVIEW_BUSY_LIMIT` (5) times is treated as having no USB live view
+  five times was treated as having no USB live view (superseded by §16)
   (`no_preview`): the monitor says so and stops asking. A camera that has
   given frames is only busy mid-capture and keeps being asked.
 Test 3 (2026-10-27, with libgphoto2's debug log) settled the rest:
@@ -344,3 +344,18 @@ Test 3 (2026-10-27, with libgphoto2's debug log) settled the rest:
 - `f-number` is empty because the lens has no contacts: the camera reports
   aperture 0, which is not in its own list of apertures, so libgphoto2 leaves
   the setting without a value — any adapted manual lens will do the same.
+
+## 16. Live view works after all (2026-10-27)
+In the Live Capture Monitor itself the GFX 50S II streams live view over USB:
+XGA (1024×768) at about 3 fps, with shutter speed and ISO shown. The test
+scripts only ever saw Device Busy because they asked straight after
+connecting or straight after a shot and then stopped; the monitor reads its
+settings first and keeps asking. So the camera refuses Initiate Open Capture
+for a while after connecting / after a capture, then accepts it (timing to be
+measured). Changes:
+- "busy" is retried with a back-off (`PREVIEW_BUSY_BACKOFF_S`, 0.25 s) and
+  live view is only given up after `PREVIEW_GIVE_UP_S` (15 s) of busy with no
+  frame ever (it was 5 answers, which could give up before the camera was
+  ready).
+- Exposure is read with `get_single_config` per setting, not the whole
+  configuration every 3 s, which stalled the picture.

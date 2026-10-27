@@ -263,8 +263,10 @@ def test_gphoto2_busy_and_lost(tmp_path):
     b.open("usb:001,004", None)
     # a camera busy mid-capture is not an error; repeated I/O failures are lost
     gp.state.preview_errors = [-110, -110, -7, -7]
-    assert b.preview() is None and b.preview() is None
-    assert b.preview() is None and b.preview() is None
+    for _ in range(4):
+        assert b.preview() is None
+        clock.t += cb.PREVIEW_BUSY_BACKOFF_S + 0.01
+    assert not gp.state.preview_errors
     gp.state.preview_errors = [-7]
     with pytest.raises(cb.CameraLost):
         b.preview()
@@ -1045,23 +1047,57 @@ def test_guarded_reads_match_on_the_virtual_camera(tmp_path):
 # --------------------------------------------------------------------------- #
 # the GFX 50S II case (2026-10-27): USB shooting works, USB live view doesn't
 # --------------------------------------------------------------------------- #
-def test_live_view_that_only_answers_busy_is_given_up(tmp_path):
+def test_live_view_busy_is_retried_and_only_given_up_after_a_long_while(tmp_path):
+    """A GFX 50S II answers live view "busy" for a while after connecting and
+    after each shot, then gives frames: keep asking (not too often), and only
+    a camera busy for PREVIEW_GIVE_UP_S with no frame ever has none."""
     b, gp, clock = _gp_backend(tmp_path)
     b.list_cameras()
     b.open("usb:001,004", None)
-    gp.state.preview_errors = [-110] * cb.PREVIEW_BUSY_LIMIT
-    for _ in range(cb.PREVIEW_BUSY_LIMIT - 1):
-        assert b.preview() is None and not b.no_preview
-    assert b.preview() is None and b.no_preview          # never a frame: no live view
-    # a camera that HAS given frames is only busy mid-capture: keep asking
-    b2, gp2, _c = _gp_backend(tmp_path)
+    gp.state.preview_errors = [-110] * 100
+    assert b.preview() is None
+    left = len(gp.state.preview_errors)
+    assert b.preview() is None and len(gp.state.preview_errors) == left   # backing off
+    clock.t += cb.PREVIEW_BUSY_BACKOFF_S + 0.01
+    assert b.preview() is None and len(gp.state.preview_errors) == left - 1
+    clock.t += 5.0
+    gp.state.preview_errors = []                     # ready: frames from now on
+    assert b.preview() is not None and not b.no_preview
+    # never a frame, busy past the give-up time: no USB live view
+    b2, gp2, c2 = _gp_backend(tmp_path)
     b2.list_cameras()
     b2.open("usb:001,004", None)
-    assert b2.preview() is not None
-    gp2.state.preview_errors = [-110] * (cb.PREVIEW_BUSY_LIMIT + 2)
-    for _ in range(cb.PREVIEW_BUSY_LIMIT + 2):
+    gp2.state.preview_errors = [-110] * 1000
+    t0 = c2.t
+    while c2.t - t0 < cb.PREVIEW_GIVE_UP_S + 1:
         b2.preview()
-    assert not b2.no_preview
+        c2.t += cb.PREVIEW_BUSY_BACKOFF_S + 0.01
+    assert b2.no_preview
+    # one that HAS given frames is only busy around a shot: never given up
+    b3, gp3, c3 = _gp_backend(tmp_path)
+    b3.list_cameras()
+    b3.open("usb:001,004", None)
+    assert b3.preview() is not None
+    gp3.state.preview_errors = [-110] * 1000
+    for _ in range(100):
+        b3.preview()
+        c3.t += 1.0
+    assert not b3.no_preview
+
+
+def test_exposure_reads_one_setting_at_a_time_when_it_can(tmp_path):
+    b, gp, clock = _gp_backend(tmp_path)
+    b.list_cameras()
+    b.open("usb:001,004", None)
+    asked = []
+
+    def single(name):
+        asked.append(name)
+        return gp.state.config.get_child_by_name(name)
+    b.camera.get_single_config = single
+    b.camera.get_config = lambda: (_ for _ in ()).throw(AssertionError("whole config read"))
+    assert b.exposure() == {"shutter": "1/60", "iso": "100", "aperture": "f/8"}
+    assert asked[:2] == ["shutterspeed", "iso"] and "f-number" in asked
 
 
 def test_usb_shutter_with_a_capture_device_for_the_picture(mon_usb):
