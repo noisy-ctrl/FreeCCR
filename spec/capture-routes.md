@@ -431,3 +431,17 @@ On the GFX 50S II (same setup as §15):
   body's store holds each shot it took; its numbering restarted at
   DSCF0001, which suggests a tether buffer rather than the card), then
   reconnecting.
+
+## 19. Test 6: what keeps live view busy after a shot (2026-10-27)
+Both of the body's stores were EMPTY before the shot (no DCIM, nothing left
+from test 5, so a tether buffer, not the card, cleared when the body is
+switched off). After the shot live view was busy (20 answers in 5 s); after
+`file_delete` of that shot, the first frame came in 0.07 s, and the
+disconnect went through without the `-110` it had given in every earlier
+test. So the camera holds each shot until the computer deletes it, and is
+busy for live view and for handing control back until then.
+Decision (the user, 2026-10-27): FreeCCR deletes NOTHING from the camera.
+So on this body live view stops after the first USB shot of a session and
+comes back only once the camera is switched off and on; shots keep working
+(test 5 took two). Not known: how many shots the buffer holds before it
+refuses another.
