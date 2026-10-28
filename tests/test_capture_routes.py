@@ -114,6 +114,8 @@ def fake_gp(cameras=(("Canon EOS 5D Mark III", "usb:001,004"),), shot=("IMG_0001
                                      fuji=False, in_live=False, captures=0,
                                      capture_error=None, capture_echo=False,
                                      event_checks=0, file_errors=[],
+                                     folder="/store/DCIM", held=set(), deleted=[],
+                                     size_lie=0,
                                      shot=list(shot), fired=0, inited=False, exited=False,
                                      config=config if config is not None else _Widget({
                                          "shutterspeed": _Widget(value="1/60"),
@@ -144,6 +146,8 @@ def fake_gp(cameras=(("Canon EOS 5D Mark III", "usb:001,004"),), shot=("IMG_0001
 
         def capture_preview(self):
             st.in_live = True                  # started even when the frame then fails
+            if st.fuji and st.held:            # holds a shot until it's deleted (test 6)
+                raise GPhoto2Error(gp.GP_ERROR_CAMERA_BUSY)
             if st.preview_errors:
                 raise GPhoto2Error(st.preview_errors.pop(0))
             ok, buf = cv2.imencode(".jpg", np.full((30, 40, 3), 90, np.uint8))
@@ -154,20 +158,30 @@ def fake_gp(cameras=(("Canon EOS 5D Mark III", "usb:001,004"),), shot=("IMG_0001
                 raise GPhoto2Error(gp.GP_ERROR)
             st.fired += 1
             for n in st.shot:
+                st.held.add((st.folder, n))
                 st.events.append((gp.GP_EVENT_FILE_ADDED,
-                                  types.SimpleNamespace(folder="/store/DCIM", name=n)))
+                                  types.SimpleNamespace(folder=st.folder, name=n)))
 
         def capture(self, kind):
             if st.capture_error is not None:
                 raise GPhoto2Error(st.capture_error)
             st.in_live = False
             st.captures += 1
-            first = types.SimpleNamespace(folder="/store/DCIM", name=st.shot[0])
+            st.held.update((st.folder, n) for n in st.shot)
+            first = types.SimpleNamespace(folder=st.folder, name=st.shot[0])
             rest = st.shot[1:] + (st.shot[:1] if st.capture_echo else [])
             for n in rest:                     # RAW + JPEG: the other one as an event
                 st.events.append((gp.GP_EVENT_FILE_ADDED,
-                                  types.SimpleNamespace(folder="/store/DCIM", name=n)))
+                                  types.SimpleNamespace(folder=st.folder, name=n)))
             return first
+
+        def file_delete(self, folder, name):
+            st.deleted.append((folder, name))
+            st.held.discard((folder, name))
+
+        def file_get_info(self, folder, name):
+            size = len(f"{folder}/{name}".encode()) + st.size_lie
+            return types.SimpleNamespace(file=types.SimpleNamespace(size=size, fields=4))
 
         def wait_for_event(self, ms):
             st.event_checks += 1
@@ -608,6 +622,7 @@ def test_ports_ranked_by_usb_id():
 # --------------------------------------------------------------------------- #
 class FakeUsb(QObject):
     addons_found = Signal(list)
+    live_paused = Signal(bool)
     cameras_found = Signal(list)
     state = Signal(str, str)
     file_saved = Signal(str)
@@ -1172,6 +1187,7 @@ def test_remembered_usb_shutter_opens_without_the_view(mon_usb):
 def _fuji_backend(tmp_path, **kw):
     b, gp, clock = _gp_backend(tmp_path, **kw)
     gp.state.fuji = True
+    gp.state.folder = "/store_10000001"        # the tether buffer: no DCIM
     b.list_cameras()
     b.open("usb:001,004", str(tmp_path))
     return b, gp, clock
@@ -1333,15 +1349,21 @@ _REAL_LIVE_SHOT = r'''
 import json, os, sys, time
 sys.path.insert(0, sys.argv[1])
 from core import camera_backends as cb
+if sys.argv[3] == "clear":    # its files sit under DCIM; pretend it's camera memory
+    cb.on_memory_card = lambda folder: False
 b = cb.Gphoto2Backend()
 cams = b.list_cameras()
 b.open(cb.split_key(cams[0].key)[1], sys.argv[2])
 b._live_asked = True          # as after a live view frame (the virtual camera has none)
 b.fire()
+folder, name = b._pending[0]
 files, end = [], time.monotonic() + 3
 while time.monotonic() < end:
     files += [v for k, v in b.poll(0.1) if k == "file"]
-print(json.dumps({"files": files, "listing": sorted(os.listdir(sys.argv[2]))}))
+lst = b.camera.folder_list_files(folder)
+left = [lst.get_name(i) for i in range(lst.count())]
+print(json.dumps({"files": files, "listing": sorted(os.listdir(sys.argv[2])),
+                  "name": name, "left": left}))
 b.close()
 '''
 
@@ -1355,16 +1377,19 @@ def test_real_libgphoto2_capture_call_brings_the_file_in_once(tmp_path):
     vdir = tmp_path / "vcam"
     vdir.mkdir()
     cv2.imwrite(str(vdir / "IMG_0000.JPG"), np.full((20, 30, 3), 60, np.uint8))
-    dest = tmp_path / "hot"
-    dest.mkdir()
     src = os.path.join(os.path.dirname(__file__), "..", "src")
-    r = subprocess.run([sys.executable, "-c", _REAL_LIVE_SHOT, src, str(dest)],
-                       env=dict(os.environ, VCAMERADIR=str(vdir)),
-                       capture_output=True, text=True, timeout=60)
-    assert r.returncode == 0, r.stderr[-2000:]
-    out = json.loads(r.stdout.strip().splitlines()[-1])
-    assert len(out["files"]) == 1 and len(out["listing"]) == 1     # once, no .part
-    assert os.path.getsize(out["files"][0]) > 0
+    for mode in ("card", "clear"):
+        dest = tmp_path / f"hot_{mode}"
+        dest.mkdir()
+        r = subprocess.run([sys.executable, "-c", _REAL_LIVE_SHOT, src, str(dest), mode],
+                           env=dict(os.environ, VCAMERADIR=str(vdir)),
+                           capture_output=True, text=True, timeout=60)
+        assert r.returncode == 0, r.stderr[-2000:]
+        out = json.loads(r.stdout.strip().splitlines()[-1])
+        assert len(out["files"]) == 1 and len(out["listing"]) == 1     # once, no .part
+        assert os.path.getsize(out["files"][0]) > 0
+        # a card file stays; camera memory is cleared (real size check + delete)
+        assert (out["name"] in out["left"]) == (mode == "card"), out
 
 
 # --------------------------------------------------------------------------- #
@@ -1408,3 +1433,135 @@ def test_a_file_that_cant_be_fetched_is_not_a_lost_camera(tmp_path):
     b.fire()
     with pytest.raises(cb.CameraLost):
         _bring_in(b, clock)
+
+
+# --------------------------------------------------------------------------- #
+# clearing shots from the camera's own memory (spec §20, after test 6)
+# --------------------------------------------------------------------------- #
+def test_memory_card_folders():
+    assert cb.on_memory_card("/store_00020001/DCIM/100CANON")
+    assert cb.on_memory_card("/store_00010001/dcim/100GPHOT")
+    assert not cb.on_memory_card("/store_10000001")
+    assert not cb.on_memory_card("/") and not cb.on_memory_card(None)
+    assert not cb.on_memory_card("/store_1/DCIMX")
+
+
+def test_a_shot_is_cleared_from_the_camera_once_saved_and_live_view_returns(tmp_path):
+    """A GFX 50S II in tether mode holds each shot until the computer deletes
+    it, and refuses live view until then (test 6)."""
+    b, gp, clock = _fuji_backend(tmp_path, shot=("DSCF0001.RAF",))
+    assert b.preview() is not None
+    b.fire()
+    assert b.preview() is None                         # held: busy
+    assert _bring_in(b, clock) == [("file", str(tmp_path / "DSCF0001.RAF"))]
+    assert gp.state.deleted == [("/store_10000001", "DSCF0001.RAF")]
+    clock.t += cb.PREVIEW_BUSY_BACKOFF_S + 0.01
+    assert b.preview() is not None                     # back at once
+
+
+def test_files_on_a_memory_card_are_never_deleted(tmp_path):
+    b, gp, clock = _gp_backend(tmp_path, shot=("IMG_0001.CR2", "IMG_0001.JPG"))
+    b.list_cameras()
+    b.open("usb:001,004", str(tmp_path))
+    b.fire()
+    assert _bring_in(b, clock) == [("file", str(tmp_path / "IMG_0001.CR2"))]
+    assert gp.state.deleted == []                      # /store/DCIM: both stay
+
+
+def test_nothing_is_deleted_unless_it_was_saved_whole(tmp_path):
+    # the camera says the file is longer than what was saved
+    b, gp, clock = _fuji_backend(tmp_path, shot=("DSCF0002.RAF",))
+    gp.state.size_lie = 1
+    b.fire()
+    assert _bring_in(b, clock) == [("file", str(tmp_path / "DSCF0002.RAF"))]
+    assert gp.state.deleted == []
+    # nowhere to put it
+    b2, gp2, c2 = _fuji_backend(tmp_path, shot=("DSCF0003.RAF",))
+    b2.set_dest(None)
+    b2.fire()
+    assert _bring_in(b2, c2) == [("skipped", "DSCF0003.RAF")] and gp2.state.deleted == []
+    # the download failed
+    b3, gp3, c3 = _fuji_backend(tmp_path, shot=("DSCF0004.RAF",))
+    gp3.state.file_errors = [-108]
+    b3.fire()
+    assert _bring_in(b3, c3) == [] and gp3.state.deleted == []
+
+
+def test_the_jpeg_of_a_pair_goes_only_once_its_raw_is_safe(tmp_path):
+    b, gp, clock = _fuji_backend(tmp_path, shot=("DSCF0005.RAF", "DSCF0005.JPG"))
+    b.fire()
+    assert _bring_in(b, clock) == [("file", str(tmp_path / "DSCF0005.RAF"))]
+    assert sorted(n for _f, n in gp.state.deleted) == ["DSCF0005.JPG", "DSCF0005.RAF"]
+    assert not gp.state.held
+    (tmp_path / "y").mkdir()
+    b2, gp2, c2 = _fuji_backend(tmp_path / "y", shot=("DSCF0006.RAF", "DSCF0006.JPG"))
+    gp2.state.file_errors = [-108]                     # the RAW didn't come
+    b2.fire()
+    assert _bring_in(b2, c2) == [] and gp2.state.deleted == []
+
+
+def test_live_view_stuck_busy_after_frames_counts_as_paused(tmp_path):
+    b, gp, clock = _fuji_backend(tmp_path, shot=("DSCF0007.RAF",))
+    gp.state.preview_errors = [-110] * 1000
+    t0 = clock.t
+    while clock.t - t0 < cb.LIVE_STALL_S + 1:          # never a frame: not "paused"
+        b.preview()
+        clock.t += 0.3
+    assert not b.live_stalled()
+    gp.state.preview_errors = []
+    assert b.preview() is not None
+    gp.state.preview_errors = [-110] * 1000
+    b.preview()
+    clock.t += cb.LIVE_STALL_S - 0.5
+    b.preview()
+    assert not b.live_stalled()
+    clock.t += 1.0
+    b.preview()
+    assert b.live_stalled()
+    gp.state.preview_errors = []
+    clock.t += 1.0
+    assert b.preview() is not None and not b.live_stalled()
+
+
+def test_worker_reports_a_paused_live_view():
+    flags = {"stalled": False}
+
+    class Stalls(cb.FakeBackend):
+        def live_stalled(self):
+            return flags["stalled"]
+
+    w = UsbCamera(backends=[Stalls()])
+    got = []
+    w.live_paused.connect(got.append)
+    w.start()
+    try:
+        w.open(cb.make_key("fake", "0"))
+        w.set_live(True)
+        assert _wait(lambda: w.status == "open")
+        flags["stalled"] = True
+        assert _wait(lambda: got == [True])
+        flags["stalled"] = False
+        assert _wait(lambda: got == [True, False])
+    finally:
+        w.stop()
+        w.wait(3000)
+
+
+def test_monitor_says_why_the_usb_picture_stopped(mon_usb):
+    mon, feed, light, usb, mw, asked, lm = mon_usb
+    key = "usb:gphoto2:usb:001,003"
+    mon._on_cameras([(0, 1920, 1080)])
+    usb.cameras_found.emit([(key, "USB · Fuji Fujifilm GFX100")])
+    _app.processEvents()
+    i = mon.camera_combo.findData(key)
+    mon.camera_combo.setCurrentIndex(i)
+    usb.key = key
+    usb.live_paused.emit(True)
+    _app.processEvents()
+    assert "paused" in mon.canvas.message
+    # the picture from a capture device: not this camera's live view
+    mon.canvas.set_message("")
+    mon.camera_combo.setCurrentIndex(mon.camera_combo.findData(0))
+    usb.live_paused.emit(True)
+    _app.processEvents()
+    assert "paused" not in mon.canvas.message

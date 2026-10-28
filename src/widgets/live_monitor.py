@@ -624,6 +624,8 @@ class LiveCaptureMonitor(QWidget):
         self.usb.zoom_levels.connect(self._on_zoom_levels)
         if hasattr(self.usb, "addons_found"):
             self.usb.addons_found.connect(self._on_addons)
+        if hasattr(self.usb, "live_paused"):
+            self.usb.live_paused.connect(self._on_live_paused)
         self.usb.fire_failed.connect(self._on_fire_failed)
         self.shutter_combo.activated.connect(self._on_shutter_chosen)
         self.cam_zoom_combo.activated.connect(
@@ -1595,6 +1597,14 @@ class LiveCaptureMonitor(QWidget):
         if kind == "lost" and self.sequence.running and self.sequence.camera_shutter:
             self.sequence.abort("camera lost")      # after the rebuild: its caption stays
         self._refresh_status_strip()
+
+    def _on_live_paused(self, paused):
+        # The next frame clears the message (the canvas drops it on a result).
+        key = getattr(self.usb, "key", None)
+        if paused and key and self.camera_combo.currentData() == key:
+            self.canvas.set_message(
+                "Live view is paused: the camera is still holding the last shot.\n"
+                "Switching the camera off and on brings live view back.")
 
     def _on_usb_file(self, path):
         if self.sequence.running and self.sequence.camera_shutter:

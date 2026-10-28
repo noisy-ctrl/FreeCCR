@@ -33,6 +33,7 @@ class UsbCamera(WorkerThread):
     addons_found = Signal(list)         # unofficial add-ons on the card (spec §12)
     fired = Signal()
     fire_failed = Signal(str)
+    live_paused = Signal(bool)          # live view stuck busy after giving frames
 
     def __init__(self, backends=None, clock=time.monotonic, parent=None):
         super().__init__(parent)
@@ -46,6 +47,7 @@ class UsbCamera(WorkerThread):
         self._frame = None
         self._seq = 0
         self._live = False
+        self._paused = False
         self.backend = None
         self.key = None
         self.model = ""
@@ -149,6 +151,11 @@ class UsbCamera(WorkerThread):
                         self._publish(data)
                     elif getattr(self.backend, "no_preview", False):
                         self.state.emit("nopreview", self.model)
+                    stalled = getattr(self.backend, "live_stalled", None)
+                    paused = bool(stalled()) if callable(stalled) else False
+                    if paused != self._paused:
+                        self._paused = paused
+                        self.live_paused.emit(paused)
                 events = self.backend.poll(0.01 if self._live else 0.1)
                 if self._live and not data and not events:
                     # No frame (camera busy, backing off) and the event check

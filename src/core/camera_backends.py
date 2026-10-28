@@ -46,6 +46,9 @@ PREVIEW_GIVE_UP_S = 15.0
 LIVE_EVENTS_EVERY_S = 3.0   # each check stalls the GFX 50S II's picture ~0.3 s (test 5)
 LIVE_RECENT_S = 0.5        # live view was asked for this recently = it is running
 SHOT_WAIT_S = 30.0         # after firing, check events continuously this long
+# Live view that has given frames and then answers busy this long is
+# reported as paused (`live_stalled`): a body holding a shot it couldn't clear.
+LIVE_STALL_S = 5.0
 LOST_AFTER_ERRORS = 3      # consecutive I/O failures before the camera counts as gone
 DCC_PORT = 5513
 
@@ -109,6 +112,14 @@ def is_live_view_file(name):
     stem, ext = os.path.splitext(os.path.basename(name or ""))
     return ext.lower() in (".jpg", ".jpeg") and stem.upper().startswith("LIVE") \
         and stem[4:].isdigit()
+
+
+def on_memory_card(folder):
+    """Is this camera folder on a memory card? Cards keep files under DCIM
+    (the DCF layout); a body's own memory, like a Fujifilm's tether buffer
+    (`/store_10000001`), does not. FreeCCR clears shots only from the
+    latter (spec §20)."""
+    return any(part.upper() == "DCIM" for part in (folder or "").split("/"))
 
 
 def addons_on_card(files, folders):
@@ -489,6 +500,7 @@ class Gphoto2Backend:
             self._shot_files = []
             pending, self._pending = self._pending, []
             keep = set(keep_raw([n for _f, n in pending]))
+            saved_all = bool(self.dest)
             for folder, name in pending:
                 if name not in keep:
                     continue
@@ -498,7 +510,35 @@ class Gphoto2Backend:
                 path = self._download(folder, name)
                 if path:
                     out.append(("file", path))
+                else:
+                    saved_all = False
+            if saved_all:
+                # the other half of a RAW + JPEG pair, once its RAW is safe:
+                # a body holding it still counts the transfer as unfinished
+                for folder, name in pending:
+                    if name not in keep:
+                        self._clear(folder, name)
         return out
+
+    def _clear(self, folder, name):
+        """Delete a shot from the camera's own memory (never a card). A body
+        in tether mode holds each shot until the computer deletes it, and
+        until then refuses live view (GFX 50S II, test 6, spec §19-20); the
+        protocol's normal end to a transfer, which libgphoto2's command line
+        also does after capturing and downloading."""
+        if on_memory_card(folder):
+            return False
+        try:
+            self.camera.file_delete(folder, name)
+            return True
+        except self.gp.GPhoto2Error as e:
+            print(f"usb camera: couldn't clear {name} from the camera: {e}")
+            return False
+
+    def live_stalled(self):
+        """Live view gave frames, then has answered busy for LIVE_STALL_S."""
+        return bool(self._preview_frames and self._busy_since is not None
+                    and self.clock() - self._busy_since >= LIVE_STALL_S)
 
     def _download(self, folder, name):
         gp = self.gp
@@ -506,6 +546,7 @@ class Gphoto2Backend:
         part = target + ".part"
         try:
             cf = self.camera.file_get(folder, name, gp.GP_FILE_TYPE_NORMAL)
+            got = len(memoryview(cf.get_data_and_size()))
             cf.save(part)
             os.replace(part, target)
         except gp.GPhoto2Error as e:
@@ -519,7 +560,32 @@ class Gphoto2Backend:
             print(f"usb camera: couldn't download {name}: {e}")
             return None
         self._errors = 0
+        if self._saved_whole(folder, name, target, got):
+            self._clear(folder, name)
         return target
+
+    def _saved_whole(self, folder, name, target, got):
+        """The file on disk is every byte received, and as long as the camera
+        says the file is: only then may the camera's copy go."""
+        try:
+            on_disk = os.path.getsize(target)
+        except OSError:
+            return False
+        if on_disk != got or got <= 0:
+            print(f"usb camera: {name}: saved {on_disk} of {got} bytes; left on the camera")
+            return False
+        size = None
+        try:
+            info = self.camera.file_get_info(folder, name).file
+            if info.fields & getattr(self.gp, "GP_FILE_INFO_SIZE", 1 << 2):
+                size = int(info.size)
+        except Exception:
+            size = None                       # no size reported: the save check stands
+        if size is not None and size != on_disk:
+            print(f"usb camera: {name}: the camera says {size} bytes, saved {on_disk}; "
+                  "left on the camera")
+            return False
+        return True
 
     def addons(self):
         """Unofficial add-ons found on the camera's card(s) (spec §12). A

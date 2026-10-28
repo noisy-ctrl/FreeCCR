@@ -440,8 +440,42 @@ switched off). After the shot live view was busy (20 answers in 5 s); after
 disconnect went through without the `-110` it had given in every earlier
 test. So the camera holds each shot until the computer deletes it, and is
 busy for live view and for handing control back until then.
-Decision (the user, 2026-10-27): FreeCCR deletes NOTHING from the camera.
+Decision (the user, 2026-10-27, revised the next day in §20): FreeCCR deletes NOTHING from the camera.
 So on this body live view stops after the first USB shot of a session and
 comes back only once the camera is switched off and on; shots keep working
 (test 5 took two). Not known: how many shots the buffer holds before it
 refuses another.
+
+## 20. Clearing shots from the camera's memory (2026-10-28, the user's decision)
+In use the monitor's USB picture froze on the last frame after a shot while
+the body's LED kept cycling green/orange as if still transferring: in this
+protocol the computer ends a transfer by deleting the shot, and until then the
+body counts it as unfinished (test 6). The user agreed, on the basis that
+libgphoto2's own command line does the same by default after capturing and
+downloading (`--no-keep`, which it applies even to card files), to clearing
+shots from the camera's OWN memory:
+- **When**: in `Gphoto2Backend._download`, after `os.replace` puts the whole
+  file in the hot folder, and only if `_saved_whole`: the size on disk equals
+  the bytes received and, when the camera reports a size
+  (`file_get_info(...).file`, `GP_FILE_INFO_SIZE`), that size too. Not when
+  there is no hot folder (the shot is "skipped") or the download failed.
+- **What**: only folders that aren't on a memory card, `on_memory_card` =
+  any path part is `DCIM` (the DCF layout every card uses; the Fujifilm
+  tether buffer is `/store_10000001` with files at its top). A camera that
+  records to a card keeps every file. The other half of a RAW + JPEG pair
+  (dropped by `keep_raw`) is cleared too, but only once its RAW was saved
+  whole: the body would otherwise keep holding it. In tether mode it would
+  be gone at switch-off anyway.
+- **If it fails**: printed, nothing lost; the body stays busy.
+- **Saying so**: `Gphoto2Backend.live_stalled()` is true when live view has
+  given frames and then answered busy for `LIVE_STALL_S` (5 s); the worker
+  emits `live_paused(bool)` on each change while its live view is on, and the
+  monitor shows "Live view is paused: the camera is still holding the last
+  shot. Switching the camera off and on brings live view back." over the
+  picture when that camera gives the picture (the next frame clears it).
+Tests: the fake body holds every shot and answers live view busy until it is
+deleted; card folders are never deleted; nothing is deleted unless saved
+whole (size mismatch, no hot folder, failed download); a pair's JPEG goes only
+after its RAW; the stall is reported only after frames; the real libgphoto2
+virtual camera keeps its DCIM file and, with the card rule lifted, has it
+deleted through the real size check and `file_delete`.
