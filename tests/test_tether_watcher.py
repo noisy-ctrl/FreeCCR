@@ -363,6 +363,7 @@ def test_named_hot_folder_tether(tmp_path, monkeypatch):
     monkeypatch.setattr(QFileDialog, "getExistingDirectory",
                         lambda *a, **k: str(tmp_path))
     monkeypatch.setattr(w._settings, "setValue", lambda *a, **k: None)
+    monkeypatch.setattr(w, "_tether_start_choice", lambda n: "add")   # images left open
     w.enter_tethering()
     try:
         assert w.tether_action.text() == "Stop Hot Folder Tether"

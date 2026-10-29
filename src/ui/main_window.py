@@ -1903,6 +1903,16 @@ class MainWindow(QMainWindow):
         self._settings.setValue("files/last_tether_dir", folder)
         folder = os.path.normpath(normalized)
 
+        # Images open: add this roll's captures to them, or start blank
+        # (spec/tether-start-choice.md). Edits were saved above.
+        n_open = len(ccr_backend.images or [])
+        if n_open:
+            choice = self._tether_start_choice(n_open)
+            if choice is None:
+                return
+            if choice == "blank":
+                self._close_session_for_tether()
+
         # Snapshot the folder's current supported files. They are seeded into the
         # scanner (so the poller never re-imports them); optionally import them now.
         try:
@@ -2350,6 +2360,37 @@ class MainWindow(QMainWindow):
         if self._tether_active and not self._tether_unavailable:
             self.image_preview.show_tether_banner(
                 self._tether_folder_label(), self._tether_count, self._tether_note())
+
+    def _tether_start_choice(self, n):
+        """Ask how a tether starts with `n` images open: "add", "blank" or
+        None (cancel). The test seam."""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Question)
+        box.setWindowTitle("Start Hot Folder Tether")
+        box.setText(f"{n} image{'' if n == 1 else 's'} {'is' if n == 1 else 'are'} open.")
+        box.setInformativeText(
+            "Add this roll's captures to them, or close them and start blank? "
+            "Your edits are saved and come back when you reopen those files.")
+        add_btn = box.addButton("Add to Them", QMessageBox.AcceptRole)
+        blank_btn = box.addButton("Start Blank", QMessageBox.DestructiveRole)
+        cancel_btn = box.addButton(QMessageBox.Cancel)
+        box.setDefaultButton(add_btn)
+        box.setEscapeButton(cancel_btn)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is add_btn:
+            return "add"
+        if clicked is blank_btn:
+            return "blank"
+        return None
+
+    def _close_session_for_tether(self):
+        """Close the open images, as opening new files does: edits saved
+        (and restored when those files are reopened), list and canvas
+        emptied."""
+        ccr_backend.save_catalog()
+        ccr_backend.clear()
+        self.thumbnail_list.load_thumbnails()
 
     def _prompt_bwpoint_for_session(self):
         """After the first capture of a session (the film lead), guide the user
