@@ -39,8 +39,6 @@ CHANNEL_COLOURS = {"r": theme.CH_R, "g": theme.CH_G, "b": theme.CH_B,
 RING_KEYS = (("r", "R", "1"), ("g", "G", "2"), ("b", "B", "3"), ("w", "W", "4"))
 LED_VALUE_W = 52
 IDLE_CHECK_MS = 10_000
-BREATH_MS = 100
-BREATH_LOW, BREATH_HIGH, BREATH_PERIOD_S = 0.05, 0.25, 4.0
 STATE_COLOURS = {"ok": theme.SUCCESS_HOVER, "waiting": theme.TEXT_MUTED,
                  "silent": theme.WARN_TEXT, "error": theme.DANGER, "lost": theme.DANGER,
                  "off": theme.BORDER_STRONG, "unavailable": theme.BORDER_STRONG}
@@ -224,8 +222,7 @@ class LiveCaptureMonitor(QWidget):
         self._asked_tether = False
         self._started = False
         self._levels = dict(cl.OFF)
-        self._sleeping = None            # the levels to restore while dimmed
-        self._breath_t0 = 0.0
+        self._sleeping = None            # the levels to restore: light off while idle
         self._last_use = time.monotonic()
         self._pick_target = None
         self._neg = {"base": None, "hi": None, "mid": None, "note": ""}
@@ -310,6 +307,41 @@ class LiveCaptureMonitor(QWidget):
         self.scroll.setWidget(self.panel)
         self.scroll.setFixedWidth(theme.PANEL_W + 14)
         root.addWidget(self.scroll)
+        self._build_wake_overlay()
+
+    def _build_wake_overlay(self):
+        """Covers the whole control panel while the light is off for being
+        idle: nothing is shot in the dark, and only Wake turns it back on
+        (spec/live-capture-monitor.md §7.5)."""
+        ov = QFrame(self.scroll)
+        ov.setObjectName("WakeOverlay")
+        ov.setStyleSheet(
+            "#WakeOverlay { background-color: rgba(30, 30, 30, 248); }")
+        lay = QVBoxLayout(ov)
+        lay.setContentsMargins(theme.SPACE_XL, theme.SPACE_XL, theme.SPACE_XL, theme.SPACE_XL)
+        lay.addStretch(1)
+        title = QLabel("Light off while idle")
+        title.setAlignment(Qt.AlignCenter)
+        title.setStyleSheet(f"color: {theme.TEXT}; font-weight: bold;")
+        lay.addWidget(title)
+        self.wake_note = _muted("")
+        self.wake_note.setAlignment(Qt.AlignCenter)
+        self.wake_note.setWordWrap(True)
+        lay.addWidget(self.wake_note)
+        self.wake_btn = QPushButton("Wake")
+        self.wake_btn.setFixedHeight(theme.CONTROL_H_LG)
+        theme.style_button(self.wake_btn, "primary")
+        self.wake_btn.setToolTip("Turn the Scanlight back on at the levels it had")
+        self.wake_btn.clicked.connect(self._wake)
+        lay.addWidget(self.wake_btn)
+        lay.addStretch(1)
+        ov.setVisible(False)
+        self.wake_overlay = ov
+        self.scroll.installEventFilter(self)
+
+    def _place_wake_overlay(self):
+        self.wake_overlay.setGeometry(self.scroll.rect())
+        self.wake_overlay.raise_()
 
     def _build_toolbar(self):
         tb = QToolBar()
@@ -666,9 +698,6 @@ class LiveCaptureMonitor(QWidget):
         self._idle_timer.setInterval(IDLE_CHECK_MS)
         self._idle_timer.timeout.connect(self._check_idle)
         self._idle_timer.start()
-        self._breath_timer = QTimer(self)
-        self._breath_timer.setInterval(BREATH_MS)
-        self._breath_timer.timeout.connect(self._breathe)
         self._status_timer = QTimer(self)
         self._status_timer.setInterval(1000)
         self._status_timer.timeout.connect(self._refresh_status_strip)
@@ -752,7 +781,7 @@ class LiveCaptureMonitor(QWidget):
             return
         self._closing = True
         QApplication.instance().removeEventFilter(self)
-        for t in (self._idle_timer, self._breath_timer, self._status_timer, self._ring_timer):
+        for t in (self._idle_timer, self._status_timer, self._ring_timer):
             t.stop()
         if self.sequence.running:
             self.sequence.on_finished = None
@@ -1265,9 +1294,11 @@ class LiveCaptureMonitor(QWidget):
             if i >= 0:
                 self.port_combo.setCurrentIndex(i)
         was_open = getattr(self, "_prev_light", "off") in ("ok", "waiting", "silent")
-        if state == "waiting" and not was_open and any(self._levels.values()):
+        if (state == "waiting" and not was_open and any(self._levels.values())
+                and self._sleeping is None):
             # levels set before connecting go to the light; an untouched
-            # panel (all 0) leaves the light as it is
+            # panel (all 0) leaves the light as it is, and one off while idle
+            # stays off until Wake
             self.light.set_levels(self._levels)
         self._prev_light = state
         self._refresh_light_status()
@@ -1294,7 +1325,7 @@ class LiveCaptureMonitor(QWidget):
         else:
             text = detail or state
         if self._sleeping is not None:
-            text += "  ·  dimmed while idle"
+            text += "  ·  off while idle"
         self.light_status.setText(text)
         self._refresh_shoot_enabled()
 
@@ -1317,8 +1348,8 @@ class LiveCaptureMonitor(QWidget):
         self.set_levels(cl.exclusive(self._levels, ch, value))
 
     def solo(self, ch):
-        if self.sequence.running:
-            return
+        if self.sequence.running or self._sleeping is not None:
+            return                       # off while idle: only Wake lights it
         self._used()
         self.set_levels(cl.solo(self._preset(), ch))
 
@@ -1421,6 +1452,8 @@ class LiveCaptureMonitor(QWidget):
         if self.sequence.running:
             self.sequence.stop()
             return
+        if self._sleeping is not None:
+            return                       # the light is off while idle: Wake first
         tri = self.scan_type() == "trichrome"
         self._used()
         if self._shutter_is_usb():
@@ -1790,10 +1823,14 @@ class LiveCaptureMonitor(QWidget):
         self._refresh_capture_caption()
 
     # ------------------------------------------------------------------ #
-    # idle dimming
+    # idle: the light turns off (spec §7.5)
     # ------------------------------------------------------------------ #
     def eventFilter(self, obj, ev):
         t = ev.type()
+        if t == QEvent.Resize and obj is getattr(self, "scroll", None):
+            if getattr(self, "wake_overlay", None) is not None:
+                self._place_wake_overlay()
+            return False
         if t in (QEvent.MouseButtonPress, QEvent.KeyPress, QEvent.Wheel):
             try:
                 if obj.isWidgetType() and obj.window() is self:
@@ -1803,9 +1840,9 @@ class LiveCaptureMonitor(QWidget):
         return False
 
     def _used(self):
+        # Use only counts towards the idle time: once the light is off for
+        # being idle, Wake (and nothing else) turns it back on.
         self._last_use = time.monotonic()
-        if self._sleeping is not None:
-            self._wake()
 
     def _idle_minutes(self):
         try:
@@ -1820,24 +1857,20 @@ class LiveCaptureMonitor(QWidget):
             return
         if time.monotonic() - self._last_use >= mins * 60:
             self._sleeping = dict(self._levels)
-            self._breath_t0 = time.monotonic()
-            self._breath_timer.start()
+            self.light.set_levels(dict(cl.OFF))       # off, not dimmed: spares the LEDs
+            self.wake_note.setText(
+                f"The Scanlight turned off after {mins} min without use. Wake puts "
+                "it back at the levels it had.")
+            self._place_wake_overlay()
+            self.wake_overlay.setVisible(True)
             self._refresh_light_status()
-
-    def _breathe(self):
-        if self._sleeping is None:
-            self._breath_timer.stop()
-            return
-        phase = ((time.monotonic() - self._breath_t0) % BREATH_PERIOD_S) / BREATH_PERIOD_S
-        k = BREATH_LOW + (BREATH_HIGH - BREATH_LOW) * 0.5 * (1 - math.cos(2 * math.pi * phase))
-        lv = {c: (int(round(255 * k)) if v > 0 else 0) for c, v in self._sleeping.items()}
-        self.light.set_levels(lv)
 
     def _wake(self):
         if self._sleeping is None:
             return
         self._sleeping = None
-        self._breath_timer.stop()
+        self.wake_overlay.setVisible(False)
+        self._last_use = time.monotonic()
         self.light.set_levels(self._levels)
         self._refresh_light_status()
 

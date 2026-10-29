@@ -33,7 +33,7 @@ combine page is included, now or later.
   corners and false colour, on the live feed).
 - A rough positive of the white-lit negative for judging the frame.
 - Light control: connect, the five LED channels, presets, solo keys, idle
-  dimming, telemetry.
+  light-off (with Wake), telemetry.
 - Shutter control: single shots and the trichrome sequence, stoppable, with
   timing that can't silently mix colours.
 - Works without the light (view only) and without a camera (light only), and
@@ -169,7 +169,7 @@ nothing in the main window (the presets are light levels), so they are not
 there.
 
 ### 3.7 Settings (Settings → General → Live capture)
-- Dim the light when idle after N minutes (0 = never; default 5).
+- Turn the light off when idle after N minutes (0 = never; default 5; §7.5).
 - Video format: Automatic (default) / Prefer uncompressed / Prefer MJPEG.
 - Ask about Hot Folder Tether when the monitor opens (default on; §3.8).
 
@@ -414,13 +414,20 @@ coalesced to at most one per 16 ms, and the last value is always sent.
 and the other way round: the light can't run both groups. A preset holding
 both (from older files) keeps RGB, as the light itself would.
 
-### 7.5 Idle dimming
+### 7.5 Idle: the light turns off (revised 2026-10-29, the user's request)
 After the set minutes without use (default 5) while connected and lit, the
-lit channels breathe slowly between 5 % and 25 % (a 4 s cosine), then return
-exactly when used. **Use** includes the pointer moving over the window and
-the live picture changing (the §5.6 motion test), not only clicks and keys:
-the reference dimmed the light while the lens was being focused by hand.
-Never during a capture sequence.
+Scanlight is turned OFF (all channels 0: it was a slow 5–25 % breathing,
+which kept the LEDs working) and an overlay covers the WHOLE control panel
+(`wake_overlay` over `self.scroll`, kept to its size on resize): "Light off
+while idle", the minutes, and a **Wake** button that puts back exactly the
+levels it had (`_sleeping`). Only Wake turns it back on: use (clicks, keys,
+wheel, the pointer, the live picture changing — §5.6) still counts towards
+the idle time but no longer wakes it, the 1–4 solo keys and Shoot (S) do
+nothing while it is off (nothing is shot in the dark), and a light that
+reconnects meanwhile stays off. The light status line says "off while
+idle". Never during a capture sequence. Setting: "Turn the Scanlight off
+when idle after N min" (Settings → General → Live capture,
+`live/idle_minutes`, 0 = never).
 
 ## 8. Capture
 
