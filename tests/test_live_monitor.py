@@ -210,7 +210,10 @@ def test_hold_shorter_than_the_exposure_is_flagged(monkeypatch):
         _close(mon)
 
 
-def test_idle_dims_then_wakes_exactly(iso_settings):
+def test_idle_turns_the_light_off_and_only_wake_turns_it_on(iso_settings):
+    """Idle: the light goes OFF (not dimmed) and an overlay covers the whole
+    control panel; clicks, keys, the 1-4 solos and Shoot don't light it;
+    Wake puts back exactly the levels it had (spec §7.5)."""
     mon, feed, light, dev = _monitor()
     try:
         lm._settings().setValue("live/idle_minutes", 1)
@@ -218,21 +221,46 @@ def test_idle_dims_then_wakes_exactly(iso_settings):
         mon._last_use -= 61
         mon._check_idle()
         assert mon._sleeping == {"r": 0, "g": 0, "b": 0, "w": 220, "ir": 0}
-        assert "dimmed" in mon.light_status.text()
-        mon._breathe()
+        assert "off while idle" in mon.light_status.text()
         light.link._last_colour = -1e9
         light.link.tick()
-        lvl = dev.written[-1][3 + 3]                          # W byte
-        assert 12 <= lvl <= 64
-        mon._used()
+        assert dev.written[-1] == cl.colour_packet(dict(cl.OFF))
+        assert mon.wake_overlay.isVisible()
+        assert mon.wake_overlay.geometry() == mon.scroll.rect()
+        assert "1 min" in mon.wake_note.text()
+        n = len(dev.written)
+        mon._used()                                        # a click or key
+        mon.solo("r")                                      # the 1-4 keys
+        mon.shoot()                                        # S
         light.link._last_colour = -1e9
         light.link.tick()
-        assert mon._sleeping is None
+        assert mon._sleeping is not None and not mon.sequence.running
+        assert all(w == cl.colour_packet(dict(cl.OFF)) for w in dev.written[n:])
+        mon.wake_btn.click()
+        light.link._last_colour = -1e9
+        light.link.tick()
+        assert mon._sleeping is None and not mon.wake_overlay.isVisible()
         assert dev.written[-1] == cl.colour_packet({"w": 220})
+        assert "off while idle" not in mon.light_status.text()
         lm._settings().setValue("live/idle_minutes", 0)       # never
         mon._last_use -= 10_000
         mon._check_idle()
         assert mon._sleeping is None
+    finally:
+        _close(mon)
+
+
+def test_the_wake_overlay_follows_the_panel_size(iso_settings):
+    mon, feed, light, dev = _monitor()
+    try:
+        lm._settings().setValue("live/idle_minutes", 1)
+        mon.led_sliders["w"].setValue(100)
+        mon._last_use -= 61
+        mon._check_idle()
+        mon.resize(mon.width(), mon.height() - 120)
+        _app.processEvents()
+        assert mon.wake_overlay.geometry() == mon.scroll.rect()
+        assert mon.wake_btn.isVisible()
     finally:
         _close(mon)
 

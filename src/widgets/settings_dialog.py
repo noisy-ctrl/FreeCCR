@@ -348,7 +348,7 @@ class SettingsDialog(QDialog):
         gl = QVBoxLayout(grp_live)
         gl.setSpacing(theme.GAP_ROW)
         row = QHBoxLayout()
-        row.addWidget(QLabel("Dim the Scanlight when idle after"))
+        row.addWidget(QLabel("Turn the Scanlight off when idle after"))
         self._spin_live_idle = QSpinBox()
         self._spin_live_idle.setRange(0, 60)
         self._spin_live_idle.setSuffix(" min")
