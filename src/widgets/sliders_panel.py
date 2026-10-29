@@ -941,10 +941,11 @@ class SlidersPanel(QWidget):
 
         # --- 10 existing sliders (sliders[0]–[9]) ---
         # --- Film B/W Point section — at the top, right below the histogram ---
-        bwp_label = QLabel("Film B/W Point")
-        bwp_label.setStyleSheet(theme.section_header_qss())
-        bwp_label.setAlignment(Qt.AlignLeft)
-        scroll_layout.addWidget(bwp_label)
+        # Its sampling rows (Set Black/White Point, Film Stock, White Point)
+        # fold away under a + / − header; Convert and Auto Crop below stay
+        # visible. Open by default, and it remembers (spec/bwp-section-collapsible.md).
+        self.bwp_section = CollapsibleSection("Film B/W Point")
+        scroll_layout.addWidget(self.bwp_section)
 
         bwp_row = theme.apply_button_row(QHBoxLayout())
         self.white_point_btn = QPushButton("Set White Point")
@@ -962,7 +963,7 @@ class SlidersPanel(QWidget):
         bwp_row.addWidget(self.black_point_btn)
         bwp_row.addWidget(self.white_point_btn)
         bwp_row.addWidget(self.clear_white_point_btn)
-        scroll_layout.addLayout(bwp_row)
+        self.bwp_section.add_layout(bwp_row)
 
         # --- Film-stock slope presets (spec/film-stock-slopes.md) ---
         # Save the per-channel density slopes implied by a sampled B/W pair
@@ -998,7 +999,7 @@ class SlidersPanel(QWidget):
         stock_row.addWidget(self.film_stock_combo, 1)
         stock_row.addWidget(self.save_film_stock_btn)
         stock_row.addWidget(self.delete_film_stock_btn)
-        scroll_layout.addLayout(stock_row)
+        self.bwp_section.add_layout(stock_row)
 
         # The white point, per frame (spec/white-point-choice.md): this frame's
         # brightest near-grey area, the roll's average, off, or the White Point
@@ -1031,10 +1032,15 @@ class SlidersPanel(QWidget):
         wp_row.addWidget(wp_label, alignment=Qt.AlignVCenter)
         wp_row.addWidget(self.wp_combo, 1)
         wp_row.addWidget(self.wp_show_btn)
-        scroll_layout.addLayout(wp_row)
+        self.bwp_section.add_layout(wp_row)
         # Presets + last selection persist across sessions (same QSettings
         # store as the persisted B/W points themselves).
         self._settings = QSettings("FreeCCR", "FreeCCR")
+        bwp_open = self._settings.value(self.BWP_OPEN_KEY, True, type=bool)
+        self.bwp_section._toggle_btn.setChecked(bool(bwp_open))
+        self.bwp_section._on_toggle(bool(bwp_open))
+        self.bwp_section._toggle_btn.toggled.connect(
+            lambda on: self._settings.setValue(self.BWP_OPEN_KEY, bool(on)))
         self._film_stocks = decode_film_stocks(
             self._settings.value("convert/film_stocks", "", type=str))
         # The PRESETS persist across sessions; the SELECTION does not — every
@@ -2306,6 +2312,7 @@ class SlidersPanel(QWidget):
         self._update_thumb()
 
     # --- Settings -> Panel: show / hide sections (spec/panel-visibility.md) ----
+    BWP_OPEN_KEY = "panel/bwp_open"     # the Film B/W Point section left open?
     HIDEABLE_SECTIONS = (("layers", "Layers (shown anyway on a frame that has areas)",
                           "layers_container"),
                          ("printer_lights", "Printer Lights", "printer_section"),
