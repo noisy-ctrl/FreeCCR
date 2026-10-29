@@ -246,9 +246,11 @@ class MainWindow(QMainWindow):
         self._tether_attention = []            # greyed-out shots needing a decision
         self._attention_seq = 0
         self._tether_lead_img = None           # the first new capture (film lead)
+        self._tether_last_lit = None           # newest capture lit enough for a base
         self.tether_banner = TetherBanner()
         self.tether_banner.stopRequested.connect(self.stop_tethering)
         self.tether_banner.scanTypeChanged.connect(self.set_scan_type)
+        self.tether_banner.blackPointRequested.connect(self.start_roll_black_point)
         self.image_preview.set_tether_banner(self.tether_banner)
 
         # Contact sheet (spec/contact-sheet.md): a SIBLING of image_preview,
@@ -1929,6 +1931,7 @@ class MainWindow(QMainWindow):
         self._tether_unavailable = False
         self._tether_prompted = False
         self._tether_lead_img = None
+        self._tether_last_lit = None
         # Files imported at session start are not the "film lead" — only a
         # genuinely-new capture triggers the B/W-point prompt.
         self._tether_import_existing = {os.path.normpath(p) for p in import_paths}
@@ -2197,10 +2200,21 @@ class MainWindow(QMainWindow):
                 self._tether_folder_label(), self._tether_count, self._tether_note())
             self.sliders_panel.set_temporary_hint(f"Captured {name}", duration=2500)
             self._schedule_tether_save()
-            # Once per session, after the first genuinely-new capture (the film
-            # lead), prompt the user to set the roll's B/W point from it.
-            if (not self._tether_prompted
-                    and os.path.normpath(img.file_path) not in self._tether_import_existing):
+            from core import lead_frame
+            lit = lead_frame.is_lit(getattr(img, "lit_level", None))
+            new_capture = (os.path.normpath(img.file_path)
+                           not in self._tether_import_existing)
+            if lit and new_capture:
+                self._tether_last_lit = img
+            # Once per session, after the first genuinely-new LIT capture (the
+            # film lead), prompt the user to set the roll's B/W point from it.
+            # A frame too dark to show film base (the light off) doesn't count
+            # (spec/tether-black-point.md).
+            if not self._tether_prompted and new_capture and not lit:
+                self.sliders_panel.set_temporary_hint(
+                    f"Captured {name}: too dark to show the film base (light off?). "
+                    "FreeCCR will ask on the next lit frame.", duration=6000)
+            elif not self._tether_prompted and new_capture:
                 self._tether_prompted = True
                 self._tether_lead_img = img
                 # Defer so the modal opens cleanly after this slot returns (and
@@ -2343,6 +2357,7 @@ class MainWindow(QMainWindow):
         on that frame."""
         if not self._tether_active:
             return
+        self._bring_to_front()           # it may be behind the Live Capture Monitor
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Information)
         box.setWindowTitle("Set B/W Point for This Roll")
@@ -2361,14 +2376,43 @@ class MainWindow(QMainWindow):
             return
         # Make sure sampling targets the lead frame even if a later capture stole
         # the selection while the dialog was open.
-        lead = self._tether_lead_img
-        if lead is not None and lead in ccr_backend.images:
-            self.thumbnail_list.thumbnail_list.setCurrentRow(
-                ccr_backend.images.index(lead))
+        self.start_roll_black_point(self._tether_lead_img)
+
+    def _bring_to_front(self):
+        if self.isMinimized():
+            self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def start_roll_black_point(self, img=None):
+        """Sample the roll's black point now (the tether banner's and the
+        Live Capture Monitor's Black Point buttons, and the prompt): on `img`,
+        else this session's newest lit capture, else the frame on screen.
+        Brings this window to the front. Returns whether sampling started.
+        spec/tether-black-point.md."""
+        images = ccr_backend.images
+        target = None
+        for cand in (img, self._tether_last_lit):
+            if cand is not None and any(cand is x for x in images):
+                target = cand
+                break
+        if target is None and images:
+            idx = self.image_preview.current_idx
+            if idx is not None and 0 <= idx < len(images):
+                target = images[idx]
+        self._bring_to_front()
+        if target is None:
+            self.sliders_panel.set_temporary_hint(
+                "Capture the film lead first, with the light on.", duration=6000)
+            return False
+        row = next(i for i, x in enumerate(images) if x is target)
+        if self.thumbnail_list.thumbnail_list.currentRow() != row:
+            self.thumbnail_list.thumbnail_list.setCurrentRow(row)
         self.image_preview.set_bwpoint_mode("black")
         self.sliders_panel.set_temporary_hint(
             "<b>Black Point:</b> draw a rectangle over the clear film base.",
             duration=9000)
+        return True
 
     def _restore_bwpoint(self):
         """Restore a persisted global black point into the backend at startup.

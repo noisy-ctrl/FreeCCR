@@ -252,9 +252,16 @@ class TetherWatchWorker(QObject):
         # where a selected film-stock preset supplies per-channel slopes.
         slopes = ccr_backend.film_stock_slopes if white is None else None
         convert = (not positive and black is not None)
+        from core import lead_frame
         for img in imgs:
             if self._cancelled:
                 return
+            # Lit enough to show film base? Measured on the unconverted data,
+            # for the roll black point prompt (spec/tether-black-point.md).
+            try:
+                img.lit_level = None if img.converted else lead_frame.lit_level(img)
+            except Exception:
+                img.lit_level = None
             if convert and not img.converted:
                 self._convert(img, black, white, slopes)
             self.captured.emit(img)

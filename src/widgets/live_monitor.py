@@ -551,6 +551,17 @@ class LiveCaptureMonitor(QWidget):
         self.shoot_btn.setFixedHeight(theme.CONTROL_H_LG)
         theme.style_button(self.shoot_btn, "primary")
         lay.addWidget(self.shoot_btn)
+        # The roll's black point is sampled in the main window on a capture
+        # (spec/tether-black-point.md): this brings it there, light ready.
+        self.black_point_btn = QPushButton("Set Black Point…")
+        self.black_point_btn.setFixedHeight(theme.CONTROL_H)
+        self.black_point_btn.setToolTip(
+            "Set the roll's black point from the newest lit capture: FreeCCR's "
+            "main window comes forward; draw a rectangle over the clear film base.")
+        self.black_point_btn.clicked.connect(self._on_black_point)
+        self.black_point_btn.setEnabled(
+            hasattr(self._mw, "start_roll_black_point"))
+        lay.addWidget(self.black_point_btn)
         self.capture_caption = _muted("")
         lay.addWidget(self.capture_caption)
 
@@ -1597,6 +1608,13 @@ class LiveCaptureMonitor(QWidget):
         if kind == "lost" and self.sequence.running and self.sequence.camera_shutter:
             self.sequence.abort("camera lost")      # after the rebuild: its caption stays
         self._refresh_status_strip()
+
+    def _on_black_point(self):
+        start = getattr(self._mw, "start_roll_black_point", None)
+        if start is None:
+            return
+        if not start():
+            self._warn_caption("Capture the film lead first, with the light on.")
 
     def _on_live_paused(self, paused):
         # The next frame clears the message (the canvas drops it on a result).

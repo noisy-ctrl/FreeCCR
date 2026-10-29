@@ -7,7 +7,7 @@ Styled to fit FreeCCR's neutral dark theme: a muted warning "active session"
 strip with a red recording dot and a clearly-visible Stop button.
 """
 from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QWidget, QHBoxLayout, QLabel, QPushButton, QComboBox
+from PySide6.QtWidgets import QWidget, QHBoxLayout, QLabel, QPushButton, QComboBox, QSizePolicy
 
 from ui import theme
 
@@ -15,6 +15,7 @@ from ui import theme
 class TetherBanner(QWidget):
     stopRequested = Signal()
     scanTypeChanged = Signal(str)       # spec/scan-type.md
+    blackPointRequested = Signal()      # spec/tether-black-point.md
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -37,6 +38,10 @@ class TetherBanner(QWidget):
         self._note = QLabel("")
         self._note.setStyleSheet(
             f"color: {theme.WARN_TEXT_MUTED}; background: transparent;")
+        # The note may be long: it gives way (clipped, full text in its
+        # tooltip) rather than setting the window's minimum width.
+        self._note.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self._note.setMinimumWidth(0)
         self._stop = QPushButton("Stop")
         self._stop.setFixedHeight(theme.CONTROL_H)
         self._stop.setStyleSheet(
@@ -48,8 +53,7 @@ class TetherBanner(QWidget):
 
         layout.addWidget(self._dot)
         layout.addWidget(self._status)
-        layout.addWidget(self._note)
-        layout.addStretch(1)
+        layout.addWidget(self._note, 1)       # takes the room left; clipped when narrow
         # What is being scanned decides how arriving files load (one frame
         # each, or three merged into one; B&W). Changeable mid-session.
         from core import scan_type as st
@@ -65,8 +69,16 @@ class TetherBanner(QWidget):
             "Black & White. Also set in the Live Capture Monitor.")
         self._scan.currentIndexChanged.connect(
             lambda i: self.scanTypeChanged.emit(self._scan.itemData(i)))
+        self._black = QPushButton("Black Point…")
+        self._black.setFixedHeight(theme.CONTROL_H)
+        self._black.setToolTip(
+            "Set this roll's black point: picks the newest lit capture, then "
+            "draw a rectangle over the clear film base. Do it once the light "
+            "is on.")
+        self._black.clicked.connect(self.blackPointRequested)
         layout.addWidget(self._scan_label)
         layout.addWidget(self._scan)
+        layout.addWidget(self._black)
         layout.addWidget(self._stop)
 
     def set_scan_type(self, t):
@@ -83,3 +95,4 @@ class TetherBanner(QWidget):
         self._status.setText(
             f"Hot folder tether: “{folder}”  ·  {count} captured")
         self._note.setText(note or "")
+        self._note.setToolTip(note or "")
