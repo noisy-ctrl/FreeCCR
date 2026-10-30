@@ -109,8 +109,7 @@ def _row_label_in(layout, slider):
 
 
 def _row_label_for(panel, slider):
-    """Master Gain lives OUTSIDE the collapsible (always visible), so look in
-    the scroll layout as well as the section's content."""
+    """Look in the section's content (and the scroll layout, for safety)."""
     return (_row_label_in(panel.od_section._content_layout, slider)
             or _row_label_in(_scroll_layout(panel), slider))
 
@@ -131,45 +130,42 @@ def test_channel_keys_precede_band_keys(panel):
     assert last_channel < first_band
 
 
-# --- Master Gain lives outside the collapsible ------------------------------
+# --- Master Gain folds away with Channel Levels (2026-10-30) ----------------
 
-def test_master_gain_is_outside_the_collapsible_and_always_visible(panel):
-    layout = _scroll_layout(panel)
+def test_master_gain_is_the_last_row_of_channel_levels(panel):
+    """The user's request: Master Gain hides with Channel Levels' − button.
+    It is the section's last row, under Film Look and a caption saying the
+    render still applies it after Channel Balance."""
+    content = panel.od_section._content_layout
     slider = panel.sliders[panel.adjustment_keys.index("ch_master_gain")]
+    assert _row_label_in(content, slider) == "Master Gain"
+    assert _row_label_in(_scroll_layout(panel), slider) is None
+    last = content.itemAt(content.count() - 1).layout()
+    assert last is panel.master_gain_slider_layout
+    cap = content.itemAt(content.count() - 2).widget()
+    assert "after Channel Balance" in cap.text()
 
-    # It is NOT in the section's content...
-    assert _row_label_in(panel.od_section._content_layout, slider) is None
-    # ...it is a direct row of the scroll layout, right after the section.
-    assert _row_label_in(layout, slider) == "Master Gain"
 
-
-def test_master_gain_sits_below_channel_levels_and_channel_balance(panel):
-    """The panel reads in render order: Channel Levels, then Channel Balance,
-    then Master Gain — the gain runs after the tone-weighted Balance node
-    (spec/master-gain-after-balance.md). Both sections are above it; the gain is
-    a direct row, so collapsing either never hides it."""
+def test_channel_balance_follows_channel_levels(panel):
     layout = _scroll_layout(panel)
-    slider = panel.sliders[panel.adjustment_keys.index("ch_master_gain")]
     levels = _index_of(layout, panel.od_section)
-    balance = _index_of(layout, panel.balance_section)
-    row = _index_of(layout, slider)
-    assert (balance, row) == (levels + 1, levels + 2)
-    # and still above the WB/AWB row
-    assert row < _index_of(layout, panel.auto_wb_btn)
+    assert _index_of(layout, panel.balance_section) == levels + 1
+    assert levels < _index_of(layout, panel.auto_wb_btn)
 
 
-def test_master_gain_survives_collapsing_the_section(panel):
-    """Collapsing Channel Levels must not hide Master Gain — it is the app's
-    one gain control."""
+def test_master_gain_folds_with_the_section(panel):
     slider = panel.sliders[panel.adjustment_keys.index("ch_master_gain")]
-    assert not panel.od_section._toggle_btn.isChecked()   # collapsed by default
-    assert not panel.od_section._content.isHidden() or True
-    # the slider's parent chain must not run through the section's content widget
     parent, seen = slider.parentWidget(), []
     while parent is not None:
         seen.append(parent)
         parent = parent.parentWidget()
-    assert panel.od_section._content not in seen
+    assert panel.od_section._content in seen
+    panel.od_section._toggle_btn.setChecked(False)
+    panel.od_section._on_toggle(False)
+    assert not slider.isVisibleTo(panel)
+    panel.od_section._toggle_btn.setChecked(True)
+    panel.od_section._on_toggle(True)
+    assert slider.isVisibleTo(panel)
 
 
 # --- the Gain slider is gone ------------------------------------------------

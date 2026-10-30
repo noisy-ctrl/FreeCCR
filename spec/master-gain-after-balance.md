@@ -137,3 +137,15 @@ tests assert.
   change (covered by `tests/test_channel_levels.py` and
   `tests/test_working_space.py` passing unchanged).
 - **CPU/GPU parity** holds through `tests/test_opencl_accuracy.py`.
+
+
+## Revision 2026-10-30: Master Gain folds away with Channel Levels
+At the user's request Master Gain is now the last row INSIDE the Channel
+Levels collapsible (below Film Look), under a muted caption "Master Gain ·
+applied after Channel Balance". It hides with the section's − button. The
+render order is unchanged (it still runs after Channel Balance), so the panel
+no longer reads in processing order at that one point; the caption says so.
+The slider is still created third among the channel sliders, so the
+positional `ADJUSTMENT_KEYS` zip is untouched (tests:
+`test_master_gain_is_the_last_row_of_channel_levels`,
+`test_master_gain_folds_with_the_section`).

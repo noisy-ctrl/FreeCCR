@@ -126,16 +126,17 @@ def test_wb_sliders_sit_directly_above_brightness(panel):
 
 
 def test_panel_reads_in_pipeline_order(panel):
-    """Channel Levels -> Channel Balance -> Master Gain -> White Balance, top to
-    bottom, which is the order the render applies them
-    (spec/master-gain-after-balance.md). Master Gain sits outside both
-    collapsibles so it is always visible."""
+    """Channel Levels -> Channel Balance -> White Balance, top to bottom.
+    Master Gain is the last row INSIDE Channel Levels since 2026-10-30 (it
+    folds away with it; the render still applies it after Balance, which its
+    caption says — spec/master-gain-after-balance.md)."""
     sl = _scroll_layout(panel)
     levels = _index_of(sl, panel.od_section)
     balance = _index_of(sl, panel.balance_section)
-    gain = _index_of(sl, panel.master_gain_slider_layout)
-    assert levels >= 0 and (balance, gain) == (levels + 1, levels + 2)
-    assert gain < _index_of(sl, panel.temperature_slider_layout)
+    assert levels >= 0 and balance == levels + 1
+    assert _index_of(sl, panel.master_gain_slider_layout) == -1
+    assert _index_of(panel.od_section._content.layout(), panel.master_gain_slider_layout) >= 0
+    assert balance < _index_of(sl, panel.temperature_slider_layout)
 
 
 def test_balance_section_is_collapsed_by_default(panel):

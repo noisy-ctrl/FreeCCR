@@ -1149,17 +1149,11 @@ class SlidersPanel(QWidget):
         self.balance_section = CollapsibleSection("Channel Balance")
         scroll_layout.addWidget(self.balance_section)
 
-        # Master Gain sits OUTSIDE both collapsibles, directly BELOW Channel
-        # Balance, so it is always visible and the panel reads in pipeline
-        # order: Levels -> Balance -> Master Gain, which is the order the render
-        # applies them (spec/master-gain-after-balance.md — the gain runs after
-        # the tone-weighted node so a brightness change cannot move the colour).
-        # It is the app's one gain control (the general-adjustments "Gain"
-        # slider was the same math and is gone) and the stage Auto Gain rides.
-        # Its row is created later, with the rest of the Channel Levels sliders,
-        # to keep the positional ADJUSTMENT_KEYS zip intact — so reserve its slot
-        # here and insert into it below.
-        _master_gain_slot = scroll_layout.count()
+        # Master Gain lives at the bottom of Channel Levels (it folds away with
+        # it; populated below). The render applies it AFTER Channel Balance
+        # (spec/master-gain-after-balance.md — the gain runs after the
+        # tone-weighted node so a brightness change cannot move the colour).
+        # It is the app's one gain control and the stage Auto Gain rides.
 
         # Separator between B/W Point tools and the adjustment sliders
         scroll_layout.addWidget(theme.section_separator())
@@ -1447,12 +1441,13 @@ class SlidersPanel(QWidget):
         self.od_section.add_widget(master_label)
         self.od_section.add_layout(self.create_slider("Input Gain"))
         self.od_section.add_layout(self.create_slider("Master Shift", half_steps=True))
-        # Created HERE (third, so the ADJUSTMENT_KEYS zip is unchanged) but placed
-        # OUTSIDE the collapsible, in the slot reserved above — always visible,
-        # and BELOW Channel Balance, where the render applies it. Creation order
-        # and display order are independent; only the former feeds the zip.
+        # Created HERE (third, so the ADJUSTMENT_KEYS zip is unchanged) but
+        # placed at the BOTTOM of Channel Levels, below Film Look, so it folds
+        # away with the section (the user's request, 2026-10-30). The render
+        # still applies it after Channel Balance, which its caption says.
+        # Creation order and display order are independent; only the former
+        # feeds the zip. See spec/master-gain-after-balance.md.
         self.master_gain_slider_layout = self.create_slider("Master Gain")
-        scroll_layout.insertLayout(_master_gain_slot, self.master_gain_slider_layout)
 
         # R channel group
         r_label = QLabel("R Channel")
@@ -1510,6 +1505,11 @@ class SlidersPanel(QWidget):
         look_row.addWidget(self.look_combo, 1)
         self.od_section.add_layout(look_row)
         self._populate_look_combo()
+        gain_label = QLabel("Master Gain · applied after Channel Balance")
+        gain_label.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 11px; margin-top: 4px;")
+        gain_label.setAlignment(Qt.AlignCenter)
+        self.od_section.add_widget(gain_label)
+        self.od_section.add_layout(self.master_gain_slider_layout)
 
         # --- Populate Channel Balance (the section widget is placed above,
         # right under Master Gain) ---
