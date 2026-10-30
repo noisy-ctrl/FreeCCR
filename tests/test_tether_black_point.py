@@ -65,12 +65,12 @@ def test_worker_measures_before_converting(tmp_path, monkeypatch):
         def __init__(self):
             self.resized_raw = np.full((20, 20, 3), 30000, np.uint16)
 
-    def convert(img, *a, **k):
+    def convert(img):
         seen.append(getattr(img, "lit_level", "unset"))
         img.resized_raw = np.zeros((20, 20, 3), np.uint16)   # what was measured is gone
         img.converted = True
 
-    monkeypatch.setattr(TetherWatchWorker, "_convert", staticmethod(convert))
+    monkeypatch.setattr(TetherWatchWorker, "_convert_like_current", staticmethod(convert))
     monkeypatch.setattr(ccr_backend, "black_point_bgr", (40000, 40000, 40000), raising=False)
     monkeypatch.setattr(ccr_backend, "white_point_bgr", None, raising=False)
     monkeypatch.setattr(ccr_backend, "positive_mode", False, raising=False)

@@ -133,6 +133,58 @@ class FolderScanner:
         return ready
 
 
+def look_template(src):
+    """The editable look of `src` for the next capture to inherit (spec
+    §9.1.3; revised in spec/tether-convert-like-convert.md): adjustments,
+    areas, orientation incl. the mirror flips, crop, colour profile. A
+    Temperature/Tint pair the after-conversion AWB wrote for `src` is its
+    own, not a look, so it stays behind (the capture gets its own). None when
+    the look is all default."""
+    import copy
+    adj = dict(getattr(src, "adjustment_settings", None) or {})
+    rec = getattr(src, "awb_auto", None)
+    if rec is not None and (adj.get("temperature", 0), adj.get("tint", 0)) == tuple(rec):
+        adj.pop("temperature", None)
+        adj.pop("tint", None)
+    areas = getattr(src, "area_layers", None) or []
+    rot = getattr(src, "rotation_angle", 0)
+    fine = getattr(src, "fine_rotation_angle", 0)
+    hflip = getattr(src, "horizontal_mirrored", False)
+    vflip = getattr(src, "vertical_mirrored", False)
+    crop = getattr(src, "crop_rect", None)
+    crop_angle = getattr(src, "crop_angle", 0.0) or 0.0
+    profile = getattr(src, "color_profile", "color")
+    if not (adj or areas or rot or fine or hflip or vflip
+            or crop is not None or crop_angle or profile != "color"):
+        return None
+    return {
+        "adjustment_settings": copy.deepcopy(adj),
+        "area_layers": copy.deepcopy(areas),
+        "rotation_angle": rot,
+        "fine_rotation_angle": fine,
+        "horizontal_mirrored": hflip,
+        "vertical_mirrored": vflip,
+        "crop_rect": crop,
+        "crop_angle": crop_angle,
+        "color_profile": profile,
+    }
+
+
+def apply_look_template(img, t):
+    """Give a fresh capture an inherited look (deep copies, so each capture
+    has its own)."""
+    import copy
+    img.adjustment_settings = copy.deepcopy(t["adjustment_settings"])
+    img.area_layers = copy.deepcopy(t["area_layers"])
+    img.rotation_angle = t["rotation_angle"]
+    img.fine_rotation_angle = t["fine_rotation_angle"]
+    img.horizontal_mirrored = t["horizontal_mirrored"]
+    img.vertical_mirrored = t["vertical_mirrored"]
+    img.crop_rect = t["crop_rect"]
+    img.crop_angle = t["crop_angle"]
+    img.color_profile = t["color_profile"]
+
+
 class TetherWatchWorker(QObject):
     """Long-lived worker living on its own QThread (with an event loop). The GUI
     delivers file paths via the queued `process()` slot; each is decoded into a
@@ -152,6 +204,11 @@ class TetherWatchWorker(QObject):
     def __init__(self):
         super().__init__()
         self._cancelled = False
+        # The look of the frame on screen when a file was handed over (set by
+        # the GUI before each dispatch; spec/tether-convert-like-convert.md):
+        # applied to the capture BEFORE it converts, so its crop guides the
+        # measurements and its own auto white balance isn't overwritten.
+        self.template = None
         self._cat_mtime = None   # mtime of the cached catalog file
         self._cat_data = None    # cached parsed catalog (spec §9.2)
 
@@ -179,13 +236,14 @@ class TetherWatchWorker(QObject):
     def process(self, path):
         if self._cancelled:
             return
+        template = self.template
         try:
             from core.catalog import create_images_for_path
             imgs = create_images_for_path(path, catalog_data=self._catalog())
             if not imgs:
                 self.captureError.emit(path, "no image produced")
                 return
-            self._finish(imgs)
+            self._finish(imgs, template)
         except Exception as e:
             # Terse form: the GUI shows this inline in the hint strip, so a
             # tethered capture FreeCCR cannot decode still says why.
@@ -201,6 +259,7 @@ class TetherWatchWorker(QObject):
         like a single tethered frame. spec/scan-type.md §5."""
         if self._cancelled:
             return
+        template = self.template
         paths = list(job.get("paths") or [])
         if len(paths) != 3:
             return
@@ -223,7 +282,7 @@ class TetherWatchWorker(QObject):
             if not imgs:
                 self.captureError.emit(paths[0], "no image produced")
                 return
-            self._finish(imgs)
+            self._finish(imgs, template)
         except Exception as e:
             self.needsAttention.emit({
                 "paths": paths, "reason": f"the merge failed: {e}",
@@ -241,17 +300,13 @@ class TetherWatchWorker(QObject):
             "paths": paths, "reason": job.get("reason", ""),
             "thumbs": [st.thumb_bgr(p) for p in paths]})
 
-    def _finish(self, imgs):
-        """Convert (when the session has a black point) and hand over."""
-        # Snapshot the conversion inputs once per file so a mid-decode flip
-        # (Positive mode / B/W point change) can't make one file half-convert.
-        black = ccr_backend.black_point_bgr
-        white = ccr_backend.white_point_bgr
+    def _finish(self, imgs, template=None):
+        """Inherit the look, then convert (when the session has a black point)
+        exactly as Convert Current would, and hand over."""
+        # Snapshot once per file so a mid-decode flip (Positive mode / B/W
+        # point change) can't make one file half-convert.
         positive = ccr_backend.positive_mode
-        # white may be None → default-slope conversion (black point only),
-        # where a selected film-stock preset supplies per-channel slopes.
-        slopes = ccr_backend.film_stock_slopes if white is None else None
-        convert = (not positive and black is not None)
+        convert = (not positive and ccr_backend.black_point_bgr is not None)
         from core import lead_frame
         for img in imgs:
             if self._cancelled:
@@ -262,32 +317,24 @@ class TetherWatchWorker(QObject):
                 img.lit_level = None if img.converted else lead_frame.lit_level(img)
             except Exception:
                 img.lit_level = None
+            if template is not None and not img.converted:
+                apply_look_template(img, template)
+                img._tether_template_applied = True
             if convert and not img.converted:
-                self._convert(img, black, white, slopes)
+                self._convert_like_current(img)
             self.captured.emit(img)
 
     @staticmethod
-    def _convert(img, black, white, slopes=None):
-        """Bake the saved B/W-point conversion into the image (preview + the
-        conversion_inputs snapshot the export/catalog paths replay). Mirrors
-        CCRBackend.apply_bwpoint_to_all_images. On failure the image is left
-        unconverted but still importable."""
-        from core.ccr_processor import ccr_normalize_with_bwpoint
-        from core.ccr_backend import ccr_backend
+    def _convert_like_current(img):
+        """Convert Current's own plan and conversion (auto black point, the
+        frame's white point, auto tone, AWB), so a capture comes out as
+        pressing Convert would make it. Left unconverted when there is
+        nothing to anchor to, or on failure (still importable)."""
         try:
-            density = bool(ccr_backend.density_bwpoint)
-            processed = ccr_normalize_with_bwpoint(img, black, white, density=density,
-                                                   slopes_bgr=slopes)
-            if processed is not None:
-                img.resized_raw = processed
-            img.converted = True
-            img.conversion_inputs = {
-                "mode": "bw",
-                "bw": (tuple(black), tuple(white) if white is not None else None),
-                "fine_rot": img.fine_rotation_angle,
-                "density": density,
-                "slopes": tuple(slopes) if slopes is not None else None,
-            }
+            plan = ccr_backend.plan_frame_conversion(img)
+            if plan["black"] is None:
+                return
+            ccr_backend.apply_frame_conversion(img, plan)
             img.update_thumbnail_and_preview()
         except Exception as e:
             print(f"Tether auto-convert failed for {img.file_path}: {e}")

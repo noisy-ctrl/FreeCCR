@@ -3841,75 +3841,20 @@ class SlidersPanel(QWidget):
         if img is None:
             return
         try:
-            if img.converted:
-                img.reload_image()
-            from core.ccr_processor import ccr_normalize_with_bwpoint
-            black = ccr_backend.black_point_bgr  # may be None → direct invert
-            white = ccr_backend.white_point_bgr  # may be None → default slope
-            auto_res = auto_source = None
-            if getattr(ccr_backend, "auto_black_point", False):
-                # The raw was just reloaded above (when converted).
-                auto_res = ccr_backend.detect_frame_black_point(img, reload=False)
-                # The roll fallback is the base the other frames measured when
-                # they were converted (spec/auto-black-point-always.md §3).
-                black, auto_source = ccr_backend.resolve_auto_black_point(
-                    auto_res, ccr_backend.recorded_roll_black(img), img.resized_raw)
-                if black is None and not self._confirm_no_anchor_convert(
-                        auto_res.summary()):
-                    self.set_temporary_hint(
-                        "Not converted: set a <b>Black Point</b> by hand for this "
-                        "frame (it becomes the fallback for frames with no border).",
-                        duration=8000)
-                    return
-                white = ccr_backend.auto_white_point_for(black)
-            awp_rec = None
-            per_frame_wp = black is not None and ccr_backend.white_point_bgr is None
-            # The picture area, found on the fresh raw (reloaded above): the
-            # white point and auto tone measure inside it.
-            rect = (ccr_backend.frame_picture_rect(img, img.resized_raw)
-                    if (getattr(ccr_backend, "auto_tone", False) or per_frame_wp)
-                    else ccr_backend._known_picture_rect(img))
-            if per_frame_wp:
-                # This frame's white point from its choice: its brightest
-                # near-grey area, the roll's, off, or sampled by hand
-                # (spec/white-point-choice.md).
-                hl = ccr_backend.frame_highlights(img, img.resized_raw, black, rect)
-                white, awp_rec = ccr_backend.resolve_white_point(
-                    img, black, hl, lambda: ccr_backend.roll_highlight_reference(img))
-            # Film-stock slopes apply only in black-point-only mode — a sampled
-            # white point wins, and with no black point there is nothing for a
-            # slope to act on (spec/film-stock-slopes.md).
-            slopes = (ccr_backend.film_stock_slopes
-                      if (white is None and black is not None) else None)
-            processed = ccr_normalize_with_bwpoint(
-                img, black, white,
-                density=ccr_backend.density_bwpoint,
-                slopes_bgr=slopes
-            )
-            if processed is not None:
-                img.resized_raw = processed
-            img.converted = True
-            img.conversion_inputs = {
-                "mode": "bw",
-                # Either anchor may be None (no white point = default slope; no
-                # black point either = the no-anchor direct invert). Every replay
-                # site passes this pair straight back to the converter, so this
-                # needs no new mode. See spec/no-anchor-convert.md §4.
-                "bw": (tuple(black) if black is not None else None,
-                       tuple(white) if white is not None else None),
-                "fine_rot": img.fine_rotation_angle,
-                "density": bool(ccr_backend.density_bwpoint),
-                "slopes": slopes,
-            }
-            if auto_source is not None:
-                img.conversion_inputs["auto_bp"] = ccr_backend.auto_bp_record(
-                    auto_res, auto_source)
-            if awp_rec is not None:
-                img.conversion_inputs["auto_wp"] = awp_rec
-            if rect is not None:
-                img.conversion_inputs["picture"] = [float(v) for v in rect]
-            ccr_backend.measure_auto_tone(img, rect)
-            ccr_backend.maybe_auto_awb(img)
+            # The same plan + conversion the tether worker runs on each
+            # capture (spec/tether-convert-like-convert.md).
+            plan = ccr_backend.plan_frame_conversion(img)
+            black, white = plan["black"], plan["white"]
+            auto_res, auto_source = plan["auto_res"], plan["auto_source"]
+            awp_rec = plan["awp_rec"]
+            if (auto_source is not None and black is None
+                    and not self._confirm_no_anchor_convert(auto_res.summary())):
+                self.set_temporary_hint(
+                    "Not converted: set a <b>Black Point</b> by hand for this "
+                    "frame (it becomes the fallback for frames with no border).",
+                    duration=8000)
+                return
+            ccr_backend.apply_frame_conversion(img, plan)
             img.update_thumbnail_and_preview()
             mw = self.parent().parent()
             mw.thumbnail_list.update_all_thumbnails()

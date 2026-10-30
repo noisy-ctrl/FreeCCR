@@ -2027,7 +2027,7 @@ class MainWindow(QMainWindow):
                 return
             self._tether_grouper.add(path)
             for trip in self._tether_grouper.take():
-                self._tether_triplet_req.emit({"paths": list(trip), "check": True})
+                self._emit_triplet({"paths": list(trip), "check": True})
             self._refresh_tether_banner()
             return
         self._dispatch_to_worker(path)
@@ -2046,7 +2046,7 @@ class MainWindow(QMainWindow):
                 self._dispatch_to_worker(p)
         trips, left = st.group_existing(raws)
         for trip in trips:
-            self._tether_triplet_req.emit({"paths": list(trip), "check": True})
+            self._emit_triplet({"paths": list(trip), "check": True})
         if left:
             self._tether_leftover_req.emit({
                 "paths": left,
@@ -2120,11 +2120,12 @@ class MainWindow(QMainWindow):
 
     def _load_triplet_now(self, paths, check):
         if self._tether_worker is not None and self._tether_active:
-            self._tether_triplet_req.emit({"paths": list(paths), "check": check})
+            self._emit_triplet({"paths": list(paths), "check": check})
             return
         # no session running: merge here, like Open with 3-way merge
         from core.tether_watcher import TetherWatchWorker
         w = TetherWatchWorker()
+        self._hand_template(w)
         w.captured.connect(self._on_capture)
         w.captureError.connect(self._on_capture_error)
         w.needsAttention.connect(self._on_needs_attention)
@@ -2143,8 +2144,13 @@ class MainWindow(QMainWindow):
     def _dispatch_to_worker(self, path):
         if self._tether_worker is None:
             return
+        self._hand_template()
         QMetaObject.invokeMethod(self._tether_worker, "process",
                                  Qt.QueuedConnection, Q_ARG(str, path))
+
+    def _emit_triplet(self, job):
+        self._hand_template()
+        self._tether_triplet_req.emit(job)
 
     def _poll_tether_folder(self):
         if not self._tether_active or not self._tether_folder:
@@ -2186,7 +2192,8 @@ class MainWindow(QMainWindow):
         # on one frame auto-applies to the next imported frame — a fixed
         # copy-stand rig wants identical treatment per frame. Snapshot BEFORE
         # appending the new image (current_idx still points at the prior one).
-        template = self._tether_template()
+        template = (None if getattr(img, "_tether_template_applied", False)
+                    else self._tether_template())
         # Always keep the capture — even one that arrives just after Stop (the
         # worker had already decoded it). Dropping it would lose a real photo.
         ccr_backend.images.append(img)
@@ -2196,6 +2203,8 @@ class MainWindow(QMainWindow):
         if template is not None:
             self._apply_tether_template(img, template)
             rerender = True
+        elif getattr(img, "_tether_template_applied", False) and not img.converted:
+            rerender = True              # the worker gave it a look but didn't render it
         # What it was scanned as decides its colour profile and is recorded
         # (spec/scan-type.md): a merge is trichrome; a single file is colour
         # or B&W by the scan type (a single file of a trichrome scan, loaded
@@ -2248,53 +2257,33 @@ class MainWindow(QMainWindow):
             ccr_backend.save_catalog()
 
     def _tether_template(self):
-        """Snapshot the editable look of the currently displayed image so the
-        next capture can inherit it. Returns None when there is no current image
-        or its look is entirely default (so no wasted re-render)."""
+        """The look of the frame on screen, for the next capture to inherit
+        (core.tether_watcher.look_template: the frame's own auto Temperature /
+        Tint stays behind). None when there is no current image or its look
+        is all default."""
         idx = self.image_preview.current_idx
         if idx is None:
             return None
         src = ccr_backend.get_image_by_index(idx)
         if src is None:
             return None
-        adj = getattr(src, "adjustment_settings", None) or {}
-        areas = getattr(src, "area_layers", None) or []
-        rot = getattr(src, "rotation_angle", 0)
-        fine = getattr(src, "fine_rotation_angle", 0)
-        hflip = getattr(src, "horizontal_mirrored", False)
-        vflip = getattr(src, "vertical_mirrored", False)
-        crop = getattr(src, "crop_rect", None)
-        crop_angle = getattr(src, "crop_angle", 0.0) or 0.0
-        profile = getattr(src, "color_profile", "color")
-        if not (adj or areas or rot or fine or hflip or vflip
-                or crop is not None or crop_angle or profile != "color"):
-            return None
-        return {
-            "adjustment_settings": copy.deepcopy(adj),
-            "area_layers": copy.deepcopy(areas),
-            "rotation_angle": rot,
-            "fine_rotation_angle": fine,
-            "horizontal_mirrored": hflip,
-            "vertical_mirrored": vflip,
-            "crop_rect": crop,
-            "crop_angle": crop_angle,
-            "color_profile": profile,
-        }
+        from core.tether_watcher import look_template
+        return look_template(src)
 
     @staticmethod
     def _apply_tether_template(img, t):
-        """Apply an inherited look template to a freshly captured image. The
-        template already holds isolated deep copies, so direct assignment is
-        safe (each capture builds its own template)."""
-        img.adjustment_settings = t["adjustment_settings"]
-        img.area_layers = t["area_layers"]
-        img.rotation_angle = t["rotation_angle"]
-        img.fine_rotation_angle = t["fine_rotation_angle"]
-        img.horizontal_mirrored = t["horizontal_mirrored"]
-        img.vertical_mirrored = t["vertical_mirrored"]
-        img.crop_rect = t["crop_rect"]
-        img.crop_angle = t["crop_angle"]
-        img.color_profile = t["color_profile"]
+        from core.tether_watcher import apply_look_template
+        apply_look_template(img, t)
+
+    def _hand_template(self, worker=None):
+        """Give the worker the look to apply BEFORE it converts the next
+        files (spec/tether-convert-like-convert.md)."""
+        w = worker if worker is not None else self._tether_worker
+        if w is not None:
+            try:
+                w.template = self._tether_template()
+            except AttributeError:           # a stand-in worker in tests
+                pass
 
     def _on_capture_error(self, path, msg):
         self.sliders_panel.set_temporary_hint(
