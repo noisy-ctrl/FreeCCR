@@ -12,6 +12,7 @@ import time
 from PySide6.QtCore import QObject, QTimer, Signal, Slot, Qt, QMetaObject, Q_ARG
 
 from core import capture_light as cl
+from core import olp
 
 STATES_OPEN = ("waiting", "ok", "silent")
 
@@ -51,6 +52,14 @@ class LightLink(QObject):
         self._auto_port = ""
         self._user_closed = False
         self._parser = cl.PacketParser()
+        # Two protocols on one port (spec/open-light-protocol.md): the
+        # Scanlight's binary packets (the default, so nothing changes for it)
+        # and the Open Light Protocol's text lines, taken up the moment a
+        # light answers HELLO with "OLP 1 ...".
+        self._olp_parser = olp.LineParser()
+        self._dialect = "scanlight"
+        self._light_info = {}
+        self._levels_now = None
         self._rx = 0
         self._dtr = True
         self._retried = False
@@ -94,7 +103,7 @@ class LightLink(QObject):
         if self._ser is not None:
             if light_off:
                 self._pending = None
-                self._write(cl.colour_packet(cl.OFF))
+                self._write(self._off_bytes())
             else:
                 self._flush_colour(force=True)
         self._close_quietly()
@@ -137,12 +146,12 @@ class LightLink(QObject):
     @Slot(int)
     def pulse(self, ms):
         self._flush_colour(force=True)
-        self._write(cl.shutter_packet(ms))
+        self._write(olp.shutter_line(ms) if self._dialect == "olp" else cl.shutter_packet(ms))
 
     @Slot(bool)
     def focus(self, on):
         self._flush_colour(force=True)
-        self._write(cl.focus_packet(on))
+        self._write(olp.focus_line(on) if self._dialect == "olp" else cl.focus_packet(on))
 
     # ------------------------------------------------------------------ #
     # the tick and the port scan
@@ -164,6 +173,10 @@ class LightLink(QObject):
                     if t is not None:
                         self._telemetry[t[0]] = t[1]
                         self._telemetry_dirty = True
+                for line in self._olp_parser.feed(chunk):
+                    self._on_olp_line(line)
+                if self._ser is None:            # a write in there failed
+                    return
             now = self._clock()
             if self._state[0] in ("waiting", "silent") and self._rx > 0:
                 self._set_state("ok", self._port, "Responding")
@@ -230,6 +243,9 @@ class LightLink(QObject):
         self._dtr = bool(assert_dtr)
         self._rx = 0
         self._parser = cl.PacketParser()
+        self._olp_parser = olp.LineParser()
+        self._dialect = "scanlight"
+        self._light_info = {}
         self._telemetry = {}
         try:
             self._sleep(self.SETTLE_S)
@@ -238,7 +254,8 @@ class LightLink(QObject):
             pass
         self._opened_at = self._clock()
         self._set_state("waiting", port, "Waiting for the light…")
-        self._write(cl.fw_version_packet())     # ask it to say something
+        self._write(cl.fw_version_packet())     # ask it to say something...
+        self._write(olp.HELLO)                  # ...in either protocol
         if self._pending is not None:
             self._flush_colour(force=True)
 
@@ -248,10 +265,48 @@ class LightLink(QObject):
         now = self._clock()
         if not force and now - self._last_colour < self.COLOUR_GAP_S:
             return
-        pkt = cl.colour_packet(self._pending)
+        levels = self._pending
+        pkt = olp.set_line(levels) if self._dialect == "olp" else cl.colour_packet(levels)
         self._pending = None
+        self._levels_now = levels
         self._last_colour = now
         self._write(pkt)
+
+    def _off_bytes(self):
+        return olp.OFF if self._dialect == "olp" else cl.colour_packet(cl.OFF)
+
+    def _on_olp_line(self, line):
+        reply = olp.parse_reply(line)
+        if reply is None:
+            return
+        kind, data = reply
+        if kind == "hello":
+            first = self._dialect != "olp"
+            self._dialect = "olp"
+            self._light_info = dict(data)
+            if data.get("name"):
+                self._telemetry["name"] = data["name"]
+                self._telemetry_dirty = True
+            if first:
+                # whatever went out before it answered was in the other protocol:
+                # end that junk line, then say it again in text
+                self._write(olp.NEWLINE)
+                again = self._pending if self._pending is not None else self._levels_now
+                if again is not None:
+                    self._pending = again
+                    self._flush_colour(force=True)
+                self._write(olp.STATUS)
+        elif kind == "status" and data:
+            self._telemetry.update(data)
+            self._telemetry_dirty = True
+
+    def light_info(self):
+        """What an Open Light Protocol light said about itself ({} for a
+        Scanlight): version, channels, shutter, focus, name."""
+        return dict(self._light_info)
+
+    def dialect(self):
+        return self._dialect
 
     def _write(self, pkt):
         if self._ser is None:

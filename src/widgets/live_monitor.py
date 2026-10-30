@@ -1295,7 +1295,8 @@ class LiveCaptureMonitor(QWidget):
             w.setEnabled(avail)
         if state == "ok":
             t = self.light.telemetry
-            bits = ["Responding"]
+            # An Open Light Protocol light names itself (spec/open-light-protocol.md)
+            bits = [t["name"] if t.get("name") else "Responding"]
             if "vbus" in t:
                 bits.append(f"{t['vbus']:.1f} V")
             if "temp" in t:
