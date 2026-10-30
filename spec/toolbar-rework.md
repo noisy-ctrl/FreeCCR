@@ -9,16 +9,24 @@ Un-convert, zoom, Export).
 
 Now, left to right, groups split by the toolbar's own separators:
 
-    Convert  Un-convert  ▦ | ⟲ ⟳ ⇵ ⇋ | Area  Gradient  Dust | Fit ▾  HDR  False colour ........ Export…
+    ▦ | ⟲ ⟳ ⇵ ⇋ | Area  Gradient  Dust | Fit ▾  HDR  False colour ........ Un-convert  Convert    Export…
 
 (▦ = sprocket holes white, an icon toggle added later: spec/sprocket-toolbar-toggle.md.)
+
+**Revision 2026-10-30 (the user's request):** Un-convert and Convert moved to
+the right-hand end, beside Export, after the stretch, with a plain gap
+(`EXPORT_GAP_PX`, 18 px, no separator line) between Convert and Export. The
+sprocket icon now starts the toolbar. The actions are still created first in
+`ImagePreview.__init__` (other code refers to them) and only placed at the
+end. The toolbar still fits at the window's minimum width in a Mac-wide font
+(885 of 900 px).
 
 - **Text buttons carry no symbols**: "Area", "Gradient", "Dust", "HDR".
   Only the icon-only buttons (rotate left/right, mirror vertical/horizontal)
   are pictures. The rule for new toolbar buttons: a picture alone, or words
   alone.
-- **Convert** comes first and is bold (the main action); Un-convert keeps
-  its red text.
+- **Convert** is bold (the main action); Un-convert keeps its red text.
+  Since the revision both sit on the right with Export (Un-convert first).
 - The zoom box joins the view group (zoom, HDR, False colour); Export stays
   at the far right, after the stretch.
 - Every action keeps its attribute, tooltip, checkable state and handler,
