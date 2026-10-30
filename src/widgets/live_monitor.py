@@ -13,6 +13,7 @@ Shutter it fires over USB and its files are brought into the hot folder.
 import json
 import math
 import os
+import re
 import sys
 import time
 
@@ -239,6 +240,10 @@ class LiveCaptureMonitor(QWidget):
         self._usb_model = ""
         self._usb_dest = None
         self._exposure = {}
+        # shutter speed / ISO set from here (spec/usb-exposure-control.md)
+        self._exp_choices = {}           # field -> the camera's values
+        self._exp_waiting = {}           # field -> value sent, not yet confirmed
+        self._exp_held = {}              # field -> value picked during a sequence
         self._addon_warned = set()       # cameras warned about this session
 
         st = _settings()
@@ -580,6 +585,30 @@ class LiveCaptureMonitor(QWidget):
         self.shutter_combo.addItem("Scanlight", "scanlight")
         r.addWidget(self.shutter_combo, 1)
         lay.addLayout(r)
+        # Shutter speed and ISO (spec/usb-exposure-control.md): only with a
+        # USB camera open that lets the computer set them.
+        self.exposure_row = QWidget()
+        r = QHBoxLayout(self.exposure_row)
+        r.setContentsMargins(0, 0, 0, 0)
+        theme.apply_button_row(r)
+        exp_lab = QLabel("Exposure")
+        col = max(lab.sizeHint().width(), exp_lab.sizeHint().width())
+        lab.setFixedWidth(col)                   # the two rows' pickers line up
+        exp_lab.setFixedWidth(col)
+        r.addWidget(exp_lab)
+        why = ("\nThe camera's own dials don't work while it is connected over USB, "
+               "so exposure is set here. With live view running, the picture "
+               "pauses for under a second while it is set.")
+        self.shutter_speed_combo = QComboBox()
+        theme.shrinkable_combo(self.shutter_speed_combo)
+        self.shutter_speed_combo.setToolTip("Shutter speed." + why)
+        self.iso_combo = QComboBox()
+        theme.shrinkable_combo(self.iso_combo)
+        self.iso_combo.setToolTip("ISO (Auto: the camera's automatic ISO settings)." + why)
+        r.addWidget(self.shutter_speed_combo, 1)
+        r.addWidget(self.iso_combo, 1)
+        self.exposure_row.setVisible(False)
+        lay.addWidget(self.exposure_row)
         self.shoot_btn = QPushButton("Shoot   (S)")
         self.shoot_btn.setFixedHeight(theme.CONTROL_H_LG)
         theme.style_button(self.shoot_btn, "primary")
@@ -672,6 +701,14 @@ class LiveCaptureMonitor(QWidget):
         if hasattr(self.usb, "live_paused"):
             self.usb.live_paused.connect(self._on_live_paused)
         self.usb.fire_failed.connect(self._on_fire_failed)
+        if hasattr(self.usb, "exposure_choices"):
+            self.usb.exposure_choices.connect(self._on_exposure_choices)
+        if hasattr(self.usb, "exposure_set"):
+            self.usb.exposure_set.connect(self._on_exposure_set)
+        for field, name in self.EXP_FIELDS:
+            combo = getattr(self, name)
+            combo.activated.connect(
+                lambda i, f=field, c=combo: self._on_exposure_picked(f, c.itemData(i)))
         self.shutter_combo.activated.connect(self._on_shutter_chosen)
         self.cam_zoom_combo.activated.connect(
             lambda i: self.usb.set_zoom(self.cam_zoom_combo.itemData(i)))
@@ -1477,6 +1514,9 @@ class LiveCaptureMonitor(QWidget):
             self.rings[ch].set_progress(p)
 
     def _on_sequence_finished(self, reason):
+        if self._exp_held:                       # picked while it ran
+            held, self._exp_held = self._exp_held, {}
+            self._send_exposure(held)
         self._ring_anim = None
         self._ring_timer.stop()
         for ring in self.rings.values():
@@ -1619,6 +1659,7 @@ class LiveCaptureMonitor(QWidget):
         if kind in ("lost", "closed", "error", "busy"):
             self._exposure = {}
             self.cam_zoom_combo.setVisible(False)
+            self._on_exposure_choices({})
         self._rebuild_shutter_combo()
         if kind == "lost" and self.sequence.running and self.sequence.camera_shutter:
             self.sequence.abort("camera lost")      # after the rebuild: its caption stays
@@ -1667,7 +1708,92 @@ class LiveCaptureMonitor(QWidget):
 
     def _on_exposure(self, exp):
         self._exposure = dict(exp or {})
+        self._select_exposure()
         self._refresh_status_strip()
+
+    # -- shutter speed and ISO (spec/usb-exposure-control.md) -------------
+    EXP_FIELDS = (("shutter", "shutter_speed_combo"), ("iso", "iso_combo"))
+
+    @staticmethod
+    def exposure_label(field, value):
+        """What a picker shows for one of the camera's values: ISO values it
+        reports as negative numbers are its automatic modes."""
+        v = str(value)
+        if field == "iso":
+            return f"Auto {v[1:]}" if re.fullmatch(r"-\d+", v) else f"ISO {v}"
+        return v
+
+    def _note_caption(self, text):
+        self.capture_caption.setStyleSheet(
+            f"color: {theme.TEXT_MUTED}; font-size: {theme.FS_CAPTION}px;")
+        self.capture_caption.setText(text)
+
+    def _on_exposure_choices(self, choices):
+        self._exp_choices = dict(choices or {})
+        self._exp_waiting, self._exp_held = {}, {}
+        for field, name in self.EXP_FIELDS:
+            combo = getattr(self, name)
+            vals = self._exp_choices.get(field) or []
+            combo.blockSignals(True)
+            combo.clear()
+            for v in vals:
+                combo.addItem(self.exposure_label(field, v), str(v))
+            combo.blockSignals(False)
+            combo.setVisible(bool(vals))
+        self.exposure_row.setVisible(bool(self._exp_choices))
+        self._select_exposure()
+
+    def _select_exposure(self):
+        """The pickers show what the camera reports, except a field whose
+        change is waiting (sent, or held for the end of a sequence)."""
+        for field, name in self.EXP_FIELDS:
+            if field in self._exp_waiting or field in self._exp_held:
+                continue
+            v = self._exposure.get(field)
+            combo = getattr(self, name)
+            i = combo.findData(str(v)) if v is not None else -1
+            if i >= 0 and i != combo.currentIndex():
+                combo.blockSignals(True)
+                combo.setCurrentIndex(i)
+                combo.blockSignals(False)
+
+    def _on_exposure_picked(self, field, value):
+        if value is None:
+            return
+        value = str(value)
+        if (field not in self._exp_waiting and field not in self._exp_held
+                and str(self._exposure.get(field)) == value):
+            return                                # already set
+        if self.sequence.running:
+            self._exp_held[field] = value
+            self._note_caption(f"{self.exposure_label(field, value)} is set when "
+                               "this shot finishes.")
+            return
+        self._send_exposure({field: value})
+
+    def _send_exposure(self, wanted):
+        setter = getattr(self.usb, "set_exposure", None)
+        if setter is None or not self.usb.is_open():
+            return
+        for f, v in wanted.items():
+            self._exp_waiting[f] = v
+            setter(f, v)
+        self._note_caption("Setting " + ", ".join(
+            self.exposure_label(f, v) for f, v in wanted.items()) + "…")
+
+    def _on_exposure_set(self, results):
+        bad = []
+        for f, res in (results or {}).items():
+            ok, text, value = res
+            if self._exp_waiting.get(f) == value:
+                self._exp_waiting.pop(f, None)
+            if not ok:
+                bad.append(self.exposure_label(f, value) + (f" ({text})" if text else ""))
+        if bad:
+            self._warn_caption("The camera didn't take " + ", ".join(bad) + ".")
+        elif not self._exp_waiting and self.capture_caption.text().startswith("Setting "):
+            self.capture_caption.setText("")
+        self._select_exposure()
 
     def _on_zoom_levels(self, levels):
         self.cam_zoom_combo.clear()

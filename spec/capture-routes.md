@@ -479,3 +479,15 @@ whole (size mismatch, no hot folder, failed download); a pair's JPEG goes only
 after its RAW; the stall is reported only after frames; the real libgphoto2
 virtual camera keeps its DCIM file and, with the card rule lifted, has it
 deleted through the real size check and `file_delete`.
+
+## 21. The camera's dials, and exposure from FreeCCR (tests 7–9, 2026-10-30)
+- In "USB Tether Shooting Fixed" the GFX 50S II's dials are locked for the
+  whole USB connection (libgphoto2 sets USB priority when it connects), with
+  or without live view.
+- While live view runs, every setting from the computer is refused with PTP
+  Device Busy; with live view off, shutter speed and ISO set in ~50 ms.
+- Camera priority, once accepted, stops live view entirely and the dial still
+  doesn't register: not a way out.
+- Ending live view by reconnecting, setting and resuming leaves 0.4–0.7 s
+  without a picture, and the picture follows the new exposure.
+So the monitor sets shutter speed and ISO itself: `spec/usb-exposure-control.md`.
