@@ -393,6 +393,7 @@ class MainWindow(QMainWindow):
         # B/W-point conversions. See spec/sprocket-hole-mask.md.
         ccr_backend.sprocket_mask_white = self._settings.value(
             "adjust/sprocket_mask_white", False, type=bool)
+        self._sync_sprocket_action()
         # Reflect the restored mode in the toolbar/slider gating right away
         # (no images yet, but the negative-only actions should already grey out).
         self.image_preview._update_unconvert_action_state()
@@ -1416,6 +1417,15 @@ class MainWindow(QMainWindow):
             "Gamma: hue-preserving (luminance) mode." if checked else
             "Gamma: per-channel mode (standard).")
 
+    def _sync_sprocket_action(self):
+        """The toolbar's Sprockets button shows the global switch, however it
+        was changed (the button, Settings, the restore at start-up)."""
+        act = getattr(getattr(self, "image_preview", None), "sprocket_action", None)
+        if act is not None:
+            act.blockSignals(True)
+            act.setChecked(bool(ccr_backend.sprocket_mask_white))
+            act.blockSignals(False)
+
     def on_sprocket_mask_toggled(self, checked: bool):
         """Flip the global reversal-look sprocket-hole mask, persist it, and
         re-render all loaded images. The mask is composited last as a display
@@ -1424,6 +1434,7 @@ class MainWindow(QMainWindow):
         See spec/sprocket-hole-mask.md."""
         ccr_backend.sprocket_mask_white = bool(checked)
         self._settings.setValue("adjust/sprocket_mask_white", bool(checked))
+        self._sync_sprocket_action()
         self._rerender_all_for_global_mode(
             "Sprocket holes / clear film shown white (reversal look)." if checked
             else "Sprocket holes shown as converted (black).")
