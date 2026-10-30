@@ -466,12 +466,16 @@ def test_a_colour_at_a_raised_iso_shows_its_iso():
 
 
 # --------------------------------------------------------------------------- #
-# a shot the camera answers "busy" to is tried again ([-110] I/O in progress,
-# the user's first measure on the GFX 50S II)
+# "busy" from a fire ([-110] I/O in progress, the user's first measures on the
+# GFX 50S II): the camera may still have taken the picture, so its file is
+# looked for before firing again; and no fire straight after connecting
 # --------------------------------------------------------------------------- #
-def _busy_backend(tmp_path, busy_times, live=False):
+def _busy_backend(tmp_path, busy_times, live=False, shoots_anyway=False, announce=True,
+                  card=None):
     from test_capture_routes import fake_gp, GPhoto2Error
-    gp = fake_gp()
+    gp = fake_gp(card=card if card is not None else {"/": ["store_10000001"],
+                                                      "/store_10000001": ([], [])})
+    st = gp.state
     clock = Clock()
     slept = []
 
@@ -482,36 +486,114 @@ def _busy_backend(tmp_path, busy_times, live=False):
     b = cb.Gphoto2Backend(gp_module=gp, clock=clock, sleep=sleep)
     b.list_cameras()
     b.open("usb:001,004", str(tmp_path))
+    clock.t += 2.0                                  # long after connecting
+    slept.clear()
     left = {"n": busy_times}
+    calls = {"trigger": 0, "capture": 0}
     for name in ("trigger_capture", "capture"):
         orig = getattr(b.camera, name)
 
-        def wrapped(*a, _orig=orig):
+        def wrapped(*a, _orig=orig, _name=name):
+            calls["trigger" if _name == "trigger_capture" else "capture"] += 1
             if left["n"] > 0:
                 left["n"] -= 1
+                if shoots_anyway:                    # the picture IS taken
+                    st.fired += 1
+                    held = st.card["/store_10000001"][0]
+                    held.append(f"DSCF{st.fired:04d}.RAF")
+                    if announce:
+                        st.events.append((gp.GP_EVENT_FILE_ADDED, types.SimpleNamespace(
+                            folder="/store_10000001", name=held[-1])))
                 raise GPhoto2Error(gp.GP_ERROR_CAMERA_BUSY)
             return _orig(*a)
         setattr(b.camera, name, wrapped)
     b._live_asked = live
-    return b, gp, clock, slept
+    return b, gp, clock, slept, calls
 
 
-def test_a_busy_camera_is_fired_again(tmp_path, capsys):
-    b, gp, clock, slept = _busy_backend(tmp_path, busy_times=3)
+import types  # noqa: E402
+
+
+def test_busy_but_shot_is_one_picture_found_by_its_event(tmp_path, capsys):
+    b, gp, clock, slept, calls = _busy_backend(tmp_path, 1, shoots_anyway=True)
     b.fire()
-    assert gp.state.fired == 1 and len(slept) == 3
-    assert b._errors == 0 and b.shot_pending()
-    assert "fired after 3 retries" in capsys.readouterr().out
-    # with live view asked, the capture call is retried the same way
-    b, gp, clock, slept = _busy_backend(tmp_path, busy_times=2, live=True)
+    assert calls["trigger"] == 1 and gp.state.fired == 1     # never a second picture
+    assert b._pending == [("/store_10000001", "DSCF0001.RAF")]
+    out = capsys.readouterr().out
+    assert "answered busy" in out and "took the shot" in out
+    assert b.shot_pending() and b._errors == 0
+
+
+def test_busy_but_shot_with_no_event_is_found_in_the_cameras_memory(tmp_path):
+    b, gp, clock, slept, calls = _busy_backend(tmp_path, 1, shoots_anyway=True,
+                                               announce=False)
     b.fire()
-    assert gp.state.captures == 1 and len(slept) == 2
+    assert calls["trigger"] == 1 and gp.state.fired == 1
+    assert ("/store_10000001", "DSCF0001.RAF") in b._pending
+    # the live-view capture call is covered the same way
+    b, gp, clock, slept, calls = _busy_backend(tmp_path, 1, live=True, shoots_anyway=True,
+                                               announce=False)
+    b.fire()
+    assert calls["capture"] == 1 and gp.state.fired == 1
 
 
-def test_a_camera_busy_for_too_long_still_fails(tmp_path):
-    b, gp, clock, slept = _busy_backend(tmp_path, busy_times=10 ** 6)
+def test_busy_and_no_shot_fires_once_more(tmp_path):
+    b, gp, clock, slept, calls = _busy_backend(tmp_path, 1)
+    t0 = clock.t
+    b.fire()
+    assert calls["trigger"] == 2 and gp.state.fired == 1
+    assert clock.t - t0 >= cb.FIRE_CONFIRM_S                  # it looked for the shot first
+
+
+def test_busy_with_no_shot_twice_is_a_failure_not_a_lost_camera(tmp_path):
+    b, gp, clock, slept, calls = _busy_backend(tmp_path, 10)
     with pytest.raises(RuntimeError, match="-110"):
         b.fire()
-    assert gp.state.fired == 0
-    assert sum(slept) == pytest.approx(cb.FIRE_BUSY_S, abs=cb.FIRE_RETRY_S + 1e-9)
-    assert b._errors == 0                      # busy never counts towards "lost"
+    assert calls["trigger"] == 1 + cb.FIRE_BUSY_TRIES and gp.state.fired == 0
+    assert b._errors == 0
+
+
+def test_the_confirm_window_includes_the_exposure(tmp_path):
+    b, gp, clock, slept, calls = _busy_backend(tmp_path, 1)
+    b._note_shutter("8s")
+    t0 = clock.t
+    b.fire()
+    assert clock.t - t0 >= cb.FIRE_CONFIRM_S + 8.0
+
+
+def test_no_fire_straight_after_connecting(tmp_path, monkeypatch):
+    from test_capture_routes import fake_gp
+    monkeypatch.setattr(cb, "RECONNECT_SETTLE_S", 1.0)       # conftest zeroes it
+    gp = fake_gp()
+    clock = Clock()
+    slept = []
+    b = cb.Gphoto2Backend(gp_module=gp, clock=clock,
+                          sleep=lambda s: (slept.append(s), setattr(clock, "t", clock.t + s)))
+    b.list_cameras()
+    b.open("usb:001,004", str(tmp_path))
+    b.fire()
+    assert slept == [pytest.approx(cb.RECONNECT_SETTLE_S)]
+    slept.clear()
+    clock.t += 5
+    b.fire()
+    assert slept == []                                        # long since connected
+    b._reconnect()                                            # the exposure reconnect
+    clock.t += 0.3
+    b.fire()
+    assert slept == [pytest.approx(cb.RECONNECT_SETTLE_S - 0.3)]
+
+
+def test_held_shots_come_only_from_the_cameras_own_memory(tmp_path):
+    card = {"/": ["store_10000001", "store_00010001"],
+            "/store_10000001": (["DSCF0007.RAF", "LIVE0001.JPG", "notes.txt"], []),
+            "/store_00010001": (["DSCF0001.RAF"], ["DCIM"])}           # a card: never
+    b, gp, clock, slept, calls = _busy_backend(tmp_path, 0, card=card)
+    assert b.held_files() == [("/store_10000001", "DSCF0007.RAF")]
+    assert b.collect_held() == 1
+    assert b._pending == [("/store_10000001", "DSCF0007.RAF")] and b.shot_pending()
+    assert b.held_files() == []                               # already queued
+    for _ in range(5):
+        clock.t += 0.5
+        b.poll(0.0)
+    assert gp.state.deleted == [("/store_10000001", "DSCF0007.RAF")]
+    assert os.path.exists(os.path.join(str(tmp_path), "DSCF0007.RAF"))

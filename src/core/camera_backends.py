@@ -46,12 +46,19 @@ PREVIEW_GIVE_UP_S = 15.0
 LIVE_EVENTS_EVERY_S = 3.0   # each check stalls the GFX 50S II's picture ~0.3 s (test 5)
 LIVE_RECENT_S = 0.5        # live view was asked for this recently = it is running
 SHOT_WAIT_S = 30.0         # after firing, check events continuously this long
-# A shot the camera answers "busy" to is tried again (it took no picture):
-# a GFX 50S II answered [-110] I/O in progress to a fire right after the
-# reconnect that ends live view to set the shutter speed (the user's first
-# film-base measure, 2026-10-30), though the settings had just gone in.
-FIRE_BUSY_S = 5.0
-FIRE_RETRY_S = 0.15
+# A fire right after (re)connecting: a GFX 50S II answered [-110] I/O in
+# progress to one sent straight after the reconnect that ends live view to set
+# the shutter speed (the user's first film-base measure, 2026-10-30) AND TOOK
+# THE PICTURE. So: wait RECONNECT_SETTLE_S after a connection before firing,
+# and treat "busy" from a fire as "maybe shot": look for the shot's file (an
+# event, or the file waiting in the camera's own memory) for FIRE_CONFIRM_S
+# plus the exposure before firing again (at most FIRE_BUSY_TRIES more), so a
+# busy answer never takes a second picture.
+RECONNECT_SETTLE_S = 1.0
+FIRE_CONFIRM_S = 3.0
+FIRE_BUSY_TRIES = 1
+CONFIRM_POLL_MS = 200
+HELD_EXTS = RAW_EXTS | {".jpg", ".jpeg", ".heif", ".hif", ".tif", ".tiff"}
 # Live view that has given frames and then answers busy this long is
 # reported as paused (`live_stalled`): a body holding a shot it couldn't clear.
 LIVE_STALL_S = 5.0
@@ -168,6 +175,31 @@ def exposure_text(exp):
 # --------------------------------------------------------------------------- #
 # libgphoto2
 # --------------------------------------------------------------------------- #
+def _gphoto2_debug_log(gp):
+    """FREECCR_GPHOTO2_LOG=<file>: libgphoto2's own debug log, for finding out
+    what a camera answered (once per process)."""
+    path = os.environ.get("FREECCR_GPHOTO2_LOG")
+    if not path or gp is None or _GP_LOG:
+        return
+    try:
+        import logging
+        log = logging.getLogger("gphoto2")
+        handler = logging.FileHandler(os.path.expanduser(path), mode="w")
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+        log.addHandler(handler)
+        log.setLevel(logging.DEBUG)
+        _GP_LOG.append(gp.check_result(gp.use_python_logging(mapping={
+            gp.GP_LOG_ERROR: logging.WARNING,
+            gp.GP_LOG_VERBOSE: logging.INFO,
+            gp.GP_LOG_DEBUG: logging.DEBUG})))
+        print(f"usb camera: libgphoto2 debug log -> {path}")
+    except Exception as e:
+        print(f"usb camera: no libgphoto2 log ({e})")
+
+
+_GP_LOG = []
+
+
 def _import_gphoto2():
     try:
         import gphoto2 as gp
@@ -252,6 +284,9 @@ class Gphoto2Backend:
         self.clock = clock
         self.sleep = sleep
         self.camera = None
+        self._ready_at = 0.0          # no fire before this (just connected)
+        self._shutter_s = 0.0         # the shutter speed last read or set, seconds
+        _gphoto2_debug_log(self.gp)
         self.dest = None
         self._ident = None           # the open camera's port
         self._exp_keys = {}          # field -> the setting that worked (per connection)
@@ -324,6 +359,7 @@ class Gphoto2Backend:
         cam = self._connect(ident)
         self.camera = cam
         self._ident = ident
+        self._ready_at = self.clock() + RECONNECT_SETTLE_S
         self._exp_keys = {}
         self._pending, self._last_added, self._errors = [], None, 0
         self._zoom_ok = None
@@ -441,15 +477,19 @@ class Gphoto2Backend:
         Fujifilm refuses (GFX 50S II: "Unspecified error", spec §17). With no
         live view the trigger call stays, as it doesn't hold this thread.
 
-        "Busy" means the camera took no picture: it is tried again every
-        FIRE_RETRY_S for up to FIRE_BUSY_S before it counts as a failure."""
+        Never straight after connecting (RECONNECT_SETTLE_S). "Busy" from the
+        fire may still have taken the picture (GFX 50S II), so the shot's file
+        is looked for (`_confirm_shot`) before it is fired again."""
         gp = self.gp
         if self.camera is None:
             raise CameraLost("not open")
+        wait = self._ready_at - self.clock()
+        if wait > 0:
+            self.sleep(wait)
         self._shot_files = []
         start = self.clock()
         tries = 0
-        max_tries = int(FIRE_BUSY_S / FIRE_RETRY_S) + 1
+        taken = None
         while True:
             try:
                 taken = None
@@ -465,22 +505,91 @@ class Gphoto2Backend:
                     self.camera.trigger_capture()
                 break
             except gp.GPhoto2Error as e:
-                busy = self._code(e) == gp.GP_ERROR_CAMERA_BUSY
-                if busy and tries < max_tries and self.clock() - start < FIRE_BUSY_S:
-                    tries += 1
-                    self.sleep(FIRE_RETRY_S)
-                    continue
-                self._failed(e)
-                raise (CameraLost(str(e)) if self._errors >= LOST_AFTER_ERRORS
-                       else RuntimeError(str(e)))
-        if tries:
-            print(f"usb camera: the camera was busy; fired after {tries} "
-                  f"{'retry' if tries == 1 else 'retries'} ({self.clock() - start:.2f} s)")
+                if self._code(e) != gp.GP_ERROR_CAMERA_BUSY:
+                    self._failed(e)
+                    raise (CameraLost(str(e)) if self._errors >= LOST_AFTER_ERRORS
+                           else RuntimeError(str(e)))
+                if self._confirm_shot(FIRE_CONFIRM_S + self._shutter_s):
+                    print(f"usb camera: the camera answered busy ({e}) but took the shot "
+                          f"({self.clock() - start:.2f} s)")
+                    break
+                if tries >= FIRE_BUSY_TRIES:
+                    raise RuntimeError(str(e))     # busy never counts towards "lost"
+                tries += 1
+                print(f"usb camera: the camera answered busy ({e}) and no shot came; "
+                      "firing again")
         self._errors = 0
         self._live_asked = False
         self._shot_until = self.clock() + SHOT_WAIT_S
         if taken is not None:
             self._add_file(taken.folder, taken.name)
+
+    def _confirm_shot(self, seconds):
+        """After a busy answer to a fire: did the camera take the picture?
+        True once its file is seen, as an event or waiting in the camera's
+        own memory (then it is queued like any shot's file)."""
+        gp = self.gp
+        end = self.clock() + max(0.5, seconds)
+        next_list = self.clock() + 1.0
+        while self.clock() < end:
+            t0 = self.clock()
+            try:
+                kind, data = self.camera.wait_for_event(CONFIRM_POLL_MS)
+            except gp.GPhoto2Error:
+                kind, data = None, None
+            if kind == gp.GP_EVENT_FILE_ADDED and not is_live_view_file(data.name):
+                self._add_file(data.folder, data.name)
+                return True
+            spent = self.clock() - t0
+            if kind != gp.GP_EVENT_FILE_ADDED and spent < CONFIRM_POLL_MS / 2000.0:
+                self.sleep(CONFIRM_POLL_MS / 1000.0 - spent)   # the wait returned early
+            if self.clock() >= next_list:
+                next_list = self.clock() + 1.0
+                if self._take_held():
+                    return True
+        return self._take_held()
+
+    def _take_held(self):
+        held = self.held_files()
+        for folder, name in held:
+            self._add_file(folder, name)
+        return bool(held)
+
+    def held_files(self):
+        """Shots waiting in the camera's OWN memory (a store with no DCIM
+        folder: never a card), as (folder, name). A body in tether mode keeps
+        each shot there until the computer takes it (spec §19-20)."""
+        if self.camera is None:
+            return []
+
+        def names(lst):
+            return [lst.get_name(i) for i in range(lst.count())]
+        out = []
+        try:
+            stores = names(self.camera.folder_list_folders("/"))
+        except Exception:
+            return []
+        for store in stores:
+            top = "/" + store.strip("/")
+            try:
+                if any(f.upper() == "DCIM" for f in names(self.camera.folder_list_folders(top))):
+                    continue                       # a memory card: never touched
+                files = names(self.camera.folder_list_files(top))
+            except Exception:
+                continue
+            for n in files:
+                if (os.path.splitext(n)[1].lower() in HELD_EXTS
+                        and not is_live_view_file(n) and (top, n) not in self._pending):
+                    out.append((top, n))
+        return out
+
+    def collect_held(self):
+        """Bring in shots the camera is holding (live view stuck busy after a
+        shot whose file never came): queued like a shot's files. The count."""
+        n = len(self.held_files())
+        if n and self._take_held():
+            self._shot_until = self.clock() + SHOT_WAIT_S
+        return n
 
     def _add_file(self, folder, name):
         # A file the capture call returned might be announced again as an
@@ -666,6 +775,7 @@ class Gphoto2Backend:
                     if v not in (None, ""):
                         out[field] = str(v)
                         break
+            self._note_shutter(out.get("shutter"))
             return out
         try:
             cfg = self.camera.get_config()
@@ -742,7 +852,16 @@ class Gphoto2Backend:
             return False, str(e)
         if str(got) != str(value):
             return False, f"it reads {got}"
+        if field == "shutter":
+            self._note_shutter(value)
         return True, ""
+
+    def _note_shutter(self, value):
+        if value:
+            from core.base_exposure import seconds
+            t = seconds(value)
+            if t is not None:
+                self._shutter_s = t
 
     def _reconnect(self):
         """End live view the only way libgphoto2 can on a Fujifilm without
@@ -756,6 +875,7 @@ class Gphoto2Backend:
             except Exception:
                 pass
         self.camera = self._connect(self._ident)
+        self._ready_at = self.clock() + RECONNECT_SETTLE_S
         self.reconnects += 1
         self._live_asked = False
         self._last_preview = None

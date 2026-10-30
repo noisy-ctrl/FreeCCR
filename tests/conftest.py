@@ -45,3 +45,17 @@ def _ui_idle():
     if mod is not None:
         mod._last = -1e9
     yield
+
+
+@_pytest.fixture(autouse=True)
+def _no_camera_settle(monkeypatch):
+    """A fake camera needs no time after connecting: the GFX's settle
+    (camera_backends.RECONNECT_SETTLE_S) would be a real 1 s sleep in every
+    test that fires. Tests of the settle itself set it back."""
+    try:
+        from core import camera_backends
+    except Exception:
+        yield
+        return
+    monkeypatch.setattr(camera_backends, "RECONNECT_SETTLE_S", 0.0)
+    yield
