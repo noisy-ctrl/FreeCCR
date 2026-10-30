@@ -237,6 +237,8 @@ connected (`Qt.QueuedConnection`) to `worker.process(path)`. `process`:
    *(Catalog is read once and cached on the worker; re-read only if stale.)*
 2. For each produced `CCRImage img` (normally one; a previously-sliced file could
    yield several):
+   - *(Revised: converts with Convert Current's plan/apply,
+     `spec/tether-convert-like-convert.md`.)*
    - If **Positive mode off** *and* a B/W point is set:
      `processed = ccr_normalize_with_bwpoint(img, black, white)`;
      `img.resized_raw = processed`; `img.converted = True`;
@@ -476,7 +478,10 @@ An adversarial review of the implementation surfaced these fixes, now in code:
   next imported frame, which a fixed copy-stand rig wants. The template chains
   forward (each capture becomes the source for the next) and is a deep,
   isolated copy. Skipped when the active image's look is all-default (no wasted
-  re-render).
+  re-render). *Revised by `spec/tether-convert-like-convert.md`: the worker now
+  applies the look BEFORE converting (handed over at dispatch), converts with
+  Convert Current's own plan, and an auto Temperature/Tint stays with its
+  frame.*
 
 ### 9.6 Per-session B/W-point reset + prompt (film-lead workflow)
 Every tethering session **clears the global B/W point** on entry and re-samples

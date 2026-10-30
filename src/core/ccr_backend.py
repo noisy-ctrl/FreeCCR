@@ -2966,7 +2966,9 @@ class CCRBackend:
         roll fallback Convert All gets from roll_check."""
         import numpy as np
         vals = []
-        for other in self.images:
+        # A copy: the tether worker calls this off the GUI thread, which may
+        # be appending a capture meanwhile.
+        for other in list(self.images):
             if other is img:
                 continue
             ci = getattr(other, "conversion_inputs", None) or {}
@@ -3163,7 +3165,7 @@ class CCRBackend:
         converted, or a quick measure of an unconverted one."""
         from core.auto_white_point import roll_reference
         ests = []
-        for other in self.images:
+        for other in list(self.images):      # a copy (see recorded_roll_black)
             if other is img:
                 continue
             rec = self.recorded_highlight(other)
@@ -3193,6 +3195,70 @@ class CCRBackend:
                 "side": getattr(result, "side", None),
                 "confidence": getattr(result, "confidence", None),
                 "reason": getattr(result, "reason", "")}
+
+    def plan_frame_conversion(self, img):
+        """What Convert Current converts one frame with, measured on its raw
+        (spec/tether-convert-like-convert.md): the frame's own film base (auto
+        black point, else the sampled or roll one), its white point by its
+        choice, the film-stock slopes, and its picture area. GUI-free, so the
+        tether worker converts captures exactly like Convert Current.
+        Returns a dict; "black" None means nothing to anchor to (the caller
+        decides whether the fixed-constant invert is wanted)."""
+        if img.converted:
+            img.reload_image()
+        black = self.black_point_bgr          # may be None → direct invert
+        white = self.white_point_bgr          # may be None → default slope
+        auto_res = auto_source = None
+        if getattr(self, "auto_black_point", False):
+            auto_res = self.detect_frame_black_point(img, reload=False)
+            black, auto_source = self.resolve_auto_black_point(
+                auto_res, self.recorded_roll_black(img), img.resized_raw)
+            white = self.auto_white_point_for(black)
+        awp_rec = None
+        per_frame_wp = black is not None and self.white_point_bgr is None
+        rect = (self.frame_picture_rect(img, img.resized_raw)
+                if (getattr(self, "auto_tone", False) or per_frame_wp)
+                else self._known_picture_rect(img))
+        if per_frame_wp:
+            hl = self.frame_highlights(img, img.resized_raw, black, rect)
+            white, awp_rec = self.resolve_white_point(
+                img, black, hl, lambda: self.roll_highlight_reference(img))
+        slopes = (self.film_stock_slopes
+                  if (white is None and black is not None) else None)
+        return {"black": black, "white": white, "slopes": slopes, "rect": rect,
+                "auto_res": auto_res, "auto_source": auto_source, "awp_rec": awp_rec}
+
+    def apply_frame_conversion(self, img, plan):
+        """Convert `img` with a plan from plan_frame_conversion: the
+        conversion, its recorded inputs (replayed by zoom, export and the
+        catalog), auto tone and the after-conversion AWB."""
+        black, white, slopes, rect = plan["black"], plan["white"], plan["slopes"], plan["rect"]
+        processed = ccr_normalize_with_bwpoint(
+            img, black, white, density=self.density_bwpoint, slopes_bgr=slopes)
+        if processed is not None:
+            img.resized_raw = processed
+        img.converted = True
+        img.conversion_inputs = {
+            "mode": "bw",
+            # Either anchor may be None (no white point = default slope; no
+            # black point either = the no-anchor direct invert). Every replay
+            # site passes this pair straight back to the converter
+            # (spec/no-anchor-convert.md §4).
+            "bw": (tuple(black) if black is not None else None,
+                   tuple(white) if white is not None else None),
+            "fine_rot": img.fine_rotation_angle,
+            "density": bool(self.density_bwpoint),
+            "slopes": slopes,
+        }
+        if plan.get("auto_source") is not None:
+            img.conversion_inputs["auto_bp"] = self.auto_bp_record(
+                plan["auto_res"], plan["auto_source"])
+        if plan.get("awp_rec") is not None:
+            img.conversion_inputs["auto_wp"] = plan["awp_rec"]
+        if rect is not None:
+            img.conversion_inputs["picture"] = [float(v) for v in rect]
+        self.measure_auto_tone(img, rect)
+        self.maybe_auto_awb(img)
 
     def apply_bwpoint_to_all_images(self, progress_callback=None):
         """
