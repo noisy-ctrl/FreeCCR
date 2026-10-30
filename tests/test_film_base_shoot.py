@@ -537,19 +537,24 @@ def test_busy_but_shot_with_no_event_is_found_in_the_cameras_memory(tmp_path):
     assert calls["capture"] == 1 and gp.state.fired == 1
 
 
-def test_busy_and_no_shot_fires_once_more(tmp_path):
+def test_busy_and_no_shot_fires_once_more_with_the_capture_call(tmp_path):
     b, gp, clock, slept, calls = _busy_backend(tmp_path, 1)
     t0 = clock.t
     b.fire()
-    assert calls["trigger"] == 2 and gp.state.fired == 1
+    assert calls == {"trigger": 1, "capture": 1} and gp.state.captures == 1
     assert clock.t - t0 >= cb.FIRE_CONFIRM_S                  # it looked for the shot first
+    b.fire()                                                  # and keeps to it
+    assert calls == {"trigger": 1, "capture": 2}
+    b.open("usb:001,004", str(tmp_path))                      # a new connection starts over
+    assert not b._capture_call()
 
 
 def test_busy_with_no_shot_twice_is_a_failure_not_a_lost_camera(tmp_path):
     b, gp, clock, slept, calls = _busy_backend(tmp_path, 10)
     with pytest.raises(RuntimeError, match="-110"):
         b.fire()
-    assert calls["trigger"] == 1 + cb.FIRE_BUSY_TRIES and gp.state.fired == 0
+    assert calls["trigger"] + calls["capture"] == 1 + cb.FIRE_BUSY_TRIES
+    assert gp.state.fired == 0 and gp.state.captures == 0
     assert b._errors == 0
 
 
@@ -597,3 +602,22 @@ def test_held_shots_come_only_from_the_cameras_own_memory(tmp_path):
         b.poll(0.0)
     assert gp.state.deleted == [("/store_10000001", "DSCF0007.RAF")]
     assert os.path.exists(os.path.join(str(tmp_path), "DSCF0007.RAF"))
+
+
+def test_a_fujifilm_always_gets_the_capture_call(tmp_path):
+    """The user's GFX 50S II log: two capture-call shots in a row, then the
+    trigger call refused as busy (InitiateCapture: Device Busy)."""
+    from test_capture_routes import fake_gp
+    gp = fake_gp(cameras=(("Fuji Fujifilm GFX100", "usb:001,004"),))
+    b = cb.Gphoto2Backend(gp_module=gp, clock=Clock(), sleep=lambda s: None)
+    b.list_cameras()
+    b.open("usb:001,004", str(tmp_path))
+    used = []
+    b.camera.trigger_capture = lambda: used.append("trigger")
+    orig = b.camera.capture
+    b.camera.capture = lambda kind: (used.append("capture"), orig(kind))[1]
+    for _ in range(3):
+        b._live_asked = False                                 # live view not asked
+        b.fire()
+    assert used == ["capture"] * 3
+    assert b._pending                                         # the capture call's file

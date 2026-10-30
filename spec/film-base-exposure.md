@@ -284,6 +284,22 @@ that got through would have taken a second picture. So, in `Gphoto2Backend`:
 - `FREECCR_GPHOTO2_LOG=<file>` writes libgphoto2's own debug log, to see what
   the camera answered if this happens again.
 
+## Revision 3: the capture call on a Fujifilm (2026-10-30)
+The user ran FreeCCR with `FREECCR_GPHOTO2_LOG` and sent the log. It settled
+it: two shots in a row went through libgphoto2's full capture call
+(`camera_fuji_capture`: half-press, AF status, release, the new object found
+and fetched), because live view had been asked for between them; the third,
+with no live view asked, went through the trigger call, whose
+`InitiateCapture` the camera answered `Device Busy`, and so did the retry.
+No picture was taken that time (no new object). Test 10 only ever used the
+trigger call on a fresh connection, so it never mixed the two.
+So `Gphoto2Backend._capture_call()` now picks the capture call always on a
+Fujifilm (the libgphoto2 table name has "Fuji"), as well as with live view
+asked, and on any other camera once its trigger was refused busy with no
+shot (sticky for the connection, `_use_capture`). The capture call holds the
+worker for the shot and its download (~4-5 s), which Shoot and measuring
+wait for anyway.
+
 ## Code
 - `core/base_exposure.py` (new, Qt-free): `seconds`, `iso_number`,
   `exposure_of`, `Reading` + `reading_from_mosaic` + `read_patch`, `Plan` +
