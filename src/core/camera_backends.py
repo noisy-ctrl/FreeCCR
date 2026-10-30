@@ -246,6 +246,9 @@ class Gphoto2Backend:
         self.clock = clock
         self.camera = None
         self.dest = None
+        self._ident = None           # the open camera's port
+        self._exp_keys = {}          # field -> the setting that worked (per connection)
+        self.reconnects = 0          # exposure pauses (spec/usb-exposure-control.md)
         self._models = {}            # address -> model, from the last scan
         self._pending = []           # (folder, name) added, waiting for the shot's quiet
         self._last_added = None
@@ -287,10 +290,10 @@ class Gphoto2Backend:
     def _code(self, e):
         return getattr(e, "code", None)
 
-    def open(self, ident, dest=None):
+    def _connect(self, ident):
+        """A fresh, initialised Camera on `ident`'s port (open and the
+        exposure reconnect share this)."""
         gp = self.gp
-        self.close()
-        self.dest = dest
         cam = gp.Camera()
         try:
             ports = gp.PortInfoList()
@@ -306,7 +309,15 @@ class Gphoto2Backend:
             if self._code(e) == gp.GP_ERROR_IO_USB_CLAIM:
                 raise CameraBusy(str(e))
             raise CameraLost(str(e))
+        return cam
+
+    def open(self, ident, dest=None):
+        self.close()
+        self.dest = dest
+        cam = self._connect(ident)
         self.camera = cam
+        self._ident = ident
+        self._exp_keys = {}
         self._pending, self._last_added, self._errors = [], None, 0
         self._zoom_ok = None
         self.no_preview = False
@@ -649,6 +660,101 @@ class Gphoto2Backend:
                     break
         return out
 
+    # -- setting the exposure (spec/usb-exposure-control.md) -----------------
+    EXPOSURE_FIELDS = (("shutter", SHUTTER_KEYS), ("iso", ISO_KEYS))
+
+    def _setting(self, key):
+        """The camera's setting `key` as a widget (one setting, not the whole
+        configuration)."""
+        single = getattr(self.camera, "get_single_config", None)
+        if single is not None:
+            return single(key)
+        return self.camera.get_config().get_child_by_name(key)
+
+    def exposure_choices(self):
+        """{"shutter": [values], "iso": [values]}: what the camera offers for
+        each field it lets the computer set (at least two choices), in its
+        own order. The setting used is remembered per connection."""
+        if self.camera is None:
+            return {}
+        out = {}
+        for field, keys in self.EXPOSURE_FIELDS:
+            for k in keys:
+                try:
+                    w = self._setting(k)
+                    n = int(w.count_choices())
+                    vals = [str(w.get_choice(i)) for i in range(n)]
+                except Exception:
+                    continue
+                if len(vals) >= 2:
+                    out[field] = vals
+                    self._exp_keys[field] = k
+                    break
+        return out
+
+    def shot_pending(self):
+        """A shot is on its way (fired, files not all in yet)."""
+        return bool(self._pending) or self.clock() < self._shot_until
+
+    def _put(self, field, value):
+        """Set one field and read it back: (ok, text)."""
+        key = self._exp_keys.get(field)
+        if key is None:
+            return False, "the camera has no such setting"
+        try:
+            w = self._setting(key)
+            w.set_value(str(value))
+            single = getattr(self.camera, "set_single_config", None)
+            if single is not None:
+                single(key, w)
+            else:
+                cfg = self.camera.get_config()
+                cfg.get_child_by_name(key).set_value(str(value))
+                self.camera.set_config(cfg)
+            got = widget_value(self.gp, self._setting(key))
+        except self.gp.GPhoto2Error as e:
+            return False, str(e)
+        except Exception as e:
+            return False, str(e)
+        if str(got) != str(value):
+            return False, f"it reads {got}"
+        return True, ""
+
+    def _reconnect(self):
+        """End live view the only way libgphoto2 can on a Fujifilm without
+        shooting: disconnect and connect again. The shot state, the hot
+        folder and the frame count stay; live view starts again on the next
+        preview."""
+        cam, self.camera = self.camera, None
+        if cam is not None:
+            try:
+                cam.exit()
+            except Exception:
+                pass
+        self.camera = self._connect(self._ident)
+        self.reconnects += 1
+        self._live_asked = False
+        self._last_preview = None
+        self._busy_since = None
+        self._busy_until = 0.0
+
+    def set_exposure(self, wanted):
+        """Set {field: value}; {field: (ok, text)}. A camera that refuses
+        while its live view runs (a Fujifilm answers Device Busy to every
+        setting) gets one reconnect, then the refused fields again."""
+        if self.camera is None:
+            raise CameraLost("not open")
+        if not self._exp_keys:
+            self.exposure_choices()
+        results = {f: self._put(f, v) for f, v in wanted.items()}
+        failed = [f for f, (ok, _t) in results.items() if not ok
+                  and self._exp_keys.get(f) is not None]
+        if failed and self._live_asked:
+            self._reconnect()
+            for f in failed:
+                results[f] = self._put(f, wanted[f])
+        return results
+
     def zoom_levels(self):
         if self.camera is None:
             return []
@@ -905,6 +1011,16 @@ class DigiCamControlBackend:
     def set_zoom(self, level):
         pass
 
+    # Setting exposure is libgphoto2-only for now (spec/usb-exposure-control.md).
+    def exposure_choices(self):
+        return {}
+
+    def shot_pending(self):
+        return False
+
+    def set_exposure(self, wanted):
+        return {f: (False, "not over this connection") for f in wanted}
+
 
 # --------------------------------------------------------------------------- #
 # a synthetic camera
@@ -929,6 +1045,15 @@ class FakeBackend:
         self.zoom = "1"
         self.frames = 0
         self.card_addons = []
+        # exposure (spec/usb-exposure-control.md): refused while live view
+        # runs, like a GFX 50S II; a reconnect ends live view
+        self.shutters = ["1/250", "1/125", "1/60", "1/30", "1/15"]
+        self.isos = ["100", "200", "400", "-1"]
+        self.settings = {"shutter": "1/60", "iso": "100"}
+        self.refuse_in_live = True
+        self.reconnects = 0
+        self.set_calls = []
+        self.pending_shot = False
 
     def available(self):
         return True
@@ -999,7 +1124,26 @@ class FakeBackend:
         return list(self.card_addons)
 
     def exposure(self):
-        return {"shutter": "1/60", "iso": "100", "aperture": "8"}
+        return {"shutter": self.settings["shutter"], "iso": self.settings["iso"],
+                "aperture": "8"}
+
+    def exposure_choices(self):
+        return {"shutter": list(self.shutters), "iso": list(self.isos)}
+
+    def shot_pending(self):
+        return bool(self.pending_shot or self._due)
+
+    def set_exposure(self, wanted):
+        self.set_calls.append(dict(wanted))
+        if self.live and self.refuse_in_live:
+            self.reconnects += 1          # ends live view; preview starts it again
+        out = {}
+        for f, v in wanted.items():
+            ok = v in (self.shutters if f == "shutter" else self.isos)
+            if ok:
+                self.settings[f] = v
+            out[f] = (ok, "" if ok else "not offered")
+        return out
 
     def zoom_levels(self):
         return ["1", "5", "10"]

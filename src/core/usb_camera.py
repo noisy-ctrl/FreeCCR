@@ -34,6 +34,9 @@ class UsbCamera(WorkerThread):
     fired = Signal()
     fire_failed = Signal(str)
     live_paused = Signal(bool)          # live view stuck busy after giving frames
+    # spec/usb-exposure-control.md
+    exposure_choices = Signal(dict)     # {"shutter": [...], "iso": [...]}; {} = none
+    exposure_set = Signal(dict)         # {field: (ok, text, value)}
 
     def __init__(self, backends=None, clock=time.monotonic, parent=None):
         super().__init__(parent)
@@ -48,6 +51,7 @@ class UsbCamera(WorkerThread):
         self._seq = 0
         self._live = False
         self._paused = False
+        self._want = {}                  # exposure asked for, latest wins
         self.backend = None
         self.key = None
         self.model = ""
@@ -82,6 +86,18 @@ class UsbCamera(WorkerThread):
 
     def release_and_retry(self):
         self._command(("release",))
+
+    def set_exposure(self, field, value):
+        """Ask for a shutter speed or ISO. Latest wins: a burst of picks is
+        one setting (and on a camera that needs it, one live view pause),
+        applied when no shot is on its way."""
+        with self._lock:
+            self._want[str(field)] = str(value)
+        self._wake.set()
+
+    def exposure_wanted(self):
+        with self._lock:
+            return dict(self._want)
 
     def stop(self):
         self._stop = True
@@ -144,6 +160,10 @@ class UsbCamera(WorkerThread):
                 self._wake.clear()
                 continue
             try:
+                if self._want:
+                    self._apply_exposure()
+                    if self.backend is None or self.status != "open":
+                        continue
                 data = None
                 if self._live and not getattr(self.backend, "no_preview", False):
                     data = self.backend.preview()
@@ -260,11 +280,49 @@ class UsbCamera(WorkerThread):
         self.state.emit("open", self.model)
         self.zoom_levels.emit(list(backend.zoom_levels()))
         try:
+            choices = backend.exposure_choices() if hasattr(backend, "exposure_choices") else {}
+        except cb.CameraLost as e:
+            self._lose(str(e))
+            return
+        except Exception:
+            choices = {}
+        self.exposure_choices.emit(dict(choices or {}))
+        try:
             found = list(backend.addons()) if hasattr(backend, "addons") else []
         except Exception:
             found = []
         if found:
             self.addons_found.emit(found)
+
+    def _apply_exposure(self):
+        """Set what was asked for, unless a shot is on its way (then a later
+        turn does). spec/usb-exposure-control.md."""
+        b = self.backend
+        try:
+            if b.shot_pending():
+                return
+        except AttributeError:
+            pass
+        with self._lock:
+            wanted, self._want = self._want, {}
+        if not wanted:
+            return
+        setter = getattr(b, "set_exposure", None)
+        if setter is None:
+            results = {f: (False, "not over this connection") for f in wanted}
+        else:
+            try:
+                results = setter(wanted)
+            except cb.CameraLost as e:
+                self._lose(str(e))
+                return
+            except Exception as e:
+                results = {f: (False, str(e)) for f in wanted}
+        self.exposure_set.emit({f: (bool(ok), str(text), wanted.get(f))
+                                for f, (ok, text) in results.items()})
+        exp = b.exposure()
+        if exp:
+            self.exposure_changed.emit(exp)
 
     def _publish(self, data):
         frame = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
@@ -283,6 +341,8 @@ class UsbCamera(WorkerThread):
             self._frame_cv.notify_all()
 
     def _shut(self):
+        with self._lock:
+            self._want = {}
         b, self.backend = self.backend, None
         if b is not None:
             try:
