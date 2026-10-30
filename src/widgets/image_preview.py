@@ -804,6 +804,9 @@ def orientation_prompt(kind, frames):
     return prompt
 
 
+EXPORT_GAP_PX = 18     # the line-less break between Convert and Export
+
+
 class ImagePreview(QWidget):
     ccr_converted = Signal(str, str)
 
@@ -829,31 +832,19 @@ class ImagePreview(QWidget):
             spacer.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
             self.toolbar.addWidget(spacer)
 
-        # Workflow order (spec/toolbar-rework.md, 2026-10-30): Convert,
-        # Un-convert, sprocket holes (icon) | rotate / mirror (icons) | Area, Gradient, Dust | zoom,
-        # HDR, False colour ........ Export. Text buttons carry no symbols;
-        # only the icon-only buttons are pictures.
+        # Order (spec/toolbar-rework.md, revised 2026-10-30): sprocket holes
+        # (icon) | rotate / mirror (icons) | Area, Gradient, Dust | zoom, HDR,
+        # False colour ........ Un-convert, Convert   Export. Convert and
+        # Un-convert sit on the right with Export, a plain gap (no line)
+        # between them and Export. Text buttons carry no symbols; only the
+        # icon-only buttons are pictures. The actions are made here (the rest
+        # of the class refers to them) and placed on the toolbar at the end.
         self.convert_action = QAction("Convert", self)
         self.convert_action.setToolTip(
             "Convert the current frame or all frames (asks which).")
         self.convert_action.triggered.connect(self.convert_ccr)
-        self.toolbar.addAction(self.convert_action)
-        _conv_btn = self.toolbar.widgetForAction(self.convert_action)
-        if _conv_btn is not None:                  # the main action: bold
-            _conv_btn.setStyleSheet("QToolButton { font-weight: bold; }")
-        add_spacer()
-
         self.unconvert_action = QAction("Un-convert", self)
         self.unconvert_action.triggered.connect(self.unconvert_ccr)
-        self.toolbar.addAction(self.unconvert_action)
-        # Destructive revert → red text when enabled, muted when disabled.
-        _unconv_btn = self.toolbar.widgetForAction(self.unconvert_action)
-        if _unconv_btn is not None:
-            _unconv_btn.setStyleSheet(
-                f"QToolButton {{ color: {theme.DANGER}; }}"
-                f"QToolButton:hover {{ color: {theme.DANGER_HOVER}; }}"
-                f"QToolButton:disabled {{ color: {theme.TEXT_DISABLED}; }}")
-        add_spacer()
 
         # White sprocket holes / clear film (the reversal look,
         # spec/sprocket-hole-mask.md): the Settings → Film border switch, one
@@ -1006,15 +997,35 @@ class ImagePreview(QWidget):
                 lambda pos, b=_fc_btn: self._show_fc_menu(b.mapToGlobal(pos)))
         add_spacer()
 
+        # Un-convert, Convert and Export sit at the far right, next to the
+        # histogram: everything before them stays left-aligned and this spacer
+        # takes up the slack.
+        self.export_push = QWidget()
+        self.export_push.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.toolbar.addWidget(self.export_push)
+
+        self.toolbar.addAction(self.unconvert_action)
+        # Destructive revert → red text when enabled, muted when disabled.
+        _unconv_btn = self.toolbar.widgetForAction(self.unconvert_action)
+        if _unconv_btn is not None:
+            _unconv_btn.setStyleSheet(
+                f"QToolButton {{ color: {theme.DANGER}; }}"
+                f"QToolButton:hover {{ color: {theme.DANGER_HOVER}; }}"
+                f"QToolButton:disabled {{ color: {theme.TEXT_DISABLED}; }}")
+        add_spacer()
+        self.toolbar.addAction(self.convert_action)
+        _conv_btn = self.toolbar.widgetForAction(self.convert_action)
+        if _conv_btn is not None:                  # the main action: bold
+            _conv_btn.setStyleSheet("QToolButton { font-weight: bold; }")
+        # A plain gap, no line, between the conversion pair and Export.
+        self.export_gap = QWidget()
+        self.export_gap.setFixedWidth(EXPORT_GAP_PX)
+        self.export_gap.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+        self.toolbar.addWidget(self.export_gap)
+
         self.export_action = QAction("Export…", self)
         self.export_action.triggered.connect(self.open_export_dialog)
         self.toolbar.addAction(self.export_action)
-
-        # Export sits at the far right, next to the histogram: everything before
-        # it stays left-aligned and this spacer takes up the slack.
-        self.export_push = QWidget()
-        self.export_push.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        self.toolbar.insertWidget(self.export_action, self.export_push)
         export_margin = QWidget()
         export_margin.setFixedWidth(6)
         export_margin.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
