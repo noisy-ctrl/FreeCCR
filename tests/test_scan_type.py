@@ -248,14 +248,15 @@ def test_a_shot_that_needs_attention_is_greyed_out_and_acted_on(mw, monkeypatch)
                             "reason": "frame 2 (w.RAF) should be lit green but looks "
                                       "lit by white or mixed light",
                             "thumbs": [np.full((10, 12, 3), 200, np.uint8)] * 3})
-    assert not tl.attention_list.isHidden() and tl.attention_list.count() == 1
+    assert not tl.attention_bar.isHidden() and tl.attention_list.count() == 1
+    assert tl.attention_bar.text() == "1 rejected combination"
     item = tl.attention_list.item(0)
     assert item.text() == "Not red, green, blue" and "w.RAF" in item.toolTip()
     assert len(ccr_backend.images) == 0                      # not a frame in the list
     eid = mw._tether_attention[0]["id"]
     tl.attention_action.emit(eid, "merge")
     assert mw.trips[-1] == {"paths": ["/x/r.RAF", "/x/w.RAF", "/x/b.RAF"], "check": False}
-    assert tl.attention_list.isHidden()
+    assert tl.attention_bar.isHidden()
     # left over: load singly, or choose the files by hand
     mw._on_needs_attention({"paths": ["/x/9.RAF"], "reason": "1 of the 3 frames of a shot "
                             "arrived; the rest didn't come within 30 s", "thumbs": []})
@@ -271,7 +272,7 @@ def test_a_shot_that_needs_attention_is_greyed_out_and_acted_on(mw, monkeypatch)
     assert mw.singles[-2:] == ["/x/7.RAF", "/x/8.RAF"]
     mw._on_needs_attention({"paths": ["/x/6.RAF"], "reason": "x", "thumbs": []})
     tl.attention_action.emit(mw._tether_attention[0]["id"], "remove")
-    assert mw._tether_attention == [] and tl.attention_list.isHidden()
+    assert mw._tether_attention == [] and tl.attention_bar.isHidden()
 
 
 def test_stopping_part_way_keeps_the_waiting_frames(mw):
@@ -321,3 +322,39 @@ def test_monitor_follows_and_sets_the_scan_type(tmp_path, monkeypatch):
         assert "with the light as it is" in mon.capture_caption.text()
     finally:
         tlm._close(mon)
+
+
+def test_rejected_combinations_take_one_line_and_open_on_hover_or_click(mw):
+    """spec/rejected-strip-compact.md: one line ("N rejected combinations");
+    the tiles open over the list on hover and stay open when it is clicked."""
+    from PySide6.QtCore import QEvent
+    from PySide6.QtGui import QEnterEvent
+    from PySide6.QtCore import QPointF
+    tl = mw.thumbnail_list
+    mw.resize(1300, 800)
+    mw.show()
+    for i in range(3):
+        mw._on_needs_attention({"paths": [f"/x/{i}.RAF"], "reason": "x", "thumbs": []})
+    _app.processEvents()
+    assert tl.attention_bar.text() == "3 rejected combinations"
+    assert tl.attention_bar.height() < 40                      # one line, not the tiles
+    pop = tl.attention_popup
+    assert not pop.isVisible()
+    enter = QEnterEvent(QPointF(2, 2), QPointF(2, 2), QPointF(2, 2))
+    QApplication.sendEvent(tl.attention_bar, enter)
+    assert pop.isVisible() and tl.attention_list.count() == 3
+    assert pop.geometry().bottom() <= tl.attention_bar.geometry().top()   # above the line
+    QApplication.sendEvent(tl.attention_bar, QEvent(QEvent.Leave))
+    tl._maybe_hide_attention()                                # the timer's job
+    assert not pop.isVisible()
+    tl.attention_bar.click()                                  # pinned
+    assert pop.isVisible()
+    QApplication.sendEvent(tl.attention_bar, QEvent(QEvent.Leave))
+    tl._maybe_hide_attention()
+    assert pop.isVisible()
+    tl.attention_bar.click()                                  # unpinned
+    assert not pop.isVisible()
+    for e in list(mw._tether_attention):
+        tl.attention_action.emit(e["id"], "remove")
+    assert tl.attention_bar.isHidden() and not pop.isVisible()
+    mw.hide()
