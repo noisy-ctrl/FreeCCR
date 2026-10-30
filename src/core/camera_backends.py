@@ -285,6 +285,7 @@ class Gphoto2Backend:
         self.sleep = sleep
         self.camera = None
         self._ready_at = 0.0          # no fire before this (just connected)
+        self._use_capture = False     # the trigger was refused: capture call from now on
         self._shutter_s = 0.0         # the shutter speed last read or set, seconds
         _gphoto2_debug_log(self.gp)
         self.dest = None
@@ -360,6 +361,7 @@ class Gphoto2Backend:
         self.camera = cam
         self._ident = ident
         self._ready_at = self.clock() + RECONNECT_SETTLE_S
+        self._use_capture = False
         self._exp_keys = {}
         self._pending, self._last_added, self._errors = [], None, 0
         self._zoom_ok = None
@@ -471,11 +473,11 @@ class Gphoto2Backend:
     def fire(self):
         """Take a picture; its file(s) come through `poll`.
 
-        With live view asked for since the last shot, libgphoto2's full
-        capture call is used: it ends the camera's live view first and waits
-        for the file. Its trigger call shoots without ending it, which a
-        Fujifilm refuses (GFX 50S II: "Unspecified error", spec §17). With no
-        live view the trigger call stays, as it doesn't hold this thread.
+        libgphoto2's full capture call (`_capture_call`) when live view was
+        asked for since the last shot (it ends live view first; the trigger
+        call doesn't, which a Fujifilm refuses: spec §17), always on a
+        Fujifilm, and on any camera once its trigger call was refused as busy;
+        otherwise the trigger call, which doesn't hold this thread.
 
         Never straight after connecting (RECONNECT_SETTLE_S). "Busy" from the
         fire may still have taken the picture (GFX 50S II), so the shot's file
@@ -493,7 +495,7 @@ class Gphoto2Backend:
         while True:
             try:
                 taken = None
-                if self._live_asked:
+                if self._capture_call():
                     try:
                         taken = self.camera.capture(getattr(gp, "GP_CAPTURE_IMAGE", 0))
                     except gp.GPhoto2Error as e:
@@ -516,13 +518,24 @@ class Gphoto2Backend:
                 if tries >= FIRE_BUSY_TRIES:
                     raise RuntimeError(str(e))     # busy never counts towards "lost"
                 tries += 1
+                again = "" if self._capture_call() else " with the capture call"
+                self._use_capture = True
                 print(f"usb camera: the camera answered busy ({e}) and no shot came; "
-                      "firing again")
+                      f"firing again{again}")
         self._errors = 0
         self._live_asked = False
         self._shot_until = self.clock() + SHOT_WAIT_S
         if taken is not None:
             self._add_file(taken.folder, taken.name)
+
+    def _capture_call(self):
+        """The full capture call rather than the trigger call? With live view
+        asked for since the last shot; always on a Fujifilm: the user's GFX
+        50S II log (2026-10-30) has two capture-call shots in a row working
+        and the trigger call that followed refused as busy, every time; and on
+        any camera once its trigger call was refused as busy with no shot."""
+        model = (self._models.get(self._ident) or "").lower()
+        return bool(self._live_asked or self._use_capture or "fuji" in model)
 
     def _confirm_shot(self, seconds):
         """After a busy answer to a fire: did the camera take the picture?
