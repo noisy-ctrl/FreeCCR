@@ -1,7 +1,8 @@
 # Expose for the film base: a shutter speed per colour
 
 Status: DRAFT for the user's review (2026-10-30). Not built. Open points are
-at the end; test 10 (`gfx50sii_test_v10.py`) answers the camera questions.
+at the end; test 10 (`gfx50sii_test_v10.py`) has answered the camera
+questions (results below).
 Builds on `spec/usb-exposure-control.md` (setting shutter speed and ISO over
 USB) and `spec/live-capture-monitor.md` §8 (the Shoot sequence).
 
@@ -15,8 +16,8 @@ light, which is the least noise in the inverted shadows (the noise the parked
 density experiment in CLAUDE.md ran into).
 
 Under white light one exposure has to serve all three colours, and the orange
-mask holds blue (and green) well below red: blue typically gets 1.5-2.5 stops
-less light than red at the base (test 10 measures it on the user's film).
+mask holds blue (and green) below red. On the user's film under the
+Scanlight's white LED (test 10): green 0.21 and blue 1.56 stops below red.
 A trichrome set shoots each colour on its own, so each can be exposed to the
 base on its own. Today the balance between colours comes from the light
 preset (dimming the brighter LEDs) at one camera exposure, which throws away
@@ -35,23 +36,37 @@ What varies, and why the shutter (the user's rules):
   so with per-colour shutter speeds the LEDs can all sit at full and the
   shutter does the balancing.
 
-## What the camera does (tests 8-9) and what test 10 must confirm
-Known: with live view off, the GFX 50S II takes a shutter speed or ISO in
+## What the camera does (tests 8-10)
+Tests 8-9: with live view off, the GFX 50S II takes a shutter speed or ISO in
 ~50 ms; with live view running it refuses every setting, and the only way out
 is a reconnect (0.4-0.7 s). After a shot, live view is off until it is asked
 for again (`Gphoto2Backend.fire` clears `_live_asked`).
 
-Test 10 (FreeCCR's own camera code, no live view) checks:
-1. A new shutter speed / ISO is taken right after the previous shot's file
-   lands, and how long that takes.
-2. The next file really carries it (EXIF) and the RAW follows it.
-3. Whether 1/3-stop speeds are true thirds (the "1/15" setting exposing
-   1/16 s) or the dial numbers: the model below must use whichever is true.
-4. One stop of ISO doubles the RAW values.
-5. Firing-to-file time at 1 s (detects the camera's Long Exposure NR, which
-   doubles every long exposure with a dark frame).
-6. Light drift over a few minutes; and, on film base, the white-light R/G/B
-   gap in stops.
+Test 10 (9 shots, live view off, film base under the white LED, ISO 250):
+1. **Setting between shots works**: every shutter speed and ISO was taken
+   right after the previous shot's file came in, in 76-125 ms, and read back.
+2. **Each file carries it**: EXIF matched every setting, and the RAW followed.
+3. **The shutter speeds are the dial numbers, not true thirds**: 1/30 -> 1/25
+   gave x1.198 (dial x1.200, true thirds x1.260); 1/15 -> 1/8 gave x1.882
+   (dial x1.875, true thirds x2.000). So exposure is computed from the
+   camera's own numbers (the EXIF value), never snapped.
+4. **ISO is linear**: 250 -> 500 gave x1.999.
+5. **No dark frame at 1 s**: the 1 s shot was ready 2.16 s after firing,
+   about 1 s more than a short one (1.0-1.3 s): the exposure itself. Longer
+   exposures weren't tested; the camera's Long Exposure NR should be off.
+6. **The light doesn't drift**: the first shot repeated at the end matched to
+   0.00 %. One check shot per colour is enough.
+7. **Time per shot**: file ready 1.0-1.3 s after firing, downloaded 3.4-3.5 s
+   later, ~4.5 s a shot plus the exposure. A trichrome frame is ~14 s plus its
+   three exposures; a 6-shot calibration ~30 s.
+8. **The ceiling**: saturated photosites read 3.4 % above the white level
+   LibRaw reports. FreeCCR clips at the reported level, so levels and the
+   target are measured against that (the extra 3 % is never used).
+9. **What per-colour exposure wins here**: at ISO 100 under the white LED,
+   one exposure that puts red's base at the target leaves blue ~1.56 stops
+   (x2.9) under; separately, red ~1/3 s, green ~1/2.5 s, blue ~1 s would put
+   all three near the target. (The trichrome LEDs differ from the white one;
+   the calibration measures each.)
 
 ## Goals
 1. **Calibrate** with one click: test shots measure the film base in the RAW
@@ -109,8 +124,8 @@ clip; they hold no picture.
 `plan_exposure(k, shutters, isos, rules) -> (shutter, iso, predicted, note)`
 
 - `k` is the measured base level per unit exposure (level / (t x ISO/100)),
-  with `t` and ISO snapped to true thirds of a stop if test 10 shows the
-  camera works that way.
+  with `t` and ISO as the camera states them (test 10: the dial numbers are
+  the real exposures).
 - `rules`: `base_iso` (default: open point 1), `max_iso` 640, `longest`
   (default 4 s, open point 2), `shortest` (default 1/250 s).
 - At `base_iso`, the longest shutter speed within [`shortest`, `longest`]
@@ -165,7 +180,7 @@ trichrome, the light connected). Esc / the button again cancels.
 ## The merge
 `ccr_merge.combine_channels` gains per-channel exposure scales: each frame's
 plane is multiplied by `E_min / E_c`, where `E_c` = its exposure (t x ISO/100,
-from its EXIF, snapped like the plan) and `E_min` the shortest of the three.
+from its EXIF, as stated) and `E_min` the shortest of the three.
 All scales are at most 1, so nothing new can clip; frames shot at equal
 exposures get 1, 1, 1 and merge exactly as today.
 
@@ -209,8 +224,7 @@ In the light preset, beside its levels (`light_presets`):
   shutter speed.
 
 ## Code
-- `core/base_exposure.py` (new, Qt-free): `seconds(text)`, `third(x)`,
-  `patch_level(path, rect, colour)`, `plan_exposure(...)`, and
+- `core/base_exposure.py` (new, Qt-free): `seconds(text)`, `patch_level(path, rect, colour)`, `plan_exposure(...)`, and
   `Calibration`, a small state machine with an injectable camera / light /
   measure (tested like `CaptureSequence`).
 - `capture_sequence`: `exposures` on `start`; `fire(exposure)`; timeouts.
@@ -223,7 +237,8 @@ In the light preset, beside its levels (`light_presets`):
   pickers restored after a sequence.
 
 ## Tests
-- `seconds` / `third` on the camera's real strings (test 10 prints them).
+- `seconds` on the camera's real strings ("1/8", "1s", "60m": test 10's log
+  lists them all).
 - `plan_exposure`: in range at base ISO; longest reached -> ISO up by the
   shortfall; `max_iso` reached -> note; too bright at `shortest` -> note
   naming the LED; never above `TARGET`; ISO Auto values never chosen.
@@ -246,8 +261,9 @@ In the light preset, beside its levels (`light_presets`):
    standard sensitivities (50 is the extended one), so 100 is a full native
    setting on this body; 160 is the base on the X-series. Default 100, or
    160 as you said?
-2. **Longest shutter speed** before ISO goes up: 4 s? Each trichrome frame
-   takes the three exposures plus ~1.5-2 s of download each.
+2. **Longest shutter speed** before ISO goes up: 4 s? Each shot already
+   takes ~4.5 s (mostly the download), so on this film at ISO 100 (blue ~1 s)
+   a trichrome frame is ~15 s against ~14 s at short speeds.
 3. **One calibration per light preset** (a preset per film stock), or a
    separate list of film-base calibrations to pick from?
 4. If even the shortest shutter speed is too bright: **say which LED to dim**
