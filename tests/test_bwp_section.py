@@ -88,3 +88,22 @@ def test_sampling_still_starts_when_folded(fresh_setting):
         assert modes == []
     finally:
         w.hide()
+
+
+def test_reset_compare_sync_are_the_last_rows_of_the_panel(fresh_setting):
+    """2026-10-30: Reset / Compare / Sync to All sit at the very bottom, below
+    every section they act on."""
+    w, p = _window()
+    try:
+        top = lambda wid: wid.mapTo(p, wid.rect().topLeft()).y()
+        sections = [p.lab_finish_section, p.curves_section, p.band_section,
+                    p.noise_section, p.details_section]
+        lowest = max(top(sec) for sec in sections if sec.isVisibleTo(p))
+        assert top(p.reset_button) > lowest
+        assert top(p.compare_button) == top(p.reset_button)
+        assert top(p.sync_to_all_button) > top(p.reset_button)
+        sl = p.reset_button.parentWidget().layout()
+        last = sl.itemAt(sl.count() - 1)
+        assert last.layout() is not None and last.layout().indexOf(p.sync_to_all_button) >= 0
+    finally:
+        w.hide()

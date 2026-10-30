@@ -1387,11 +1387,11 @@ class SlidersPanel(QWidget):
         self.lab_finish_section._toggle_btn.setChecked(True)
         self.lab_finish_section._on_toggle(True)
         scroll_layout.addWidget(self.lab_finish_section)
-        sep = theme.section_separator()
-        scroll_layout.addWidget(sep)
-        self._lab_finish_sep_below = sep
+        # The next section's own separator draws the line below Lab Finish now
+        # that Reset / Compare / Sync moved to the bottom (2026-10-30).
+        self._lab_finish_sep_below = None
 
-        # --- Reset / Compare / Sync buttons ---
+        # --- Reset / Compare / Sync buttons (placed at the very bottom, below) ---
         buttons_layout = theme.apply_button_row(QHBoxLayout())
         self.reset_button = QPushButton("Reset")
         self.compare_button = QPushButton("Compare")
@@ -1401,13 +1401,11 @@ class SlidersPanel(QWidget):
         self.compare_button.setFixedHeight(theme.CONTROL_H)
         buttons_layout.addWidget(self.reset_button)
         buttons_layout.addWidget(self.compare_button)
-        scroll_layout.addLayout(buttons_layout)
 
         sync_layout = QHBoxLayout()
         self.sync_to_all_button = QPushButton("Sync to All")
         self.sync_to_all_button.setFixedHeight(theme.CONTROL_H)
         sync_layout.addWidget(self.sync_to_all_button)
-        scroll_layout.addLayout(sync_layout)
 
         # --- Collapsible sections ---
         # Display order (top→bottom): Channel Levels and Channel Balance (placed
@@ -1431,6 +1429,12 @@ class SlidersPanel(QWidget):
             setattr(self, attr, section)
             scroll_layout.addWidget(section)
             self._section_separators[sid] = sep
+        # Reset / Compare / Sync to All at the very bottom of the panel (the
+        # user's request, 2026-10-30): actions on the whole edit, after every
+        # control they act on.
+        scroll_layout.addWidget(theme.section_separator())
+        scroll_layout.addLayout(buttons_layout)
+        scroll_layout.addLayout(sync_layout)
         # Every hideable section exists now: apply the user's Settings -> Panel
         # choice (spec/panel-visibility.md).
         self.apply_section_visibility(self.hidden_sections())
