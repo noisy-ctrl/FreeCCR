@@ -1877,21 +1877,28 @@ class MainWindow(QMainWindow):
         if ccr_backend.positive_mode:
             return "Positive mode — captures import as positives."
         if ccr_backend.black_point_bgr is None:
+            if self._tether_prompted:
+                return ("Lead frame in: press Black Point… and draw over the "
+                        "clear film base.")
             return ("No black point set — captures import unconverted. "
                     "Set the Black Point (film base) to auto-convert.")
         return ""
 
-    def enter_tethering(self):
+    def enter_tethering(self, from_monitor=False):
+        """Start Hot Folder Tether from ONE window (folder, scan type, close the
+        open images, import the folder's files: spec/tether-start-window.md).
+        Returns the window's answers (None when already on)."""
         if self._tether_active:
-            return
+            return None
         # The batch is about to grow — persist current edits first (like the
         # open flows) so nothing is lost if the session is interrupted.
         ccr_backend.save_catalog()
         start_dir = self._settings.value("files/last_tether_dir", "", type=str)
-        folder = QFileDialog.getExistingDirectory(
-            self, "Select Folder to Watch for Captures", start_dir)
-        if not folder:
-            return
+        opts = self._tether_start_options(len(ccr_backend.images or []), start_dir,
+                                          from_monitor)
+        if not opts or not opts.get("start") or not opts.get("folder"):
+            return opts
+        folder = opts["folder"]
         normalized = normalize_unicode_path(folder)
         if not validate_unicode_path(normalized):
             QMessageBox.warning(
@@ -1899,19 +1906,11 @@ class MainWindow(QMainWindow):
                 f"The selected folder path contains characters that may cause "
                 f"issues:\n\n{folder}\n\nPlease choose a folder with a simpler "
                 f"path name.")
-            return
+            return dict(opts, start=False)
         self._settings.setValue("files/last_tether_dir", folder)
         folder = os.path.normpath(normalized)
-
-        # Images open: add this roll's captures to them, or start blank
-        # (spec/tether-start-choice.md). Edits were saved above.
-        n_open = len(ccr_backend.images or [])
-        if n_open:
-            choice = self._tether_start_choice(n_open)
-            if choice is None:
-                return
-            if choice == "blank":
-                self._close_session_for_tether()
+        if opts.get("scan_type"):
+            self.set_scan_type(opts["scan_type"])
 
         # Snapshot the folder's current supported files. They are seeded into the
         # scanner (so the poller never re-imports them); optionally import them now.
@@ -1921,20 +1920,17 @@ class MainWindow(QMainWindow):
         except OSError as e:
             QMessageBox.warning(self, "Hot Folder Tether Error",
                                 f"Could not read the folder:\n\n{e}")
-            return
+            return dict(opts, start=False)
+        # Close the open images, as opening new files does (edits saved).
+        if opts.get("close_open") and ccr_backend.images:
+            self._close_session_for_tether()
         import_paths = []
-        if existing:
-            resp = QMessageBox.question(
-                self, "Import Existing Files?",
-                f"This folder already contains {len(existing)} supported "
-                f"image(s).\n\nImport them too?",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-            if resp == QMessageBox.Yes:
-                import_paths = [os.path.join(folder, n) for n in existing]
-                try:
-                    import_paths.sort(key=os.path.getmtime)  # oldest first
-                except OSError:
-                    pass
+        if existing and opts.get("import_existing"):
+            import_paths = [os.path.join(folder, n) for n in existing]
+            try:
+                import_paths.sort(key=os.path.getmtime)  # oldest first
+            except OSError:
+                pass
 
         self._tether_folder = folder
         self._tether_count = 0
@@ -1986,6 +1982,8 @@ class MainWindow(QMainWindow):
         self.sliders_panel.set_temporary_hint(
             f"Hot folder tether: watching “{self._tether_folder_label()}”. "
             f"Captures appear here automatically.", duration=5000)
+        self.refresh_tether_banner()
+        return opts
 
     # --- scan type and trichrome grouping (spec/scan-type.md) ------------
     def set_scan_type(self, t):
@@ -2046,8 +2044,7 @@ class MainWindow(QMainWindow):
     def _refresh_tether_banner(self):
         if not self._tether_active:
             return
-        self.image_preview.show_tether_banner(
-            self._tether_folder_label(), self._tether_count, self._tether_note())
+        self.refresh_tether_banner()
 
     def _on_needs_attention(self, entry):
         """A shot that couldn't be merged: shown greyed out under the frames."""
@@ -2227,9 +2224,9 @@ class MainWindow(QMainWindow):
             elif not self._tether_prompted and new_capture:
                 self._tether_prompted = True
                 self._tether_lead_img = img
-                # Defer so the modal opens cleanly after this slot returns (and
-                # never blocks/hangs a headless test, which won't spin the loop).
-                QTimer.singleShot(0, self._prompt_bwpoint_for_session)
+                # No pop-up (spec/tether-start-window.md): the banner says the
+                # lead is in and its Black Point… button is highlighted.
+                self.refresh_tether_banner()
         else:
             # Late arrival after Stop: persist immediately (the debounced timer
             # is gone) so the photo isn't lost on close.
@@ -2360,29 +2357,21 @@ class MainWindow(QMainWindow):
         if self._tether_active and not self._tether_unavailable:
             self.image_preview.show_tether_banner(
                 self._tether_folder_label(), self._tether_count, self._tether_note())
+        self.tether_banner.set_black_point_nudge(
+            bool(self._tether_active and self._tether_prompted
+                 and ccr_backend.black_point_bgr is None
+                 and not ccr_backend.positive_mode))
 
-    def _tether_start_choice(self, n):
-        """Ask how a tether starts with `n` images open: "add", "blank" or
-        None (cancel). The test seam."""
-        box = QMessageBox(self)
-        box.setIcon(QMessageBox.Question)
-        box.setWindowTitle("Start Hot Folder Tether")
-        box.setText(f"{n} image{'' if n == 1 else 's'} {'is' if n == 1 else 'are'} open.")
-        box.setInformativeText(
-            "Add this roll's captures to them, or close them and start blank? "
-            "Your edits are saved and come back when you reopen those files.")
-        add_btn = box.addButton("Add to Them", QMessageBox.AcceptRole)
-        blank_btn = box.addButton("Start Blank", QMessageBox.DestructiveRole)
-        cancel_btn = box.addButton(QMessageBox.Cancel)
-        box.setDefaultButton(add_btn)
-        box.setEscapeButton(cancel_btn)
-        box.exec()
-        clicked = box.clickedButton()
-        if clicked is add_btn:
-            return "add"
-        if clicked is blank_btn:
-            return "blank"
-        return None
+    def _tether_start_options(self, n_open, start_dir, from_monitor=False):
+        """The Start Hot Folder Tether window's answers (dict, see
+        TetherStartDialog.options), "start" False on Cancel. The test seam."""
+        from widgets.tether_start_dialog import TetherStartDialog
+        dlg = TetherStartDialog(self, n_open=n_open,
+                                folder=start_dir if start_dir and os.path.isdir(start_dir) else "",
+                                scan_type=getattr(ccr_backend, "scan_type", "colour"),
+                                from_monitor=from_monitor)
+        started = dlg.exec() == QDialog.Accepted
+        return dlg.options(started)
 
     def _close_session_for_tether(self):
         """Close the open images, as opening new files does: edits saved
@@ -2391,33 +2380,6 @@ class MainWindow(QMainWindow):
         ccr_backend.save_catalog()
         ccr_backend.clear()
         self.thumbnail_list.load_thumbnails()
-
-    def _prompt_bwpoint_for_session(self):
-        """After the first capture of a session (the film lead), guide the user
-        to set the roll's B/W point from it, then kick off Black-point sampling
-        on that frame."""
-        if not self._tether_active:
-            return
-        self._bring_to_front()           # it may be behind the Live Capture Monitor
-        box = QMessageBox(self)
-        box.setIcon(QMessageBox.Information)
-        box.setWindowTitle("Set B/W Point for This Roll")
-        box.setText(
-            "This first frame should be a shot of the <b>film lead</b> — showing "
-            "both the clear film base and a fully-exposed (dense) area.<br><br>"
-            "Set this roll's B/W point from it so the rest of the roll converts "
-            "to positive automatically:<br>"
-            "• <b>Black Point</b> — draw over the clear film base<br>"
-            "• <b>White Point</b> — draw over the dense / exposed area")
-        set_btn = box.addButton("Set Black Point", QMessageBox.AcceptRole)
-        box.addButton("Skip", QMessageBox.RejectRole)
-        box.setDefaultButton(set_btn)
-        box.exec()
-        if box.clickedButton() is not set_btn:
-            return
-        # Make sure sampling targets the lead frame even if a later capture stole
-        # the selection while the dialog was open.
-        self.start_roll_black_point(self._tether_lead_img)
 
     def _bring_to_front(self):
         if self.isMinimized():
@@ -2433,7 +2395,8 @@ class MainWindow(QMainWindow):
         spec/tether-black-point.md."""
         images = ccr_backend.images
         target = None
-        for cand in (img, self._tether_last_lit):
+        lead = self._tether_lead_img if self._tether_prompted else None
+        for cand in (img, lead, self._tether_last_lit):
             if cand is not None and any(cand is x for x in images):
                 target = cand
                 break

@@ -106,7 +106,7 @@ def _monitor(mw=None, connect=True, usb=None):
     light, dev, made = _light()
     mon = lm.LiveCaptureMonitor(main_window=mw, feed=feed, light=light,
                                 usb=usb if usb is not None else UsbCamera(backends=[]))
-    mon._hot_folder_choice = lambda *a: ("keep", False)
+    mon._start_hot_folder = lambda from_monitor=False: None
     mon.resize(1300, 820)
     mon.show()
     _app.processEvents()
@@ -347,26 +347,25 @@ class _MW(QObject):
         self.calls.append("stop")
         self._tether_active = False
 
-    def enter_tethering(self):
-        self.calls.append("enter")
+    def enter_tethering(self, from_monitor=False):
+        self.calls.append(("enter", from_monitor))
         self._tether_active = True
+        return {"start": True, "dont_ask": False}
 
     def toggle_tethering(self):
         self.calls.append("toggle")
 
 
-@pytest.mark.parametrize("active,choice,want", [
-    (False, "start", ["enter"]), (True, "start", ["stop", "enter"]),
-    (False, "keep", []), (True, "keep", [])])
-def test_hot_folder_prompt(active, choice, want):
+@pytest.mark.parametrize("active,want", [
+    (False, [("enter", True)]),       # off: the one start window, from the monitor
+    (True, [])])                      # on: nothing asked (the status strip shows it)
+def test_hot_folder_on_opening(active, want):
     mw = _MW(active)
     mon, feed, light, dev = _monitor(mw)
     try:
-        seen = []
-        mon._hot_folder_choice = lambda a, l, c: (seen.append((a, l, c)) or (choice, False))
+        del mon._start_hot_folder                  # the real one: calls the main window
         mon.ask_hot_folder()
         assert mw.calls == want
-        assert seen == [(active, "Roll 12" if active else "", 7)]
     finally:
         _close(mon)
 
@@ -376,10 +375,11 @@ def test_dont_ask_again_is_remembered():
     mon, feed, light, dev = _monitor(mw)
     try:
         asked = []
-        mon._hot_folder_choice = lambda *a: (asked.append(1) or ("keep", True))
+        mon._start_hot_folder = lambda from_monitor=False: (
+            asked.append(from_monitor) or {"start": False, "dont_ask": True})
         mon.ask_hot_folder()
         mon.ask_hot_folder()
-        assert asked == [1]
+        assert asked == [True]
     finally:
         _close(mon)
 
@@ -411,7 +411,7 @@ def test_file_menu_opens_one_monitor(monkeypatch):
 
     def make(main_window=None):
         m = real(main_window=main_window, feed=FakeFeed(), light=Light())
-        m._hot_folder_choice = lambda *a: ("keep", False)
+        m._start_hot_folder = lambda from_monitor=False: None
         made.append(m)
         return m
     monkeypatch.setattr(lm, "LiveCaptureMonitor", make)

@@ -173,18 +173,12 @@ there.
 - Video format: Automatic (default) / Prefer uncompressed / Prefer MJPEG.
 - Ask about Hot Folder Tether when the monitor opens (default on; §3.8).
 
-### 3.8 Hot Folder Tether prompt
-On opening the monitor (unless turned off in the prompt or Settings):
-- Not running: "Turn on Hot Folder Tether? The frames your camera's tether
-  app saves into a folder are loaded into FreeCCR as you shoot."
-  **Turn On…** / **Not Now**.
-- Running: "Hot Folder Tether is watching “Roll 12” (7 captured). Close that
-  session and start a new one for this scan?" **Start New…** /
-  **Keep Current**.
-- **Turn On…** and **Start New…** stop any running session
-  (`MainWindow.stop_tethering`) and start one (`enter_tethering`, with its
-  own folder picker and questions); cancelling the picker leaves it off.
-- A "Don't ask again" box in the prompt clears `live/ask_tether`.
+### 3.8 Hot Folder Tether on opening (revised 2026-10-30)
+With Hot Folder Tether off, opening the monitor shows FreeCCR's one "Start
+Hot Folder Tether" window straight away (folder, scan type, close open
+images, import existing files, "Don't ask when the monitor opens"); with it
+on, nothing is asked. Shooting over USB with it off shows the same window.
+See spec/tether-start-window.md.
 
 ## 4. Data model
 

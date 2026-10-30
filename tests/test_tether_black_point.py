@@ -95,8 +95,14 @@ def mw(tmp_path):
     ccr_backend.white_point_bgr = None
     ccr_backend.positive_mode = False
     w = MainWindow()
-    prompts = []
-    w._prompt_bwpoint_for_session = lambda: prompts.append(w._tether_lead_img)
+    prompts = []                 # the banner nudge (no pop-up since 2026-10-30)
+    real_nudge = w.tether_banner.set_black_point_nudge
+
+    def nudge(on):
+        if on and not getattr(w.tether_banner, "_nudging", False):
+            prompts.append(w._tether_lead_img)
+        real_nudge(on)
+    w.tether_banner.set_black_point_nudge = nudge
     w._tether_active = True
     w._tether_folder = str(tmp_path)
     w._tether_prompted = False
@@ -142,7 +148,7 @@ def test_a_dark_first_capture_doesnt_take_the_prompt(mw):
     assert prompts == [lit]
 
 
-def test_black_point_picks_the_newest_lit_capture(mw):
+def test_black_point_picks_the_lead_then_the_newest_lit_capture(mw):
     w, prompts, modes, hints, tmp = mw
     lit1 = _capture(tmp, "a.png", lit=True)
     lit2 = _capture(tmp, "b.png", lit=True)
@@ -150,8 +156,11 @@ def test_black_point_picks_the_newest_lit_capture(mw):
     for img in (lit1, lit2, dark):
         w._on_capture(img)
     _app.processEvents()
-    assert w.start_roll_black_point() is True
+    assert w.start_roll_black_point() is True             # the lead the banner named
     assert modes == ["black"]
+    assert w.thumbnail_list.thumbnail_list.currentRow() == ccr_backend.images.index(lit1)
+    w._tether_prompted = False                             # no lead: the newest lit one
+    assert w.start_roll_black_point() is True
     assert w.thumbnail_list.thumbnail_list.currentRow() == ccr_backend.images.index(lit2)
     # a frame asked for by name wins
     assert w.start_roll_black_point(lit1) is True

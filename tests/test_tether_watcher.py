@@ -340,8 +340,9 @@ def test_session_start_clears_bwpoint(tmp_path, monkeypatch):
     w = MainWindow()
     roll = tmp_path / "roll"          # empty → no "import existing?" prompt
     roll.mkdir()
-    monkeypatch.setattr(QFileDialog, "getExistingDirectory",
-                        lambda *a, **k: str(roll))
+    w._tether_start_options = lambda n, d, m=False: {
+        "start": True, "folder": str(roll), "scan_type": "colour",
+        "close_open": False, "import_existing": False, "dont_ask": False}
     w.enter_tethering()
     try:
         assert w._tether_active is True
@@ -360,10 +361,10 @@ def test_named_hot_folder_tether(tmp_path, monkeypatch):
     from widgets.tether_banner import TetherBanner
     w = MainWindow()
     assert w.tether_action.text() == "Hot Folder Tether…"
-    monkeypatch.setattr(QFileDialog, "getExistingDirectory",
-                        lambda *a, **k: str(tmp_path))
     monkeypatch.setattr(w._settings, "setValue", lambda *a, **k: None)
-    monkeypatch.setattr(w, "_tether_start_choice", lambda n: "add")   # images left open
+    w._tether_start_options = lambda n, d, m=False: {
+        "start": True, "folder": str(tmp_path), "scan_type": None,
+        "close_open": False, "import_existing": False, "dont_ask": False}
     w.enter_tethering()
     try:
         assert w.tether_action.text() == "Stop Hot Folder Tether"

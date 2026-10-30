@@ -819,43 +819,24 @@ class LiveCaptureMonitor(QWidget):
         return active, label, int(getattr(mw, "_tether_count", 0) or 0)
 
     def ask_hot_folder(self):
+        """On opening: with Hot Folder Tether off, show the one window that
+        starts it (spec/tether-start-window.md); with it on, nothing (the status
+        strip shows it). Its "Don't ask when the monitor opens" is remembered."""
         if self._closing or self._mw is None:
             return
         if not _settings().value("live/ask_tether", True, type=bool):
             return
-        active, label, count = self._tether_state()
-        choice, dont_ask = self._hot_folder_choice(active, label, count)
-        if dont_ask:
-            _settings().setValue("live/ask_tether", False)
-        if choice == "start":
-            if active:
-                self._mw.stop_tethering()
-            self._mw.enter_tethering()
+        active, _label, _count = self._tether_state()
+        if not active:
+            opts = self._start_hot_folder(from_monitor=True)
+            if opts and opts.get("dont_ask"):
+                _settings().setValue("live/ask_tether", False)
         self._refresh_status_strip()
 
-    def _hot_folder_choice(self, active, label, count):
-        """("start" | "keep", don't-ask-again). The test seam."""
-        box = QMessageBox(self)
-        box.setWindowTitle("Hot Folder Tether")
-        if active:
-            box.setText(f"Hot Folder Tether is watching “{label}” ({count} captured).")
-            box.setInformativeText("Close that session and start a new one for this scan?")
-            start = box.addButton("Start New…", QMessageBox.AcceptRole)
-            keep = box.addButton("Keep Current", QMessageBox.RejectRole)
-        else:
-            box.setText("Turn on Hot Folder Tether?")
-            from core import scan_type as st
-            box.setInformativeText(
-                "The frames your camera's tether app saves into a folder are loaded "
-                f"into FreeCCR as you shoot.\n\nScanning: {st.LABELS[st.clean(self.scan_type())]} "
-                "(change it under Capture).")
-            start = box.addButton("Turn On…", QMessageBox.AcceptRole)
-            keep = box.addButton("Not Now", QMessageBox.RejectRole)
-        box.setDefaultButton(start)
-        cb = QCheckBox("Don't ask when the monitor opens")
-        box.setCheckBox(cb)
-        box.exec()
-        return ("start" if box.clickedButton() is start else "keep"), cb.isChecked()
+    def _start_hot_folder(self, from_monitor=False):
+        """The main window's start window; its answers (None if it wasn't
+        shown). The test seam."""
+        return self._mw.enter_tethering(from_monitor=from_monitor)
 
     def _on_tether_button(self):
         if self._mw is None:
@@ -1557,9 +1538,7 @@ class LiveCaptureMonitor(QWidget):
         off); the USB camera is pointed at its folder."""
         active, label, count = self._tether_state()
         if not active and self._mw is not None:
-            choice, _dont = self._hot_folder_choice(False, label, count)
-            if choice == "start":
-                self._mw.enter_tethering()
+            self._start_hot_folder()
             active, label, count = self._tether_state()
         if active:
             self._usb_dest = self._tether_folder()
