@@ -945,6 +945,10 @@ class SlidersPanel(QWidget):
         # fold away under a + / − header; Convert and Auto Crop below stay
         # visible. Open by default, and it remembers (spec/bwp-section-collapsible.md).
         self.bwp_section = CollapsibleSection("Film B/W Point")
+        # Convert / Auto Crop and the anchor line go ABOVE this section (they
+        # are created further down and inserted here): used on every frame,
+        # they stay at the top whether it is open or folded.
+        _convert_slot = scroll_layout.count()
         scroll_layout.addWidget(self.bwp_section)
 
         bwp_row = theme.apply_button_row(QHBoxLayout())
@@ -1070,7 +1074,6 @@ class SlidersPanel(QWidget):
         # line of height + spacing, leaving a gap between this and the Convert row,
         # so keep it hidden until it has something to say (_update_bwp_mode_label).
         self.bwp_mode_label.setVisible(False)
-        scroll_layout.addWidget(self.bwp_mode_label)
         self._sync_wp_combo()
         self.convert_current_bwp_btn = QPushButton("Convert Current")
         self.convert_all_bwp_btn = QPushButton("Convert All")
@@ -1082,7 +1085,7 @@ class SlidersPanel(QWidget):
         convert_row = theme.apply_button_row(QHBoxLayout())
         convert_row.addWidget(self.convert_current_bwp_btn)
         convert_row.addWidget(self.convert_all_bwp_btn)
-        scroll_layout.addLayout(convert_row)
+        scroll_layout.insertLayout(_convert_slot, convert_row)
         # Auto crop, independent of Convert (spec/auto-crop-buttons.md): find
         # the frame on the raw scan, straighten, crop to the picture, with what
         # it has learned from your confirmed crops (spec/auto-crop-learning.md).
@@ -1106,7 +1109,8 @@ class SlidersPanel(QWidget):
         crop_row = theme.apply_button_row(QHBoxLayout())
         crop_row.addWidget(self.auto_crop_btn)
         crop_row.addWidget(self.auto_crop_all_btn)
-        scroll_layout.addLayout(crop_row)
+        scroll_layout.insertLayout(_convert_slot + 1, crop_row)
+        scroll_layout.insertWidget(_convert_slot + 2, self.bwp_mode_label)
 
         # Channel Levels sits directly under the Convert row and above the
         # WB/AWB row: it is the FIRST stage of the adjustment pipeline (it runs
