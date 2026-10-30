@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (QWidget, QFrame, QHBoxLayout, QVBoxLayout, QLabel
                                QScrollArea, QSlider, QMenu, QInputDialog, QMessageBox,
                                QFileDialog, QApplication)
 
+from core import base_exposure as be
 from core import camera_backends as cb
 from core import capture_light as cl
 from core import capture_sequence as cs
@@ -213,6 +214,7 @@ class LiveCaptureMonitor(QWidget):
     `light` can be injected (tests)."""
 
     closed = Signal()
+    _patch_read = Signal(int, object)    # a film-base test shot's reading (or error)
 
     def __init__(self, main_window=None, feed=None, light=None, usb=None, parent=None):
         super().__init__(parent, Qt.Window)
@@ -245,6 +247,13 @@ class LiveCaptureMonitor(QWidget):
         self._exp_waiting = {}           # field -> value sent, not yet confirmed
         self._exp_held = {}              # field -> value picked during a sequence
         self._addon_warned = set()       # cameras warned about this session
+        # film bases (spec/film-base-exposure.md)
+        self._measure = None             # the measuring in progress
+        self._measure_token = 0          # voids a finished measuring's timers / reads
+        self._pending_measure = None     # (name, index) waiting for a Film Base click
+        self._neg_base_pos = None        # the last Film Base click, frame fractions
+        self._shoot_exp_before = None    # the camera's exposure before a film-base Shoot
+        self._read_patch = be.read_patch
 
         st = _settings()
         self._toggles = _json_setting("live/toggles", {"denoise": True})
@@ -254,6 +263,7 @@ class LiveCaptureMonitor(QWidget):
                                            lf.EDGE_DEFAULT, lf.EDGE_LIMITS)
         self._timing = cs.clean_timing(_json_setting("live/timing", {}))
         self._presets = lp.normalise(st.value("live/presets", ""))
+        self._bases = be.normalise(st.value("live/film_bases", ""))
 
         self.feed = feed if feed is not None else lf.LiveFeed()
         if light is None:
@@ -275,6 +285,7 @@ class LiveCaptureMonitor(QWidget):
         self._wire()
         self._apply_toggles()
         self._refresh_presets()
+        self._refresh_film_bases()
         self._apply_scan_type(self.scan_type())
         self._on_ports(self.light.ports)          # the link may have reported already
         self._refresh_light_status()
@@ -609,6 +620,46 @@ class LiveCaptureMonitor(QWidget):
         r.addWidget(self.iso_combo, 1)
         self.exposure_row.setVisible(False)
         lay.addWidget(self.exposure_row)
+        # Film bases (spec/film-base-exposure.md): a shutter speed per colour,
+        # measured on the film base; shown with the Exposure row.
+        self.film_base_box = QWidget()
+        fb = QVBoxLayout(self.film_base_box)
+        fb.setContentsMargins(0, 0, 0, 0)
+        fb.setSpacing(theme.GAP_ROW)
+        r = QHBoxLayout()
+        r.setContentsMargins(0, 0, 0, 0)
+        theme.apply_button_row(r)
+        base_lab = QLabel("Film base")
+        col = max(col, base_lab.sizeHint().width())
+        for w in (lab, exp_lab, base_lab):
+            w.setFixedWidth(col)
+        r.addWidget(base_lab)
+        self.film_base_combo = QComboBox()
+        theme.shrinkable_combo(self.film_base_combo)
+        self.film_base_combo.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.film_base_combo.setToolTip(
+            "Film bases measured so far: each colour's shutter speed (and LED level) "
+            "that puts this film's base just under the sensor's ceiling.\n"
+            "Right-click: measure again, rename, delete.")
+        self.measure_btn = QPushButton("Measure…")
+        self.measure_btn.setToolTip(
+            "With the film base in view (click it in Negative Preview, or let the "
+            "border be found): test shots read the base in the RAW and pick each "
+            "colour's shutter speed at ISO 100. The shots aren't kept.")
+        r.addWidget(self.film_base_combo, 1)
+        r.addWidget(self.measure_btn)
+        fb.addLayout(r)
+        self.film_base_note = _muted("")
+        fb.addWidget(self.film_base_note)
+        self.film_base_use = QCheckBox("Shoot at these exposures")
+        self.film_base_use.setToolTip(
+            "Shoot over USB sets each colour's shutter speed and LED level from the "
+            "film base above before its shot. Off: Shoot uses the Exposure row.")
+        self.film_base_use.setChecked(_settings().value("live/film_base_use", True)
+                                      not in (False, "false", "0", 0))
+        fb.addWidget(self.film_base_use)
+        self.film_base_box.setVisible(False)
+        lay.addWidget(self.film_base_box)
         self.shoot_btn = QPushButton("Shoot   (S)")
         self.shoot_btn.setFixedHeight(theme.CONTROL_H_LG)
         theme.style_button(self.shoot_btn, "primary")
@@ -723,6 +774,13 @@ class LiveCaptureMonitor(QWidget):
         self.save_as_btn.clicked.connect(self._on_save_as)
         self.save_btn.clicked.connect(self._on_save)
         self.shoot_btn.clicked.connect(self.shoot)
+        self.film_base_combo.currentIndexChanged.connect(self._on_film_base_selected)
+        self.film_base_combo.customContextMenuRequested.connect(self._film_base_menu)
+        self.measure_btn.clicked.connect(self._on_measure_clicked)
+        self.film_base_use.toggled.connect(
+            lambda on: (_settings().setValue("live/film_base_use", bool(on)),
+                        self._refresh_film_bases()))
+        self._patch_read.connect(self._on_patch_read)
         self.timing_btn.clicked.connect(self._timing_popup)
         self.scan_combo.activated.connect(self._on_scan_type_chosen)
         self.tether_btn.clicked.connect(self._on_tether_button)
@@ -825,6 +883,9 @@ class LiveCaptureMonitor(QWidget):
         if self.sequence.running:
             self.sequence.on_finished = None
             self.sequence.stop()
+        if self._measure is not None:
+            self._measure["cal"].cancel()
+            self._measure_finish()
         self._save_view_state()
         st = _settings()
         st.setValue("live/geometry", self.saveGeometry())
@@ -1064,6 +1125,10 @@ class LiveCaptureMonitor(QWidget):
 
     def _on_escape(self):
         if self.canvas.cancel_mode():
+            self._pending_measure = None
+            return
+        if self._measure is not None:
+            self._measure_stop()
             return
         if self.sequence.running:
             self.sequence.stop()
@@ -1197,7 +1262,7 @@ class LiveCaptureMonitor(QWidget):
         self.camera_info.setText("  ·  ".join(bits))
         active, label, count = self._tether_state()
         folder = self._tether_folder() if active else None
-        if folder != self._usb_dest:
+        if folder != self._usb_dest and self._measure is None:
             self._usb_dest = folder
             self.usb.set_dest(folder)
         if self._mw is None:
@@ -1242,6 +1307,15 @@ class LiveCaptureMonitor(QWidget):
         bgr = self.feed.sample(sx, sy)
         if bgr is None:
             return
+        if target == "base":
+            full = self.feed.last_full_frame()
+            if full is not None and getattr(full, "ndim", 0) >= 2:
+                h, w = full.shape[:2]
+                self._neg_base_pos = (sx / max(1, w), sy / max(1, h), w, h)
+            if self._pending_measure is not None:
+                name, index = self._pending_measure
+                self._pending_measure = None
+                QTimer.singleShot(0, lambda: self.start_measure(name, index))
         self._neg[target] = bgr
         if target == "base" and self._neg.get("hi") is None:
             self._rebuild_negative(force_auto=True, keep_base=True)
@@ -1473,6 +1547,8 @@ class LiveCaptureMonitor(QWidget):
         if self.sequence.running:
             self.sequence.stop()
             return
+        if self._measure is not None:
+            return
         if self._sleeping is not None:
             return                       # the light is off while idle: Wake first
         tri = self.scan_type() == "trichrome"
@@ -1486,8 +1562,16 @@ class LiveCaptureMonitor(QWidget):
                 self._warn_caption("Shooting over USB brings the files in through Hot "
                                    "Folder Tether: turn it on to shoot.")
                 return
+            exposures = self._shoot_exposures(tri)
+            if exposures:
+                self._shoot_exp_before = {f: self._exposure.get(f) for f in ("shutter", "iso")
+                                          if self._exposure.get(f)}
+                self._hold_live(True)
             started = self.sequence.start(self._timing, self._preset(), tri,
-                                          shutter=self._usb_shutter)
+                                          shutter=self._usb_shutter, exposures=exposures)
+            if not started and exposures:
+                self._hold_live(False)
+                self._shoot_exp_before = None
         else:
             if not self.light.is_open():
                 return
@@ -1495,7 +1579,11 @@ class LiveCaptureMonitor(QWidget):
         if started:
             self._await_exposure = True
             self.shoot_btn.setText("Stop   (Esc)")
+            self.measure_btn.setEnabled(False)
             self._refresh_capture_caption()
+            note = self._film_base_shoot_note(tri)
+            if note:
+                self._note_caption(note)
 
     def _on_step(self, channel, duration_ms):
         self._ring_anim = (channel, time.monotonic(), max(1, duration_ms))
@@ -1514,6 +1602,11 @@ class LiveCaptureMonitor(QWidget):
             self.rings[ch].set_progress(p)
 
     def _on_sequence_finished(self, reason):
+        if self._shoot_exp_before is not None:   # a film-base Shoot: put the camera back
+            before, self._shoot_exp_before = self._shoot_exp_before, None
+            self._hold_live(False)
+            if before:
+                self._send_exposure(before)
         if self._exp_held:                       # picked while it ran
             held, self._exp_held = self._exp_held, {}
             self._send_exposure(held)
@@ -1522,6 +1615,7 @@ class LiveCaptureMonitor(QWidget):
         for ring in self.rings.values():
             ring.set_progress(None)
         self.shoot_btn.setText("Shoot   (S)")
+        self.measure_btn.setEnabled(True)
         self._refresh_light_status()
         if reason == "disconnected":
             self._warn_caption("Stopped: the Scanlight disconnected.")
@@ -1533,6 +1627,333 @@ class LiveCaptureMonitor(QWidget):
         elif reason == "camera lost":
             self._warn_caption("Stopped: the camera disconnected.")
         # "no file": _on_usb_skipped says why
+        self._refresh_shoot_enabled()
+
+    # ------------------------------------------------------------------ #
+    # film bases (spec/film-base-exposure.md)
+    # ------------------------------------------------------------------ #
+    def _hold_live(self, on):
+        hold = getattr(self.usb, "pause_live", None)
+        if hold is not None:
+            hold(on)
+
+    def _save_film_bases(self):
+        self._bases = be.normalise(self._bases)
+        _settings().setValue("live/film_bases", be.dumps(self._bases))
+
+    def _film_base(self):
+        return be.selected(self._bases)
+
+    def _refresh_film_bases(self):
+        d = self._bases = be.normalise(self._bases)
+        self.film_base_combo.blockSignals(True)
+        self.film_base_combo.clear()
+        if d["bases"]:
+            self.film_base_combo.addItems([b["name"] for b in d["bases"]])
+            self.film_base_combo.setCurrentIndex(d["selected"])
+        else:
+            self.film_base_combo.addItem("No film base yet")
+        self.film_base_combo.setEnabled(bool(d["bases"]) and self._measure is None)
+        self.film_base_combo.blockSignals(False)
+        tri = self.scan_type() == "trichrome"
+        base = self._film_base()
+        self.film_base_note.setText(be.summary(base, tri))
+        self.film_base_use.setEnabled(be.exposures_for(base, tri) is not None)
+
+    def _on_film_base_selected(self, i):
+        if i < 0 or not self._bases["bases"]:
+            return
+        self._bases["selected"] = i
+        self._save_film_bases()
+        self._refresh_film_bases()
+
+    def _film_base_menu(self, pos):
+        if self._measure is not None:
+            return
+        m = QMenu(self)
+        has = bool(self._bases["bases"])
+        a = m.addAction("Measure Again", lambda: self.start_measure(
+            self._film_base()["name"], self._bases["selected"]))
+        a.setEnabled(has)
+        m.addAction("Rename…", self._on_rename_film_base).setEnabled(has)
+        m.addAction("Delete…", self._on_delete_film_base).setEnabled(has)
+        m.popup(self.film_base_combo.mapToGlobal(pos))
+        self._popup = m
+
+    def _ask_film_base_name(self, default):
+        """The test seam: a name, or None for cancel."""
+        name, ok = QInputDialog.getText(self, "Measure Film Base", "Name this film base "
+                                        "(stock, batch):", text=default)
+        return name.strip() if ok and name.strip() else None
+
+    def _on_rename_film_base(self):
+        base = self._film_base()
+        if base is None:
+            return
+        name, ok = QInputDialog.getText(self, "Rename Film Base", "Name:", text=base["name"])
+        if ok and name.strip():
+            self._bases = be.rename(self._bases, self._bases["selected"], name.strip())
+            self._save_film_bases()
+            self._refresh_film_bases()
+
+    def _on_delete_film_base(self):
+        base = self._film_base()
+        if base is None:
+            return
+        if QMessageBox.question(self, "Delete Film Base", f"Delete “{base['name']}”?",
+                                QMessageBox.Yes | QMessageBox.No,
+                                QMessageBox.No) != QMessageBox.Yes:
+            return
+        self._bases = be.delete(self._bases, self._bases["selected"])
+        self._save_film_bases()
+        self._refresh_film_bases()
+
+    def _shoot_exposures(self, tri):
+        """The film base's exposures for a USB Shoot, or None."""
+        if not self.film_base_use.isChecked():
+            return None
+        return be.exposures_for(self._film_base(), tri)
+
+    def _film_base_shoot_note(self, tri):
+        base = self._film_base()
+        if base is None or not self.film_base_use.isChecked():
+            return ""
+        if self.sequence.exposures:
+            return f"Shooting at “{base['name']}”: {be.summary(base, tri)}"
+        if not self._shutter_is_usb():
+            return ("The film base's exposures need the USB camera as the Shutter: "
+                    "shooting at the camera's own settings.")
+        if be.exposures_for(base, tri) is None:
+            return (f"“{base['name']}” wasn't measured for this scan type: shooting at the "
+                    "Exposure row's settings.")
+        return ""
+
+    def _on_measure_clicked(self):
+        if self._measure is not None:
+            self._measure_stop()
+            return
+        name = self._ask_film_base_name(be.default_name())
+        if name:
+            self.start_measure(name)
+
+    def _film_base_patch(self):
+        """(rect in frame fractions, where) for reading the base: the Film Base
+        click, else a border found on the live picture with HIGH confidence
+        (two edges agreeing), else (None, ""). A lone bright edge can be bare
+        light round the film, which would expose the base a stop or more
+        under, so anything less asks for the click."""
+        if self._neg_base_pos is not None:
+            fx, fy, w, h = self._neg_base_pos
+            return be.patch_around(fx, fy, w, h), "where you clicked"
+        frame = self.feed.last_full_frame()
+        if frame is None:
+            return None, ""
+        try:
+            from core.auto_black_point import find_rebate
+            res = find_rebate(frame)
+        except Exception:
+            return None, ""
+        if res.rect and res.confidence == "high":
+            return be.patch_inset(res.rect), f"the {res.side} border"
+        return None, ""
+
+    def start_measure(self, name, index=None):
+        """Measure a film base: `index` set = Measure Again on that entry."""
+        if self._measure is not None or self.sequence.running:
+            return False
+        if self._sleeping is not None:
+            self._warn_caption("Wake the light first.")
+            return False
+        shutters = self._exp_choices.get("shutter") or []
+        if not self.usb.is_open() or not shutters:
+            self._warn_caption("Measuring needs a USB camera whose shutter speed FreeCCR "
+                               "can set.")
+            return False
+        tri = self.scan_type() == "trichrome"
+        if tri and not self.light.is_open():
+            self._warn_caption("Measuring for trichrome needs the Scanlight connected: it "
+                               "lights each colour.")
+            return False
+        rect, where = self._film_base_patch()
+        if rect is None:
+            self._pending_measure = (name, index)
+            self._pick_target = "base"
+            self.canvas.set_mode("pick")
+            self._note_caption("Click the film base in the picture (the clear border "
+                               "beside the frame): measuring starts after.  Esc cancels.")
+            return False
+        self._used()
+        if tri:
+            # each LED from full (the user's choice): the shutter does the
+            # balancing, so no colour is slowed by a preset's dimmed LED
+            colours = list(be.COLOURS)
+            start = {c: cl.solo({c: 255}, c) for c in colours}
+        else:
+            colours = ["w"]
+            start = {"w": dict(self._levels) if self.light.is_open() else None}
+        first = self._exposure.get("shutter") or self.shutter_speed_combo.currentData()
+        cal = be.Calibration(colours, start, shutters, self._exp_choices.get("iso") or [],
+                             first, can_dim=self.light.is_open())
+        if cal.done:
+            self._warn_caption(cal.error or "Nothing to measure.")
+            return False
+        import tempfile
+        self._measure_token += 1
+        self._measure = {
+            "cal": cal, "name": name, "index": index, "rect": rect, "where": where,
+            "temp": tempfile.mkdtemp(prefix="freeccr-film-base-"),
+            "levels": dict(self._levels),
+            "exposure": {f: self._exposure.get(f) for f in ("shutter", "iso")
+                         if self._exposure.get(f)},
+            "in_flight": False, "stopping": False, "token": self._measure_token,
+        }
+        self._hold_live(True)
+        self.usb.set_dest(self._measure["temp"])
+        self.measure_btn.setText("Stop Measuring")
+        self._refresh_film_bases()
+        self._refresh_shoot_enabled()
+        self._measure_next()
+        return True
+
+    def _measure_next(self):
+        m = self._measure
+        if m is None:
+            return
+        cal = m["cal"]
+        shot = cal.next_shot()
+        if shot is None:
+            self._measure_finish()
+            return
+        colour, levels, exp = shot
+        if colour in be.COLOURS and not self.light.is_open():
+            cal.failed("The Scanlight disconnected.")
+            self._measure_finish()
+            return
+        if levels is not None and self.light.is_open():
+            self.set_levels(levels)
+        what = be.NAMES.get(colour, colour) if colour in be.COLOURS else "the film base"
+        self._note_caption(f"Measuring {what} ({m['where']}): shot {cal.shots + 1} at "
+                           f"{be.short_text(exp['shutter'])}, ISO {exp['iso']}…  Esc stops.")
+        token = m["token"]
+        QTimer.singleShot(cs.settle_ms(self._timing), lambda: self._measure_fire(token, exp))
+
+    def _measure_fire(self, token, exp):
+        m = self._measure
+        if m is None or m["token"] != token:
+            return
+        if m["stopping"]:
+            self._measure_finish()
+            return
+        m["in_flight"] = True
+        m["shot"] = m.get("shot", 0) + 1
+        shot = m["shot"]
+        wait_ms = (cs.FILE_TIMEOUT_S + (be.seconds(exp.get("shutter")) or 0.0)) * 1000.0
+        QTimer.singleShot(int(wait_ms), lambda: self._measure_timeout(token, shot))
+        self.usb.fire(exp)
+
+    def _measure_timeout(self, token, shot):
+        m = self._measure
+        if m is None or m["token"] != token or m.get("shot") != shot or not m["in_flight"]:
+            return
+        m["cal"].failed(f"No file from the camera after {int(cs.FILE_TIMEOUT_S)} s.")
+        self._measure_finish()
+
+    def _measure_landed(self, path):
+        m = self._measure
+        if not m["in_flight"]:
+            return                               # not ours (a late file)
+        m["in_flight"] = False
+        token = m["token"]
+        rect = m["rect"]
+        read = self._read_patch
+
+        def work():
+            try:
+                out = read(path, rect)
+            except Exception as e:
+                out = e
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            self._patch_read.emit(token, out)
+
+        import threading
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_patch_read(self, token, reading):
+        m = self._measure
+        if m is None or m["token"] != token:
+            return
+        cal = m["cal"]
+        if isinstance(reading, Exception):
+            cal.failed(f"Couldn't read the test shot ({reading}).")
+        elif m["stopping"]:
+            cal.cancel()
+        else:
+            cal.landed(reading)
+        if cal.done:
+            self._measure_finish()
+        else:
+            self._measure_next()
+
+    def _measure_stop(self):
+        """Stop: at once, or once the shot on its way has landed (a shot is
+        never abandoned, so its file can't reach the hot folder)."""
+        m = self._measure
+        if m is None:
+            return
+        if m["in_flight"]:
+            m["stopping"] = True
+            self._note_caption("Stopping after this shot…")
+            return
+        m["cal"].cancel()
+        self._measure_finish()
+
+    def _measure_finish(self):
+        m, self._measure = self._measure, None
+        if m is None:
+            return
+        self._measure_token += 1
+        cal = m["cal"]
+        if not cal.done:
+            cal.cancel()
+        # put back what measuring changed: the light, the camera's exposure, the
+        # download folder, live view
+        if self.light.is_open() and m["levels"] is not None and self._sleeping is None:
+            self.set_levels(m["levels"])
+        if m["exposure"] and self.usb.is_open():
+            setter = getattr(self.usb, "set_exposure", None)
+            if setter is not None:
+                for f, v in m["exposure"].items():
+                    setter(f, v)
+        self.usb.set_dest(self._usb_dest)
+        self._hold_live(False)
+        import shutil
+        shutil.rmtree(m["temp"], ignore_errors=True)
+        self.measure_btn.setText("Measure…")
+        if cal.error is None and cal.result:
+            camera = self._usb_model or ""
+            if m["index"] is not None:
+                self._bases = be.replace(self._bases, m["index"], cal.result, camera, cal.notes)
+            else:
+                self._bases = be.add(self._bases, be.entry(m["name"], cal.result, camera,
+                                                           cal.notes))
+            self._save_film_bases()
+            self._refresh_film_bases()
+            base = self._film_base()
+            tri = self.scan_type() == "trichrome"
+            self._note_caption(f"Film base “{base['name']}” measured in {cal.shots} shots: "
+                               + be.summary(base, tri))
+        else:
+            self._refresh_film_bases()
+            if cal.error == "cancelled":
+                self._note_caption("Measuring stopped; nothing was saved.")
+            else:
+                self._warn_caption(cal.error or "Measuring didn't finish.")
+        if self._exp_held:
+            held, self._exp_held = self._exp_held, {}
+            self._send_exposure(held)
         self._refresh_shoot_enabled()
 
     # ------------------------------------------------------------------ #
@@ -1554,6 +1975,10 @@ class LiveCaptureMonitor(QWidget):
         return data.startswith("usb:") and getattr(self.usb, "key", data) == data
 
     def _refresh_shoot_enabled(self):
+        if self._measure is not None:
+            self.shoot_btn.setEnabled(False)
+            self.shoot_btn.setToolTip("Measuring the film base")
+            return
         if self.sequence.running:
             self.shoot_btn.setEnabled(True)
             self.shoot_btn.setToolTip("")
@@ -1657,6 +2082,9 @@ class LiveCaptureMonitor(QWidget):
         if kind in ("lost", "closed", "error", "busy", "open"):
             self.addon_badge.setVisible(False)       # an open camera is checked afresh
         if kind in ("lost", "closed", "error", "busy"):
+            if self._measure is not None:
+                self._measure["cal"].failed("The camera disconnected.")
+                self._measure_finish()
             self._exposure = {}
             self.cam_zoom_combo.setVisible(False)
             self._on_exposure_choices({})
@@ -1681,6 +2109,9 @@ class LiveCaptureMonitor(QWidget):
                 "Switching the camera off and on brings live view back.")
 
     def _on_usb_file(self, path):
+        if self._measure is not None:
+            self._measure_landed(path)
+            return
         if self.sequence.running and self.sequence.camera_shutter:
             self.sequence.frame_done(path)
         elif not self.sequence.running:
@@ -1702,6 +2133,10 @@ class LiveCaptureMonitor(QWidget):
                                "shots in.")
 
     def _on_fire_failed(self, text):
+        if self._measure is not None:
+            self._measure["cal"].failed(text)
+            self._measure_finish()
+            return
         self.sequence.fire_failed(text)
         if not self.sequence.running:
             self._warn_caption(text)
@@ -1741,6 +2176,7 @@ class LiveCaptureMonitor(QWidget):
             combo.blockSignals(False)
             combo.setVisible(bool(vals))
         self.exposure_row.setVisible(bool(self._exp_choices))
+        self.film_base_box.setVisible(bool(self._exp_choices.get("shutter")))
         self._select_exposure()
 
     def _select_exposure(self):
@@ -1764,10 +2200,11 @@ class LiveCaptureMonitor(QWidget):
         if (field not in self._exp_waiting and field not in self._exp_held
                 and str(self._exposure.get(field)) == value):
             return                                # already set
-        if self.sequence.running:
+        if self.sequence.running or self._measure is not None:
             self._exp_held[field] = value
             self._note_caption(f"{self.exposure_label(field, value)} is set when "
-                               "this shot finishes.")
+                               + ("measuring finishes." if self._measure is not None
+                                  else "this shot finishes."))
             return
         self._send_exposure({field: value})
 
@@ -1878,6 +2315,8 @@ class LiveCaptureMonitor(QWidget):
         self.neg_bw.setChecked(t == "bw")
         self._refresh_capture_caption()
         self._refresh_shoot_enabled()
+        if hasattr(self, "film_base_note"):
+            self._refresh_film_bases()
 
     def _refresh_capture_caption(self):
         tri = self.scan_type() == "trichrome"
@@ -1961,6 +2400,7 @@ class LiveCaptureMonitor(QWidget):
     def _check_idle(self):
         mins = self._idle_minutes()
         if (self._sleeping is not None or mins <= 0 or self.sequence.running
+                or self._measure is not None
                 or not self.light.is_open() or not any(self._levels.values())):
             return
         if time.monotonic() - self._last_use >= mins * 60:
@@ -2014,8 +2454,11 @@ class _UsbShutter:
     def __init__(self, win):
         self.win = win
 
-    def fire(self):
-        self.win.usb.fire()
+    def fire(self, exposure=None):
+        if exposure:
+            self.win.usb.fire(exposure)
+        else:
+            self.win.usb.fire()
 
 
 class _SequenceLight:

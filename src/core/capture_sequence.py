@@ -11,6 +11,11 @@ apart: a shot waits, it is never dropped. Trichrome: R, G, then B, each lit
 alone at the preset's value, then White at the preset's value for
 positioning the next frame. Stop finishes a pulse already fired (never cuts
 one) and skips the rest; a light that disconnects stops it.
+
+With a film base (spec/film-base-exposure.md) a camera-shutter run takes
+`exposures`: each colour's LED levels and shutter speed / ISO, set before its
+shot, the exposure handed to the shutter with the fire so the camera takes it
+first.
 """
 import time
 
@@ -76,6 +81,11 @@ def exposure_seconds(path):
         return None
 
 
+def _exposure_s(exp):
+    from core.base_exposure import seconds
+    return (seconds((exp or {}).get("shutter")) or 0.0) if exp else 0.0
+
+
 def _qt_schedule(ms, fn):
     from PySide6.QtCore import QTimer
     QTimer.singleShot(max(0, int(round(ms))), fn)
@@ -89,7 +99,12 @@ class CaptureSequence:
     With a `shutter` (an object with `fire()`: a USB camera) a shot is
     colour -> settle -> fire -> wait for `frame_done()` (its file landed) or
     FILE_TIMEOUT_S; the light is needed only to set trichrome colours.
-    Without one, the Scanlight's focus/pulse timers as before."""
+    Without one, the Scanlight's focus/pulse timers as before.
+
+    `exposures` (camera shutter only): {"r"/"g"/"b" or "w": {"shutter",
+    "iso", "levels"}}: a colour lights at its own levels and the shutter gets
+    `fire(exposure)`; the file timeout and the step's duration include the
+    exposure time."""
 
     def __init__(self, light, schedule=None, clock=time.monotonic,
                  on_step=None, on_finished=None):
@@ -109,11 +124,15 @@ class CaptureSequence:
         self._phase = "idle"         # idle | waiting | focus | pulse | settle | exposing
         self._shutter = None
         self._shot = 0               # voids a shot's file timeout once it is done
+        self.exposures = None
+        self._channel = None         # the colour of the shot in flight
 
-    def start(self, timing, preset, trichrome=True, shutter=None):
+    def start(self, timing, preset, trichrome=True, shutter=None, exposures=None):
         if self.running:
             return False
         self._shutter = shutter
+        self.exposures = ({k: dict(v) for k, v in exposures.items() if isinstance(v, dict)}
+                          if (exposures and shutter is not None) else None)
         self._trichrome = bool(trichrome)
         if not self._light_ok():
             self._finish("disconnected", restore=False)
@@ -190,12 +209,18 @@ class CaptureSequence:
                 self._later(wait, self._next)
                 return
         channel = self._queue.pop(0)
+        self._channel = channel
+        exp = self._exposure_for(channel)
         if channel is not None:
-            self.light.set_levels(cl.solo(self._preset, channel))
+            lv = (exp or {}).get("levels")
+            self.light.set_levels(dict(lv) if lv else cl.solo(self._preset, channel))
+        elif exp and exp.get("levels") and self.light.is_open():
+            self.light.set_levels(dict(exp["levels"]))
         self._last_shot = self._clock()
         if self._shutter is not None:
             if self.on_step:
-                self.on_step(channel, settle_ms(self._timing) + USB_SHOT_EST_MS)
+                self.on_step(channel, settle_ms(self._timing) + USB_SHOT_EST_MS
+                             + 1000.0 * _exposure_s(exp))
             self._phase = "settle"
             self._later(settle_ms(self._timing), self._fire_camera)
             return
@@ -219,6 +244,11 @@ class CaptureSequence:
         self._phase = "idle"
         self._next()
 
+    def _exposure_for(self, channel):
+        if not self.exposures:
+            return None
+        return self.exposures.get(channel if channel is not None else "w")
+
     def _fire_camera(self):
         if self._stop or not self._light_ok():
             self._finish("stopped" if self._stop else "disconnected")
@@ -226,10 +256,14 @@ class CaptureSequence:
         self._phase = "exposing"
         self._shot += 1
         shot = self._shot
-        self._later(FILE_TIMEOUT_S * 1000.0,
+        exp = self._exposure_for(self._channel)
+        self._later((FILE_TIMEOUT_S + _exposure_s(exp)) * 1000.0,
                     lambda: self._finish("timeout")
                     if (self._phase == "exposing" and self._shot == shot) else None)
-        self._shutter.fire()
+        if exp:
+            self._shutter.fire({k: exp[k] for k in ("shutter", "iso") if exp.get(k)})
+        else:
+            self._shutter.fire()
 
     def _finish(self, reason, restore=True):
         was = self.running

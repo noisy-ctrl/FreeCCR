@@ -51,6 +51,7 @@ class UsbCamera(WorkerThread):
         self._seq = 0
         self._live = False
         self._paused = False
+        self._hold_live = False          # no previews while held (film base, Shoot)
         self._want = {}                  # exposure asked for, latest wins
         self.backend = None
         self.key = None
@@ -75,8 +76,18 @@ class UsbCamera(WorkerThread):
     def set_live(self, on):
         self._command(("live", bool(on)))
 
-    def fire(self):
-        self._command(("fire",))
+    def fire(self, exposure=None):
+        """Take a picture. With `exposure` ({"shutter", "iso"}) the worker sets
+        it first, in the same turn, and fires only if the camera took every
+        value (spec/film-base-exposure.md)."""
+        self._command(("fire", dict(exposure) if exposure else None))
+
+    def pause_live(self, on):
+        """Hold live view: no preview requests until released, so a camera
+        that refuses settings while live view runs (GFX 50S II) takes each one
+        straight away. Separate from the user's live view switch."""
+        self._hold_live = bool(on)
+        self._wake.set()
 
     def set_zoom(self, level):
         self._command(("zoom", str(level)))
@@ -165,7 +176,8 @@ class UsbCamera(WorkerThread):
                     if self.backend is None or self.status != "open":
                         continue
                 data = None
-                if self._live and not getattr(self.backend, "no_preview", False):
+                if (self._live and not self._hold_live
+                        and not getattr(self.backend, "no_preview", False)):
                     data = self.backend.preview()
                     if data:
                         self._publish(data)
@@ -223,6 +235,9 @@ class UsbCamera(WorkerThread):
         elif kind == "fire":
             if self.backend is None or self.status != "open":
                 self.fire_failed.emit("The camera isn't open.")
+                return
+            exposure = cmd[1] if len(cmd) > 1 else None
+            if exposure and not self._set_for_shot(exposure):
                 return
             try:
                 self.backend.fire()
@@ -293,6 +308,37 @@ class UsbCamera(WorkerThread):
             found = []
         if found:
             self.addons_found.emit(found)
+
+    def _set_for_shot(self, exposure):
+        """Set a shot's exposure; False (and fire_failed) if any value wasn't
+        taken."""
+        setter = getattr(self.backend, "set_exposure", None)
+        if setter is None:
+            self.fire_failed.emit("This camera's exposure can't be set over USB.")
+            return False
+        try:
+            results = setter(dict(exposure))
+        except cb.CameraLost as e:
+            self._lose(str(e))
+            self.fire_failed.emit("The camera disconnected.")
+            return False
+        except Exception as e:
+            results = {f: (False, str(e)) for f in exposure}
+        bad = [(f, t) for f, (ok, t) in results.items() if not ok]
+        if bad:
+            f, text = bad[0]
+            value = exposure.get(f)
+            what = f"ISO {value}" if f == "iso" else str(value)
+            self.fire_failed.emit(f"The camera didn't take {what}" + (f" ({text})." if text
+                                                                     else "."))
+            return False
+        try:
+            exp = self.backend.exposure()
+            if exp:
+                self.exposure_changed.emit(exp)
+        except Exception:
+            pass
+        return True
 
     def _apply_exposure(self):
         """Set what was asked for, unless a shot is on its way (then a later
