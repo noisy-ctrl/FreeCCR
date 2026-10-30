@@ -22,12 +22,14 @@ def test_export_is_pushed_to_the_right_end():
     ip = w.image_preview
     tb = ip.toolbar
     export = tb.widgetForAction(ip.export_action)
-    zoom = ip.zoom_combo
+    fc = tb.widgetForAction(ip.fc_action)
     assert ip.export_push.sizePolicy().horizontalPolicy() == QSizePolicy.Expanding
     right = tb.width()
     ex = export.geometry()
-    assert ex.right() > right - 40                       # at the end, a small margin
-    assert zoom.geometry().right() < ex.left() - 100     # the rest stays on the left
+    zoom = ip.zoom_combo.geometry()
+    # Export, then only the zoom box (revision 2026-10-30: zoom far right)
+    assert ex.right() < zoom.left() and zoom.right() > right - 40
+    assert fc.geometry().right() < ex.left() - 100       # the rest stays on the left
 
 
 def test_convert_and_un_convert_sit_with_export_behind_a_plain_gap():
@@ -55,5 +57,6 @@ def test_convert_and_un_convert_sit_with_export_behind_a_plain_gap():
     fc = tb.widgetForAction(ip.fc_action).geometry()
     assert un.right() < conv.left() and conv.right() < exp.left()
     assert exp.left() - conv.right() >= EXPORT_GAP_PX           # the break
+    assert EXPORT_GAP_PX > 18                                 # wider than it was
     assert un.left() - fc.right() > 100                       # pushed right, away from the rest
-    assert exp.right() > tb.width() - 40
+    assert ip.zoom_combo.geometry().left() > exp.right()      # zoom box last

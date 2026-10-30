@@ -52,15 +52,15 @@ def test_a_new_window_shows_the_saved_state():
         w.hide()
 
 
-def test_it_leads_the_toolbar_before_the_orientation_icons():
-    """Convert and Un-convert moved to the right with Export (revision
-    2026-10-30), so the sprocket button now starts the toolbar."""
+def test_it_follows_the_orientation_icons():
+    """Revision 2026-10-30: after the rotate / flip tools, before Area."""
     w = MainWindow()
     try:
         acts = [a for a in w.image_preview.toolbar.actions() if not a.isSeparator()
                 and (a.text() or not a.icon().isNull())]
         names = [a.text() for a in acts]
         i = names.index("Sprocket Holes White")
-        assert i == 0 and i < names.index("Rotate Left")
+        assert names[i - 1] == "Mirror Horizontal"
+        assert names.index("Rotate Left") < i < names.index("Area")
     finally:
         w.hide()

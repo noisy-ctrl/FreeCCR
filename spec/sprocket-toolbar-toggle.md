@@ -5,8 +5,8 @@ turned out to be what whitened deep shadows on tethered captures converted
 with a lead frame's black point).
 
 ## What
-A checkable icon button on the canvas toolbar (first, since Convert and
-Un-convert moved to the right on 2026-10-30; it was right after Un-convert), for
+A checkable icon button on the canvas toolbar, right after the rotate / flip
+icons (the user's choice, 2026-10-30; it began after Un-convert), for
 the existing global switch "White sprocket holes / clear film (reversal
 look)" (Settings → Film border, `ccr_backend.sprocket_mask_white`, QSettings
 `adjust/sprocket_mask_white`, `spec/sprocket-hole-mask.md`).

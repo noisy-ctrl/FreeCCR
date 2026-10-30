@@ -804,7 +804,8 @@ def orientation_prompt(kind, frames):
     return prompt
 
 
-EXPORT_GAP_PX = 18     # the line-less break between Convert and Export
+EXPORT_GAP_PX = 32     # the line-less break between Convert and Export (was 18)
+ZOOM_GAP_PX = 8        # ... and the one between Export and the zoom box
 
 
 class ImagePreview(QWidget):
@@ -832,11 +833,12 @@ class ImagePreview(QWidget):
             spacer.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
             self.toolbar.addWidget(spacer)
 
-        # Order (spec/toolbar-rework.md, revised 2026-10-30): sprocket holes
-        # (icon) | rotate / mirror (icons) | Area, Gradient, Dust | zoom, HDR,
-        # False colour ........ Un-convert, Convert   Export. Convert and
-        # Un-convert sit on the right with Export, a plain gap (no line)
-        # between them and Export. Text buttons carry no symbols; only the
+        # Order (spec/toolbar-rework.md, revised 2026-10-30): rotate / mirror
+        # (icons), sprocket holes (icon) | Area, Gradient, Dust | HDR, False
+        # colour ........ Un-convert, Convert      Export  Fit. Convert and
+        # Un-convert sit on the right with Export, a wide plain gap (no line)
+        # between them and Export; the zoom box is last, as in the Live
+        # Capture Monitor. Text buttons carry no symbols; only the
         # icon-only buttons are pictures. The actions are made here (the rest
         # of the class refers to them) and placed on the toolbar at the end.
         self.convert_action = QAction("Convert", self)
@@ -861,11 +863,7 @@ class ImagePreview(QWidget):
             "Same as Settings → Film border.")
         self.sprocket_action.triggered.connect(
             lambda checked: self.window().on_sprocket_mask_toggled(bool(checked)))
-        self.toolbar.addAction(self.sprocket_action)
-        add_spacer()
 
-        self.toolbar.addSeparator()
-        add_spacer()
         rotate_left_icon = theme.load_tinted_icon(resource_path("icons/rotate-left-icon-size_512.png"))
         if rotate_left_icon.isNull():
             rotate_left_icon = QIcon.fromTheme("view-refresh")
@@ -905,6 +903,8 @@ class ImagePreview(QWidget):
         self.mirror_h_action.setCheckable(True)
         self.mirror_h_action.triggered.connect(lambda _checked=False: self.mirror_horizontal())
         self.toolbar.addAction(self.mirror_h_action)
+        add_spacer()
+        self.toolbar.addAction(self.sprocket_action)     # after the orientation tools
         add_spacer()
 
         self.toolbar.addSeparator()
@@ -946,12 +946,13 @@ class ImagePreview(QWidget):
 
         self.toolbar.addSeparator()
         add_spacer()
-        # Zoom percentage dropdown (before Export). Percentages are relative
-        # to the source image's ACTUAL full resolution, not the preview size.
+        # Zoom percentage dropdown (placed at the far right, after Export, as
+        # in the Live Capture Monitor). Percentages are relative to the
+        # source image's ACTUAL full resolution, not the preview size.
         self.zoom_combo = QComboBox()
         self.zoom_combo.addItems(["Fit", "25%", "50%", "100%", "200%"])
         self.zoom_combo.setCurrentIndex(0)
-        self.zoom_combo.setFixedWidth(78)
+        self.zoom_combo.setFixedWidth(74)
         # Editable + read-only line edit: lets the box DISPLAY arbitrary live
         # percentages from wheel zoom while still being a pick-only dropdown.
         self.zoom_combo.setEditable(True)
@@ -962,8 +963,6 @@ class ImagePreview(QWidget):
             "Zoom level — percentages are relative to the image's actual size "
             "(100% = one source pixel per screen pixel)")
         self.zoom_combo.activated.connect(self._on_zoom_combo)
-        self.toolbar.addWidget(self.zoom_combo)
-        add_spacer(6)
         # HDR glow view: tint what will glow in a "JPEG + HDR gain map"
         # export. A display mode only, off at startup and never saved.
         # See spec/hdr-gain-map-export.md.
@@ -1026,6 +1025,12 @@ class ImagePreview(QWidget):
         self.export_action = QAction("Export…", self)
         self.export_action.triggered.connect(self.open_export_dialog)
         self.toolbar.addAction(self.export_action)
+        # ... and the zoom box last, at the far right (a plain gap before it)
+        self.zoom_gap = QWidget()
+        self.zoom_gap.setFixedWidth(ZOOM_GAP_PX)
+        self.zoom_gap.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+        self.toolbar.addWidget(self.zoom_gap)
+        self.toolbar.addWidget(self.zoom_combo)
         export_margin = QWidget()
         export_margin.setFixedWidth(6)
         export_margin.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
