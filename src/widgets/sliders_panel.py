@@ -4053,6 +4053,8 @@ class SlidersPanel(QWidget):
                 msg += f"; {summ['fallback']} fell back"
             if summ.get("auto_wp"):
                 msg += f"; auto white point on {summ['auto_wp']}"
+            if summ.get("cropped"):
+                msg += f"; {summ['cropped']} cropped to the frame"
             if summ.get("unanchored"):
                 msg += (f"; {summ['unanchored']} had no film base to measure "
                         "(fixed density invert)")

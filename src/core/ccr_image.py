@@ -239,6 +239,23 @@ def _glow_area_of(img):
     return (tuple(rect), float(getattr(img, "crop_angle", 0.0) or 0.0))
 
 
+
+def clip_gain_offset(img, converted=None, ws=None):
+    """The Master Gain offset of a frame converted with "white at the
+    brightest point" (conversion_inputs["clip_gain"], spec/convert-crop-and-
+    clip.md §2), or None. It is part of how the frame was converted, so it
+    replaces Auto Gain whether or not Auto Gain is on; it rides Auto tone,
+    like the shoulder it stands in for. A plain function so test stubs and
+    any image-like object work."""
+    from core.ccr_backend import ccr_backend
+    from core.ccr_processor import CH_SLIDER_DIV
+    converted = getattr(img, "converted", False) if converted is None else converted
+    ws = bool(getattr(img, "_ws_windowed", False)) if ws is None else ws
+    g = (getattr(img, "conversion_inputs", None) or {}).get("clip_gain")
+    if not g or not converted or not ws or not getattr(ccr_backend, "auto_tone", True):
+        return None
+    return float(CH_SLIDER_DIV * (1.0 - 1.0 / float(g)))
+
 class CCRImage:
     def __init__(
         self,
@@ -1579,10 +1596,16 @@ class CCRImage:
             from core.look_lut import resolve_look
             if resolve_look(s.get("look_lut")) is not None:
                 return 0.0       # ignored by apply_adjustments with a look
+        cg = self._clip_gain_offset(converted, ws)
+        if cg is not None:
+            return cg
         if not (getattr(ccr_backend, "auto_gain", True) and converted):
             return 0.0
         xt = s if (ws and crosstalk_applies(getattr(self, "conversion_inputs", None))) else None
         return self._auto_gain_cached(base, ws, xt)
+
+    def _clip_gain_offset(self, converted=None, ws=None):
+        return clip_gain_offset(self, converted, ws)
 
     def _auto_gain_cached(self, base: np.ndarray, ws: bool, xt_settings,
                           processed: Optional[np.ndarray] = None) -> float:
@@ -2044,8 +2067,12 @@ class CCRImage:
             look = resolve_look(s.get("look_lut"))
         auto_on = (getattr(ccr_backend, "auto_gain", True) and self.converted
                    and look is None)
+        clip_ag = None if look is not None else clip_gain_offset(self, None, ws)
         if auto_gain_override is not None and look is None:
             ag = float(auto_gain_override)     # measured once from the full base
+        elif clip_ag is not None:
+            ag = clip_ag                       # this frame's own gain (brightest point)
+            auto_on = True                     # it stands in for Auto Gain: no eb
         elif not auto_on:
             ag = 0.0
         elif healed:

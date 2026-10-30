@@ -341,6 +341,12 @@ class MainWindow(QMainWindow):
         # Confirm before a no-anchor conversion (spec/no-anchor-convert.md).
         ccr_backend.warn_no_anchor_convert = self._settings.value(
             "convert/warn_no_anchor", True, type=bool)
+        # Convert, then crop; nothing clips (spec/convert-crop-and-clip.md).
+        ccr_backend.crop_after_convert = self._settings.value(
+            "convert/crop_after", True, type=bool)
+        from core.clip_guard import clean_mode
+        ccr_backend.clip_mode = clean_mode(str(self._settings.value(
+            "convert/clip_mode", "rolloff") or "rolloff"))
         # Auto crop learns from confirmed crops (spec/auto-crop-learning.md).
         ccr_backend.auto_crop_learn = self._settings.value(
             "crop/learn", True, type=bool)
@@ -1224,6 +1230,26 @@ class MainWindow(QMainWindow):
             "near-grey area." if checked else
             "Auto white point off: frames start with no white point (the default "
             "slope).", duration=5000)
+
+    def on_crop_after_convert_toggled(self, checked: bool):
+        """Convert, then crop (spec/convert-crop-and-clip.md §1): persist the
+        switch. Nothing already converted changes."""
+        ccr_backend.crop_after_convert = bool(checked)
+        self._settings.setValue("convert/crop_after", bool(checked))
+        self.sliders_panel.set_temporary_hint(
+            "Convert now crops each frame to what Auto Crop finds." if checked
+            else "Convert no longer crops; use Auto Crop.", duration=5000)
+
+    def on_clip_mode_changed(self, mode: str):
+        """How Convert treats each frame's ends (spec/convert-crop-and-clip.md
+        §2). New conversions only: a frame keeps what it was converted with."""
+        from core.clip_guard import clean_mode, LABELS
+        mode = clean_mode(mode)
+        ccr_backend.clip_mode = mode
+        self._settings.setValue("convert/clip_mode", mode)
+        self.sliders_panel.set_temporary_hint(
+            f"Highlights and shadows: {LABELS[mode]}. Applies to the next "
+            "conversions.", duration=5000)
 
     def on_warn_no_anchor_toggled(self, checked: bool):
         """Flip the confirm-before-unanchored-conversion flag and persist it.

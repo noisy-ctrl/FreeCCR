@@ -46,3 +46,5 @@ its own, usable before or after converting, and drop the tickbox.
   undo; cancelling changes nothing.
 - The panel has the two buttons and no tickbox; the hints for a crop and a
   refusal.
+
+> Revised 2026-10-30 by `spec/convert-crop-and-clip.md`: Convert now also crops each frame it converts (a Settings switch, on by default), with the same detection and the same rules as Auto Crop All.

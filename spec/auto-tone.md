@@ -108,3 +108,5 @@ and is monotone; strength follows the share above white; lamps beyond 1.3 do
 not drag the knee down; nothing is measured without a picture area, and
 re-measuring a base that no longer needs it drops it; the render passes it
 only while the setting is on, and leaves values below the knee untouched.
+
+> Revised 2026-10-30 by `spec/convert-crop-and-clip.md`: with "Highlights and shadows" on Roll off (the default) the shoulder reaches the picture's brightest point (no 1.3 cap) and the black lift is raised until nothing clips, tuned on the real render; "As before" keeps this spec's behaviour.

@@ -166,6 +166,31 @@ class SettingsDialog(QDialog):
             "instead of measuring your film — the frame keeps its own cast, and "
             "you grade it with Channel Levels. Turn this off to skip the "
             "confirmation and convert straight away."))
+        # Convert, then crop; nothing clips (spec/convert-crop-and-clip.md)
+        self._cb_crop_after = QCheckBox("Crop each frame after converting it")
+        gc.addWidget(self._cb_crop_after)
+        gc.addWidget(self._muted(
+            "Convert finds the frame the way Auto Crop does, measures the "
+            "conversion inside it, then crops to it (one undo step). Only when "
+            "auto crop is sure, and never over a crop you drew or confirmed."))
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Highlights and shadows"))
+        self._combo_clip_mode = QComboBox()
+        from core.clip_guard import LABELS as _CLIP_LABELS, MODES as _CLIP_MODES
+        for mode in _CLIP_MODES:
+            self._combo_clip_mode.addItem(_CLIP_LABELS[mode], mode)
+        row.addWidget(self._combo_clip_mode, 1)
+        gc.addLayout(row)
+        self._clip_note = self._muted(
+            "How Convert treats the ends of each frame. Roll off: brightness "
+            "as before, with the brightest and darkest parts eased into the "
+            "range so no part of the picture is pure white or black. White at "
+            "the brightest point: the frame's brightest part becomes white, so "
+            "nothing clips, but a lamp or a reflection makes the frame darker "
+            "and flatter. Works through Auto tone (above). New conversions "
+            "only.")
+        gc.addWidget(self._clip_note)
+        self._cb_auto_tone.toggled.connect(self._combo_clip_mode.setEnabled)
         lay.addWidget(grp_conv)
 
         # --- Auto crop learning (spec/auto-crop-learning.md) ------------- #
@@ -700,6 +725,8 @@ class SettingsDialog(QDialog):
                          getattr(ccr_backend, "auto_white_point", True)),
                         (self._cb_warn_no_anchor,
                          getattr(ccr_backend, "warn_no_anchor_convert", True)),
+                        (self._cb_crop_after,
+                         getattr(ccr_backend, "crop_after_convert", True)),
                         (self._cb_crop_learn,
                          getattr(ccr_backend, "auto_crop_learn", True)),
                         (self._cb_auto_awb, ccr_backend.auto_awb),
@@ -716,6 +743,11 @@ class SettingsDialog(QDialog):
         self._combo_merge_detail.setCurrentIndex(
             self._combo_merge_detail.findData(self._backend_merge_detail()))
         self._combo_merge_detail.blockSignals(False)
+        self._combo_clip_mode.blockSignals(True)
+        self._combo_clip_mode.setCurrentIndex(max(0, self._combo_clip_mode.findData(
+            getattr(ccr_backend, "clip_mode", "rolloff"))))
+        self._combo_clip_mode.blockSignals(False)
+        self._combo_clip_mode.setEnabled(self._cb_auto_tone.isChecked())
         self._combo_preview_detail.blockSignals(True)
         self._combo_preview_detail.setCurrentIndex(max(0,
             self._combo_preview_detail.findData(
@@ -804,6 +836,12 @@ class SettingsDialog(QDialog):
                 != bool(getattr(ccr_backend, "warn_no_anchor_convert", True))):
             self._mw.on_warn_no_anchor_toggled(
                 bool(self._cb_warn_no_anchor.isChecked()))
+        if (bool(self._cb_crop_after.isChecked())
+                != bool(getattr(ccr_backend, "crop_after_convert", True))):
+            self._mw.on_crop_after_convert_toggled(bool(self._cb_crop_after.isChecked()))
+        mode = self._combo_clip_mode.currentData()
+        if mode and mode != getattr(ccr_backend, "clip_mode", "rolloff"):
+            self._mw.on_clip_mode_changed(mode)
         if (bool(self._cb_crop_learn.isChecked())
                 != bool(getattr(ccr_backend, "auto_crop_learn", True))):
             self._mw.on_auto_crop_learn_toggled(bool(self._cb_crop_learn.isChecked()))
