@@ -160,3 +160,74 @@ def test_guide_values_are_kept_in_range():
     g = clean_guide({"cx": 3, "cy": -1, "w": 0, "h": "x", "angle": 90, "format": 5})
     assert g["cx"] == 1.0 and g["cy"] == 0.0 and g["w"] > 0 and g["angle"] == 45.0
     assert g["format"] is None
+
+
+def _readout_centre(c):
+    c.sharp_on = True
+    c.result.sharp = (5.0, 10.0)
+    c.grab()                                  # paints, which places the readout
+    r = c._readout_rect
+    assert r is not None
+    return (r.center().x(), r.center().y())
+
+
+def test_a_click_on_the_sharpness_readout_asks_for_a_new_best():
+    """A left click on the meter is the menu's Reset Best; it wins over the
+    frame guide and a pan (it is drawn on top), not over a one-shot mode."""
+    c, render = _canvas()
+    hits = []
+    c.meter_clicked.connect(lambda: hits.append(1))
+    at = _readout_centre(c)
+    _press(c, at)
+    _release(c, at)
+    assert hits == [1] and c._drag is None
+    # with the frame guide placed under it, the click still goes to the meter
+    gx = at[0] / c.width()
+    gy = at[1] / c.height()
+    c.set_guide({"cx": gx, "cy": gy, "w": 0.3, "h": 0.3}, on=True)
+    c.grab()
+    _press(c, at)
+    _release(c, at)
+    assert hits == [1, 1] and c.guide["cx"] == pytest.approx(gx)
+    # zoomed in: not a pan
+    c.scale = 2.0
+    c.view_changed.emit()
+    assert _readout_centre(c) == at           # the readout stays put
+    _press(c, at)
+    assert hits == [1, 1, 1] and c._drag is None
+    _release(c, at)
+    # elsewhere: nothing
+    _press(c, (c.width() - 40, 40))
+    _release(c, (c.width() - 40, 40))
+    assert len(hits) == 3
+    # the right button: nothing (that's the toolbar's menu)
+    c.mousePressEvent(_mouse(QMouseEvent.Type.MouseButtonPress, at, Qt.RightButton))
+    assert len(hits) == 3
+    # drawing an area may start over the meter
+    c.set_mode("area")
+    _press(c, at)
+    assert len(hits) == 3 and c._rubber is not None
+    c.cancel_mode()
+    c._rubber = None
+
+
+def test_a_hidden_meter_takes_no_clicks():
+    c, render = _canvas()
+    hits = []
+    c.meter_clicked.connect(lambda: hits.append(1))
+    at = _readout_centre(c)
+    c.sharp_on = False
+    c.grab()
+    assert c._readout_rect is None
+    _press(c, at)
+    _release(c, at)
+    assert hits == []
+
+
+def test_the_pointer_shows_the_meter_is_clickable():
+    c, render = _canvas()
+    at = _readout_centre(c)
+    c.mouseMoveEvent(_mouse(QMouseEvent.Type.MouseMove, at, Qt.NoButton))
+    assert c.cursor().shape() == Qt.PointingHandCursor
+    c.mouseMoveEvent(_mouse(QMouseEvent.Type.MouseMove, (c.width() - 40, 40), Qt.NoButton))
+    assert c.cursor().shape() == Qt.ArrowCursor

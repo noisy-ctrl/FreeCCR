@@ -373,6 +373,7 @@ class LiveCaptureMonitor(QWidget):
         toggle("sharp", "Sharpness",
                "A focus meter: how sharp the view (or a drawn area) is, as a "
                "share of the best this session. Brightness doesn't move it.\n"
+               "Click the meter to start a new best.\n"
                "Right-click: draw the area, whole view, reset the best.",
                self._sharp_menu)
         toggle("fc", "False colour",
@@ -653,6 +654,7 @@ class LiveCaptureMonitor(QWidget):
         c.line_placed.connect(lambda x: self._save_view_state())
         c.guide_changed.connect(lambda g: self._save_view_state())
         c.pointer_moved.connect(self._used)
+        c.meter_clicked.connect(self._reset_sharp_best)
         self.histogram.clip_hover.connect(self._on_clip_hover)
         self.feed.frame_ready.connect(self._on_frame)
         self.feed.cameras_found.connect(self._on_cameras)

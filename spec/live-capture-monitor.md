@@ -97,7 +97,7 @@ pattern: slider rows, value labels, Reset).
 |---|---|---|
 | Reduce noise | on | Strength |
 | Edge amplify | off | Amount, Radius |
-| Sharpness | off | Draw Area…, Whole Frame, Reset Best |
+| Sharpness | off | Draw Area…, Whole Frame, Reset Best (or click the meter) |
 | False colour | off | none (exposure bands only, §5.8) |
 | Frame guide | off | Format (FreeCCR's film formats), Free, Size / Position / Rotation nudges, Reset |
 | Alignment | off | Place Line… (then click the picture) |
@@ -288,7 +288,9 @@ per-frame time is logged with `FREECCR_LIVE_TIMING=1`.
   read as losing focus.
 - Shown as "% of best" with a bar and a tick at the session best, where
   "best" is the highest score **for this area and zoom**, reset when either
-  changes or from the menu. The reference's best decayed with a 17 s
+  changes, from the menu, or by a left click on the readout itself (2026-10-30;
+  pointing-hand cursor and a tooltip over it, no mode active; it takes the
+  click before the frame guide or a pan, since it is drawn on top). The reference's best decayed with a 17 s
   half-life, so "100 %" drifted to mean "recently".
 - Read from the fresh frame (before Reduce noise), so it follows the focus
   ring with no lag.
