@@ -829,6 +829,34 @@ class ImagePreview(QWidget):
             spacer.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
             self.toolbar.addWidget(spacer)
 
+        # Workflow order (spec/toolbar-rework.md, 2026-10-30): Convert,
+        # Un-convert | rotate / mirror (icons) | Area, Gradient, Dust | zoom,
+        # HDR, False colour ........ Export. Text buttons carry no symbols;
+        # only the icon-only buttons are pictures.
+        self.convert_action = QAction("Convert", self)
+        self.convert_action.setToolTip(
+            "Convert the current frame or all frames (asks which).")
+        self.convert_action.triggered.connect(self.convert_ccr)
+        self.toolbar.addAction(self.convert_action)
+        _conv_btn = self.toolbar.widgetForAction(self.convert_action)
+        if _conv_btn is not None:                  # the main action: bold
+            _conv_btn.setStyleSheet("QToolButton { font-weight: bold; }")
+        add_spacer()
+
+        self.unconvert_action = QAction("Un-convert", self)
+        self.unconvert_action.triggered.connect(self.unconvert_ccr)
+        self.toolbar.addAction(self.unconvert_action)
+        # Destructive revert → red text when enabled, muted when disabled.
+        _unconv_btn = self.toolbar.widgetForAction(self.unconvert_action)
+        if _unconv_btn is not None:
+            _unconv_btn.setStyleSheet(
+                f"QToolButton {{ color: {theme.DANGER}; }}"
+                f"QToolButton:hover {{ color: {theme.DANGER_HOVER}; }}"
+                f"QToolButton:disabled {{ color: {theme.TEXT_DISABLED}; }}")
+        add_spacer()
+
+        self.toolbar.addSeparator()
+        add_spacer()
         rotate_left_icon = theme.load_tinted_icon(resource_path("icons/rotate-left-icon-size_512.png"))
         if rotate_left_icon.isNull():
             rotate_left_icon = QIcon.fromTheme("view-refresh")
@@ -870,10 +898,12 @@ class ImagePreview(QWidget):
         self.toolbar.addAction(self.mirror_h_action)
         add_spacer()
 
+        self.toolbar.addSeparator()
+        add_spacer()
         # Area-editing mask pickers — create a local masked adjustment area
         # (the global panel is the implicit whole-image layer). Guarded to
         # converted images inside add_area().
-        self.add_circle_action = QAction("◯ Area", self)
+        self.add_circle_action = QAction("Area", self)
         self.add_circle_action.setToolTip(
             "Add a circular local-adjustment area (squishable ellipse). "
             "Edit its adjustments in the right panel; drag on the canvas to "
@@ -882,7 +912,7 @@ class ImagePreview(QWidget):
         self.toolbar.addAction(self.add_circle_action)
         add_spacer()
 
-        self.add_gradient_action = QAction("▤ Gradient", self)
+        self.add_gradient_action = QAction("Gradient", self)
         self.add_gradient_action.setToolTip(
             "Add a linear-gradient local-adjustment area. Drag its endpoints "
             "on the canvas to aim the ramp.")
@@ -890,10 +920,45 @@ class ImagePreview(QWidget):
         self.toolbar.addAction(self.add_gradient_action)
         add_spacer()
 
+        # Dust removal: opens the Dust Removal panel (covers the sliders) and a
+        # paint/AI-detect mode on the canvas. Checkable so it reflects mode
+        # state. With the area tools. "Dust", not "Dust Removal": the toolbar
+        # must still fit at a 14-inch Mac's full width without pushing Export
+        # into the overflow menu (a test checks).
+        self.dust_action = QAction("Dust", self)
+        self.dust_action.setCheckable(True)
+        self.dust_action.setToolTip(
+            "Spot out dust, hair and small scratches. Opens the Dust Removal "
+            "panel: paint over dust with the brush, or use AI auto-detect.")
+        self.dust_action.triggered.connect(
+            lambda checked: self.window().toggle_dust_removal(checked))
+        self.toolbar.addAction(self.dust_action)
+        add_spacer()
+
+        self.toolbar.addSeparator()
+        add_spacer()
+        # Zoom percentage dropdown (before Export). Percentages are relative
+        # to the source image's ACTUAL full resolution, not the preview size.
+        self.zoom_combo = QComboBox()
+        self.zoom_combo.addItems(["Fit", "25%", "50%", "100%", "200%"])
+        self.zoom_combo.setCurrentIndex(0)
+        self.zoom_combo.setFixedWidth(78)
+        # Editable + read-only line edit: lets the box DISPLAY arbitrary live
+        # percentages from wheel zoom while still being a pick-only dropdown.
+        self.zoom_combo.setEditable(True)
+        self.zoom_combo.lineEdit().setReadOnly(True)
+        self.zoom_combo.lineEdit().setAlignment(Qt.AlignCenter)
+        self.zoom_combo.setInsertPolicy(QComboBox.NoInsert)
+        self.zoom_combo.setToolTip(
+            "Zoom level — percentages are relative to the image's actual size "
+            "(100% = one source pixel per screen pixel)")
+        self.zoom_combo.activated.connect(self._on_zoom_combo)
+        self.toolbar.addWidget(self.zoom_combo)
+        add_spacer(6)
         # HDR glow view: tint what will glow in a "JPEG + HDR gain map"
         # export. A display mode only, off at startup and never saved.
         # See spec/hdr-gain-map-export.md.
-        self.hdr_tint_action = QAction("☀ HDR", self)
+        self.hdr_tint_action = QAction("HDR", self)
         self.hdr_tint_action.setCheckable(True)
         self.hdr_tint_action.setToolTip(
             "Dot the highlights that will glow on an HDR screen in a "
@@ -923,72 +988,10 @@ class ImagePreview(QWidget):
                 lambda pos, b=_fc_btn: self._show_fc_menu(b.mapToGlobal(pos)))
         add_spacer()
 
-        # Dust removal: opens the Dust Removal panel (covers the sliders) and a
-        # paint/AI-detect mode on the canvas. Checkable so it reflects mode
-        # state. Grouped with the area-editing tools (a separator before it).
-        self.toolbar.addSeparator()
-        add_spacer()
-        # "Dust", not "Dust Removal": the text False colour button needs the
-        # room, and the toolbar must still fit at a 14-inch Mac's full width
-        # without pushing Export into the overflow menu (a test checks).
-        self.dust_action = QAction("🧹 Dust", self)
-        self.dust_action.setCheckable(True)
-        self.dust_action.setToolTip(
-            "Spot out dust, hair and small scratches. Opens the Dust Removal "
-            "panel: paint over dust with the brush, or use AI auto-detect.")
-        self.dust_action.triggered.connect(
-            lambda checked: self.window().toggle_dust_removal(checked))
-        self.toolbar.addAction(self.dust_action)
-        add_spacer()
-
-        self.convert_action = QAction("Convert", self)
-        self.convert_action.setToolTip(
-            "Convert the current frame or all frames (asks which).")
-        self.convert_action.triggered.connect(self.convert_ccr)
-        self.toolbar.addAction(self.convert_action)
-        add_spacer()
-
-        self.unconvert_action = QAction("Un-convert", self)
-        self.unconvert_action.triggered.connect(self.unconvert_ccr)
-        self.toolbar.addAction(self.unconvert_action)
-        # Destructive revert → red text when enabled, muted when disabled.
-        _unconv_btn = self.toolbar.widgetForAction(self.unconvert_action)
-        if _unconv_btn is not None:
-            _unconv_btn.setStyleSheet(
-                f"QToolButton {{ color: {theme.DANGER}; }}"
-                f"QToolButton:hover {{ color: {theme.DANGER_HOVER}; }}"
-                f"QToolButton:disabled {{ color: {theme.TEXT_DISABLED}; }}")
-        add_spacer()
-
         self.export_action = QAction("Export…", self)
         self.export_action.triggered.connect(self.open_export_dialog)
         self.toolbar.addAction(self.export_action)
 
-        # Zoom percentage dropdown (before Export). Percentages are relative
-        # to the source image's ACTUAL full resolution, not the preview size.
-        self.zoom_combo = QComboBox()
-        self.zoom_combo.addItems(["Fit", "25%", "50%", "100%", "200%"])
-        self.zoom_combo.setCurrentIndex(0)
-        self.zoom_combo.setFixedWidth(78)
-        # Editable + read-only line edit: lets the box DISPLAY arbitrary live
-        # percentages from wheel zoom while still being a pick-only dropdown.
-        self.zoom_combo.setEditable(True)
-        self.zoom_combo.lineEdit().setReadOnly(True)
-        self.zoom_combo.lineEdit().setAlignment(Qt.AlignCenter)
-        self.zoom_combo.setInsertPolicy(QComboBox.NoInsert)
-        self.zoom_combo.setToolTip(
-            "Zoom level — percentages are relative to the image's actual size "
-            "(100% = one source pixel per screen pixel)")
-        self.zoom_combo.activated.connect(self._on_zoom_combo)
-        zoom_spacer_l = QWidget()
-        zoom_spacer_l.setFixedWidth(8)
-        zoom_spacer_l.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
-        zoom_spacer_r = QWidget()
-        zoom_spacer_r.setFixedWidth(8)
-        zoom_spacer_r.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
-        self.toolbar.insertWidget(self.export_action, zoom_spacer_l)
-        self.toolbar.insertWidget(self.export_action, self.zoom_combo)
-        self.toolbar.insertWidget(self.export_action, zoom_spacer_r)
         # Export sits at the far right, next to the histogram: everything before
         # it stays left-aligned and this spacer takes up the slack.
         self.export_push = QWidget()
