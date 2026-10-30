@@ -153,6 +153,12 @@ def look_template(src):
     vflip = getattr(src, "vertical_mirrored", False)
     crop = getattr(src, "crop_rect", None)
     crop_angle = getattr(src, "crop_angle", 0.0) or 0.0
+    # Was that crop auto crop's? Then the capture may get its own frame after
+    # it converts (spec/convert-crop-and-clip.md §1); a hand crop is kept.
+    auto = getattr(src, "auto_crop_rect", None)
+    crop_is_auto = bool(crop is not None and auto is not None
+                        and tuple(crop) == tuple(auto)
+                        and not getattr(src, "auto_crop_example", None))
     profile = getattr(src, "color_profile", "color")
     if not (adj or areas or rot or fine or hflip or vflip
             or crop is not None or crop_angle or profile != "color"):
@@ -166,6 +172,7 @@ def look_template(src):
         "vertical_mirrored": vflip,
         "crop_rect": crop,
         "crop_angle": crop_angle,
+        "crop_is_auto": crop_is_auto,
         "color_profile": profile,
     }
 
@@ -182,6 +189,8 @@ def apply_look_template(img, t):
     img.vertical_mirrored = t["vertical_mirrored"]
     img.crop_rect = t["crop_rect"]
     img.crop_angle = t["crop_angle"]
+    if t.get("crop_is_auto") and t["crop_rect"] is not None:
+        img.auto_crop_rect = tuple(t["crop_rect"])
     img.color_profile = t["color_profile"]
 
 

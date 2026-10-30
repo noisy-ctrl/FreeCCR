@@ -94,11 +94,19 @@ def measure(display: np.ndarray, rect=None) -> Optional[dict]:
         strength = min(1.0, (over - HI_START) / (HI_FULL - HI_START))
         top = 1.0 + (min(float(np.percentile(mx, HI_PCT)), HI_MAX) - 1.0) * strength
         if top > 1.0 + 1e-3:
-            knee = float(np.clip(1.0 - KNEE_GAIN * (top - 1.0), KNEE_MIN, KNEE_MAX))
-            u = (top - knee) / (1.0 - knee)
-            params.update(knee=round(knee, 4), top=round(top, 4),
-                          sigma=round(_solve_sigma(u), 6))
+            params.update(shoulder(top))
     return params or None
+
+
+def shoulder(top: float) -> dict:
+    """The shoulder's parameters for rolling everything up to `top` into
+    white: the knee drops with the overshoot (between KNEE_MIN and KNEE_MAX)
+    and sigma gives slope 1 at the knee and `top` -> exactly 1."""
+    top = float(top)
+    knee = float(np.clip(1.0 - KNEE_GAIN * (top - 1.0), KNEE_MIN, KNEE_MAX))
+    u = (top - knee) / (1.0 - knee)
+    return {"knee": round(knee, 4), "top": round(top, 4),
+            "sigma": round(_solve_sigma(u), 6)}
 
 
 def apply(d: np.ndarray, params: Optional[dict]) -> np.ndarray:

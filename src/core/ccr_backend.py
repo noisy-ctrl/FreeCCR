@@ -119,8 +119,16 @@ class CCRBackend:
         # for the frame; rendering applies it while this is on. Restored by
         # MainWindow (adjust/auto_tone).
         self.auto_tone: bool = True
-        # Auto crop (spec/auto-crop.md, spec/auto-crop-buttons.md) is its own
-        # action now, not part of Convert: see auto_crop_one / auto_crop_all.
+        # Nothing clips at conversion (spec/convert-crop-and-clip.md §2):
+        # "rolloff" | "brightest" | "legacy". Restored by MainWindow
+        # (convert/clip_mode); rides Auto tone.
+        self.clip_mode: str = "rolloff"
+        # Convert, then crop (spec/convert-crop-and-clip.md §1): after a frame
+        # converts it gets the frame auto crop finds, when auto crop may change
+        # its crop and is sure. Restored by MainWindow (convert/crop_after).
+        self.crop_after_convert: bool = True
+        # Auto crop (spec/auto-crop.md, spec/auto-crop-buttons.md) is also its
+        # own action: see auto_crop_one / auto_crop_all.
         # Learn from the crops you confirm (spec/auto-crop-learning.md).
         # Persisted by MainWindow (crop/learn); the store is core.crop_memory.
         self.auto_crop_learn: bool = True
@@ -1557,6 +1565,7 @@ class CCRBackend:
                         img.tint_balance_factor = tbf
                     self._reconvert_in_place(img)       # replays bw in the new mode
                     self.measure_auto_tone(img)         # a new base: re-measure
+                    self.guard_clipping(img)
                     img.update_thumbnail_and_preview()
                 except Exception as e:
                     print(f"Density reprocess failed for "
@@ -2863,17 +2872,42 @@ class CCRBackend:
             img.update_thumbnail_and_preview()
         return frame, applied
 
+    @staticmethod
+    def is_crop_candidate(img):
+        """Auto crop may change this frame's crop: it has none, or still has
+        the one auto crop set. A crop you drew yourself, or confirmed with
+        Done, stays."""
+        if getattr(img, "auto_crop_example", None):
+            return False
+        rect = getattr(img, "crop_rect", None)
+        if rect is None:
+            return True
+        auto = getattr(img, "auto_crop_rect", None)
+        return auto is not None and tuple(rect) == tuple(auto)
+
     def auto_crop_candidates(self):
-        """Frames Auto Crop All may change: uncropped, or still holding the crop
-        auto crop set. A crop you drew yourself, or confirmed with Done, stays."""
-        out = []
-        for img in self.images:
-            if getattr(img, "auto_crop_example", None):
-                continue
-            rect = getattr(img, "crop_rect", None)
-            if rect is None or rect == getattr(img, "auto_crop_rect", None):
-                out.append(img)
-        return out
+        """Frames Auto Crop All may change (is_crop_candidate)."""
+        return [img for img in self.images if self.is_crop_candidate(img)]
+
+    def crop_after_conversion(self, img, frame) -> bool:
+        """Convert, then crop (spec/convert-crop-and-clip.md §1): set the frame
+        auto crop found as the crop of a frame that just converted, exactly as
+        Auto Crop would (one undo step, after the conversion), when the setting
+        is on, auto crop may change this frame's crop and the detection is
+        usable. An unchanged crop is left alone (no junk undo step)."""
+        if (not self.crop_after_convert or frame is None or not frame.usable
+                or not self.is_crop_candidate(img)):
+            return False
+        rect = getattr(img, "crop_rect", None)
+        if (rect is not None
+                and all(abs(a - b) < 1e-6 for a, b in zip(rect, frame.rect))
+                and abs((getattr(img, "crop_angle", 0.0) or 0.0) - frame.angle) < 1e-6):
+            return False
+        try:
+            return self.apply_auto_crop(img, frame)
+        except Exception as e:                   # a crop never undoes a conversion
+            print(f"Crop after converting failed for {getattr(img, 'file_path', '?')}: {e}")
+            return False
 
     def auto_crop_all(self, progress_callback=None, should_cancel=None):
         """Auto Crop All: auto crop every frame `auto_crop_candidates` allows,
@@ -3085,6 +3119,147 @@ class CCRBackend:
         return white_point(black, used), rec
 
         # --- Auto tone (spec/auto-tone.md) ---------------------------------------
+    def _finish_tone(self, img, rect=None):
+        """After a fresh conversion: Auto tone's toe/shoulder, the AWB, then
+        the clipping guard (which measures the render they all make)."""
+        self.measure_auto_tone(img, rect)
+        self.maybe_auto_awb(img)
+        self.guard_clipping(img, rect)
+
+    def guard_clipping(self, img, rect=None):
+        """Nothing clips at conversion (spec/convert-crop-and-clip.md §2):
+        tune this frame's shoulder (rolloff) or gain (brightest), and its
+        black lift, on the real default render until no picture pixel has a
+        channel at 0 or 255 (core.clip_guard). Records
+        conversion_inputs["clip_guard"] (and ["clip_gain"] for brightest).
+        Returns that record, or None when the guard doesn't apply."""
+        import numpy as np
+        from core import clip_guard as cg
+        from core.auto_tone import shoulder
+        from core.ccr_processor import (WS_B, _WS_INV_WIDTH, _master_gain_divisor,
+                                        CH_SLIDER_DIV, AG_GMIN, AG_GMAX)
+        ci = getattr(img, "conversion_inputs", None)
+        if not ci:
+            return None
+        ci.pop("clip_guard", None)
+        ci.pop("clip_gain", None)
+        mode = cg.clean_mode(getattr(self, "clip_mode", cg.DEFAULT_MODE))
+        bw = ci.get("bw")
+        if (mode == "legacy" or not self.auto_tone or ci.get("mode") != "bw"
+                or not bw or bw[0] is None or not getattr(img, "converted", False)
+                or not getattr(img, "_ws_windowed", False)
+                or (img.adjustment_settings or {}).get("look_lut")):
+            return None
+        if rect is None:
+            rect = (tuple(ci["picture"]) if ci.get("picture")
+                    else self._known_picture_rect(img))
+        base = getattr(img, "resized_raw", None)
+        if rect is None or base is None:
+            return None
+        try:
+            at0 = dict(ci.get("auto_tone") or {})
+            renders = [0]
+            seen = {}
+            settings = img.adjustment_settings or {}
+            # Render just the picture (a little faster) unless something
+            # placed on the frame needs the whole of it.
+            whole = bool(getattr(img, "area_layers", None)) or bool(settings.get("glow"))
+            h, w = base.shape[:2]
+            x1, y1, x2, y2 = (float(v) for v in rect)
+            # the picture plus a margin, so the 3x3 median at its edge sees
+            # the same neighbours as in a render of the whole frame
+            r0, r1 = max(0, int(y1 * h) - 2), min(h, int(round(y2 * h)) + 2)
+            c0, c1 = max(0, int(x1 * w) - 2), min(w, int(round(x2 * w)) + 2)
+            if whole:
+                part, part_rect = base, rect
+            else:
+                part = np.ascontiguousarray(base[r0:r1, c0:c1])
+                ph, pw = r1 - r0, c1 - c0
+                part_rect = ((x1 * w - c0) / pw, (y1 * h - r0) / ph,
+                             (x2 * w - c0) / pw, (y2 * h - r0) / ph)
+
+            def counts(params, gain):
+                key = (tuple(sorted(params.items())), None if gain is None else round(gain, 6))
+                if key in seen:
+                    return seen[key]
+                renders[0] += 1
+                if params:
+                    ci["auto_tone"] = params
+                else:
+                    ci.pop("auto_tone", None)
+                if gain is None:
+                    ci.pop("clip_gain", None)
+                else:
+                    ci["clip_gain"] = float(gain)
+                ag = img._auto_gain_for_base(base)          # from the WHOLE base
+                out = img.apply_adjustments(part, auto_gain_override=ag, skip_dust=True)
+                seen[key] = cg.clip_counts(out, part_rect)
+                return seen[key]
+
+            d = base.astype(np.float32)
+            d -= np.float32(WS_B)
+            d *= np.float32(_WS_INV_WIDTH)
+            gain = None
+            if mode == "brightest":
+                _lo1, hi1 = cg.robust_extremes(d, rect)
+                gain = float(np.clip(cg.AIM / max(hi1, 1e-3), AG_GMIN, AG_GMAX))
+                params = {k: v for k, v in at0.items() if k not in ("knee", "top", "sigma")}
+                hi = hi1 * gain
+            else:
+                g_now = 1.0 / _master_gain_divisor(img._auto_gain_for_base(base))
+                params = dict(at0)
+                _lo, hi = cg.robust_extremes(d * np.float32(g_now), rect)
+            top0 = hi + cg.TOP_PAD
+            if mode == "rolloff" and top0 > 1.0 + 1e-3:
+                params.update(shoulder(top0))
+
+            black, white, total = counts(params, gain)
+            if white:
+                if mode == "rolloff":
+                    def with_reach(k):
+                        p = dict(params)
+                        p.update(shoulder(max(top0, 1.0) + (max(top0, 1.0) - 1.0 + cg.REACH_PAD)
+                                          * (k - 1.0) + 1e-3))
+                        return p
+                    k, _ok = cg.bisect_clear(lambda k: counts(with_reach(k), gain)[1] > 0,
+                                             1.0, cg.REACH_MAX, cg.STEPS_WHITE)
+                    params = with_reach(k)
+                else:
+                    g0 = gain
+                    t, _ok = cg.bisect_clear(lambda t: counts(params, g0 * (1.0 - t))[1] > 0,
+                                             0.0, 1.0 - cg.GAIN_FLOOR, cg.STEPS_WHITE)
+                    gain = max(AG_GMIN, g0 * (1.0 - t))
+                black, white, total = counts(params, gain)
+            if black:
+                base_lift = float(params.get("lift", 0.0))
+
+                def with_lift(x):
+                    p = dict(params)
+                    if base_lift + x > 0:
+                        p["lift"] = round(base_lift + x, 5)
+                    return p
+                x, _ok = cg.bisect_clear(lambda x: counts(with_lift(x), gain)[0] > 0,
+                                         0.0, cg.LIFT_EXTRA_MAX, cg.STEPS_BLACK)
+                params = with_lift(x)
+                black, white, total = counts(params, gain)
+            if params:
+                ci["auto_tone"] = params
+            else:
+                ci.pop("auto_tone", None)
+            ci.pop("clip_gain", None)
+            if gain is not None:
+                ci["clip_gain"] = round(float(gain), 6)
+            rec = {"mode": mode,
+                   "black": round(black / max(total, 1), 6),
+                   "white": round(white / max(total, 1), 6),
+                   "renders": renders[0]}
+            ci["clip_guard"] = rec
+            return rec
+        except Exception as e:                   # never let it stop a convert
+            print(f"Clipping guard failed for {getattr(img, 'file_path', '?')}: {e}")
+            ci.pop("clip_gain", None)
+            return None
+
     def measure_auto_tone(self, img, rect=None):
         """Measure the frame's toe/shoulder on its just-converted base and keep
         it in conversion_inputs["auto_tone"] (replaced, or dropped when the
@@ -3216,9 +3391,19 @@ class CCRBackend:
             white = self.auto_white_point_for(black)
         awp_rec = None
         per_frame_wp = black is not None and self.white_point_bgr is None
-        rect = (self.frame_picture_rect(img, img.resized_raw)
-                if (getattr(self, "auto_tone", False) or per_frame_wp)
-                else self._known_picture_rect(img))
+        crop = None
+        if self.crop_after_convert and self.is_crop_candidate(img):
+            # Convert, then crop (spec/convert-crop-and-clip.md §1): find the
+            # frame now, on the unconverted scan, and measure inside it.
+            crop = getattr(img, "auto_crop_last", None)
+            if crop is None:
+                crop = self.detect_frame_crop(img, raw=img.resized_raw)
+        if crop is not None and crop.usable:
+            rect = tuple(crop.rect)
+        elif getattr(self, "auto_tone", False) or per_frame_wp:
+            rect = self.frame_picture_rect(img, img.resized_raw)
+        else:
+            rect = self._known_picture_rect(img)
         if per_frame_wp:
             hl = self.frame_highlights(img, img.resized_raw, black, rect)
             white, awp_rec = self.resolve_white_point(
@@ -3226,7 +3411,8 @@ class CCRBackend:
         slopes = (self.film_stock_slopes
                   if (white is None and black is not None) else None)
         return {"black": black, "white": white, "slopes": slopes, "rect": rect,
-                "auto_res": auto_res, "auto_source": auto_source, "awp_rec": awp_rec}
+                "auto_res": auto_res, "auto_source": auto_source, "awp_rec": awp_rec,
+                "crop": crop}
 
     def apply_frame_conversion(self, img, plan):
         """Convert `img` with a plan from plan_frame_conversion: the
@@ -3257,8 +3443,10 @@ class CCRBackend:
             img.conversion_inputs["auto_wp"] = plan["awp_rec"]
         if rect is not None:
             img.conversion_inputs["picture"] = [float(v) for v in rect]
-        self.measure_auto_tone(img, rect)
-        self.maybe_auto_awb(img)
+        self._finish_tone(img, rect)
+        frame = plan.get("crop")
+        if frame is not None:
+            self.crop_after_conversion(img, frame)
 
     def apply_bwpoint_to_all_images(self, progress_callback=None):
         """
@@ -3317,13 +3505,44 @@ class CCRBackend:
                 }
                 if rect is not None:
                     img.conversion_inputs["picture"] = [float(v) for v in rect]
-                self.measure_auto_tone(img, rect)
-                self.maybe_auto_awb(img)
+                self._finish_tone(img, rect)
                 img.update_thumbnail_and_preview()
             except Exception as e:
                 print(f"B/W point conversion failed for image {i}: {e}")
             if progress_callback:
                 progress_callback(i + 1, total)
+
+    def _convert_all_crops(self, results):
+        """Convert All, then crop (spec/convert-crop-and-clip.md §1): {index:
+        FrameCrop} for the frames auto crop may change, found on their
+        unconverted scans (the detection pass reloaded them) and checked
+        against the roll exactly as Auto Crop All does."""
+        if not self.crop_after_convert:
+            return {}
+        idx, imgs, frames, raws = [], [], [], []
+        for i, (img, res) in enumerate(zip(self.images, results)):
+            if not self.is_crop_candidate(img):
+                continue
+            try:
+                if res is None and img.converted:
+                    img.reload_image()
+                fr = getattr(img, "auto_crop_last", None)
+                if fr is None:
+                    fr = self.detect_frame_crop(img, raw=img.resized_raw)
+            except Exception as e:
+                print(f"Auto crop failed for {getattr(img, 'file_path', '?')}: {e}")
+                fr = None
+            idx.append(i)
+            imgs.append(img)
+            frames.append(fr)
+            raws.append(None if img.converted else img.resized_raw)
+        if not idx:
+            return {}
+        try:
+            frames, _n = self._roll_consistent_crops(imgs, frames, raws)
+        except Exception as e:
+            print(f"Roll check of the crops failed: {e}")
+        return dict(zip(idx, frames))
 
     def _apply_auto_bwpoint_to_all(self, progress_callback=None):
         """Convert All with a per-frame black point: detect every frame first,
@@ -3359,17 +3578,22 @@ class CCRBackend:
                     for res, img in zip(results, self.images)]
         highlights = [None] * total
         rects = [self._FIND] * total
+        crops = self._convert_all_crops(results)
+        for i, fr in crops.items():
+            if fr is not None and fr.usable:
+                rects[i] = tuple(fr.rect)             # measured inside the frame it gets
         if use_awp:
             for i, (img, res, (black, _src)) in enumerate(zip(self.images, results, resolved)):
                 if black is not None:
                     if res is None and img.converted:
                         img.reload_image()
-                    rects[i] = self.frame_picture_rect(img, img.resized_raw)
+                    if rects[i] is self._FIND:
+                        rects[i] = self.frame_picture_rect(img, img.resized_raw)
                     highlights[i] = self.frame_highlights(img, img.resized_raw, black,
                                                           rects[i])
                 step(1, i)                                # white points
         summary = {"high": 0, "medium": 0, "fallback": 0, "unanchored": 0,
-                   "skipped": 0, "auto_wp": 0, "notes": []}
+                   "skipped": 0, "auto_wp": 0, "cropped": 0, "notes": []}
         for i, (img, res) in enumerate(zip(self.images, results)):
             try:
                 black, source = resolved[i]
@@ -3430,8 +3654,9 @@ class CCRBackend:
                     img.conversion_inputs["auto_wp"] = awp_rec
                 if rect is not None:
                     img.conversion_inputs["picture"] = [float(v) for v in rect]
-                self.measure_auto_tone(img, rect)
-                self.maybe_auto_awb(img)
+                self._finish_tone(img, rect)
+                if self.crop_after_conversion(img, crops.get(i)):
+                    summary["cropped"] += 1
                 img.update_thumbnail_and_preview()
             except Exception as e:
                 print(f"Auto black point conversion failed for image {i}: {e}")
