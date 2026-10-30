@@ -32,6 +32,13 @@ Two sensor kinds are supported:
 Either way each frame contributes exactly one channel (R from the red-light
 frame, G from green, B from blue), scaled to 16-bit by 65535/white_level.
 
+Frames shot at different exposures (a shutter speed per colour, exposed to the
+film base: spec/film-base-exposure.md) are brought back to one exposure: each
+channel is scaled by E_min / E_c (E = shutter seconds x ISO / 100 from the
+frame's EXIF), so a channel exposed longer gets its extra light's noise benefit
+but not a colour shift through the camera profile. Equal or unreadable
+exposures scale by exactly 1.
+
 This module is split so everything except `merge_raw_channels` is pure and
 unit-testable without rawpy/Qt. See spec/three-way-rgb-merge.md.
 """
@@ -58,6 +65,41 @@ MERGE_GROUP_SIZE = 3
 # loader recognises a marked TIFF and loads it as a normal image instead of
 # treating it as a (RAW) merge input. See spec/merge-linear-tiff-replace.md.
 FREECCR_MERGE_TIFF_MARKER = "FreeCCR:3-way-RGB-merge-linear-v1"
+
+_EXPOSURES = {}            # (path, size, mtime) -> seconds x ISO / 100, or None
+
+
+def shot_exposure(path):
+    """A frame's exposure in ISO-100 seconds from its EXIF (cached per path,
+    size and modification time), or None when it can't be read."""
+    try:
+        st = os.stat(path)
+        key = (os.path.abspath(path), st.st_size, st.st_mtime_ns)
+    except OSError:
+        return None
+    if key not in _EXPOSURES:
+        e = None
+        try:
+            from core.it8_profile import read_shot_exposure
+            sec, iso = read_shot_exposure(path)
+            if sec and iso and sec > 0 and iso > 0:
+                e = float(sec) * float(iso) / 100.0
+        except Exception:
+            e = None
+        if len(_EXPOSURES) > 512:
+            _EXPOSURES.clear()
+        _EXPOSURES[key] = e
+    return _EXPOSURES[key]
+
+
+def exposure_scales(exposures):
+    """E_min / E_c per channel (all <= 1), or (1, 1, 1) when any exposure is
+    unknown. Equal exposures give exactly 1.0."""
+    es = list(exposures)
+    if len(es) != 3 or any(e is None or not e > 0 for e in es):
+        return (1.0, 1.0, 1.0)
+    lo = min(es)
+    return tuple(1.0 if e == lo else lo / e for e in es)
 
 
 def is_freeccr_merge_tiff(path) -> bool:
@@ -146,10 +188,12 @@ def bayer_channel_indices(color_desc) -> Tuple[int, int, int]:
 
 
 def combine_channels(plane_r: np.ndarray, plane_g: np.ndarray, plane_b: np.ndarray,
-                     white_levels: Sequence[float]) -> np.ndarray:
+                     white_levels: Sequence[float],
+                     exposure_scales: Sequence[float] = (1.0, 1.0, 1.0)) -> np.ndarray:
     """Pure merge core: take the red frame's R-plane, the green frame's G-plane,
     and the blue frame's B-plane (each a 2-D array, already the correct channel),
-    scale each by 65535/white_level (matching read_image's white-level scaling),
+    scale each by 65535/white_level (matching read_image's white-level scaling)
+    and by its exposure scale (E_min / E_c, at most 1; see the module notes),
     and stack into one (H, W, 3) uint16 RGB image.
 
     Planes may differ slightly in size; all are cropped to the common (min H,
@@ -160,9 +204,14 @@ def combine_channels(plane_r: np.ndarray, plane_g: np.ndarray, plane_b: np.ndarr
     h = min(p.shape[0] for p in planes)
     w = min(p.shape[1] for p in planes)
     out = np.empty((h, w, 3), dtype=np.uint16)
+    es = list(exposure_scales) if exposure_scales is not None else [1.0] * 3
+    if len(es) != 3:
+        raise ValueError("exposure_scales must have 3 entries (R, G, B)")
     for i, (plane, wl) in enumerate(zip(planes, white_levels)):
         cropped = plane[:h, :w].astype(np.float32)
         scale = 65535.0 / wl if wl and wl > 0 else 1.0
+        if es[i] != 1.0:
+            scale *= float(min(1.0, max(0.0, es[i])))
         out[..., i] = np.clip(cropped * scale, 0, 65535).astype(np.uint16)
     return out
 
@@ -505,7 +554,9 @@ def merge_raw_channels(sources: Sequence[str], preview: bool = False,
         raise ValueError("3-way merge sources must all be the same sensor type "
                          "(all Bayer, or all monochrome).")
 
-    merged = combine_channels(planes[0], planes[1], planes[2], white_levels)
+    # a shutter speed per colour: back to one exposure (spec/film-base-exposure.md)
+    scales = exposure_scales([shot_exposure(p) for p in sources])
+    merged = combine_channels(planes[0], planes[1], planes[2], white_levels, scales)
     # Canonical FULL (export) resolution: full sensor for monochrome and for a
     # demosaiced Bayer merge (both may decode a half-size preview while their
     # export resolution is the full sensor); the 2x2-binned size for a
