@@ -188,6 +188,17 @@ class UsbCamera(WorkerThread):
                     if paused != self._paused:
                         self._paused = paused
                         self.live_paused.emit(paused)
+                        collect = getattr(self.backend, "collect_held", None)
+                        if paused and collect is not None:
+                            # a shot the camera holds whose file never came
+                            # (it answered busy to the fire): bring it in
+                            try:
+                                n = collect()
+                            except Exception:
+                                n = 0
+                            if n:
+                                print(f"usb camera: live view stuck; collecting {n} "
+                                      "shot(s) the camera was holding")
                 events = self.backend.poll(0.01 if self._live else 0.1)
                 if self._live and not data and not events:
                     # No frame (camera busy, backing off) and the event check

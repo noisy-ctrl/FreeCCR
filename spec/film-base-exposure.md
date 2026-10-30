@@ -261,6 +261,29 @@ never fired that soon after connecting. "Busy" means no picture was taken, so
 many tries it took; only after that is it a failure (and busy still never
 counts towards a lost camera). Helps Shoot after a picker change too.
 
+## Revision 2: busy can mean "shot taken" (2026-10-30)
+Revision 1 didn't fix it, and the user saw why: the shutter HAD fired. The
+GFX 50S II answered the fire with "busy" and took the picture anyway, so
+every retry was answered "busy" again (the camera holding that shot), live
+view then stalled ("the camera is still holding the last shot"), and a retry
+that got through would have taken a second picture. So, in `Gphoto2Backend`:
+- **No fire within `RECONNECT_SETTLE_S` (1 s) of connecting** (`_ready_at`,
+  set by `open` and `_reconnect`): the busy answer came to a fire sent
+  straight after the exposure reconnect; test 10 fired seconds after its
+  connect and never saw it.
+- **Busy from a fire is "maybe shot"**: `_confirm_shot` waits up to
+  `FIRE_CONFIRM_S` (3 s) + the shutter time (`_shutter_s`, from the last
+  reading or setting) for the shot's file, as an event or found waiting in
+  the camera's own memory (`held_files()`: image files in a store with no
+  DCIM folder, so never a card). Found: it counts as fired and the file is
+  queued like any shot's. Not found: one more fire (`FIRE_BUSY_TRIES`).
+  Revision 1's blind retries are gone.
+- **A stalled live view collects held shots**: when `live_stalled` turns on,
+  the worker calls `collect_held()` once, so a shot whose file never came is
+  brought in (downloaded and cleared like any other), which frees live view.
+- `FREECCR_GPHOTO2_LOG=<file>` writes libgphoto2's own debug log, to see what
+  the camera answered if this happens again.
+
 ## Code
 - `core/base_exposure.py` (new, Qt-free): `seconds`, `iso_number`,
   `exposure_of`, `Reading` + `reading_from_mosaic` + `read_patch`, `Plan` +
