@@ -437,3 +437,14 @@ def test_reconnects_to_the_remembered_port_on_opening():
         assert ("find", None, "auto") in feed.log or any(e[0] == "find" for e in feed.log)
     finally:
         _close(mon)
+
+
+def test_clicking_the_sharpness_meter_resets_the_best():
+    mon, feed, light, dev = _monitor()
+    try:
+        before = mon._reset_best
+        mon.canvas.meter_clicked.emit()
+        assert mon._reset_best == before + 1
+        assert feed.params.reset_best == before + 1
+    finally:
+        _close(mon)

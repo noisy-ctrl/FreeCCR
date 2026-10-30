@@ -10,9 +10,9 @@ the zoom, window size or panel state.
 """
 import math
 
-from PySide6.QtCore import Qt, Signal, QPointF, QRectF
+from PySide6.QtCore import Qt, Signal, QPointF, QRectF, QEvent
 from PySide6.QtGui import QPainter, QPen, QColor, QFont, QPainterPath
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QWidget, QToolTip
 
 from ui import theme
 
@@ -58,6 +58,7 @@ class LiveCanvas(QWidget):
     line_placed = Signal(float)        # sensor fraction across
     guide_changed = Signal(object)     # the guide dict
     pointer_moved = Signal()           # counts as use (idle dimming)
+    meter_clicked = Signal()           # a left click on the sharpness readout
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -80,6 +81,7 @@ class LiveCanvas(QWidget):
         self._drag = None
         self._rubber = None
         self._last_size = None
+        self._readout_rect = None         # where the sharpness readout was drawn
 
     # ------------------------------------------------------------------ #
     # state
@@ -269,6 +271,11 @@ class LiveCanvas(QWidget):
         if self.mode == "area":
             self._rubber = (pos, pos)
             return
+        if self._on_readout(pos):
+            # spec/live-capture-monitor.md: a click on the meter starts a new
+            # best (the right-click menu's Reset Best)
+            self.meter_clicked.emit()
+            return
         if self.guide_on:
             hit = self._guide_hit(g, pos)
             if hit:
@@ -287,11 +294,15 @@ class LiveCanvas(QWidget):
             self.update()
             return
         if self._drag is None or g is None:
-            if g is not None and self.guide_on and not self.mode:
+            if not self.mode and self._on_readout(pos):
+                self.setCursor(Qt.PointingHandCursor)
+            elif g is not None and self.guide_on and not self.mode:
                 hit = self._guide_hit(g, pos)
                 shape = {"move": Qt.SizeAllCursor, "resize": Qt.SizeFDiagCursor,
                          "rotate": Qt.CrossCursor}.get(hit[0] if hit else None, Qt.ArrowCursor)
                 self.setCursor(shape)
+            elif not self.mode:
+                self.setCursor(Qt.ArrowCursor)
             return
         kind, info, start, before = self._drag
         d = self.dpr()
@@ -365,9 +376,25 @@ class LiveCanvas(QWidget):
     # ------------------------------------------------------------------ #
     # painting
     # ------------------------------------------------------------------ #
+    def _on_readout(self, pos):
+        """Is `pos` (logical) on the sharpness readout as last drawn?"""
+        r = self._readout_rect
+        return r is not None and r.contains(QPointF(pos))
+
+    def event(self, e):
+        if e.type() == QEvent.ToolTip:
+            if not self.mode and self._on_readout(QPointF(e.pos())):
+                QToolTip.showText(e.globalPos(), "Click to start a new best", self)
+            else:
+                QToolTip.hideText()
+                e.ignore()
+            return True
+        return super().event(e)
+
     def paintEvent(self, e):
         p = QPainter(self)
         p.fillRect(self.rect(), QColor(theme.CANVAS))
+        self._readout_rect = None
         r = self.result
         if r is None:
             if self.message:
@@ -461,6 +488,7 @@ class LiveCanvas(QWidget):
         f.setPixelSize(theme.FS_CAPTION)
         p.setFont(f)
         box = QRectF(target.left() + 12, target.bottom() - 56, 224, 44)
+        self._readout_rect = QRectF(box)
         path = QPainterPath()
         path.addRoundedRect(box, theme.RADIUS_MD, theme.RADIUS_MD)
         p.fillPath(path, QColor(20, 20, 20, 210))
