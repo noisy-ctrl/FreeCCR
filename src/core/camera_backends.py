@@ -46,6 +46,12 @@ PREVIEW_GIVE_UP_S = 15.0
 LIVE_EVENTS_EVERY_S = 3.0   # each check stalls the GFX 50S II's picture ~0.3 s (test 5)
 LIVE_RECENT_S = 0.5        # live view was asked for this recently = it is running
 SHOT_WAIT_S = 30.0         # after firing, check events continuously this long
+# A shot the camera answers "busy" to is tried again (it took no picture):
+# a GFX 50S II answered [-110] I/O in progress to a fire right after the
+# reconnect that ends live view to set the shutter speed (the user's first
+# film-base measure, 2026-10-30), though the settings had just gone in.
+FIRE_BUSY_S = 5.0
+FIRE_RETRY_S = 0.15
 # Live view that has given frames and then answers busy this long is
 # reported as paused (`live_stalled`): a body holding a shot it couldn't clear.
 LIVE_STALL_S = 5.0
@@ -241,9 +247,10 @@ class Gphoto2Backend:
     ZOOM_KEY = "eoszoom"
     ZOOM_LEVELS = ["1", "5", "10"]
 
-    def __init__(self, gp_module=None, clock=time.monotonic):
+    def __init__(self, gp_module=None, clock=time.monotonic, sleep=time.sleep):
         self.gp = gp_module if gp_module is not None else _import_gphoto2()
         self.clock = clock
+        self.sleep = sleep
         self.camera = None
         self.dest = None
         self._ident = None           # the open camera's port
@@ -432,26 +439,43 @@ class Gphoto2Backend:
         capture call is used: it ends the camera's live view first and waits
         for the file. Its trigger call shoots without ending it, which a
         Fujifilm refuses (GFX 50S II: "Unspecified error", spec §17). With no
-        live view the trigger call stays, as it doesn't hold this thread."""
+        live view the trigger call stays, as it doesn't hold this thread.
+
+        "Busy" means the camera took no picture: it is tried again every
+        FIRE_RETRY_S for up to FIRE_BUSY_S before it counts as a failure."""
         gp = self.gp
         if self.camera is None:
             raise CameraLost("not open")
         self._shot_files = []
-        try:
-            taken = None
-            if self._live_asked:
-                try:
-                    taken = self.camera.capture(getattr(gp, "GP_CAPTURE_IMAGE", 0))
-                except gp.GPhoto2Error as e:
-                    if self._code(e) != getattr(gp, "GP_ERROR_NOT_SUPPORTED", -6):
-                        raise
-                    taken = None
+        start = self.clock()
+        tries = 0
+        max_tries = int(FIRE_BUSY_S / FIRE_RETRY_S) + 1
+        while True:
+            try:
+                taken = None
+                if self._live_asked:
+                    try:
+                        taken = self.camera.capture(getattr(gp, "GP_CAPTURE_IMAGE", 0))
+                    except gp.GPhoto2Error as e:
+                        if self._code(e) != getattr(gp, "GP_ERROR_NOT_SUPPORTED", -6):
+                            raise
+                        taken = None
+                        self.camera.trigger_capture()
+                else:
                     self.camera.trigger_capture()
-            else:
-                self.camera.trigger_capture()
-        except gp.GPhoto2Error as e:
-            self._failed(e)
-            raise CameraLost(str(e)) if self._errors >= LOST_AFTER_ERRORS else RuntimeError(str(e))
+                break
+            except gp.GPhoto2Error as e:
+                busy = self._code(e) == gp.GP_ERROR_CAMERA_BUSY
+                if busy and tries < max_tries and self.clock() - start < FIRE_BUSY_S:
+                    tries += 1
+                    self.sleep(FIRE_RETRY_S)
+                    continue
+                self._failed(e)
+                raise (CameraLost(str(e)) if self._errors >= LOST_AFTER_ERRORS
+                       else RuntimeError(str(e)))
+        if tries:
+            print(f"usb camera: the camera was busy; fired after {tries} "
+                  f"{'retry' if tries == 1 else 'retries'} ({self.clock() - start:.2f} s)")
         self._errors = 0
         self._live_asked = False
         self._shot_until = self.clock() + SHOT_WAIT_S

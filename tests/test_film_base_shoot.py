@@ -463,3 +463,55 @@ def test_a_colour_at_a_raised_iso_shows_its_iso():
         "b": {"shutter": "1s", "iso": "200", "base": 0.8, "levels": None}})]})["bases"][0]
     assert be.summary(e, True) == ("R 1/3 ISO 100 · G 1/2.5 ISO 100 · B 1 s ISO 200 "
                                    "(base 82 / 84 / 80 %)")
+
+
+# --------------------------------------------------------------------------- #
+# a shot the camera answers "busy" to is tried again ([-110] I/O in progress,
+# the user's first measure on the GFX 50S II)
+# --------------------------------------------------------------------------- #
+def _busy_backend(tmp_path, busy_times, live=False):
+    from test_capture_routes import fake_gp, GPhoto2Error
+    gp = fake_gp()
+    clock = Clock()
+    slept = []
+
+    def sleep(s):
+        slept.append(s)
+        clock.t += s
+
+    b = cb.Gphoto2Backend(gp_module=gp, clock=clock, sleep=sleep)
+    b.list_cameras()
+    b.open("usb:001,004", str(tmp_path))
+    left = {"n": busy_times}
+    for name in ("trigger_capture", "capture"):
+        orig = getattr(b.camera, name)
+
+        def wrapped(*a, _orig=orig):
+            if left["n"] > 0:
+                left["n"] -= 1
+                raise GPhoto2Error(gp.GP_ERROR_CAMERA_BUSY)
+            return _orig(*a)
+        setattr(b.camera, name, wrapped)
+    b._live_asked = live
+    return b, gp, clock, slept
+
+
+def test_a_busy_camera_is_fired_again(tmp_path, capsys):
+    b, gp, clock, slept = _busy_backend(tmp_path, busy_times=3)
+    b.fire()
+    assert gp.state.fired == 1 and len(slept) == 3
+    assert b._errors == 0 and b.shot_pending()
+    assert "fired after 3 retries" in capsys.readouterr().out
+    # with live view asked, the capture call is retried the same way
+    b, gp, clock, slept = _busy_backend(tmp_path, busy_times=2, live=True)
+    b.fire()
+    assert gp.state.captures == 1 and len(slept) == 2
+
+
+def test_a_camera_busy_for_too_long_still_fails(tmp_path):
+    b, gp, clock, slept = _busy_backend(tmp_path, busy_times=10 ** 6)
+    with pytest.raises(RuntimeError, match="-110"):
+        b.fire()
+    assert gp.state.fired == 0
+    assert sum(slept) == pytest.approx(cb.FIRE_BUSY_S, abs=cb.FIRE_RETRY_S + 1e-9)
+    assert b._errors == 0                      # busy never counts towards "lost"
