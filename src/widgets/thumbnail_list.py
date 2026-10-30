@@ -1,6 +1,6 @@
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QListWidget, QListWidgetItem, QLabel, QDialog, QApplication, QPushButton, QMenu, QComboBox, QToolButton, QProgressBar
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QListWidget, QListWidgetItem, QLabel, QDialog, QApplication, QPushButton, QMenu, QComboBox, QToolButton, QProgressBar, QFrame
 from PySide6.QtGui import QPixmap, QIcon, QTransform, QPainter
-from PySide6.QtCore import Qt, QSize, QTimer, Signal
+from PySide6.QtCore import Qt, QSize, QTimer, Signal, QEvent
 import os
 import logging
 import numpy as np
@@ -205,12 +205,38 @@ class ThumbnailList(QWidget):
         self.layout.addWidget(self.thumbnail_list)
 
         # Hot Folder Tether's trichrome shots that couldn't be merged (a frame
-        # missing, or not lit red, green, blue in order): greyed out here, OUT
-        # of the frame list so list rows stay == image indices. Right-click to
-        # choose the files, merge anyway, load singly or remove.
-        self.attention_label = QLabel("Needs attention")
-        self.attention_label.setStyleSheet(
-            f"color: {theme.WARN_TEXT}; font-size: {theme.FS_CAPTION}px; font-weight: bold;")
+        # missing, or not lit red, green, blue in order): greyed out, OUT of the
+        # frame list so list rows stay == image indices. Right-click to choose
+        # the files, merge anyway, load singly or remove. One line here ("N
+        # rejected combinations"); the tiles open over the list on hover and
+        # stay open when the line is clicked (spec/rejected-strip-compact.md).
+        self.attention_bar = QPushButton("")
+        self.attention_bar.setCursor(Qt.PointingHandCursor)
+        self.attention_bar.setStyleSheet(
+            f"QPushButton {{ text-align: left; padding: 3px 6px; border: none; "
+            f"border-radius: {theme.RADIUS_SM}px; background: {theme.WARN_BG}; "
+            f"color: {theme.WARN_TEXT}; font-size: {theme.FS_CAPTION}px; font-weight: bold; }}"
+            f"QPushButton:checked {{ background: {theme.SURFACE_ACTIVE}; }}")
+        self.attention_bar.setCheckable(True)          # checked = pinned open
+        self.attention_bar.setToolTip(
+            "Shots that couldn't be merged. Hover to see them; click to keep them "
+            "open. Right-click a shot for its choices.")
+        self.attention_bar.toggled.connect(self._on_attention_pinned)
+        self.attention_bar.installEventFilter(self)
+        self.attention_popup = QFrame(self)
+        self.attention_popup.setObjectName("AttentionPopup")
+        self.attention_popup.setStyleSheet(
+            f"#AttentionPopup {{ background: {theme.SURFACE}; "
+            f"border: 1px solid {theme.WARN_BORDER}; border-radius: {theme.RADIUS_SM}px; }}")
+        pop_lay = QVBoxLayout(self.attention_popup)
+        pop_lay.setContentsMargins(4, 4, 4, 4)
+        pop_lay.setSpacing(2)
+        self.attention_popup.installEventFilter(self)
+        self.attention_popup.setVisible(False)
+        self._attention_hide_timer = QTimer(self)
+        self._attention_hide_timer.setSingleShot(True)
+        self._attention_hide_timer.setInterval(350)
+        self._attention_hide_timer.timeout.connect(self._maybe_hide_attention)
         self.attention_list = QListWidget()
         self.attention_list.setViewMode(QListWidget.IconMode)
         self.attention_list.setIconSize(QSize(156, 52))
@@ -224,9 +250,9 @@ class ThumbnailList(QWidget):
         self.attention_list.itemDoubleClicked.connect(
             lambda it: self.attention_action.emit(it.data(Qt.UserRole), "choose"))
         self._attention = []
-        for w in (self.attention_label, self.attention_list):
-            w.setVisible(False)
-            self.layout.addWidget(w)
+        pop_lay.addWidget(self.attention_list)
+        self.attention_bar.setVisible(False)
+        self.layout.addWidget(self.attention_bar)
 
         self.count_label = QLabel("Total: 0 image(s)")
         self.count_label.setAlignment(Qt.AlignLeft)
@@ -377,12 +403,61 @@ class ThumbnailList(QWidget):
             item.setData(Qt.UserRole, e["id"])
             item.setForeground(Qt.gray)
             self.attention_list.addItem(item)
-        has = bool(self._attention)
-        self.attention_label.setVisible(has)
-        self.attention_list.setVisible(has)
-        if has:
-            rows = min(2, len(self._attention))
+        n = len(self._attention)
+        self.attention_bar.setText(
+            f"{n} rejected combination{'' if n == 1 else 's'}")
+        self.attention_bar.setVisible(bool(n))
+        if n:
+            rows = min(4, n)
             self.attention_list.setFixedHeight(rows * 84 + 8)
+            if self.attention_popup.isVisible():
+                self._place_attention_popup()
+        else:
+            self.attention_bar.setChecked(False)
+            self.attention_popup.setVisible(False)
+
+    # hover opens the tiles over the list; a click keeps them open
+    def _place_attention_popup(self):
+        bar = self.attention_bar
+        h = min(self.attention_list.height() + 10,
+                max(120, bar.y() - 4))
+        w = self.width() - 8
+        self.attention_popup.setGeometry(4, max(0, bar.y() - h - 2), w, h)
+        self.attention_popup.raise_()
+
+    def show_attention_popup(self):
+        if not self._attention:
+            return
+        self._attention_hide_timer.stop()
+        self._place_attention_popup()
+        self.attention_popup.setVisible(True)
+
+    def _maybe_hide_attention(self):
+        if self.attention_bar.isChecked():
+            return
+        if self.attention_popup.underMouse() or self.attention_bar.underMouse():
+            return
+        self.attention_popup.setVisible(False)
+
+    def _on_attention_pinned(self, pinned):
+        if pinned:
+            self.show_attention_popup()
+        else:
+            self.attention_popup.setVisible(False)
+
+    def eventFilter(self, obj, ev):
+        if obj in (getattr(self, "attention_bar", None), getattr(self, "attention_popup", None)):
+            t = ev.type()
+            if t == QEvent.Enter:
+                self.show_attention_popup()
+            elif t == QEvent.Leave:
+                self._attention_hide_timer.start()
+        return super().eventFilter(obj, ev)
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        if getattr(self, "attention_popup", None) is not None and self.attention_popup.isVisible():
+            self._place_attention_popup()
 
     def _attention_menu(self, pos):
         item = self.attention_list.itemAt(pos)
