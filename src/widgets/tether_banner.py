@@ -81,6 +81,15 @@ class TetherBanner(QWidget):
         layout.addWidget(self._black)
         layout.addWidget(self._stop)
 
+    def set_black_point_nudge(self, on):
+        """The lead frame is in and no black point is set: highlight Black
+        Point… (instead of a pop-up; spec/tether-start-window.md)."""
+        on = bool(on)
+        if getattr(self, "_nudging", None) == on:
+            return
+        self._nudging = on
+        theme.style_button(self._black, "primary" if on else None)
+
     def set_scan_type(self, t):
         i = self._scan.findData(t)
         if i >= 0 and i != self._scan.currentIndex():

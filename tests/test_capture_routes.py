@@ -688,8 +688,9 @@ class _MW(QObject):
     def tether_folder(self):
         return self.folder if self._tether_active else None
 
-    def enter_tethering(self):
+    def enter_tethering(self, from_monitor=False):
         self._tether_active = True
+        return {"start": True}
 
     def stop_tethering(self):
         self._tether_active = False
@@ -709,7 +710,8 @@ def mon_usb(tmp_path, monkeypatch):
     mw = _MW(str(tmp_path))
     mon = lm.LiveCaptureMonitor(main_window=mw, feed=feed, light=light, usb=usb)
     asked = []
-    mon._hot_folder_choice = lambda *a: (asked.append(a), ("start", False))[1]
+    mon._start_hot_folder = lambda from_monitor=False: (
+        asked.append(from_monitor), mw.enter_tethering(from_monitor=from_monitor))[1]
     mon.resize(1300, 820)
     mon.show()
     _app.processEvents()

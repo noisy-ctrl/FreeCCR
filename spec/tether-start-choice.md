@@ -1,6 +1,7 @@
 # Starting Hot Folder Tether with images open
 
-Status: built 2026-10-29 (the user's request and answer).
+Status: built 2026-10-29; SUPERSEDED 2026-10-30 by spec/tether-start-window.md
+(the question became a tickbox in the one start window).
 
 ## Problem
 Starting Hot Folder Tether always added its captures to whatever was open,

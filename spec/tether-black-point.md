@@ -1,6 +1,7 @@
 # Setting the roll's black point while tethering
 
-Status: built 2026-10-29 (the user's request and answers).
+Status: built 2026-10-29. Revised 2026-10-30: the prompt is a banner nudge, not a
+pop-up (spec/tether-start-window.md).
 
 ## Problem
 A Hot Folder Tether session asks once, on its FIRST new capture, for the
