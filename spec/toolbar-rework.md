@@ -9,7 +9,9 @@ Un-convert, zoom, Export).
 
 Now, left to right, groups split by the toolbar's own separators:
 
-    Convert  Un-convert | ⟲ ⟳ ⇵ ⇋ | Area  Gradient  Dust | Fit ▾  HDR  False colour ........ Export…
+    Convert  Un-convert  ▦ | ⟲ ⟳ ⇵ ⇋ | Area  Gradient  Dust | Fit ▾  HDR  False colour ........ Export…
+
+(▦ = sprocket holes white, an icon toggle added later: spec/sprocket-toolbar-toggle.md.)
 
 - **Text buttons carry no symbols**: "Area", "Gradient", "Dust", "HDR".
   Only the icon-only buttons (rotate left/right, mirror vertical/horizontal)

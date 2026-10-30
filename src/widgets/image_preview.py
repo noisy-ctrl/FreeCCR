@@ -830,7 +830,7 @@ class ImagePreview(QWidget):
             self.toolbar.addWidget(spacer)
 
         # Workflow order (spec/toolbar-rework.md, 2026-10-30): Convert,
-        # Un-convert | rotate / mirror (icons) | Area, Gradient, Dust | zoom,
+        # Un-convert, sprocket holes (icon) | rotate / mirror (icons) | Area, Gradient, Dust | zoom,
         # HDR, False colour ........ Export. Text buttons carry no symbols;
         # only the icon-only buttons are pictures.
         self.convert_action = QAction("Convert", self)
@@ -853,6 +853,24 @@ class ImagePreview(QWidget):
                 f"QToolButton {{ color: {theme.DANGER}; }}"
                 f"QToolButton:hover {{ color: {theme.DANGER_HOVER}; }}"
                 f"QToolButton:disabled {{ color: {theme.TEXT_DISABLED}; }}")
+        add_spacer()
+
+        # White sprocket holes / clear film (the reversal look,
+        # spec/sprocket-hole-mask.md): the Settings → Film border switch, one
+        # click away (spec/sprocket-toolbar-toggle.md). Its state follows
+        # ccr_backend.sprocket_mask_white through MainWindow.on_sprocket_mask_toggled.
+        sprocket_icon = theme.load_tinted_icon(resource_path("icons/sprocket-holes-icon.png"),
+                                               on_color=theme.ICON_ON)
+        self.sprocket_action = QAction(sprocket_icon, "Sprocket Holes White", self)
+        self.sprocket_action.setCheckable(True)
+        self.sprocket_action.setToolTip(
+            "Show sprocket holes and clear film white instead of black (the "
+            "reversal-film look). Anything clearer than the film base is "
+            "whitened, so a wrong black point can whiten deep shadows too.\n"
+            "Same as Settings → Film border.")
+        self.sprocket_action.triggered.connect(
+            lambda checked: self.window().on_sprocket_mask_toggled(bool(checked)))
+        self.toolbar.addAction(self.sprocket_action)
         add_spacer()
 
         self.toolbar.addSeparator()
