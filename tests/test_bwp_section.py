@@ -88,3 +88,16 @@ def test_sampling_still_starts_when_folded(fresh_setting):
         assert modes == []
     finally:
         w.hide()
+
+
+def test_convert_and_auto_crop_sit_above_the_section(fresh_setting):
+    w, p = _window()
+    try:
+        top = lambda wid: wid.mapTo(p, wid.rect().topLeft()).y()
+        sec = top(p.bwp_section)
+        assert top(p.convert_current_bwp_btn) < top(p.auto_crop_btn) < sec
+        p.bwp_section._toggle_btn.click()                 # folded: still above
+        _app.processEvents()
+        assert top(p.convert_current_bwp_btn) < top(p.bwp_section)
+    finally:
+        w.hide()

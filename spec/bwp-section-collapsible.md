@@ -8,9 +8,10 @@ They now sit in a `CollapsibleSection("Film B/W Point")` (the panel's usual
 
 - **Inside**: Set Black Point / Set White Point / ✕, Film Stock (combo, ＋,
   −), White Point (combo, Show).
-- **Outside, always visible**: the anchor-source line, Convert Current /
-  Convert All, Auto Crop / Auto Crop All (used on every frame; the user's
-  choice).
+- **Outside, always visible, and ABOVE the section** (revised 2026-10-30,
+  the user's request): Convert Current / Convert All, Auto Crop / Auto Crop
+  All, then the anchor-source line (used on every frame). They are created
+  after the section's rows but inserted at its slot (`_convert_slot`).
 - Opens by default; the state is remembered in QSettings
   `panel/bwp_open` (bool, `SlidersPanel.BWP_OPEN_KEY`), saved on each toggle.
 - Folded it saves ~96 px (130 → 34). Nothing else changes: the widgets are
