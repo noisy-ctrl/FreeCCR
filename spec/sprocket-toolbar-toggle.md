@@ -23,8 +23,7 @@ look)" (Settings → Film border, `ccr_backend.sprocket_mask_white`, QSettings
   at start-up both call `MainWindow._sync_sprocket_action`, so the button
   always shows the switch however it was changed.
 
-Nothing new is stored. Convert's auto crop skips frames while this is on
-(`spec/convert-crop-and-clip.md`).
+Nothing new is stored.
 
 ## Tests
 `tests/test_sprocket_toolbar_toggle.py`: the click flips the switch and the
