@@ -250,6 +250,17 @@ unaffected). The roll's black point is in merged values, whose overall level
 follows `E_min`: a roll measured again mid-way needs its black point sampled
 again.
 
+## Revision: a busy camera is fired again (2026-10-30)
+The user's first measure on the GFX 50S II stopped at once with "The camera
+didn't fire ([-110] I/O in progress)". With live view running, the first
+shot's settings go in through the reconnect that ends live view, and the
+camera then answered the fire, sent straight after, with "busy". Test 10
+never fired that soon after connecting. "Busy" means no picture was taken, so
+`Gphoto2Backend.fire` now tries again every `FIRE_RETRY_S` (0.15 s) for up to
+`FIRE_BUSY_S` (5 s), on the trigger and the capture call alike, and prints how
+many tries it took; only after that is it a failure (and busy still never
+counts towards a lost camera). Helps Shoot after a picker change too.
+
 ## Code
 - `core/base_exposure.py` (new, Qt-free): `seconds`, `iso_number`,
   `exposure_of`, `Reading` + `reading_from_mosaic` + `read_patch`, `Plan` +
