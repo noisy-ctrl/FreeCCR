@@ -51,3 +51,11 @@ window without a panel (tests) simply gets no page.
 Hide/show toggles the section and its separator; persistence round-trip;
 unknown ids ignored; the Settings page lists every section, seeds from the
 panel and applies only on Done.
+
+
+## Revision 2026-10-30: Reset / Compare / Sync at the bottom
+At the user's request the Reset / Compare row and Sync to All are the last
+rows of the panel (after Details), behind their own separator. The separator
+that stood below Lab Finish (`_lab_finish_sep_below`) is gone: the next
+section's own separator draws that line, so hiding Lab Finish never leaves a
+double line.

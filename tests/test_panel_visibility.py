@@ -113,11 +113,14 @@ def test_lab_finish_section_sits_under_colour_organics(panel):
     panel.set_hidden_sections({"lab_finish"})
     assert not _shown(sec)
     assert not _shown(panel._section_separators["lab_finish"])
-    assert not _shown(panel._lab_finish_sep_below)
+    # the line below it is the next section's own (Reset / Compare / Sync
+    # moved to the bottom, 2026-10-30), so it stays for that section
+    assert panel._lab_finish_sep_below is None
+    assert _shown(panel._section_separators["curves"])
     keys = panel.adjustment_keys
     assert "golden_highlights" in keys and "shadow_neutralise" in keys
     panel.set_hidden_sections(set())
-    assert _shown(sec) and _shown(panel._lab_finish_sep_below)
+    assert _shown(sec) and _shown(panel._section_separators["lab_finish"])
 
 
 def test_layers_hide_but_show_on_a_frame_with_areas(panel, monkeypatch):
