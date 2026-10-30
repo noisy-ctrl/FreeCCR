@@ -201,13 +201,22 @@ def test_open_folder_dialog_still_records_the_browse_location(win, tmp_path,
         w._settings.setValue("files/last_open_dir", saved)
 
 
-def test_merge_mode_rejects_a_non_triplet_from_the_command_line(win, tmp_path):
+def test_merge_mode_takes_any_count_from_the_command_line(win, tmp_path):
+    """Sets are grouped by their light now (spec/smart-triplets.md): two files
+    load, and the loader reports them as a shot with frames missing."""
     w, launched, warnings = win
     ccr_backend.rgb_merge_mode = True
     a, b = _touch(tmp_path, "a.nef", "b.nef")   # 2 files: not a multiple of 3
     w.load_paths([a, b])
-    assert launched == []
-    assert warnings == ["3-way RGB merge"]
+    assert len(launched) == 1 and warnings == []
+
+
+def test_merge_mode_still_refuses_no_raw_at_all(win, tmp_path):
+    w, launched, warnings = win
+    ccr_backend.rgb_merge_mode = True
+    a, = _touch(tmp_path, "a.jpg")
+    w.load_paths([a])
+    assert launched == [] and warnings == ["3-way RGB merge"]
 
 
 def test_merge_mode_accepts_a_triplet_from_the_command_line(win, tmp_path):
