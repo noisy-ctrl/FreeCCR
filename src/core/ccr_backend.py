@@ -77,6 +77,10 @@ class CCRBackend:
         # failure), set by the loader and surfaced by the UI after load, then
         # cleared. Reset at the top of every load so it never goes stale.
         self.last_merge_error: Optional[str] = None
+        # Shots the last merge import couldn't make into a set (frames missing,
+        # not lit by one colour, an unused retake): attention entries the UI
+        # shows greyed out after the load, then clears (spec/smart-triplets.md).
+        self.last_merge_attention: List[dict] = []
         # Files dropped by the last load, as [(path, reason)] — set by the
         # loader and surfaced by the UI after load, then cleared. Without this a
         # file that cannot be decoded (e.g. a Nikon HE NEF, which no
@@ -324,6 +328,7 @@ class CCRBackend:
         # Per-load merge error: reset up front so a prior load's message can't
         # carry over and be shown after this (possibly successful) one.
         self.last_merge_error = None
+        self.last_merge_attention = []
         self.last_load_errors = []
         # Preserved removal states belong to the previous batch (the open
         # flows save the catalog before loading a new one)
@@ -461,19 +466,43 @@ class CCRBackend:
         passthrough_paths are FreeCCR-baked merge TIFFs (marked) selected in the
         same import: they are NOT merge inputs but are loaded as normal images
         alongside the freshly merged triplets. See spec/merge-linear-tiff-replace.md."""
-        from core import ccr_merge
+        from core import ccr_merge, triplet_plan
+        from core import scan_type as st
 
         ordered = ccr_merge.sort_for_merge(file_paths)
-        ok, err = ccr_merge.validate_merge_inputs(ordered)
         current = gen is None or gen == self._load_generation
-        if not ok:
+        # Sets by the light that lit each frame, not three at a time by name
+        # (spec/smart-triplets.md): every complete red/green/blue set merges,
+        # a colour shot twice keeps its better take, and whatever can't make a
+        # set is reported (attention entries), not refused wholesale.
+        ok, err = ccr_merge.validate_merge_inputs(ordered, whole_sets=False)
+        if not ok:                                  # nothing at all to merge
             self.last_merge_error = err
             if current:  # a stale thread must not wipe a newer batch
                 self.images = []
                 self.file_paths = []
             return 0
+        raws = [p for p in ordered if ccr_merge.is_raw_path(p)]
+        notes = [{"paths": [p], "short": "Not a RAW file",
+                  "reason": f"{os.path.basename(p)} isn't a RAW file, so it can't be "
+                            "merged"} for p in ordered if not ccr_merge.is_raw_path(p)]
+        plan = triplet_plan.plan_triplets(raws) if raws else triplet_plan.Plan()
+        notes += plan.notes
+        for n in notes:
+            n["thumbs"] = [st.thumb_bgr(p) for p in n["paths"]]
+        if current:
+            self.last_merge_attention = notes
+        if not plan.sets:
+            if not file_paths:
+                self.last_merge_error = "No files selected for 3-way RGB merge."
+            elif not notes:
+                self.last_merge_error = "No red, green, blue sets were found."
+            if current:  # a stale thread must not wipe a newer batch
+                self.images = []
+                self.file_paths = []
+            return 0
 
-        triplets = ccr_merge.group_into_triplets(ordered)
+        triplets = plan.sets
         # Progress bar in merged units: triplet count + any passthrough TIFFs.
         if current:
             self.file_paths = ([t[0] for t in triplets]
@@ -562,6 +591,7 @@ class CCRBackend:
         # user deliberately stopped.
         if cancel_flag and cancel_flag():
             self.last_merge_error = None
+            self.last_merge_attention = []
 
         # Stable order: unique red basenames, with catalog_order as a tiebreak.
         results.sort(key=lambda im: (os.path.basename(im.file_path),

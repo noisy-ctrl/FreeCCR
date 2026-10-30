@@ -493,3 +493,10 @@ CFA, so no crosstalk to remove).
 (During review the green channel was first implemented as a single site — strict
 "no merge" — then changed per request to the two-green average, since averaging
 two same-colour sites is not crosstalk and preserves green resolution/SNR.)
+
+
+## Revision 2026-10-30: sets by their light
+An Open import no longer requires a multiple of 3 or takes files three at a
+time by name: sets are grouped by the light that lit each frame, a retaken
+colour keeps its better take, and whatever can't make a set is reported under
+the frames. See spec/smart-triplets.md.

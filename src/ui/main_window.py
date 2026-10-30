@@ -1517,6 +1517,17 @@ class MainWindow(QMainWindow):
         if err:
             ccr_backend.last_merge_error = None
             QMessageBox.warning(self, "3-way RGB merge", err)
+        # Shots the merge couldn't make into a set: greyed out under the frames
+        # (spec/smart-triplets.md), no warning box.
+        notes = getattr(ccr_backend, "last_merge_attention", None) or []
+        ccr_backend.last_merge_attention = []
+        for entry in notes:
+            self._on_needs_attention(entry, hint=False)
+        if notes:
+            n = len(notes)
+            self.sliders_panel.set_temporary_hint(
+                f"{n} shot{'' if n == 1 else 's'} couldn't be merged as found: see "
+                "“rejected combinations” under the frames.", duration=6000)
         # Files the loader had to drop (undecodable RAW, missing file, …).
         # Without this they silently never appear — a built exe has no console
         # to show the loader's print. Read once, then clear.
@@ -1730,8 +1741,9 @@ class MainWindow(QMainWindow):
             )
 
         if valid_files:
-            # 3-way RGB merge: validate the selection up front (multiple of
-            # 3, all RAW) so the user gets immediate feedback before any load.
+            # 3-way RGB merge: refuse up front only a selection with no RAW at
+            # all; any count is fine, the loader groups sets by their light
+            # (spec/smart-triplets.md).
             # FreeCCR-baked merge TIFFs are excluded — they re-open as normal
             # images even in merge mode. See spec/merge-linear-tiff-replace.md.
             if ccr_backend.rgb_merge_mode:
@@ -1740,7 +1752,7 @@ class MainWindow(QMainWindow):
                             if not ccr_merge.is_freeccr_merge_tiff(p)]
                 if to_merge:
                     ok, err = ccr_merge.validate_merge_inputs(
-                        ccr_merge.sort_for_merge(to_merge))
+                        ccr_merge.sort_for_merge(to_merge), whole_sets=False)
                     if not ok:
                         QMessageBox.warning(self, "3-way RGB merge", err)
                         return
@@ -2049,10 +2061,12 @@ class MainWindow(QMainWindow):
         self.image_preview.show_tether_banner(
             self._tether_folder_label(), self._tether_count, self._tether_note())
 
-    def _on_needs_attention(self, entry):
+    def _on_needs_attention(self, entry, hint=True):
         """A shot that couldn't be merged: shown greyed out under the frames."""
         reason = entry.get("reason", "")
-        if "should be lit" in reason:
+        if entry.get("short"):
+            short = entry["short"]
+        elif "should be lit" in reason:
             short = "Not red, green, blue"
         elif "merge failed" in reason:
             short = "Merge failed"
@@ -2066,9 +2080,10 @@ class MainWindow(QMainWindow):
         e["short"] = short
         self._tether_attention.append(e)
         self.thumbnail_list.set_attention(self._tether_attention)
-        self.sliders_panel.set_temporary_hint(
-            f"A shot needs attention: {reason}. It's greyed out under the frames "
-            "(right-click it).", duration=6000)
+        if hint:
+            self.sliders_panel.set_temporary_hint(
+                f"A shot needs attention: {reason}. It's greyed out under the frames "
+                "(right-click it).", duration=6000)
 
     def _on_attention_action(self, eid, action):
         e = next((x for x in self._tether_attention if x["id"] == eid), None)

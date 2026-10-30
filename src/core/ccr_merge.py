@@ -100,22 +100,27 @@ def group_into_triplets(sorted_paths: Sequence[str]) -> List[Tuple[str, str, str
             for i in range(0, n, MERGE_GROUP_SIZE)]
 
 
-def validate_merge_inputs(paths: Sequence[str]) -> Tuple[bool, Optional[str]]:
+def validate_merge_inputs(paths: Sequence[str], whole_sets: bool = True
+                          ) -> Tuple[bool, Optional[str]]:
     """Pre-decode validation for a merge import. Returns (ok, error_message).
 
     Checks, in order: non-empty, every file is a supported RAW, count is a
     multiple of 3. The sensor check (Bayer vs monochrome vs unsupported) can only
-    happen at decode time (see merge_raw_channels), so it is NOT done here."""
+    happen at decode time (see merge_raw_channels), so it is NOT done here.
+
+    whole_sets=False (an Open import, spec/smart-triplets.md): the files are
+    grouped by the light that lit them, so any count is fine and only a
+    selection with no RAW at all is refused; the rest is reported per shot."""
     if not paths:
         return False, "No files selected for 3-way RGB merge."
     non_raw = [p for p in paths if not is_raw_path(p)]
-    if non_raw:
+    if non_raw and (whole_sets or len(non_raw) == len(paths)):
         shown = "\n".join(os.path.basename(p) for p in non_raw[:8])
         if len(non_raw) > 8:
             shown += f"\n… and {len(non_raw) - 8} more"
         return False, ("3-way RGB merge requires RAW files. "
                        f"These are not supported RAW:\n\n{shown}")
-    if len(paths) % MERGE_GROUP_SIZE != 0:
+    if whole_sets and len(paths) % MERGE_GROUP_SIZE != 0:
         return False, ("3-way RGB merge needs a multiple of 3 images "
                        f"(got {len(paths)}). Select 3 frames per shot: "
                        "red, green, blue.")
