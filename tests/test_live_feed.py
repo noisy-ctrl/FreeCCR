@@ -188,16 +188,18 @@ def test_processor_sharpness_reads_the_fresh_frame_in_the_area():
     r = p.process(img, lf.ViewParams(canvas_w=640, canvas_h=360, sharp=True,
                                      sharp_area=(0.25, 0.25, 0.75, 0.75)))
     score, best = r.sharp
-    want = lf.sharpness(img[90:270, 160:480])
+    grey = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    want = lf.sharpness(grey[90:270, 160:480])
     assert score == pytest.approx(want, rel=1e-4) and best == score
     t[0] += 0.01
     again = p.process(img, lf.ViewParams(canvas_w=640, canvas_h=360, sharp=True,
                                          sharp_area=(0.25, 0.25, 0.75, 0.75)))
     assert again.sharp == r.sharp                                  # at most 30 times a second
-    t[0] += 0.1
-    r = p.process(cv2.GaussianBlur(img, (0, 0), 1.5),
-                  lf.ViewParams(canvas_w=640, canvas_h=360, sharp=True,
-                                sharp_area=(0.25, 0.25, 0.75, 0.75)))
+    blurred = cv2.GaussianBlur(img, (0, 0), 1.5)
+    for _ in range(3):                                             # steadied: a median of 5
+        t[0] += 0.1
+        r = p.process(blurred, lf.ViewParams(canvas_w=640, canvas_h=360, sharp=True,
+                                             sharp_area=(0.25, 0.25, 0.75, 0.75)))
     assert r.sharp[0] < 0.5 * r.sharp[1]                           # % of best fell
 
 
@@ -309,3 +311,60 @@ def test_permission_is_asked_once_and_reported():
     lf.request_camera_permission(_app, seen.append)
     assert _wait(lambda: seen)
     assert seen[0] in (True, False)
+
+
+# --------------------------------------------------------------------------- #
+# the meter, revision 2 (spec/sharpness-meter-v2.md)
+# --------------------------------------------------------------------------- #
+def _film(h=400, w=600, seed=1):
+    rng = np.random.default_rng(seed)
+    img = np.full((h, w), 120, np.float32)
+    for _ in range(160):
+        cv2.circle(img, (int(rng.integers(0, w)), int(rng.integers(0, h))),
+                   int(rng.integers(6, 40)), float(rng.integers(40, 220)), -1)
+    img += rng.normal(0, 4, img.shape).astype(np.float32)          # grain
+    return np.clip(img, 0, 255)
+
+
+def test_focus_closeness_spreads_the_top():
+    vals = [round(lf.focus_closeness(r), 2) for r in (1.0, 0.99, 0.95, 0.9, 0.5, 0.0)]
+    assert vals == [1.0, 0.9, 0.77, 0.68, 0.17, 0.0]
+
+
+def test_the_meter_is_steadied_and_its_best_too():
+    m = lf.FocusMeter()
+    for v in (10, 10, 10, 100, 10):          # one wild reading
+        steady, best = m.update(v)
+    assert steady == 10 and best == 10
+
+
+def test_the_area_follows_a_small_drift_and_is_capped():
+    img = _film(seed=2)
+    tr = lf.AreaTracker()
+    box = (200, 120, 360, 280)
+    assert tr.follow(img, box) == box
+    moved = np.roll(img, (3, 5), axis=(0, 1))                      # down 3, right 5
+    got = tr.follow(moved, box)
+    assert got == (205, 123, 365, 283)
+    other = _film(seed=9)                                          # a different picture
+    assert tr.follow(other, box) == got
+    tr.dx = 10_000
+    tr.prev = None
+    assert tr.follow(img, box)[0] <= 200 + 80                      # half the area at most
+
+
+def test_a_new_frame_is_said_once_after_it_settles():
+    t = [0.0]
+    d = lf.NewFrameDetector(clock=lambda: t[0])
+    a = cv2.resize(_film(seed=1), (64, 36), interpolation=cv2.INTER_AREA)
+    b = cv2.resize(_film(seed=7), (64, 36), interpolation=cv2.INTER_AREA)
+    assert not d.update(a)
+    assert not d.update(cv2.GaussianBlur(a, (0, 0), 1.0))          # focusing isn't new
+    said = []
+    for _ in range(15):
+        t[0] += 0.1
+        said.append(d.update(b))
+    assert said.count(True) == 1 and said.index(True) >= 8         # after it settled
+    for _ in range(20):
+        t[0] += 0.1
+        assert not d.update(b)                                     # a still picture: no more

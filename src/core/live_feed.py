@@ -13,7 +13,9 @@ from building the QImage, so it is tested without a camera:
   device pixels and sensor pixels;
 - `Denoiser`: the running average that resets itself when the picture moves;
 - `edge_amplify`: an unsharp mask on luma only;
-- `sharpness`: Laplacian variance over mean luma squared;
+- `sharpness`: Laplacian variance over mean luma squared (the meter and the
+  activity test); `FocusMeter` / `AreaTracker` / `NewFrameDetector` steady
+  it, follow drift and see a new frame (spec/sharpness-meter-v2.md);
 - `Activity`: whether the picture changed (film moved, focus turned).
 
 macOS: OpenCV can't ask for camera permission from a background thread, so
@@ -228,6 +230,129 @@ def sharpness(grey):
     return float(sd[0, 0]) ** 2 / (m * m + 1.0)
 
 
+def focus_closeness(ratio):
+    """The readout's number, 0..1: 1 - sqrt(-ln r) (a Gaussian focus peak),
+    so the last few per cent below best are spread out: 0.99 -> 0.90,
+    0.95 -> 0.77, 0.90 -> 0.68, 0.50 -> 0.17."""
+    r = float(ratio)
+    if r >= 1.0:
+        return 1.0
+    if r <= 0.0:
+        return 0.0
+    return max(0.0, 1.0 - math.sqrt(-math.log(r)))
+
+
+class FocusMeter:
+    """The median of the last MEDIAN readings, and the best of those."""
+    MEDIAN = 5
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.recent = []
+        self.best = 0.0
+
+    def update(self, score):
+        self.recent.append(float(score))
+        del self.recent[:-self.MEDIAN]
+        steady = float(np.median(self.recent))
+        self.best = max(self.best, steady)
+        return steady, self.best
+
+
+class AreaTracker:
+    """Moves a drawn area with the picture (focus breathing, play in the
+    rail): phase correlation of the area against its last patch, accumulated
+    and capped at half the area's size (spec/sharpness-meter-v2.md §3)."""
+    MIN_RESPONSE = 0.15
+    MAX_STEP = 0.25            # of the area's size, per reading
+    MAX_TOTAL = 0.5            # of the area's size, in all
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.dx = self.dy = 0.0
+        self.prev = None
+
+    def follow(self, frame_grey, box):
+        """`box` (x0, y0, x1, y1) in frame pixels as drawn; returns the box
+        to measure, moved with the picture and kept inside the frame."""
+        x0, y0, x1, y1 = box
+        w, h = x1 - x0, y1 - y0
+        H, W = frame_grey.shape[:2]
+        self.dx = max(-self.MAX_TOTAL * w, min(self.MAX_TOTAL * w, self.dx))
+        self.dy = max(-self.MAX_TOTAL * h, min(self.MAX_TOTAL * h, self.dy))
+
+        def cut(dx, dy):
+            ox = int(round(min(max(x0 + dx, 0), W - w)))
+            oy = int(round(min(max(y0 + dy, 0), H - h)))
+            return (ox, oy, ox + w, oy + h)
+        cur = cut(self.dx, self.dy)
+        patch = frame_grey[cur[1]:cur[3], cur[0]:cur[2]].astype(np.float32)
+        if (self.prev is not None and self.prev.shape == patch.shape
+                and w >= 16 and h >= 16):
+            win = cv2.createHanningWindow((w, h), cv2.CV_32F)
+            (sx, sy), resp = cv2.phaseCorrelate(self.prev, patch, win)
+            if (resp >= self.MIN_RESPONSE and abs(sx) <= self.MAX_STEP * w
+                    and abs(sy) <= self.MAX_STEP * h):
+                self.dx = max(-self.MAX_TOTAL * w, min(self.MAX_TOTAL * w, self.dx + sx))
+                self.dy = max(-self.MAX_TOTAL * h, min(self.MAX_TOTAL * h, self.dy + sy))
+                cur = cut(self.dx, self.dy)
+                patch = frame_grey[cur[1]:cur[3], cur[0]:cur[2]].astype(np.float32)
+        self.prev = patch
+        return cur
+
+
+def _ncc(a, b):
+    a = a - float(a.mean())
+    b = b - float(b.mean())
+    d = math.sqrt(float((a * a).sum()) * float((b * b).sum()))
+    return float((a * b).sum()) / d if d > 1e-6 else 1.0
+
+
+class NewFrameDetector:
+    """Says once when the picture became a different one and settled (the
+    film advanced): spec/sharpness-meter-v2.md §5."""
+    DIFFERENT = 0.4
+    STEADY = 0.95
+    SETTLE_S = 0.8
+
+    def __init__(self, clock=time.monotonic):
+        self.clock = clock
+        self.reset()
+
+    def reset(self, thumb=None):
+        self.ref = thumb
+        self.last = thumb
+        self.changing = False
+        self.steady_since = None
+
+    def update(self, thumb):
+        if self.ref is None or self.ref.shape != thumb.shape:
+            self.reset(thumb)
+            return False
+        now = self.clock()
+        if not self.changing:
+            if _ncc(self.ref, thumb) < self.DIFFERENT:
+                self.changing, self.steady_since = True, None
+            self.last = thumb
+            return False
+        if _ncc(self.last, thumb) >= self.STEADY:
+            if self.steady_since is None:
+                self.steady_since = now
+        else:
+            self.steady_since = None
+        self.last = thumb
+        if self.steady_since is not None and now - self.steady_since >= self.SETTLE_S:
+            if _ncc(self.ref, thumb) < self.DIFFERENT:
+                self.reset(thumb)
+                return True
+            self.changing, self.steady_since = False, None    # came back
+        return False
+
+
 class SharpnessBest:
     """The best score for one area and zoom (`key`); a new key starts over."""
 
@@ -344,11 +469,12 @@ class FrameResult:
     image: QImage
     geometry: Geometry
     fps: float = 0.0
-    sharp: Optional[tuple] = None      # (score, best)
+    sharp: Optional[tuple] = None      # (score, best), steadied
     hist: Optional[np.ndarray] = None
     clip: Optional[QImage] = None
     activity: bool = False
     elapsed_ms: float = 0.0
+    new_frame: bool = False            # the picture became a new frame: best reset
 
 
 class Processor:
@@ -360,6 +486,9 @@ class Processor:
         self.clock = clock
         self.denoiser = Denoiser()
         self.best = SharpnessBest()
+        self.meter = FocusMeter()
+        self.tracker = AreaTracker()
+        self.newframe = NewFrameDetector(clock)
         self.activity = Activity(clock)
         self._hist_t = -1e9
         self._sharp_t = -1e9
@@ -396,26 +525,36 @@ class Processor:
 
         # measurements
         sharp = None
+        new_frame = False
         if p.sharp:
-            area = fresh
             key = (rect, p.sharp_area)
-            if p.sharp_area:
-                fx0, fy0, fx1, fy1 = p.sharp_area
-                ax0 = int(max(g.x0, min(g.x1 - 1, fx0 * full_w)))
-                ax1 = int(max(ax0 + 1, min(g.x1, fx1 * full_w)))
-                ay0 = int(max(g.y0, min(g.y1 - 1, fy0 * full_h)))
-                ay1 = int(max(ay0 + 1, min(g.y1, fy1 * full_h)))
-                area = frame[ay0:ay1, ax0:ax1]
-            if p.reset_best != self._reset_best:
+            reset = p.reset_best != self._reset_best
+            if reset:
                 self._reset_best = p.reset_best
-                self.best.reset()
+            th = _thumb(frame)
+            if self.newframe.update(th) and not reset:
+                new_frame = True
+            if reset or new_frame or self._sharp_last is None or self._sharp_last[0] != key:
+                self.meter.reset()
+                self.tracker.reset()
+                if reset:
+                    self.newframe.reset(th)
                 self._sharp_last = None
             now_s = self.clock()
-            if (self._sharp_last is None or self._sharp_last[0] != key
-                    or now_s - self._sharp_t >= SHARP_EVERY_S):
+            if self._sharp_last is None or now_s - self._sharp_t >= SHARP_EVERY_S:
                 self._sharp_t = now_s
-                score = sharpness(area)
-                self._sharp_last = (key, (score, self.best.update(key, score)))
+                if p.sharp_area:
+                    fx0, fy0, fx1, fy1 = p.sharp_area
+                    ax0 = int(max(g.x0, min(g.x1 - 1, fx0 * full_w)))
+                    ax1 = int(max(ax0 + 1, min(g.x1, fx1 * full_w)))
+                    ay0 = int(max(g.y0, min(g.y1 - 1, fy0 * full_h)))
+                    ay1 = int(max(ay0 + 1, min(g.y1, fy1 * full_h)))
+                    grey = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
+                    bx0, by0, bx1, by1 = self.tracker.follow(grey, (ax0, ay0, ax1, ay1))
+                    area = grey[by0:by1, bx0:bx1]
+                else:
+                    area = fresh
+                self._sharp_last = (key, self.meter.update(sharpness(area)))
             sharp = self._sharp_last[1]
         hist = None
         now = self.clock()
@@ -446,7 +585,7 @@ class Processor:
                 st = cv2.resize(st, size, interpolation=cv2.INTER_NEAREST)
             clip = rgba_qimage(clip_rgba(cv2.cvtColor(st, cv2.COLOR_BGR2RGB), p.clip))
         return FrameResult(to_qimage(shown), g, fps, sharp, hist, clip, activity,
-                           (time.perf_counter() - t0) * 1000.0)
+                           (time.perf_counter() - t0) * 1000.0, new_frame=new_frame)
 
     def sample(self, sx, sy, half=6):
         """Mean B, G, R of the steady frame around sensor (sx, sy), or None
