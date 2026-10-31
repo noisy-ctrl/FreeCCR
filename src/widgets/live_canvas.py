@@ -133,6 +133,20 @@ class LiveCanvas(QWidget):
         self.setCursor(Qt.CrossCursor if mode else Qt.ArrowCursor)
         self.update()
 
+    def flash_readout_note(self, text, seconds=3.0):
+        """Say something in the sharpness readout for a moment ("New frame:
+        best reset")."""
+        import time as _t
+        self._readout_note = (text, _t.monotonic() + seconds)
+        self.update()
+
+    def readout_note(self):
+        import time as _t
+        n = getattr(self, "_readout_note", None)
+        if n is None or _t.monotonic() > n[1]:
+            return None
+        return n[0]
+
     def set_magnified(self, label):
         """The camera's own magnifier (spec/live-magnifier.md): the picture is
         a small part of the frame, so whole-frame overlays are hidden and the
@@ -597,20 +611,29 @@ class LiveCanvas(QWidget):
         self._paint_label(p, QPointF(x, max(4.0, y)), text)
 
     def _paint_readout(self, p, target, sharp):
+        # spec/sharpness-meter-v2.md §4: the number is stretched near best
+        # focus (1 - sqrt(-ln r)); the plain share of best stays, smaller
+        from core.live_feed import focus_closeness
         score, best = sharp
-        frac = 0.0 if best <= 0 else max(0.0, min(1.0, score / best))
+        ratio = 0.0 if best <= 0 else max(0.0, min(1.0, score / best))
+        frac = focus_closeness(ratio)
         f = QFont(self.font())
         f.setPixelSize(theme.FS_CAPTION)
         p.setFont(f)
-        box = QRectF(target.left() + 12, target.bottom() - 56, 224, 44)
+        box = QRectF(target.left() + 12, target.bottom() - 56, 248, 44)
         self._readout_rect = QRectF(box)
         path = QPainterPath()
         path.addRoundedRect(box, theme.RADIUS_MD, theme.RADIUS_MD)
         p.fillPath(path, QColor(20, 20, 20, 210))
         p.setPen(QColor(theme.TEXT))
         what = "area" if self.sharp_area else "view"
+        note = self.readout_note()
         p.drawText(box.adjusted(8, 5, -8, 0), Qt.AlignLeft | Qt.AlignTop,
-                   f"Sharpness ({what})   {frac * 100:.0f} % of best")
+                   note or f"Focus ({what})   {frac * 100:.0f}")
+        if not note:
+            p.setPen(QColor(theme.TEXT_MUTED))
+            p.drawText(box.adjusted(8, 5, -8, 0), Qt.AlignRight | Qt.AlignTop,
+                       f"{ratio * 100:.1f} % of best")
         bar = QRectF(box.left() + 8, box.top() + 27, box.width() - 16, 8)
         p.setPen(Qt.NoPen)
         p.setBrush(QColor(70, 70, 70))

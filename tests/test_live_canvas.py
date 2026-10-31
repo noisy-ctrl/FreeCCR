@@ -298,3 +298,16 @@ def test_the_measured_patch_is_outlined_until_cleared():
     c.set_mark(None)
     col = _brightest(c.grab().toImage(), int(r.center().x()), int(round(r.top())))
     assert abs(col.red() - col.blue()) < 10                     # just the grey picture
+
+
+def test_the_readout_says_focus_and_a_new_frame():
+    c, render = _canvas()
+    c.sharp_on = True
+    r = c.result
+    r.sharp = (0.95, 1.0)
+    img1 = c.grab().toImage()
+    c.flash_readout_note("New frame: best reset", seconds=5)
+    assert c.readout_note() == "New frame: best reset"
+    assert c.grab().toImage() != img1
+    c.flash_readout_note("x", seconds=-1)
+    assert c.readout_note() is None

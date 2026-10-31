@@ -253,6 +253,7 @@ class LiveCaptureMonitor(QWidget):
         self._measure_token = 0          # voids a finished measuring's timers / reads
         self._pending_measure = None     # (name, index) waiting for a Film Base click
         self._neg_base_pos = None        # the last Film Base click, frame fractions
+        self._new_frame_quiet = 0.0      # no "new frame" note before this
         self._cam_zoom = "1"             # the camera's magnifier (spec/live-magnifier.md)
         self._zoom_whole = None          # the last whole-frame picture before magnifying
         self._zoom_token = 0
@@ -1172,6 +1173,11 @@ class LiveCaptureMonitor(QWidget):
         if r is None or self._closing:
             return
         self.canvas.set_result(r)
+        if getattr(r, "new_frame", False) and time.monotonic() >= self._new_frame_quiet:
+            # spec/sharpness-meter-v2.md §5 (not right after a magnification
+            # change, which is a new picture too and already reset the best)
+            self.canvas.flash_readout_note("New frame: best reset")
+            self._note_caption("New frame: the sharpness best was reset.")
         self._last_fps = r.fps
         if r.hist is not None:
             self.histogram.set_data(r.hist)
@@ -2349,6 +2355,7 @@ class LiveCaptureMonitor(QWidget):
         self.canvas.set_magnified(None if level == "1" else self.cam_zoom_label(level))
         if level != was:
             self._reset_sharp_best()             # a different picture scale
+            self._new_frame_quiet = time.monotonic() + 4.0
         self._zoom_token += 1
         if level != "1":
             self.canvas.set_zoom_spot(None)
