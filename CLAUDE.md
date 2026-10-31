@@ -127,6 +127,8 @@ src/utils/unicode_path_utils.py → Cross-platform Unicode filename handling
 
 **Film B/W Point folds away** (`spec/bwp-section-collapsible.md`): `SlidersPanel.bwp_section` is a `CollapsibleSection` holding Set Black/White Point, Film Stock and White Point; Convert, Auto Crop and the anchor line sit ABOVE it, always visible (inserted at `_convert_slot`). Open by default, remembered in `panel/bwp_open`.
 
+**Details (sharpening) defaults come from Settings** (`spec/details-defaults.md`, `core/detail_defaults.py`, factory 30 / 2 / 0, `adjust/detail_defaults`): the panel's `_default_for` AND the render's fallback for missing sharpen_* keys read them (before, an untouched frame rendered unsharpened while the panel showed 25), and the catalogue writes an edited dict's defaults down (`written_down`) so the old-catalogue pin only meets pre-Details catalogues.
+
 **Reset / Compare / Sync to All are the panel's last rows** (after Details; 2026-10-30, `spec/panel-visibility.md`).
 
 **Settings → Panel hides sections** (`spec/panel-visibility.md`): `SlidersPanel.HIDEABLE_SECTIONS` ((id, label, attribute)), persisted as `panel/hidden_sections`. **Layers** (id `layers`, `layers_container` + `_layers_sep_below`) is one since 2026-10-23, but `_apply_layers_visibility` keeps it SHOWN on a frame that has area layers (re-checked on every Layers rebuild) — the sliders edit the active layer, so the list naming it can't vanish while there is a choice.

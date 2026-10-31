@@ -113,7 +113,9 @@ class TestDuplicate:
         restored = catalog.create_images_for_path(path, path=cat)
         assert len(restored) == 2
         assert restored[1].display_name == "negative_copy1.png"
-        assert restored[1].adjustment_settings == {"tint": 7}
+        # with the sharpening it rendered with written down (spec/details-defaults.md)
+        from core import detail_defaults
+        assert restored[1].adjustment_settings == detail_defaults.written_down({"tint": 7})
 
 
 class TestRemoveMultiple:
@@ -185,7 +187,9 @@ class TestRemoveMultiple:
         ccr_backend.save_catalog()
         entries = catalog.entries_for_path(path_a, path=cat)
         assert entries is not None
-        assert entries[0]["adjustment_settings"] == {"temperature": 33}
+        from core import detail_defaults
+        assert entries[0]["adjustment_settings"] == \
+            detail_defaults.written_down({"temperature": 33})
 
     def test_remove_original_and_duplicate_keeps_only_original(
             self, tmp_path, monkeypatch):

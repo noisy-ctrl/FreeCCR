@@ -355,6 +355,31 @@ class SettingsDialog(QDialog):
             "reads the picture."))
         lay.addWidget(grp_zoom)
 
+        # Details (sharpening) defaults: spec/details-defaults.md
+        from core import detail_defaults
+        grp_det = QGroupBox("Details")
+        gd = QVBoxLayout(grp_det)
+        gd.setSpacing(theme.GAP_ROW)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Sharpening starts at"))
+        self._spin_details = {}
+        for key in detail_defaults.KEYS:
+            row.addSpacing(theme.GAP_BTN)
+            row.addWidget(QLabel(detail_defaults.LABELS[key]))
+            sp = QSpinBox()
+            sp.setRange(0, 100)
+            sp.setToolTip(f"Sharpen {detail_defaults.LABELS[key]} for an image that "
+                          f"hasn't set its own (factory {detail_defaults.FACTORY[key]}).")
+            self._spin_details[key] = sp
+            row.addWidget(sp)
+        row.addStretch(1)
+        gd.addLayout(row)
+        gd.addWidget(self._muted(
+            "The Details section's values for every image that hasn't set its "
+            "own sharpening; a frame you have changed keeps its values. Radius "
+            "25 is one pixel at full size, so judge it at 100% zoom."))
+        lay.addWidget(grp_det)
+
         grp_keys = QGroupBox("Keyboard")
         gk = QVBoxLayout(grp_keys)
         gk.setSpacing(theme.GAP_ROW)
@@ -753,6 +778,11 @@ class SettingsDialog(QDialog):
             self._combo_preview_detail.findData(
                 getattr(ccr_backend, "preview_detail", "full"))))
         self._combo_preview_detail.blockSignals(False)
+        from core import detail_defaults
+        for key, sp in self._spin_details.items():
+            sp.blockSignals(True)
+            sp.setValue(detail_defaults.get(key))
+            sp.blockSignals(False)
         from PySide6.QtCore import QSettings
         _st = QSettings("FreeCCR", "FreeCCR")
         try:
@@ -849,6 +879,10 @@ class SettingsDialog(QDialog):
         level = self._combo_preview_detail.currentData()
         if level and level != getattr(ccr_backend, "preview_detail", "full"):
             self._mw.on_preview_detail_changed(level)
+        from core import detail_defaults
+        staged_det = {k: sp.value() for k, sp in self._spin_details.items()}
+        if staged_det != detail_defaults.current():
+            self._mw.on_detail_defaults_changed(staged_det)
         # Input colour space — affects the NEXT import only, so nothing is
         # re-decoded here (spec/input-transfer-function.md §4.2).
         if (bool(self._cb_tiff_ask.isChecked())

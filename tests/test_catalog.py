@@ -22,7 +22,7 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 _app = QApplication.instance() or QApplication(sys.argv[:1])
 
 import cv2  # noqa: E402
-from core import catalog  # noqa: E402
+from core import catalog, detail_defaults  # noqa: E402
 from core.ccr_backend import ccr_backend  # noqa: E402
 from core.ccr_image import CCRImage  # noqa: E402
 
@@ -56,13 +56,12 @@ class TestCatalogRoundTrip:
         restored = catalog.create_images_for_path(path, path=cat)
         assert len(restored) == 1
         r = restored[0]
-        # The saved keys survive. sharpen_* are injected at 0 because this
-        # state predates the Details section — a catalog written before
-        # sharpening existed must keep rendering unsharpened rather than picking
-        # up the new visible default of 25. See spec/sharpening.md.
+        # The saved keys survive, and the sharpening this edited frame rendered
+        # with (the Details defaults) is written down with them, so reopening
+        # it doesn't fall under the old-catalogue rule (spec/details-defaults.md).
         assert r.adjustment_settings["temperature"] == 12
         assert r.adjustment_settings["saturation"] == -5
-        assert r.adjustment_settings["sharpen_amount"] == 0
+        assert r.adjustment_settings["sharpen_amount"] == detail_defaults.get("sharpen_amount")
         assert r.crop_rect == (0.1, 0.2, 0.8, 0.9)
         assert r.crop_angle == 3.5
         assert r.rotation_angle == 90
@@ -107,8 +106,9 @@ class TestCatalogRoundTrip:
                ["negative_s1.png", "negative_s2.png"]
         assert restored[0].source_ops == ccr_backend.images[0].source_ops
         assert restored[0].adjustment_settings["contrast"] == 20
-        # Pre-Details state -> sharpening pinned off (spec/sharpening.md).
-        assert restored[0].adjustment_settings["sharpen_amount"] == 0
+        # The defaults it rendered with are written down (spec/details-defaults.md).
+        assert restored[0].adjustment_settings["sharpen_amount"] == \
+            detail_defaults.get("sharpen_amount")
         for r, orig in zip(restored, originals):
             assert r.converted
             assert r.conversion_inputs["mode"] == "ref_params"

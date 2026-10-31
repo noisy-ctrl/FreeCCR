@@ -394,6 +394,14 @@ class MainWindow(QMainWindow):
         # below, which is what decides whether they are created enabled.
         ccr_backend.balance_hotkeys = self._settings.value(
             "adjust/balance_hotkeys", False, type=bool)
+        # The Details (sharpening) defaults (spec/details-defaults.md).
+        from core import detail_defaults
+        saved = detail_defaults.decode(
+            self._settings.value("adjust/detail_defaults", "", type=str))
+        if saved is not None:
+            detail_defaults.set_current(saved)
+            if getattr(self, "sliders_panel", None) is not None:
+                self.sliders_panel.apply_detail_defaults()
         # Restore the reversal-look sprocket-hole mask (default OFF). When on,
         # clear-film regions are painted white as the last render step for
         # B/W-point conversions. See spec/sprocket-hole-mask.md.
@@ -1419,6 +1427,36 @@ class MainWindow(QMainWindow):
             "Auto white balance on — new conversions get an automatic "
             "Temperature/Tint estimate." if checked else
             "Auto white balance off.", duration=4000)
+
+    def on_detail_defaults_changed(self, values):
+        """Settings → Details: the sharpening an image starts with. Persisted;
+        every image that hasn't set its own sharpening follows, so the frame
+        on screen and the thumbnails are rendered again."""
+        from core import detail_defaults
+        values = detail_defaults.set_current(values)
+        self._settings.setValue("adjust/detail_defaults", detail_defaults.encode(values))
+        self.sliders_panel.apply_detail_defaults()
+        changed = [img for img in ccr_backend.images
+                   if "sharpen_amount" not in (img.adjustment_settings or {})]
+        if changed:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            for img in changed:
+                try:
+                    img.update_thumbnail_and_preview()
+                except Exception as e:
+                    print(f"details defaults: {e}")
+        finally:
+            if changed:
+                QApplication.restoreOverrideCursor()
+        if changed:
+            self.thumbnail_list.update_all_thumbnails()
+            idx = self.image_preview.current_idx
+            if idx is not None:
+                self.image_preview.update_preview(idx)
+        self.sliders_panel.set_temporary_hint(
+            "Sharpening starts at Amount {sharpen_amount}, Radius {sharpen_radius}, "
+            "Masking {sharpen_masking}.".format(**values), duration=4000)
 
     def on_balance_hotkeys_toggled(self, checked: bool):
         """Flip the global Channel Balance nudge-key flag, persist it, and
