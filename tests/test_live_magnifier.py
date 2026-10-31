@@ -192,3 +192,36 @@ def test_the_canvas_draws_the_badge_and_hides_the_guide():
     assert before != after
     c.set_magnified(None)
     assert c.grab().toImage() == before
+
+
+def test_camera_zoom_sits_by_the_view_zoom_and_the_view_list_follows(film_mon):
+    mon, usb, light, lm, path = film_mon
+    from PySide6.QtWidgets import QLabel
+    import numpy as np
+    from core import live_feed as lf
+    assert not mon._cam_zoom_action.isVisible()
+    mon._on_zoom_levels(["1", "2.5", "4", "8", "16"])
+    assert mon._cam_zoom_action.isVisible()
+    box = mon.cam_zoom_combo.parentWidget()
+    assert any(l.text() == "Camera zoom" for l in box.findChildren(QLabel))
+    assert box.parentWidget() is mon.zoom_combo.parentWidget().parentWidget()   # the toolbar
+    # the View list: times the fitted view, and it follows the wheel
+    frame = np.zeros((768, 1024, 3), np.uint8)
+    w, h = mon.canvas.device_size()
+    mon.canvas.set_result(lf.Processor().process(frame, lf.ViewParams(canvas_w=w, canvas_h=h)))
+    combo = mon.zoom_combo
+    assert [combo.itemText(i) for i in range(combo.count())] == \
+        ["Fit", "Fit Guide", "2×", "4×", "8×"]
+    mon.canvas.zoom("4")
+    mon.canvas.set_result(lf.Processor().process(frame, lf.ViewParams(
+        canvas_w=w, canvas_h=h, scale=mon.canvas.scale, cx=mon.canvas.cx, cy=mon.canvas.cy)))
+    mon._sync_view_zoom()
+    assert combo.currentText() == "4×"
+    mon.canvas.scale *= 1.3
+    mon.canvas.set_result(lf.Processor().process(frame, lf.ViewParams(
+        canvas_w=w, canvas_h=h, scale=mon.canvas.scale, cx=mon.canvas.cx, cy=mon.canvas.cy)))
+    mon._sync_view_zoom()
+    assert combo.currentText() == "5.2×" and combo.currentData() == "custom"
+    mon.canvas.zoom("fit")
+    mon._sync_view_zoom()
+    assert combo.currentText() == "Fit" and combo.findData("custom") < 0

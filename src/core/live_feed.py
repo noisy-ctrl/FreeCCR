@@ -39,7 +39,8 @@ from PySide6.QtGui import QImage  # noqa: E402
 
 from utils.qt_threads import WorkerThread  # noqa: E402
 
-MAX_SCALE = 4.0             # display device pixels per sensor pixel
+MAX_SCALE = 4.0             # display device pixels per sensor pixel, at least
+MAX_ZOOM = 8.0              # ... and at least this many times the fitted view
 MAX_INDEX = 5               # cameras probed: 0..5
 REQUEST = (1920, 1080, 60)
 DENOISE_DEFAULT = {"strength": 35}            # percent; the running average's weight
@@ -71,6 +72,13 @@ def clean_options(opts, default, limits):
 # --------------------------------------------------------------------------- #
 # view geometry
 # --------------------------------------------------------------------------- #
+def max_scale(fs):
+    """The closest the view may zoom: 4 device px per sensor px, or 8x the
+    fitted view, whichever is closer. A 1024 px USB live view on a Retina
+    canvas fits at ~2.2 already, so a cap of 4 alone allowed under 2x."""
+    return max(MAX_SCALE, float(fs) * MAX_ZOOM)
+
+
 def fit_scale(full_w, full_h, canvas_w, canvas_h):
     if full_w <= 0 or full_h <= 0 or canvas_w <= 0 or canvas_h <= 0:
         return 1.0
@@ -122,7 +130,7 @@ def resolve_view(full_w, full_h, canvas_w, canvas_h, scale=None, cx=None, cy=Non
     stays on the frame."""
     canvas_w, canvas_h = max(1, int(canvas_w)), max(1, int(canvas_h))
     fs = fit_scale(full_w, full_h, canvas_w, canvas_h)
-    s = fs if scale is None else max(fs, min(MAX_SCALE, float(scale)))
+    s = fs if scale is None else max(fs, min(max_scale(fs), float(scale)))
     fit = s <= fs * 1.0001
     cx = full_w / 2.0 if cx is None else float(cx)
     cy = full_h / 2.0 if cy is None else float(cy)
@@ -230,21 +238,23 @@ def sharpness(grey):
     return float(sd[0, 0]) ** 2 / (m * m + 1.0)
 
 
+FOCUS_POWER = 4.0
+
+
 def focus_closeness(ratio):
-    """The readout's number, 0..1: 1 - sqrt(-ln r) (a Gaussian focus peak),
-    so the last few per cent below best are spread out: 0.99 -> 0.90,
-    0.95 -> 0.77, 0.90 -> 0.68, 0.50 -> 0.17."""
-    r = float(ratio)
-    if r >= 1.0:
-        return 1.0
-    if r <= 0.0:
-        return 0.0
-    return max(0.0, 1.0 - math.sqrt(-math.log(r)))
+    """The readout's number, 0..1: r^4, so the last few per cent below best
+    are spread out (0.99 -> 0.96, 0.95 -> 0.81, 0.90 -> 0.66, 0.50 -> 0.06)
+    with a finite slope everywhere. Revision 2's 1 - sqrt(-ln r) had an
+    infinite slope at best focus, so grain noise made the number jump there
+    (spec/sharpness-meter-v2.md, revision)."""
+    r = max(0.0, min(1.0, float(ratio)))
+    return r ** FOCUS_POWER
 
 
 class FocusMeter:
-    """The median of the last MEDIAN readings, and the best of those."""
-    MEDIAN = 5
+    """The median of the last MEDIAN readings, and the best of those (15 at
+    30 a second: half a second, steady enough to read one number)."""
+    MEDIAN = 15
 
     def __init__(self):
         self.reset()
