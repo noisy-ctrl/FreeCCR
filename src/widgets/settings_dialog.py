@@ -398,7 +398,7 @@ class SettingsDialog(QDialog):
         gl = QVBoxLayout(grp_live)
         gl.setSpacing(theme.GAP_ROW)
         row = QHBoxLayout()
-        row.addWidget(QLabel("Turn the Scanlight off when idle after"))
+        row.addWidget(QLabel("Turn the Scanlight off and let go of the camera when idle after"))
         self._spin_live_idle = QSpinBox()
         self._spin_live_idle.setRange(0, 60)
         self._spin_live_idle.setSuffix(" min")
@@ -786,9 +786,9 @@ class SettingsDialog(QDialog):
         from PySide6.QtCore import QSettings
         _st = QSettings("FreeCCR", "FreeCCR")
         try:
-            self._spin_live_idle.setValue(int(_st.value("live/idle_minutes", 5)))
+            self._spin_live_idle.setValue(int(_st.value("live/idle_minutes", 8)))
         except (TypeError, ValueError):
-            self._spin_live_idle.setValue(5)
+            self._spin_live_idle.setValue(8)
         self._combo_live_format.setCurrentIndex(max(0, self._combo_live_format.findData(
             str(_st.value("live/video_format", "auto") or "auto"))))
         self._cb_live_ask_tether.setChecked(_st.value("live/ask_tether", True, type=bool))
