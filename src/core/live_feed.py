@@ -485,6 +485,8 @@ class FrameResult:
     activity: bool = False
     elapsed_ms: float = 0.0
     new_frame: bool = False            # the picture became a new frame: best reset
+    reading: Optional[float] = None    # this frame's own sharpness reading, unsteadied
+                                       # (None: not measured); the focus rail's sweep
 
 
 class Processor:
@@ -535,6 +537,7 @@ class Processor:
 
         # measurements
         sharp = None
+        reading = None
         new_frame = False
         if p.sharp:
             key = (rect, p.sharp_area)
@@ -564,7 +567,8 @@ class Processor:
                     area = grey[by0:by1, bx0:bx1]
                 else:
                     area = fresh
-                self._sharp_last = (key, self.meter.update(sharpness(area)))
+                reading = sharpness(area)
+                self._sharp_last = (key, self.meter.update(reading))
             sharp = self._sharp_last[1]
         hist = None
         now = self.clock()
@@ -595,7 +599,8 @@ class Processor:
                 st = cv2.resize(st, size, interpolation=cv2.INTER_NEAREST)
             clip = rgba_qimage(clip_rgba(cv2.cvtColor(st, cv2.COLOR_BGR2RGB), p.clip))
         return FrameResult(to_qimage(shown), g, fps, sharp, hist, clip, activity,
-                           (time.perf_counter() - t0) * 1000.0, new_frame=new_frame)
+                           (time.perf_counter() - t0) * 1000.0, new_frame=new_frame,
+                           reading=reading)
 
     def sample(self, sx, sy, half=6):
         """Mean B, G, R of the steady frame around sensor (sx, sy), or None

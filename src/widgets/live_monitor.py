@@ -31,6 +31,8 @@ from core import capture_sequence as cs
 from core import light_presets as lp
 from core import live_feed as lf
 from core import live_negative as ln
+from core import orp
+from core import rail_autofocus as raf
 from ui import theme
 from widgets.histogram_widget import HistogramWidget
 from widgets.live_canvas import LiveCanvas, clean_guide, GUIDE_DEFAULT
@@ -40,6 +42,10 @@ CHANNEL_COLOURS = {"r": theme.CH_R, "g": theme.CH_G, "b": theme.CH_B,
                    "w": "#e8e8e8", "ir": "#b06a7e"}
 RING_KEYS = (("r", "R", "1"), ("g", "G", "2"), ("b", "B", "3"), ("w", "W", "4"))
 LED_VALUE_W = 52
+# the focus rail's jog steps, µm (spec/focus-rail.md §5)
+RAIL_JOG_DEFAULT = {"fine_um": 20, "coarse_um": 200}
+RAIL_JOG_LIMITS = {"fine_um": (1, 200), "coarse_um": (10, 2000)}
+RAIL_JOG_BTN_W = 58
 IDLE_CHECK_MS = 10_000
 STATE_COLOURS = {"ok": theme.SUCCESS_HOVER, "waiting": theme.TEXT_MUTED,
                  "silent": theme.WARN_TEXT, "error": theme.DANGER, "lost": theme.DANGER,
@@ -217,7 +223,8 @@ class LiveCaptureMonitor(QWidget):
     _patch_read = Signal(int, object)    # a film-base test shot's reading (or error)
     _zoom_spot_found = Signal(int, object)   # where the magnifier looked (or None)
 
-    def __init__(self, main_window=None, feed=None, light=None, usb=None, parent=None):
+    def __init__(self, main_window=None, feed=None, light=None, usb=None, rail=None,
+                 parent=None):
         super().__init__(parent, Qt.Window)
         self.setWindowTitle("Live Capture Monitor")
         self.setAttribute(Qt.WA_DeleteOnClose, False)
@@ -260,6 +267,11 @@ class LiveCaptureMonitor(QWidget):
         self._zoom_spot = None           # (fx, fy) where it last looked
         self._shoot_exp_before = None    # the camera's exposure before a film-base Shoot
         self._read_patch = be.read_patch
+        # the focus rail (spec/focus-rail.md)
+        self._af = None                  # the autofocus sweep running (or last run)
+        self._rail_zeroed = False        # Set Zero pressed since the rail connected
+        self._rail_home_id = None
+        self._last_frame_t = -1e9
 
         st = _settings()
         self._toggles = _json_setting("live/toggles", {"denoise": True})
@@ -270,6 +282,9 @@ class LiveCaptureMonitor(QWidget):
         self._timing = cs.clean_timing(_json_setting("live/timing", {}))
         self._presets = lp.normalise(st.value("live/presets", ""))
         self._bases = be.normalise(st.value("live/film_bases", ""))
+        self._rail_jog = lf.clean_options(_json_setting("live/rail_jog", {}),
+                                          RAIL_JOG_DEFAULT, RAIL_JOG_LIMITS)
+        self._rail_af_opts = raf.clean_options(_json_setting("live/rail_af", {}))
 
         self.feed = feed if feed is not None else lf.LiveFeed()
         if light is None:
@@ -280,6 +295,10 @@ class LiveCaptureMonitor(QWidget):
             from core.usb_camera import UsbCamera
             usb = UsbCamera()
         self.usb = usb
+        if rail is None:
+            from core.rail_link import RailClient
+            rail = RailClient()
+        self.rail = rail
         if hasattr(self.feed, "sources"):
             self.feed.sources["usb"] = self.usb.frame_source
         self.sequence = cs.CaptureSequence(_SequenceLight(self), on_step=self._on_step,
@@ -295,6 +314,8 @@ class LiveCaptureMonitor(QWidget):
         self._apply_scan_type(self.scan_type())
         self._on_ports(self.light.ports)          # the link may have reported already
         self._refresh_light_status()
+        self._on_rail_ports(self.rail.ports)
+        self._refresh_rail()
         geo = st.value("live/geometry")
         if geo is not None:
             try:
@@ -707,6 +728,8 @@ class LiveCaptureMonitor(QWidget):
         self.capture_caption = _muted("")
         lay.addWidget(self.capture_caption)
 
+        self._build_rail_section(lay)
+
         # --- Negative Preview ---
         self.neg_section = CollapsibleSection("Negative Preview")
         r = QHBoxLayout()
@@ -754,6 +777,84 @@ class LiveCaptureMonitor(QWidget):
         lay.addWidget(self.neg_section)
         lay.addStretch(1)
         return outer
+
+    def _build_rail_section(self, lay):
+        """Focus Rail (spec/focus-rail.md §5): a stepper on the camera's rail,
+        over the Open Rail Protocol."""
+        sec = self.rail_section = CollapsibleSection("Focus Rail")
+        r = QHBoxLayout()
+        theme.apply_button_row(r)
+        self.rail_dot = QLabel("●")
+        self.rail_port_combo = QComboBox()
+        theme.shrinkable_combo(self.rail_port_combo)
+        self.rail_port_combo.setToolTip(
+            "The focus rail's serial port (an ESP32's USB first; the light's port "
+            "isn't listed while the light is connected)")
+        self.rail_rescan_btn = QPushButton("Rescan")
+        self.rail_rescan_btn.setToolTip("List the serial ports again")
+        self.rail_connect_btn = QPushButton("Connect")
+        r.addWidget(self.rail_dot)
+        r.addWidget(self.rail_port_combo, 1)
+        r.addWidget(self.rail_rescan_btn)
+        r.addWidget(self.rail_connect_btn)
+        sec.add_layout(r)
+        self.rail_status = _muted("Not connected")
+        sec.add_widget(self.rail_status)
+        r = QHBoxLayout()
+        theme.apply_button_row(r)
+        self.rail_jog_btns = {}
+        jog_tip = ("Move the camera {way} by {size} ({keys}).\nUp is away from the "
+                   "rail's home end. Right-click: the step sizes.")
+        for key, sign, size, keys in (("down_coarse", -1, "coarse", "{"),
+                                      ("down_fine", -1, "fine", "["),
+                                      ("up_fine", 1, "fine", "]"),
+                                      ("up_coarse", 1, "coarse", "}")):
+            b = QPushButton()
+            b.setToolTip(jog_tip.format(way="down" if sign < 0 else "up",
+                                        size="a coarse step" if size == "coarse"
+                                        else "a fine step", keys=keys))
+            b.setContextMenuPolicy(Qt.CustomContextMenu)
+            b.customContextMenuRequested.connect(
+                lambda _p, w=b: self._rail_jog_menu(w.mapToGlobal(_p)))
+            b.clicked.connect(lambda _c=False, sg=sign, sz=size: self.rail_jog(sg, sz))
+            b.setMinimumWidth(RAIL_JOG_BTN_W)       # four and the position in one row
+            self.rail_jog_btns[key] = b
+        self.rail_pos = QLabel("—")
+        self.rail_pos.setAlignment(Qt.AlignCenter)
+        self.rail_pos.setToolTip("Where the rail is")
+        r.addWidget(self.rail_jog_btns["down_coarse"], 1)
+        r.addWidget(self.rail_jog_btns["down_fine"], 1)
+        r.addWidget(self.rail_pos, 2)
+        r.addWidget(self.rail_jog_btns["up_fine"], 1)
+        r.addWidget(self.rail_jog_btns["up_coarse"], 1)
+        sec.add_layout(r)
+        r = QHBoxLayout()
+        theme.apply_button_row(r)
+        self.rail_zero_btn = QPushButton("Set Zero")
+        self.rail_zero_btn.setToolTip("Call this position 0 (no end switch needed)")
+        self.rail_home_btn = QPushButton("Home")
+        self.rail_home_btn.setToolTip("Run to the rail's end, on its switch or a stall, "
+                                      "and call that 0")
+        self.rail_stop_btn = QPushButton("Stop")
+        self.rail_stop_btn.setToolTip("Stop the rail (Esc)")
+        self.rail_af_btn = QPushButton("Autofocus")
+        self.rail_af_btn.setToolTip(
+            "Sweep the rail through focus reading the sharpness meter (the drawn area, "
+            "or the whole view) and stop at the sharpest point. Best at Camera zoom "
+            "8×.\nRight-click: range, steps, backlash, settle.")
+        self.rail_af_btn.setContextMenuPolicy(Qt.CustomContextMenu)
+        for b in (self.rail_zero_btn, self.rail_home_btn, self.rail_stop_btn,
+                  self.rail_af_btn):
+            r.addWidget(b, 1)
+        sec.add_layout(r)
+        self.rail_caption = _muted("")
+        sec.add_widget(self.rail_caption)
+        if _settings().value("live/rail_open", False, type=bool):
+            sec._toggle_btn.setChecked(True)
+            sec._on_toggle(True)
+        sec._toggle_btn.toggled.connect(
+            lambda on: _settings().setValue("live/rail_open", bool(on)))
+        lay.addWidget(sec)
 
     def _wire(self):
         c = self.canvas
@@ -817,6 +918,30 @@ class LiveCaptureMonitor(QWidget):
         self.timing_btn.clicked.connect(self._timing_popup)
         self.scan_combo.activated.connect(self._on_scan_type_chosen)
         self.tether_btn.clicked.connect(self._on_tether_button)
+        self.rail.state_changed.connect(self._on_rail_state)
+        self.rail.info_changed.connect(lambda _i: self._refresh_rail())
+        self.rail.status_changed.connect(lambda _s: self._refresh_rail())
+        self.rail.move_done.connect(self._on_rail_done)
+        self.rail.rail_error.connect(self._on_rail_error)
+        self.rail.ports_changed.connect(self._on_rail_ports)
+        self.rail_rescan_btn.clicked.connect(self.rail.rescan)
+        self.rail_connect_btn.clicked.connect(self._on_rail_connect)
+        self.rail_zero_btn.clicked.connect(self.rail_zero)
+        self.rail_home_btn.clicked.connect(self.rail_home)
+        self.rail_stop_btn.clicked.connect(self.rail_stop)
+        self.rail_af_btn.clicked.connect(self.autofocus)
+        self.rail_af_btn.customContextMenuRequested.connect(
+            lambda p: self._rail_af_menu(self.rail_af_btn.mapToGlobal(p)))
+        self._af_timer = QTimer(self)
+        self._af_timer.setInterval(100)
+        self._af_timer.timeout.connect(lambda: self._af is not None and self._af.tick())
+        for key, slot in (("[", lambda: self.rail_jog(-1, "fine")),
+                          ("]", lambda: self.rail_jog(1, "fine")),
+                          ("{", lambda: self.rail_jog(-1, "coarse")),
+                          ("}", lambda: self.rail_jog(1, "coarse"))):
+            sc = QShortcut(QKeySequence(key), self)
+            sc.setContext(Qt.WindowShortcut)
+            sc.activated.connect(slot)
         for key, slot in (("1", lambda: self.solo("r")), ("2", lambda: self.solo("g")),
                           ("3", lambda: self.solo("b")), ("4", lambda: self.solo("w")),
                           ("S", self.shoot), ("Esc", self._on_escape),
@@ -855,6 +980,10 @@ class LiveCaptureMonitor(QWidget):
         if port:
             self.light.set_auto_port(port)
             self.light.rescan()                   # connect now, not on the next 3 s scan
+        rport = str(_settings().value("live/rail_port", "") or "")
+        if rport and rport != port:
+            self.rail.set_auto_port(rport)
+            self.rail.rescan()
         if hasattr(self.feed, "isRunning") and not self.feed.isRunning():
             self.feed.start()
         if hasattr(self.usb, "isRunning") and not self.usb.isRunning():
@@ -912,8 +1041,11 @@ class LiveCaptureMonitor(QWidget):
             return
         self._closing = True
         QApplication.instance().removeEventFilter(self)
-        for t in (self._idle_timer, self._status_timer, self._ring_timer):
+        for t in (self._idle_timer, self._status_timer, self._ring_timer, self._af_timer):
             t.stop()
+        if self._af is not None and self._af.running:
+            self._af.on_finished = None
+            self._af.stop()
         if self.sequence.running:
             self.sequence.on_finished = None
             self.sequence.stop()
@@ -927,6 +1059,10 @@ class LiveCaptureMonitor(QWidget):
             self.light.shutdown(light_off=True)
         except Exception as ex:
             print(f"live monitor: light shutdown: {ex}")
+        try:
+            self.rail.shutdown(stop=True)        # the motor stays on: it holds the camera
+        except Exception as ex:
+            print(f"live monitor: rail shutdown: {ex}")
         try:
             self.feed.stop()
             if hasattr(self.feed, "wait"):
@@ -1166,6 +1302,9 @@ class LiveCaptureMonitor(QWidget):
             return
         if self.sequence.running:
             self.sequence.stop()
+            return
+        if (self._af is not None and self._af.running) or self.rail.moving():
+            self.rail_stop()
 
     # ------------------------------------------------------------------ #
     # the feed
@@ -1189,6 +1328,10 @@ class LiveCaptureMonitor(QWidget):
         r = self.feed.take()
         if r is None or self._closing:
             return
+        self._last_frame_t = time.monotonic()
+        reading = getattr(r, "reading", None)
+        if reading is not None and self._af is not None and self._af.running:
+            self._af.reading(reading)
         self.canvas.set_result(r)
         if getattr(r, "new_frame", False) and time.monotonic() >= self._new_frame_quiet:
             # spec/sharpness-meter-v2.md §5 (not right after a magnification
@@ -1401,6 +1544,8 @@ class LiveCaptureMonitor(QWidget):
         cur = self.port_combo.currentText()
         self.port_combo.blockSignals(True)
         self.port_combo.clear()
+        taken = self.rail.port if (hasattr(self, "rail") and self.rail.is_open()) else ""
+        ports = [p for p in ports if p != taken]
         if ports:
             self.port_combo.addItems(ports)
             want = self.light.port or cur or str(_settings().value("live/port", "") or "")
@@ -1436,6 +1581,8 @@ class LiveCaptureMonitor(QWidget):
             self.light.set_levels(self._levels)
         self._prev_light = state
         self._refresh_light_status()
+        self.rail.set_blocked([port] if state in ("ok", "waiting", "silent") and port else [])
+        self._on_rail_ports(self.rail.ports)
 
     def _refresh_light_status(self):
         state, detail = self.light.state, self.light.detail
@@ -1592,6 +1739,9 @@ class LiveCaptureMonitor(QWidget):
             return
         if self._sleeping is not None:
             return                       # the light is off while idle: Wake first
+        if self._rail_busy():
+            self._warn_caption("Not while the focus rail is moving: the shot would blur.")
+            return
         tri = self.scan_type() == "trichrome"
         self._used()
         if self._shutter_is_usb():
@@ -1844,6 +1994,9 @@ class LiveCaptureMonitor(QWidget):
         """Measure a film base: `index` set = Measure Again on that entry."""
         if self._measure is not None or self.sequence.running:
             return False
+        if self._rail_busy():
+            self._warn_caption("Not while the focus rail is moving.")
+            return False
         if self._sleeping is not None:
             self._warn_caption("Wake the light first.")
             return False
@@ -2066,6 +2219,10 @@ class LiveCaptureMonitor(QWidget):
         return data.startswith("usb:") and getattr(self.usb, "key", data) == data
 
     def _refresh_shoot_enabled(self):
+        if self._af is not None and self._af.running:
+            self.shoot_btn.setEnabled(False)
+            self.shoot_btn.setToolTip("Autofocus is moving the camera")
+            return
         if self._measure is not None:
             self.shoot_btn.setEnabled(False)
             self.shoot_btn.setToolTip("Measuring the film base")
@@ -2405,6 +2562,9 @@ class LiveCaptureMonitor(QWidget):
             self.cam_zoom_combo.setCurrentIndex(i)
             self.cam_zoom_combo.blockSignals(False)
         self.canvas.set_magnified(None if level == "1" else self.cam_zoom_label(level))
+        if level != was and self._af is not None and self._af.running:
+            self._af.stop("Autofocus stopped: the camera zoom changed.")
+            self.rail.stop()
         if level != was:
             self._reset_sharp_best()             # a different picture scale
             # and again once the new picture is actually arriving (the
@@ -2591,6 +2751,262 @@ class LiveCaptureMonitor(QWidget):
     # ------------------------------------------------------------------ #
     # idle: the light turns off (spec §7.5)
     # ------------------------------------------------------------------ #
+    # ------------------------------------------------------------------ #
+    # the focus rail (spec/focus-rail.md)
+    # ------------------------------------------------------------------ #
+    def _rail_spm(self):
+        return self.rail.steps_per_mm() or raf.ASSUMED_STEPS_PER_MM
+
+    def _rail_busy(self):
+        return (self._af is not None and self._af.running) or self.rail.moving()
+
+    def _rail_caption(self, text):
+        self.rail_caption.setText(text)
+
+    def _on_rail_ports(self, ports):
+        cur = self.rail_port_combo.currentText()
+        taken = self.light.port if self.light.is_open() else ""
+        ports = [p for p in (ports or []) if p != taken]
+        self.rail_port_combo.blockSignals(True)
+        self.rail_port_combo.clear()
+        if ports:
+            self.rail_port_combo.addItems(ports)
+            want = self.rail.port or cur or str(_settings().value("live/rail_port", "") or "")
+            i = self.rail_port_combo.findText(want)
+            if i >= 0:
+                self.rail_port_combo.setCurrentIndex(i)
+        else:
+            self.rail_port_combo.addItem("No ports found")
+        self.rail_port_combo.blockSignals(False)
+        self._refresh_rail()
+
+    def _on_rail_connect(self):
+        if self.rail.is_open():
+            self.rail.close_port()
+            return
+        port = self.rail_port_combo.currentText()
+        if port and port != "No ports found":
+            self.rail.open_port(port)
+
+    def _on_rail_state(self, state, port, detail):
+        if state == "ok" and port:
+            _settings().setValue("live/rail_port", port)
+            self.rail.set_auto_port(port)
+        if state != "ok":
+            self._rail_zeroed = False
+            if self._af is not None and self._af.running:
+                self._af.stop("Autofocus stopped: the rail disconnected.")
+        if hasattr(self, "port_combo"):
+            self._on_ports(self.light.ports)          # the light's list leaves its port out
+        self._on_rail_ports(self.rail.ports)
+
+    def _refresh_rail(self):
+        if not hasattr(self, "rail_status"):
+            return
+        state = self.rail.state
+        self.rail_dot.setStyleSheet(f"color: {STATE_COLOURS.get(state, theme.BORDER_STRONG)}; "
+                                    "font-size: 13px;")
+        self.rail_connect_btn.setText("Disconnect" if self.rail.is_open() else "Connect")
+        avail = state != "unavailable"
+        for w in (self.rail_connect_btn, self.rail_rescan_btn, self.rail_port_combo):
+            w.setEnabled(avail)
+        info, st = self.rail.info, self.rail.status
+        spm = self.rail.steps_per_mm()
+        if state == "ok":
+            bits = [info.get("name") or "Rail"]
+            if st.get("homed"):
+                bits.append("homed")
+            elif self._rail_zeroed:
+                bits.append("zero set here")
+            else:
+                bits.append("position not set")
+            if not spm:
+                bits.append(f"steps ({raf.ASSUMED_STEPS_PER_MM:g}/mm assumed for "
+                            "jogs and autofocus)")
+            if st.get("driver") is False:
+                bits.append("its motor driver isn't answering")
+            text = "  ·  ".join(bits)
+        elif state == "off":
+            text = "Not connected"
+        else:
+            text = self.rail.detail or state
+        self.rail_status.setText(text)
+        self.rail_pos.setText(orp.mm_text(st.get("pos"), spm) if state == "ok" else "—")
+        for key, b in self.rail_jog_btns.items():
+            size = "coarse" if key.endswith("coarse") else "fine"
+            b.setText(orp.jog_text(self._rail_jog[f"{size}_um"],
+                                   -1 if key.startswith("down") else 1))
+        ready = self.rail.is_ready()
+        running = self._af is not None and self._af.running
+        for b in list(self.rail_jog_btns.values()) + [self.rail_zero_btn]:
+            b.setEnabled(ready and not running)
+        self.rail_home_btn.setEnabled(ready and not running
+                                      and info.get("home", "none") != "none")
+        self.rail_home_btn.setToolTip(
+            "This rail has no home switch or stall homing: use Set Zero"
+            if ready and info.get("home", "none") == "none"
+            else "Run to the rail's end, on its switch or a stall, and call that 0")
+        self.rail_stop_btn.setEnabled(ready)
+        self.rail_af_btn.setEnabled(ready)
+        # "Focusing…" while it runs (a click or Esc stops it): the row has no
+        # room for a longer label in the panel's width
+        self.rail_af_btn.setText("Focusing…" if running else "Autofocus")
+        self._refresh_shoot_enabled()
+
+    def _rail_can_move(self, what):
+        if self._sleeping is not None or self._closing:
+            return False
+        if not self.rail.is_ready():
+            self._rail_caption("Connect the focus rail first.")
+            return False
+        if self._af is not None and self._af.running:
+            self._rail_caption("Autofocus is running: Esc or Stop stops it.")
+            return False
+        if self.sequence.running or self._measure is not None:
+            self._rail_caption(f"{what}: not while shooting (the camera would move "
+                               "during the shot).")
+            return False
+        return True
+
+    def rail_jog(self, sign, size):
+        if not self._rail_can_move("Jog"):
+            return
+        um = self._rail_jog[f"{size}_um"]
+        steps = max(1, int(round(um * self._rail_spm() / 1000.0)))
+        self.rail.move(int(sign) * steps)
+        self._used()
+
+    def rail_zero(self):
+        if not self._rail_can_move("Set Zero"):
+            return
+        if self.rail.moving():
+            self._rail_caption("Wait for the rail to stop.")
+            return
+        self.rail.zero()
+        self._rail_zeroed = True
+        self._rail_caption("This position is now 0.")
+        self._refresh_rail()
+
+    def rail_home(self):
+        if not self._rail_can_move("Home"):
+            return
+        self._rail_home_id = self.rail.home()
+        self._rail_caption("Homing…")
+        self._refresh_rail()
+
+    def rail_stop(self):
+        if self._af is not None and self._af.running:
+            self._af.stop("Autofocus stopped.")
+        self.rail.stop()
+
+    def _on_rail_done(self, move_id, pos, flags):
+        if self._af is not None and self._af.running:
+            self._af.moved(move_id, pos, flags)
+        elif self._rail_home_id is not None and move_id == self._rail_home_id:
+            self._rail_home_id = None
+            if flags.get("fail"):
+                self._rail_caption(f"Homing failed: {flags['fail']}.")
+            elif flags.get("stopped"):
+                self._rail_caption("Homing stopped.")
+            else:
+                self._rail_zeroed = False
+                self._rail_caption("Homed.")
+        elif flags.get("limit"):
+            self._rail_caption("Stopped at the rail's limit.")
+        self._refresh_rail()
+
+    def _on_rail_error(self, text):
+        self._rail_caption(f"The rail said: {text}")
+
+    def autofocus(self):
+        """Start the sweep (spec/focus-rail.md §6), or stop it."""
+        if self._af is not None and self._af.running:
+            self.rail_stop()
+            return
+        if not self._rail_can_move("Autofocus"):
+            return
+        if self.rail.moving():
+            self._rail_caption("Wait for the rail to stop.")
+            return
+        pos = self.rail.position()
+        if pos is None:
+            self.rail.ask_status()
+            self._rail_caption("The rail hasn't said where it is yet: try again.")
+            return
+        if time.monotonic() - self._last_frame_t > 2.0:
+            self._rail_caption("Autofocus needs the live view: no picture is coming in.")
+            return
+        if not self.actions["sharp"].isChecked():
+            self.actions["sharp"].setChecked(True)       # it reads the sharpness meter
+        info, st = self.rail.info, self.rail.status
+        limits = None
+        if st.get("homed") and (info.get("min") is not None or info.get("max") is not None):
+            limits = (info.get("min"), info.get("max"))
+        self._af = raf.Autofocus(self.rail.goto, self._rail_af_opts,
+                                 steps_per_mm=self.rail.steps_per_mm(), limits=limits,
+                                 on_progress=self._af_progress,
+                                 on_finished=self._af_finished)
+        self._af_tip = ""
+        if self._cam_zoom_action.isVisible() and not self.magnified():
+            self._af_tip = "  Reads best at Camera zoom 8× (Z)."
+        self._new_frame_quiet = float("inf")          # a sweep changes the picture
+        self._used()
+        self._rail_caption("Autofocus: starting…" + self._af_tip)
+        self._af_timer.start()
+        self._af.start(pos)
+        self._refresh_rail()
+
+    def _af_progress(self, text):
+        self._used()
+        self._rail_caption(text + getattr(self, "_af_tip", ""))
+
+    def _af_finished(self, result):
+        self._af_timer.stop()
+        self._new_frame_quiet = time.monotonic() + 1.0
+        self._rail_caption(result.message)
+        self._note_caption(result.message)
+        self._refresh_rail()
+
+    def _rail_jog_menu(self, pos):
+        pop = OptionsPopup("Jog steps", [
+            ("fine_um", "Fine", RAIL_JOG_LIMITS["fine_um"], lambda v: f"{v} µm",
+             "[ and ] and the inner buttons"),
+            ("coarse_um", "Coarse", RAIL_JOG_LIMITS["coarse_um"], lambda v: f"{v} µm",
+             "{ and } and the outer buttons")],
+            self._rail_jog, RAIL_JOG_DEFAULT, self)
+        pop.changed.connect(self._on_rail_jog_opts)
+        self._place(pop, pos)
+
+    def _on_rail_jog_opts(self, v):
+        self._rail_jog = lf.clean_options(v, RAIL_JOG_DEFAULT, RAIL_JOG_LIMITS)
+        _settings().setValue("live/rail_jog", json.dumps(self._rail_jog))
+        self._refresh_rail()
+
+    def _rail_af_menu(self, pos):
+        L = raf.LIMITS
+        pop = OptionsPopup("Autofocus", [
+            ("range_um", "Range", L["range_um"], lambda v: f"±{v / 1000:.2f} mm",
+             "How far either side of where it starts the coarse sweep looks"),
+            ("coarse_um", "Coarse", L["coarse_um"], lambda v: f"{v} µm",
+             "The coarse sweep's step: about half the depth of field"),
+            ("fine_um", "Fine", L["fine_um"], lambda v: f"{v} µm",
+             "The fine sweep's step, round the coarse best"),
+            ("backlash_um", "Backlash", L["backlash_um"], lambda v: f"{v} µm",
+             "The rail's play: every position is reached moving up, from at least "
+             "this far below when it has to go down"),
+            ("settle_ms", "Settle", L["settle_ms"], lambda v: f"{v} ms",
+             "Wait after each move before reading (vibration, and frames already on "
+             "their way)"),
+            ("readings", "Readings", L["readings"], lambda v: str(v),
+             "Readings per position (their median counts)")],
+            self._rail_af_opts, raf.DEFAULTS, self)
+        pop.changed.connect(self._on_rail_af_opts)
+        self._place(pop, pos)
+
+    def _on_rail_af_opts(self, v):
+        self._rail_af_opts = raf.clean_options(v)
+        _settings().setValue("live/rail_af", json.dumps(self._rail_af_opts))
+
     def eventFilter(self, obj, ev):
         t = ev.type()
         if t == QEvent.Resize and obj is getattr(self, "scroll", None):
