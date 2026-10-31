@@ -363,14 +363,35 @@ def test_with_no_patch_it_asks_for_a_click_then_measures(film_mon):
     mon.measure_btn.click()
     assert mon._measure is None and mon._pending_measure == ("HP5", None)
     assert mon.canvas.mode == "pick" and "Click the film base" in mon.capture_caption.text()
+    assert mon.canvas.pick_box == be.PATCH_SIDE                 # revision 5: the box
+    assert "the box is the patch measured" in mon.canvas.pick_hint
     mon.feed.full = np.zeros((480, 640, 3), np.uint8)
     mon.feed.samples["any"] = (200.0, 150.0, 120.0)
     mon._on_picked(320.0, 24.0)
     assert mon._neg_base_pos == pytest.approx((0.5, 0.05, 640, 480))
     assert _wait(lambda: mon._measure is not None, 5)
     assert mon._measure["rect"] == pytest.approx(be.patch_around(0.5, 0.05, 640, 480))
+    assert mon.canvas.mark[0] == pytest.approx(mon._measure["rect"])
+    assert mon.canvas.mark[1] == "Measuring the base here"
     assert _wait(lambda: mon._measure is None, 20)
     assert mon._film_base()["name"] == "HP5"
+    assert mon.canvas.mark is None
+
+
+def test_the_patch_outline_goes_when_measuring_is_stopped(film_mon):
+    mon, usb, light, lm, path = film_mon
+    mon._neg_base_pos = (0.2, 0.9, 640, 480)
+    mon._ask_film_base_name = lambda default: "Stopped"
+    mon.measure_btn.click()
+    assert mon.canvas.mark[0] == pytest.approx(be.patch_around(0.2, 0.9, 640, 480))
+    mon._on_escape()
+    assert _wait(lambda: mon._measure is None, 20)
+    assert mon.canvas.mark is None
+    # a Negative Preview pick has no box
+    mon._on_neg_button("base")
+    assert mon.canvas.mode == "pick" and mon.canvas.pick_box is None
+    mon._on_escape()
+    assert mon.canvas.mode is None
 
 
 def test_stop_waits_for_the_shot_on_its_way_and_saves_nothing(film_mon):

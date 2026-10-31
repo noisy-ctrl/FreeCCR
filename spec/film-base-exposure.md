@@ -364,6 +364,34 @@ and keeps `when`/`camera`; old entries without `edited` load; summary shows
 disables LED without levels, updates the estimate and warns at 95 %; the
 monitor's Save / Save as New / Cancel, and Edit disabled while measuring.
 
+## Revision 5: the patch is shown (2026-10-31)
+The user: "When clicking measure, it would be good for the cursor to show the
+area being measured. E.g. a box."
+
+- **Picking.** When Measure asks for the click, the canvas's pick mode
+  carries the patch: `LiveCanvas.set_mode("pick", box=be.PATCH_SIDE,
+  hint=…)`. A box the patch's size follows the pointer over the picture
+  (white over a dark halo, like the guide); the cross cursor stays at its
+  centre. The box is `be.patch_around` of the pointer, the SAME function the
+  click's rect comes from, so near an edge it stops at the frame exactly as
+  the patch does, and it scales with zoom. Off the picture there is no box.
+  The canvas hint reads "Click the film base: the box is the patch measured
+  · Esc cancels". Other picks (Negative Preview's Base / Highlight / Mid)
+  are unchanged: plain cross, no box.
+- **Measuring.** The patch read (a click, an earlier Film Base click, or a
+  confident border) is outlined in the warning colour with a label
+  "Measuring the base here" (`LiveCanvas.set_mark(rect, label)`) from the
+  first shot until measuring ends, however it ends. Live view is held while
+  measuring, so the outline sits on the last picture, which is the one the
+  patch was chosen on.
+- Display only: nothing is stored, nothing reaches the RAW reading.
+
+**Tests.** `box_at` equals `patch_around` (centre and clamped at an edge),
+None off the picture and outside pick mode; a pick without a box draws none;
+the mark is set when measuring starts and cleared when it ends, cancelled or
+finished; the Measure pick passes the box and its hint; a render of the
+canvas has the box's white pixels at the pointer.
+
 ## Code
 - `core/base_exposure.py` (new, Qt-free): `seconds`, `iso_number`,
   `exposure_of`, `Reading` + `reading_from_mosaic` + `read_patch`, `Plan` +

@@ -231,3 +231,70 @@ def test_the_pointer_shows_the_meter_is_clickable():
     assert c.cursor().shape() == Qt.PointingHandCursor
     c.mouseMoveEvent(_mouse(QMouseEvent.Type.MouseMove, (c.width() - 40, 40), Qt.NoButton))
     assert c.cursor().shape() == Qt.ArrowCursor
+
+
+# --------------------------------------------------------------------------- #
+# the film base patch (spec/film-base-exposure.md, revision 5)
+# --------------------------------------------------------------------------- #
+from core import base_exposure as be  # noqa: E402
+
+
+def _white_ring(img, r):
+    """How many pixels on the outline of logical rect `r` are near-white."""
+    hits, total = 0, 0
+    for x in range(int(r.left()) + 1, int(r.right())):
+        for y in (int(round(r.top())), int(round(r.bottom()))):
+            total += 1
+            best = max(min(img.pixelColor(x, y + d).red(), img.pixelColor(x, y + d).green(),
+                           img.pixelColor(x, y + d).blue()) for d in (-1, 0, 1))
+            hits += best > 200
+    return hits / max(1, total)
+
+
+def _brightest(img, x, y):
+    cols = [img.pixelColor(x, y + d) for d in (-1, 0, 1)]
+    return max(cols, key=lambda c: c.red() + c.green())
+
+
+def test_the_pick_box_is_the_patch_a_click_reads():
+    c, render = _canvas()
+    g = c.result.geometry
+    assert c.box_at(QPointF(300, 200)) is None                # not picking
+    c.set_mode("pick")
+    assert c.box_at(QPointF(300, 200)) is None                # a plain pick: no box
+    c.set_mode("pick", box=be.PATCH_SIDE, hint="Click the film base")
+    sx, sy = g.to_sensor(300 * c.dpr(), 200 * c.dpr())
+    want = be.patch_around(sx / g.full_w, sy / g.full_h, g.full_w, g.full_h)
+    assert c.box_at(QPointF(300, 200)) == pytest.approx(want)
+    # at the edge it stops where the patch stops
+    edge = c.box_at(QPointF(1, 1))
+    assert edge[0] == pytest.approx(0, abs=1e-9) and edge[1] == pytest.approx(0, abs=1e-9)
+    assert (edge[2] - edge[0]) * g.full_w == pytest.approx(be.PATCH_SIDE * 1080)
+    assert c.box_at(QPointF(-5, 200)) is None or g.ox > 0     # off the picture: none
+    # the pointer draws it
+    _move(c, (300, 200))
+    r = c._frac_rect(g, want)
+    assert 10 < r.width() < 30                                # 32 sensor px at half size
+    assert _white_ring(c.grab().toImage(), r) > 0.8
+    # a click picks the centre, and the mode (and box) end
+    got = []
+    c.picked.connect(lambda x, y: got.append((x, y)))
+    _press(c, (300, 200))
+    assert got and c.mode is None and c.pick_box is None and c._hover is None
+    assert _white_ring(c.grab().toImage(), r) < 0.2
+
+
+def test_the_measured_patch_is_outlined_until_cleared():
+    c, render = _canvas()
+    g = c.result.geometry
+    rect = (0.45, 0.02, 0.48, 0.07)
+    c.set_mark(rect, "Measuring the base here")
+    r = c._frac_rect(g, rect)
+    img = c.grab().toImage()
+    col = _brightest(img, int(r.center().x()), int(round(r.top())))
+    assert col.red() > 180 and col.green() > 150 and col.blue() < 140     # amber
+    render()                                                    # a new frame keeps it
+    assert c.mark is not None
+    c.set_mark(None)
+    col = _brightest(c.grab().toImage(), int(r.center().x()), int(round(r.top())))
+    assert abs(col.red() - col.blue()) < 10                     # just the grey picture
