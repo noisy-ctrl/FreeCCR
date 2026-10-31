@@ -812,6 +812,11 @@ class MainWindow(QMainWindow):
         menu_bar = self.menuBar()
         file_menu = menu_bar.addMenu("File")
 
+        # Close the roll on screen and start empty (spec/new-roll.md)
+        self.new_roll_action = file_menu.addAction("New Roll…")
+        self.new_roll_action.setShortcut("Ctrl+N")
+        self.new_roll_action.triggered.connect(self.new_roll)
+
         open_action = file_menu.addAction("Open Files")
         open_action.triggered.connect(self.open_files)
 
@@ -2421,6 +2426,59 @@ class MainWindow(QMainWindow):
         ccr_backend.save_catalog()
         ccr_backend.clear()
         self.thumbnail_list.load_thumbnails()
+
+    def _confirm_new_roll(self, n):
+        """Ask before closing `n` open images for a new roll. The test seam."""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Question)
+        box.setWindowTitle("New Roll")
+        box.setText(f"Close the {n} open image{'' if n == 1 else 's'} and start a "
+                    "new roll?")
+        info = ("Your edits are saved and come back when you reopen those files. "
+                "The black point and film stock go back to the default, as when "
+                "you open new files.")
+        if self._tether_active:
+            info += f" Hot Folder Tether keeps watching “{self._tether_folder_label()}”."
+        box.setInformativeText(info)
+        new_btn = box.addButton("New Roll", QMessageBox.AcceptRole)
+        cancel_btn = box.addButton(QMessageBox.Cancel)
+        box.setDefaultButton(cancel_btn)
+        box.setEscapeButton(cancel_btn)
+        box.exec()
+        return box.clickedButton() is new_btn
+
+    def new_roll(self):
+        """File → New Roll…: close the open images (edits saved) and start
+        the next roll as a fresh batch does. spec/new-roll.md."""
+        n = len(ccr_backend.images or [])
+        if n and not self._confirm_new_roll(n):
+            return False
+        if n:
+            self._close_session_for_tether()
+        # the roll's own state, as a new batch resets it (in memory only)
+        ccr_backend.black_point_bgr = None
+        ccr_backend.white_point_bgr = None
+        self.sliders_panel.reset_film_stock_combo()
+        # rejected combinations belonged to the roll just closed
+        self._tether_attention = []
+        self.thumbnail_list.set_attention(self._tether_attention)
+        if self._tether_active:
+            self._tether_count = 0
+            self._tether_prompted = False
+            self._tether_lead_img = None
+            self._tether_last_lit = None
+            if self._tether_grouper is not None:
+                left = self._tether_grouper.flush()
+                if left:
+                    self._on_needs_attention({
+                        "paths": left, "thumbs": [],
+                        "reason": f"New Roll with {len(left)} frame(s) of a trichrome "
+                                  "shot waiting for the rest"}, hint=False)
+            self.refresh_tether_banner()
+        self.sliders_panel.set_temporary_hint(
+            f"New roll: closed {n} image{'' if n == 1 else 's'} (edits saved)." if n
+            else "Ready for a new roll.", duration=4000)
+        return True
 
     def _bring_to_front(self):
         if self.isMinimized():
