@@ -392,6 +392,30 @@ the mark is set when measuring starts and cleared when it ends, cancelled or
 finished; the Measure pick passes the box and its hint; a render of the
 canvas has the box's white pixels at the pointer.
 
+## Revision 6: live view that doesn't come back (2026-10-31)
+The user: "after the measure - live view freezes." The cause isn't visible
+from here (no log of it yet), so FreeCCR now recovers by itself and says
+what it did, in the Terminal, for the next log:
+
+- When a hold ends (`UsbCamera.pause_live(False)`: measuring or a film-base
+  Shoot finished), live view gets `RESUME_GRACE_S` (3 s) to send a picture.
+  If none came, the worker reconnects once (`Gphoto2Backend.restart_live()`
+  = the same `_reconnect` a setting uses, 0.4-0.7 s measured) so the next
+  preview starts live view afresh. "usb camera: no live view 3 s after
+  measuring / shooting; reconnecting to restart it".
+- When live view stalls (`live_stalled`: frames came, then busy for 5 s) and
+  `collect_held()` finds no shot in the camera's memory, the same single
+  reconnect ("live view stuck busy, nothing held").
+- At most one reconnect until a picture arrives again (no loop on a camera
+  that stays stuck), and never while a shot is on its way
+  (`shot_pending()`: it looks again once the shot is in).
+- A picture arriving 1 s or more after a hold logs how long it took.
+
+Tests: a fake backend whose live view stays dead after a hold is restarted
+once after the grace and streams again; one that comes back by itself is
+not touched; a stall with nothing held restarts once and never loops; no
+restart while a shot is pending, one as soon as it isn't.
+
 ## Code
 - `core/base_exposure.py` (new, Qt-free): `seconds`, `iso_number`,
   `exposure_of`, `Reading` + `reading_from_mosaic` + `read_patch`, `Plan` +
