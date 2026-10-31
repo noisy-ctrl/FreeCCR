@@ -278,6 +278,10 @@ class Gphoto2Backend:
     APERTURE_KEYS = ("aperture", "f-number", "fnumber")
     ZOOM_KEY = "eoszoom"
     ZOOM_LEVELS = ["1", "5", "10"]
+    # A Fujifilm's live view magnifier, "ThroughImageZoom" (spec/live-magnifier.md:
+    # measured 2.49x, 3.99x, ~8.3x on a GFX 50S II; 3 = 2, 6 and up = the max)
+    FUJI_ZOOM_KEY = "d01b"
+    FUJI_ZOOM = (("1", "1"), ("2.5", "2"), ("4", "4"), ("8", "5"), ("16", "6"))
 
     def __init__(self, gp_module=None, clock=time.monotonic, sleep=time.sleep):
         self.gp = gp_module if gp_module is not None else _import_gphoto2()
@@ -921,9 +925,20 @@ class Gphoto2Backend:
                 results[f] = self._put(f, wanted[f])
         return results
 
+    def _is_fuji(self):
+        return "fuji" in (self._models.get(self._ident) or "").lower()
+
     def zoom_levels(self):
         if self.camera is None:
             return []
+        if self._is_fuji():
+            if self._zoom_ok is None:
+                try:
+                    self._setting(self.FUJI_ZOOM_KEY)     # one setting, not ~150
+                    self._zoom_ok = True
+                except Exception:
+                    self._zoom_ok = False
+            return [lv for lv, _v in self.FUJI_ZOOM] if self._zoom_ok else []
         if self._zoom_ok is None:
             try:
                 self.camera.get_config().get_child_by_name(self.ZOOM_KEY)
@@ -932,15 +947,72 @@ class Gphoto2Backend:
                 self._zoom_ok = False
         return list(self.ZOOM_LEVELS) if self._zoom_ok else []
 
+    @classmethod
+    def fuji_zoom_label(cls, value):
+        """The magnification label for a `d01b` value (2-3 → 2.5, 6 up → 16)."""
+        try:
+            v = int(float(str(value)))
+        except (TypeError, ValueError):
+            return None
+        if v <= 1:
+            return "1"
+        if v <= 3:
+            return "2.5"
+        if v == 4:
+            return "4"
+        if v == 5:
+            return "8"
+        return "16"
+
+    def zoom_now(self):
+        """The magnification the camera is at, or None (no magnifier we know)."""
+        if self.camera is None or not self._is_fuji() or not self.zoom_levels():
+            return None
+        try:
+            return self.fuji_zoom_label(widget_value(self.gp, self._setting(self.FUJI_ZOOM_KEY)))
+        except Exception:
+            return None
+
+    def _put_fuji_zoom(self, value):
+        key = self.FUJI_ZOOM_KEY
+        try:
+            w = self._setting(key)
+            w.set_value(str(value))
+            single = getattr(self.camera, "set_single_config", None)
+            if single is not None:
+                single(key, w)
+            else:
+                cfg = self.camera.get_config()
+                cfg.get_child_by_name(key).set_value(str(value))
+                self.camera.set_config(cfg)
+            return str(widget_value(self.gp, self._setting(key))) == str(value)
+        except Exception:
+            return False
+
     def set_zoom(self, level):
         if self.camera is None or not self.zoom_levels():
-            return
+            return None
+        if self._is_fuji():
+            value = dict(self.FUJI_ZOOM).get(str(level))
+            if value is None:
+                return None
+            ok = self._put_fuji_zoom(value)
+            if not ok and self._live_asked:
+                # refused while live view runs (every setting is): end it, as a
+                # shutter speed does, and set again
+                self._reconnect()
+                ok = self._put_fuji_zoom(value)
+            if not ok:
+                print(f"usb camera: magnifier {level}x refused")
+            return self.zoom_now()
         try:
             cfg = self.camera.get_config()
             cfg.get_child_by_name(self.ZOOM_KEY).set_value(str(level))
             self.camera.set_config(cfg)
+            return str(level)
         except Exception as e:
             print(f"usb camera: zoom {level}: {e}")
+            return None
 
 
 def release_macos_camera_service(run=subprocess.run):
