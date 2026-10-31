@@ -2425,6 +2425,10 @@ class MainWindow(QMainWindow):
         bp = encode_bwpoint(ccr_backend.black_point_bgr)
         if bp is not None:
             self._settings.setValue("convert/black_point_bgr", bp)
+        elif ccr_backend.black_point_bgr is None:
+            # an explicit clear (✕ or Reset Black Point) sticks across a
+            # restart (spec/bw-point-menu.md)
+            self._settings.remove("convert/black_point_bgr")
         # A cleared white point must be removed, else it would be restored next
         # session and override the default-slope choice.
         if ccr_backend.white_point_bgr is None:
