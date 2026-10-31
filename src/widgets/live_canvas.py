@@ -7,13 +7,18 @@ Everything placed on the picture is kept in sensor fractions of the full
 frame and mapped through the geometry the frame was rendered with
 (`core.live_feed.Geometry`), so it stays on the same spot of film whatever
 the zoom, window size or panel state.
+
+Measuring a film base (spec/film-base-exposure.md, revision 5) shows its
+patch: picking it, a box the patch's size follows the pointer (`pick_box`);
+while it measures, the patch read is outlined (`set_mark`).
 """
 import math
 
 from PySide6.QtCore import Qt, Signal, QPointF, QRectF, QEvent
-from PySide6.QtGui import QPainter, QPen, QColor, QFont, QPainterPath
+from PySide6.QtGui import QPainter, QPen, QColor, QFont, QFontMetricsF, QPainterPath
 from PySide6.QtWidgets import QWidget, QToolTip
 
+from core import base_exposure as be
 from ui import theme
 
 GUIDE_DEFAULT = {"cx": 0.5, "cy": 0.5, "w": 0.6, "h": 0.6, "angle": 0.0, "format": None}
@@ -78,6 +83,10 @@ class LiveCanvas(QWidget):
         self.sharp_on = False
         self.sharp_area = None
         self.mode = None                  # None | "pick" | "area" | "line"
+        self.pick_box = None              # pick mode: patch side, share of the short side
+        self.pick_hint = None             # pick mode: the hint's text, if not the usual
+        self._hover = None                # the pointer (logical px) while picking a box
+        self.mark = None                  # (rect in frame fractions, label) to outline
         self._drag = None
         self._rubber = None
         self._last_size = None
@@ -110,11 +119,34 @@ class LiveCanvas(QWidget):
             self.result = None
         self.update()
 
-    def set_mode(self, mode):
+    def set_mode(self, mode, box=None, hint=None):
+        """`box`: in pick mode, show the patch a click would read (its side
+        as a share of the frame's short side, as `be.patch_around` takes)."""
         self.mode = mode
         self._rubber = None
+        self.pick_box = box if mode == "pick" else None
+        self.pick_hint = hint if mode else None
+        if not self.pick_box:
+            self._hover = None
         self.setCursor(Qt.CrossCursor if mode else Qt.ArrowCursor)
         self.update()
+
+    def set_mark(self, rect, label=""):
+        """Outline `rect` (frame fractions x0, y0, x1, y1), or None to clear."""
+        self.mark = (tuple(rect), label or "") if rect else None
+        self.update()
+
+    def box_at(self, pos):
+        """The patch a pick-box click at `pos` (logical) reads, in frame
+        fractions, or None off the picture: exactly `be.patch_around`."""
+        g = self.geometry_()
+        if g is None or not self.pick_box:
+            return None
+        sx, sy = self._to_sensor(g, pos)
+        if not (0 <= sx < g.full_w and 0 <= sy < g.full_h):
+            return None
+        return be.patch_around(sx / g.full_w, sy / g.full_h, g.full_w, g.full_h,
+                               self.pick_box)
 
     def cancel_mode(self):
         if self.mode:
@@ -289,6 +321,9 @@ class LiveCanvas(QWidget):
         self.pointer_moved.emit()
         g = self.geometry_()
         pos = e.position()
+        if self.mode == "pick" and self.pick_box:
+            self._hover = QPointF(pos)
+            self.update()
         if self._rubber is not None:
             self._rubber = (self._rubber[0], pos)
             self.update()
@@ -381,6 +416,30 @@ class LiveCanvas(QWidget):
         r = self._readout_rect
         return r is not None and r.contains(QPointF(pos))
 
+    def leaveEvent(self, e):
+        if self._hover is not None:
+            self._hover = None
+            self.update()
+        super().leaveEvent(e)
+
+    def _frac_rect(self, g, rect):
+        x0, y0, x1, y1 = rect
+        ax, ay = self._to_logical(g, x0 * g.full_w, y0 * g.full_h)
+        bx, by = self._to_logical(g, x1 * g.full_w, y1 * g.full_h)
+        return QRectF(QPointF(ax, ay), QPointF(bx, by)).normalized()
+
+    def _paint_box(self, p, r, colour):
+        """A patch outline readable on any picture: a dark halo under a
+        bright line, never smaller than a few pixels."""
+        if r.width() < 6 or r.height() < 6:
+            c = r.center()
+            r = QRectF(c.x() - 3, c.y() - 3, 6, 6)
+        p.setBrush(Qt.NoBrush)
+        p.setPen(QPen(QColor(0, 0, 0, 180), 3))
+        p.drawRect(r)
+        p.setPen(QPen(colour, 1.5))
+        p.drawRect(r)
+
     def event(self, e):
         if e.type() == QEvent.ToolTip:
             if not self.mode and self._on_readout(QPointF(e.pos())):
@@ -430,7 +489,15 @@ class LiveCanvas(QWidget):
             p.setPen(QPen(QColor(255, 255, 255, 210), 1, Qt.DashLine))
             p.setBrush(Qt.NoBrush)
             p.drawRect(QRectF(QPointF(ax, ay), QPointF(bx, by)))
+        if self.mark is not None:
+            self._paint_box(p, self._frac_rect(g, self.mark[0]), QColor(theme.WARN_TEXT))
+        if self.mode == "pick" and self._hover is not None:
+            box = self.box_at(self._hover)
+            if box is not None:
+                self._paint_box(p, self._frac_rect(g, box), QColor(255, 255, 255, 235))
         p.restore()
+        if self.mark is not None and self.mark[1]:
+            self._paint_label_near(p, self._frac_rect(g, self.mark[0]), self.mark[1])
         if self._rubber is not None:
             a, b = self._rubber
             p.setPen(QPen(QColor(255, 255, 255), 1.5, Qt.DashLine))
@@ -439,9 +506,10 @@ class LiveCanvas(QWidget):
         if self.sharp_on and r.sharp is not None:
             self._paint_readout(p, target, r.sharp)
         if self.mode:
-            hint = {"pick": "Click the picture to sample it  ·  Esc cancels",
-                    "area": "Drag over the detail to measure  ·  Esc cancels",
-                    "line": "Click where the line goes  ·  Esc cancels"}[self.mode]
+            hint = self.pick_hint or {
+                "pick": "Click the picture to sample it  ·  Esc cancels",
+                "area": "Drag over the detail to measure  ·  Esc cancels",
+                "line": "Click where the line goes  ·  Esc cancels"}[self.mode]
             self._paint_label(p, QPointF(target.left() + 12, target.top() + 12), hint)
         p.end()
 
@@ -480,6 +548,16 @@ class LiveCanvas(QWidget):
         p.fillPath(path, QColor(20, 20, 20, 210))
         p.setPen(QColor(theme.TEXT))
         p.drawText(box.adjusted(8, 5, -8, -5), Qt.AlignLeft | Qt.AlignVCenter, text)
+
+    def _paint_label_near(self, p, r, text):
+        """A label under `r`, or above it near the bottom, kept on the canvas."""
+        f = QFont(self.font())
+        f.setPixelSize(theme.FS_CAPTION)
+        fm = QFontMetricsF(f)
+        w, h = fm.horizontalAdvance(text) + 16, fm.height() + 10
+        y = r.bottom() + 6 if r.bottom() + 6 + h <= self.height() - 4 else r.top() - 6 - h
+        x = max(4.0, min(r.left(), self.width() - w - 4))
+        self._paint_label(p, QPointF(x, max(4.0, y)), text)
 
     def _paint_readout(self, p, target, sharp):
         score, best = sharp

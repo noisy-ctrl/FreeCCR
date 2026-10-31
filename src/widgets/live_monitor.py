@@ -1826,7 +1826,11 @@ class LiveCaptureMonitor(QWidget):
         if rect is None:
             self._pending_measure = (name, index)
             self._pick_target = "base"
-            self.canvas.set_mode("pick")
+            # revision 5: the pointer carries the patch, so the click shows
+            # exactly what will be read
+            self.canvas.set_mode("pick", box=be.PATCH_SIDE,
+                                 hint="Click the film base: the box is the patch measured"
+                                      "  ·  Esc cancels")
             self._note_caption("Click the film base in the picture (the clear border "
                                "beside the frame): measuring starts after.  Esc cancels.")
             return False
@@ -1857,6 +1861,7 @@ class LiveCaptureMonitor(QWidget):
         }
         self._hold_live(True)
         self.usb.set_dest(self._measure["temp"])
+        self.canvas.set_mark(rect, "Measuring the base here")
         self.measure_btn.setText("Stop Measuring")
         self._refresh_film_bases()
         self._refresh_shoot_enabled()
@@ -1977,6 +1982,7 @@ class LiveCaptureMonitor(QWidget):
                     setter(f, v)
         self.usb.set_dest(self._usb_dest)
         self._hold_live(False)
+        self.canvas.set_mark(None)
         import shutil
         shutil.rmtree(m["temp"], ignore_errors=True)
         self.measure_btn.setText("Measure…")
