@@ -202,11 +202,41 @@ class LiveCanvas(QWidget):
     def is_fit(self):
         return self.scale is None
 
+    def fit_scale(self):
+        g = self.geometry_()
+        if g is None:
+            return None
+        from core.live_feed import fit_scale
+        cw, ch = self.device_size()
+        return fit_scale(g.full_w, g.full_h, cw, ch)
+
+    def zoom_factor(self):
+        """How many times the fitted view the picture is shown (1 = fit)."""
+        g, fs = self.geometry_(), self.fit_scale()
+        if g is None or not fs or self.is_fit():
+            return 1.0
+        return g.scale / fs
+
     def zoom(self, mode):
-        """"fit", "1:1", "2:1" or "guide"."""
+        """"fit", "guide", a factor of the fitted view ("2", "4", "8"), or
+        the old device-pixel "1:1" / "2:1"."""
         g = self.geometry_()
         if mode == "fit":
             self.scale, self.cx, self.cy = None, None, None
+        elif mode not in ("1:1", "2:1", "guide"):
+            try:
+                factor = float(mode)
+            except (TypeError, ValueError):
+                return
+            fs = self.fit_scale()
+            if fs is None:
+                return
+            if factor <= 1.0:
+                self.scale, self.cx, self.cy = None, None, None
+            else:
+                self.scale = fs * factor
+                if self.cx is None:
+                    self.cx, self.cy = g.full_w / 2.0, g.full_h / 2.0
         elif mode in ("1:1", "2:1"):
             self.scale = 1.0 if mode == "1:1" else 2.0
             if g is not None and self.cx is None:
@@ -234,10 +264,10 @@ class LiveCanvas(QWidget):
         px, py = pos.x() * d, pos.y() * d
         sx, sy = g.to_sensor(px, py)
         cur = g.scale
-        from core.live_feed import fit_scale, MAX_SCALE
+        from core.live_feed import fit_scale, max_scale
         cw, ch = self.device_size()
         fs = fit_scale(g.full_w, g.full_h, cw, ch)
-        new = max(fs, min(MAX_SCALE, cur * factor))
+        new = max(fs, min(max_scale(fs), cur * factor))
         if new <= fs * 1.0001:
             self.scale, self.cx, self.cy = None, None, None
         else:
@@ -260,10 +290,7 @@ class LiveCanvas(QWidget):
         if g is None:
             return
         if self.is_fit():
-            d = self.dpr()
-            self._zoom_about(1.0 / max(1e-6, g.scale), e.position())
-            if self.scale is None:        # the window is bigger than 1:1
-                self.zoom("1:1")
+            self._zoom_about(4.0, e.position())     # 4x the fitted view, about the pointer
         else:
             self.zoom("fit")
 
@@ -611,32 +638,27 @@ class LiveCanvas(QWidget):
         self._paint_label(p, QPointF(x, max(4.0, y)), text)
 
     def _paint_readout(self, p, target, sharp):
-        # spec/sharpness-meter-v2.md §4: the number is stretched near best
-        # focus (1 - sqrt(-ln r)); the plain share of best stays, smaller
+        # One number (the user, 2026-10-31: the bar flickered): Focus N,
+        # N = 100·r^4 of the share of best, shown at most 4 times a second
+        import time as _t
         from core.live_feed import focus_closeness
         score, best = sharp
         ratio = 0.0 if best <= 0 else max(0.0, min(1.0, score / best))
-        frac = focus_closeness(ratio)
+        now = _t.monotonic()
+        if getattr(self, "_focus_shown", None) is None or now - self._focus_t >= 0.25:
+            self._focus_shown = int(round(focus_closeness(ratio) * 100))
+            self._focus_t = now
         f = QFont(self.font())
         f.setPixelSize(theme.FS_CAPTION)
         p.setFont(f)
-        box = QRectF(target.left() + 12, target.bottom() - 56, 248, 44)
+        note = self.readout_note()
+        text = note or f"Focus  {self._focus_shown}"
+        fm = QFontMetricsF(f)
+        w = max(fm.horizontalAdvance("Focus  100"), fm.horizontalAdvance(text)) + 20
+        box = QRectF(target.left() + 12, target.bottom() - 40, w, fm.height() + 14)
         self._readout_rect = QRectF(box)
         path = QPainterPath()
         path.addRoundedRect(box, theme.RADIUS_MD, theme.RADIUS_MD)
         p.fillPath(path, QColor(20, 20, 20, 210))
         p.setPen(QColor(theme.TEXT))
-        what = "area" if self.sharp_area else "view"
-        note = self.readout_note()
-        p.drawText(box.adjusted(8, 5, -8, 0), Qt.AlignLeft | Qt.AlignTop,
-                   note or f"Focus ({what})   {frac * 100:.0f}")
-        if not note:
-            p.setPen(QColor(theme.TEXT_MUTED))
-            p.drawText(box.adjusted(8, 5, -8, 0), Qt.AlignRight | Qt.AlignTop,
-                       f"{ratio * 100:.1f} % of best")
-        bar = QRectF(box.left() + 8, box.top() + 27, box.width() - 16, 8)
-        p.setPen(Qt.NoPen)
-        p.setBrush(QColor(70, 70, 70))
-        p.drawRoundedRect(bar, 3, 3)
-        p.setBrush(QColor(235, 235, 235))
-        p.drawRoundedRect(QRectF(bar.left(), bar.top(), bar.width() * frac, bar.height()), 3, 3)
+        p.drawText(box.adjusted(10, 0, -10, 0), Qt.AlignLeft | Qt.AlignVCenter, text)

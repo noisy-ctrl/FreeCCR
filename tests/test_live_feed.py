@@ -47,7 +47,8 @@ def test_zoom_clamps_to_the_frame_and_maps_both_ways():
                           (9.0, 700, 300), (0.01, 0, 0)):
         g = lf.resolve_view(1920, 1080, 1200, 800, scale, cx, cy)
         assert 0 <= g.x0 < g.x1 <= 1920 and 0 <= g.y0 < g.y1 <= 1080
-        assert g.scale <= lf.MAX_SCALE + 1e-6
+        fs = lf.fit_scale(1920, 1080, 1200, 800)
+        assert g.scale <= lf.max_scale(fs) + 1e-6
         for px, py in ((g.ox + 3, g.oy + 5), (g.ox + g.out_w / 2, g.oy + g.out_h / 3)):
             sx, sy = g.to_sensor(px, py)
             bx, by = g.to_canvas(sx, sy)
@@ -196,7 +197,7 @@ def test_processor_sharpness_reads_the_fresh_frame_in_the_area():
                                          sharp_area=(0.25, 0.25, 0.75, 0.75)))
     assert again.sharp == r.sharp                                  # at most 30 times a second
     blurred = cv2.GaussianBlur(img, (0, 0), 1.5)
-    for _ in range(3):                                             # steadied: a median of 5
+    for _ in range(lf.FocusMeter.MEDIAN // 2 + 1):                  # steadied: a median
         t[0] += 0.1
         r = p.process(blurred, lf.ViewParams(canvas_w=640, canvas_h=360, sharp=True,
                                              sharp_area=(0.25, 0.25, 0.75, 0.75)))
@@ -328,12 +329,14 @@ def _film(h=400, w=600, seed=1):
 
 def test_focus_closeness_spreads_the_top():
     vals = [round(lf.focus_closeness(r), 2) for r in (1.0, 0.99, 0.95, 0.9, 0.5, 0.0)]
-    assert vals == [1.0, 0.9, 0.77, 0.68, 0.17, 0.0]
+    assert vals == [1.0, 0.96, 0.81, 0.66, 0.06, 0.0]
+    # a finite slope at best focus: half a per cent of noise moves it ~2 points
+    assert (lf.focus_closeness(1.0) - lf.focus_closeness(0.995)) * 100 < 2.5
 
 
 def test_the_meter_is_steadied_and_its_best_too():
     m = lf.FocusMeter()
-    for v in (10, 10, 10, 100, 10):          # one wild reading
+    for v in [10] * 10 + [100, 100] + [10] * 3:     # wild readings
         steady, best = m.update(v)
     assert steady == 10 and best == 10
 
@@ -368,3 +371,11 @@ def test_a_new_frame_is_said_once_after_it_settles():
     for _ in range(20):
         t[0] += 0.1
         assert not d.update(b)                                     # a still picture: no more
+
+
+def test_the_view_can_zoom_well_past_fit_on_a_small_live_view():
+    # a 1024 px USB live view on a Retina-sized canvas fits at ~2.15
+    fs = lf.fit_scale(1024, 768, 2200, 1878)
+    g = lf.resolve_view(1024, 768, 2200, 1878, fs * 8, 512, 384)
+    assert g.scale == pytest.approx(fs * 8, rel=1e-3)
+    assert lf.max_scale(0.5) == lf.MAX_SCALE                        # big frames: as before

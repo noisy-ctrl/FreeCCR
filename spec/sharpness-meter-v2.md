@@ -64,3 +64,18 @@ best from the steadied value, `focus_closeness` table. `AreaTracker`: a
 4-px drift is followed and a different picture isn't; capped. Detector: a
 blurred copy is not new; a different picture that settles is, once; a still
 picture isn't. Canvas: "Focus" text and the new-frame note.
+
+## Revision 1 (2026-10-31): one steady number
+The user: "The focus bar is now distracting as it flickers (presumably due to
+noise). I only really want one number. Maybe it should reset after camera
+zoom is toggled off?"
+- The readout is ONE number, "Focus N": no bar, no "% of best".
+- `focus_closeness` is now `r^4`: 0.99 → 96, 0.95 → 81, 0.90 → 66, 0.50 →
+  6. The `1 − √(−ln r)` stretch had an infinite slope at best focus, so grain
+  noise of half a per cent swung it by ~7 points exactly where it is read; r^4
+  moves ~2 points for the same noise and still spreads the top.
+- `FocusMeter.MEDIAN` 5 → 15 (half a second at 30 readings a second), and the
+  canvas changes the shown number at most 4 times a second.
+- A magnification change resets the best twice: at once and again 1.5 s later,
+  when the new picture is actually arriving (frames already on their way set
+  the best at the old scale).

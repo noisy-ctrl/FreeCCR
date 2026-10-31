@@ -64,3 +64,17 @@ while live view runs reconnects once and reads back; `zoom_now` maps 3 →
 changes it by itself; monitor: Z steps the combo, badge + guide hidden +
 Measure refused while magnified, best reset; `zoom_spot.locate` on a
 synthetic texture finds a known centre and scale and rejects a mismatch.
+
+## Revision 1 (2026-10-31): beside the View zoom; the View zoom fixed
+- The camera's magnifier moved from the camera row into the toolbar, labelled
+  **Camera zoom**, just left of the window's zoom, now labelled **View**
+  (`_cam_zoom_action` is the toolbar action shown/hidden with it).
+- The View list did nothing useful on a USB live view: "1:1" and "2:1" were
+  device pixels per sensor pixel, and a 1024 px picture on a Retina canvas
+  already fits at ~2.2, so both were clamped to Fit; the wheel stopped at
+  `MAX_SCALE` 4, under 2x the fitted view. Now the list is **Fit, Fit Guide,
+  2×, 4×, 8×** — times the fitted view (`LiveCanvas.zoom("4")`,
+  `zoom_factor()`); the cap is `live_feed.max_scale(fs)` = max(4, 8 × fit);
+  F and double-click switch Fit ↔ 4× (double-click about the pointer); the
+  list follows the wheel and shows a custom "5.2×" when between presets
+  (`_sync_view_zoom`).

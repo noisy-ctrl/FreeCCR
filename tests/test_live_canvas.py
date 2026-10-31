@@ -311,3 +311,32 @@ def test_the_readout_says_focus_and_a_new_frame():
     assert c.grab().toImage() != img1
     c.flash_readout_note("x", seconds=-1)
     assert c.readout_note() is None
+
+
+def test_view_zoom_is_times_the_fitted_view():
+    c, render = _canvas()
+    fs = c.fit_scale()
+    c.zoom("4")
+    assert c.result.geometry.scale == pytest.approx(fs * 4)
+    assert c.zoom_factor() == pytest.approx(4.0)
+    c.zoom("1")
+    assert c.is_fit() and c.zoom_factor() == 1.0
+    ev = _mouse(QMouseEvent.Type.MouseButtonDblClick, (300, 200))
+    c.mouseDoubleClickEvent(ev)
+    assert c.zoom_factor() == pytest.approx(4.0)
+    c.mouseDoubleClickEvent(ev)
+    assert c.is_fit()
+
+
+def test_the_readout_is_one_steady_number():
+    c, render = _canvas()
+    c.sharp_on = True
+    c.result.sharp = (0.95, 1.0)
+    c.grab()
+    assert c._focus_shown == 81
+    c.result.sharp = (0.5, 1.0)
+    c.grab()
+    assert c._focus_shown == 81                                     # held for 0.25 s
+    c._focus_t -= 1.0
+    c.grab()
+    assert c._focus_shown == 6

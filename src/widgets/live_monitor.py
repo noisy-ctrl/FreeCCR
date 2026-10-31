@@ -417,13 +417,35 @@ class LiveCaptureMonitor(QWidget):
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         tb.addWidget(spacer)
+        # The camera's own magnifier sits beside the window's zoom, labelled
+        # so the two can't be confused (spec/live-magnifier.md revision 1)
+        cam_box = QWidget()
+        cz = QHBoxLayout(cam_box)
+        cz.setContentsMargins(0, 0, theme.GAP_BTN, 0)
+        cz.setSpacing(theme.GAP_TIGHT * 2)
+        cz.addWidget(QLabel("Camera zoom"))
+        self.cam_zoom_combo = QComboBox()
+        self.cam_zoom_combo.setToolTip("The camera's own live view magnification, "
+                                       "for focusing")
+        cz.addWidget(self.cam_zoom_combo)
+        self._cam_zoom_action = tb.addWidget(cam_box)
+        self._cam_zoom_action.setVisible(False)
+        view_box = QWidget()
+        vz = QHBoxLayout(view_box)
+        vz.setContentsMargins(0, 0, 0, 0)
+        vz.setSpacing(theme.GAP_TIGHT * 2)
+        vz.addWidget(QLabel("View"))
         self.zoom_combo = QComboBox()
-        for label, key in (("Fit", "fit"), ("Fit Guide", "guide"), ("1:1", "1:1"), ("2:1", "2:1")):
+        # factors of the fitted view: "1:1" meant less than Fit on a USB live
+        # view (1024 px) and did nothing
+        for label, key in self.VIEW_ZOOMS:
             self.zoom_combo.addItem(label, key)
-        self.zoom_combo.setToolTip("Zoom. The wheel zooms about the pointer, drag pans, "
-                                   "double-click switches Fit / 1:1 (F).")
-        self.zoom_combo.activated.connect(lambda i: self.canvas.zoom(self.zoom_combo.itemData(i)))
-        tb.addWidget(self.zoom_combo)
+        self.zoom_combo.setToolTip("The window's zoom, as times the fitted view. The wheel "
+                                   "zooms about the pointer, drag pans, double-click "
+                                   "switches Fit / 4× (F).")
+        self.zoom_combo.activated.connect(self._on_view_zoom_chosen)
+        vz.addWidget(self.zoom_combo)
+        tb.addWidget(view_box)
         a = QAction("Panel", self)
         a.setCheckable(True)
         a.setChecked(True)
@@ -454,11 +476,6 @@ class LiveCaptureMonitor(QWidget):
         self.addon_badge.setStyleSheet(f"color: {theme.WARN_TEXT}; font-size: {theme.FS_CAPTION}px;")
         self.addon_badge.setVisible(False)
         r.addWidget(self.addon_badge)
-        self.cam_zoom_combo = QComboBox()
-        self.cam_zoom_combo.setToolTip("The camera's own live view magnification, "
-                                       "for focusing")
-        self.cam_zoom_combo.setVisible(False)
-        r.addWidget(self.cam_zoom_combo)
         self.release_btn = QPushButton("Release Camera")
         self.release_btn.setToolTip("macOS's own camera service is holding the camera: "
                                     "end its hold so FreeCCR can open it")
@@ -803,7 +820,7 @@ class LiveCaptureMonitor(QWidget):
                           ("3", lambda: self.solo("b")), ("4", lambda: self.solo("w")),
                           ("S", self.shoot), ("Esc", self._on_escape),
                           ("Z", self._step_cam_zoom),
-                          ("F", lambda: self.canvas.zoom("1:1" if self.canvas.is_fit() else "fit"))):
+                          ("F", lambda: self.canvas.zoom("4" if self.canvas.is_fit() else "fit"))):
             sc = QShortcut(QKeySequence(key), self)
             sc.setContext(Qt.WindowShortcut)
             sc.activated.connect(slot)
@@ -1165,8 +1182,7 @@ class LiveCaptureMonitor(QWidget):
             sharp=self.actions["sharp"].isChecked(), sharp_area=self.canvas.sharp_area,
             false_colour=self.actions["fc"].isChecked(), negative=neg,
             bw=self.neg_bw.isChecked(), clip=self._clip_kind, reset_best=self._reset_best))
-        if self.canvas.is_fit():
-            self.zoom_combo.setCurrentIndex(0)
+        self._sync_view_zoom()
 
     def _on_frame(self):
         r = self.feed.take()
@@ -2159,7 +2175,7 @@ class LiveCaptureMonitor(QWidget):
                 self._measure["cal"].failed("The camera disconnected.")
                 self._measure_finish()
             self._exposure = {}
-            self.cam_zoom_combo.setVisible(False)
+            self._cam_zoom_action.setVisible(False)
             self._on_cam_zoom("1")
             self._on_exposure_choices({})
         self._rebuild_shutter_combo()
@@ -2306,6 +2322,40 @@ class LiveCaptureMonitor(QWidget):
             self.capture_caption.setText("")
         self._select_exposure()
 
+    VIEW_ZOOMS = (("Fit", "fit"), ("Fit Guide", "guide"), ("2×", "2"), ("4×", "4"),
+                  ("8×", "8"))
+
+    def _on_view_zoom_chosen(self, i):
+        key = self.zoom_combo.itemData(i)
+        if key != "custom":
+            self.canvas.zoom(key)
+
+    def _sync_view_zoom(self):
+        """The View list shows the zoom as it is (the wheel and double-click
+        change it too): a preset when it is one, else its factor."""
+        combo = self.zoom_combo
+        custom = combo.findData("custom")
+        if self.canvas.is_fit():
+            target = combo.findData("fit")
+        else:
+            f = self.canvas.zoom_factor()
+            target = next((combo.findData(k) for _l, k in self.VIEW_ZOOMS
+                           if k not in ("fit", "guide") and abs(f / float(k) - 1) < 0.03), -1)
+            if target < 0:
+                text = f"{f:.1f}×"
+                if custom < 0:
+                    combo.addItem(text, "custom")
+                    custom = combo.findData("custom")
+                else:
+                    combo.setItemText(custom, text)
+                target = custom
+        if custom >= 0 and target != custom:
+            combo.removeItem(custom)
+            target = combo.findData(combo.itemData(target)) if target >= 0 else target
+        combo.blockSignals(True)
+        combo.setCurrentIndex(max(0, target))
+        combo.blockSignals(False)
+
     @staticmethod
     def cam_zoom_label(lv):
         lv = str(lv)
@@ -2315,7 +2365,7 @@ class LiveCaptureMonitor(QWidget):
         self.cam_zoom_combo.clear()
         for lv in levels or []:
             self.cam_zoom_combo.addItem(self.cam_zoom_label(lv), lv)
-        self.cam_zoom_combo.setVisible(bool(levels))
+        self._cam_zoom_action.setVisible(bool(levels))
         self.cam_zoom_combo.setToolTip(
             "The camera's own live view magnifier, for focusing: it reads the sensor, "
             "so 8× shows about one sensor pixel per screen pixel. It zooms where the "
@@ -2337,7 +2387,7 @@ class LiveCaptureMonitor(QWidget):
 
     def _step_cam_zoom(self):
         n = self.cam_zoom_combo.count()
-        if n < 2 or not self.cam_zoom_combo.isVisible():
+        if n < 2 or not self._cam_zoom_action.isVisible():
             return
         i = self.cam_zoom_combo.findData(self._cam_zoom)
         nxt = self.cam_zoom_combo.itemData((i + 1) % n if i >= 0 else 1)
@@ -2355,6 +2405,10 @@ class LiveCaptureMonitor(QWidget):
         self.canvas.set_magnified(None if level == "1" else self.cam_zoom_label(level))
         if level != was:
             self._reset_sharp_best()             # a different picture scale
+            # and again once the new picture is actually arriving (the
+            # reconnect takes ~1 s; frames already on their way would
+            # otherwise set the best at the old scale)
+            QTimer.singleShot(1500, self._reset_sharp_best)
             self._new_frame_quiet = time.monotonic() + 4.0
         self._zoom_token += 1
         if level != "1":
