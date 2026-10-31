@@ -191,6 +191,111 @@ def test_live_view_can_be_held(tmp_path):
         usb.wait(3000)
 
 
+class _StuckAfterHold(cb.FakeBackend):
+    """Live view that doesn't come back by itself until restarted (revision 6:
+    the user's live view froze after Measure)."""
+    def __init__(self):
+        super().__init__()
+        self.stuck = False
+        self.restarts = 0
+        self.stall = False
+
+    def preview(self):
+        if self.stuck:
+            return None
+        return super().preview()
+
+    def restart_live(self):
+        self.restarts += 1
+        self.stuck = False
+        self.stall = False
+        return True
+
+    def live_stalled(self):
+        return self.stall
+
+    def collect_held(self):
+        return 0
+
+
+def _stuck_worker(tmp_path, monkeypatch):
+    import core.usb_camera as uc
+    monkeypatch.setattr(uc, "RESUME_GRACE_S", 0.3)
+    fake = _StuckAfterHold()
+    usb = UsbCamera(backends=[fake])
+    states = []
+    usb.state.connect(lambda k, t: states.append(k))
+    usb.start()
+    usb.set_dest(str(tmp_path))
+    usb.open("usb:fake:0")
+    assert _wait(lambda: "open" in states)
+    usb.set_live(True)
+    assert _wait(lambda: fake.frames > 2)
+    return fake, usb
+
+
+def test_live_view_that_doesnt_come_back_after_a_hold_is_restarted_once(tmp_path, monkeypatch):
+    fake, usb = _stuck_worker(tmp_path, monkeypatch)
+    try:
+        usb.pause_live(True)
+        time.sleep(0.1)
+        fake.stuck = True
+        usb.pause_live(False)
+        time.sleep(0.15)
+        assert fake.restarts == 0                       # given its grace first
+        assert _wait(lambda: fake.restarts == 1, 3)
+        n = fake.frames
+        assert _wait(lambda: fake.frames > n)           # and it's back
+        # a hold it comes back from by itself: no reconnect
+        usb.pause_live(True)
+        time.sleep(0.1)
+        usb.pause_live(False)
+        time.sleep(0.6)
+        assert fake.restarts == 1
+    finally:
+        usb.stop()
+        usb.wait(3000)
+
+
+def test_a_stall_with_nothing_held_restarts_live_view_once(tmp_path, monkeypatch):
+    fake, usb = _stuck_worker(tmp_path, monkeypatch)
+    try:
+        fake.stall = fake.stuck = True                  # busy, no shot to collect
+        assert _wait(lambda: fake.restarts == 1, 3)
+        n = fake.frames
+        assert _wait(lambda: fake.frames > n)
+        # stuck again and not recovering: no reconnect loop until a frame comes
+        fake.stuck = True
+        restart = fake.restart_live
+        fake.restart_live = lambda: (setattr(fake, "restarts", fake.restarts + 1), True)[1]
+        fake.stall = True
+        assert _wait(lambda: fake.restarts == 2, 3)
+        time.sleep(0.5)
+        assert fake.restarts == 2
+        fake.restart_live = restart
+    finally:
+        usb.stop()
+        usb.wait(3000)
+
+
+def test_no_restart_while_a_shot_is_on_its_way(tmp_path, monkeypatch):
+    fake, usb = _stuck_worker(tmp_path, monkeypatch)
+    try:
+        busy = {"on": True}
+        fake.shot_pending = lambda: busy["on"]
+        usb.pause_live(True)
+        time.sleep(0.1)
+        fake.stuck = True
+        usb.pause_live(False)
+        time.sleep(0.8)
+        assert fake.restarts == 0
+        busy["on"] = False
+        assert _wait(lambda: fake.restarts == 1, 3)
+    finally:
+        usb.stop()
+        usb.wait(3000)
+
+
 # --------------------------------------------------------------------------- #
 # the monitor
 # --------------------------------------------------------------------------- #

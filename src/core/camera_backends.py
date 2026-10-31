@@ -895,6 +895,15 @@ class Gphoto2Backend:
         self._busy_since = None
         self._busy_until = 0.0
 
+    def restart_live(self):
+        """Live view that didn't come back (after a hold, or stuck busy with no
+        shot to collect): reconnect, as a setting does, so the next preview
+        starts it afresh. spec/film-base-exposure.md revision 6."""
+        if self.camera is None:
+            return False
+        self._reconnect()
+        return True
+
     def set_exposure(self, wanted):
         """Set {field: value}; {field: (ok, text)}. A camera that refuses
         while its live view runs (a Fujifilm answers Device Busy to every

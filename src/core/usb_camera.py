@@ -21,6 +21,7 @@ from utils.qt_threads import WorkerThread
 EXPOSURE_EVERY_S = 3.0
 FRAME_WAIT_S = 0.2          # a source read waits this long for a new frame
 IDLE_LIVE_S = 0.02          # live view wanted but nothing came this turn: pause
+RESUME_GRACE_S = 3.0        # after a hold, live view gets this long before a reconnect
 
 
 class UsbCamera(WorkerThread):
@@ -51,6 +52,8 @@ class UsbCamera(WorkerThread):
         self._seq = 0
         self._live = False
         self._paused = False
+        self._resume_at = None           # when a hold ended, until a frame comes
+        self._restarted = False          # one reconnect per hold / per stall
         self._hold_live = False          # no previews while held (film base, Shoot)
         self._want = {}                  # exposure asked for, latest wins
         self.backend = None
@@ -86,7 +89,10 @@ class UsbCamera(WorkerThread):
         """Hold live view: no preview requests until released, so a camera
         that refuses settings while live view runs (GFX 50S II) takes each one
         straight away. Separate from the user's live view switch."""
-        self._hold_live = bool(on)
+        was, self._hold_live = self._hold_live, bool(on)
+        if was and not on:
+            self._resume_at = self._clock()
+            self._restarted = False
         self._wake.set()
 
     def set_zoom(self, level):
@@ -181,6 +187,13 @@ class UsbCamera(WorkerThread):
                     data = self.backend.preview()
                     if data:
                         self._publish(data)
+                        if self._resume_at is not None:
+                            took = self._clock() - self._resume_at
+                            if took >= 1.0:
+                                print(f"usb camera: live view back {took:.1f} s after "
+                                      "the hold")
+                        self._resume_at = None
+                        self._restarted = False
                     elif getattr(self.backend, "no_preview", False):
                         self.state.emit("nopreview", self.model)
                     stalled = getattr(self.backend, "live_stalled", None)
@@ -199,6 +212,13 @@ class UsbCamera(WorkerThread):
                             if n:
                                 print(f"usb camera: live view stuck; collecting {n} "
                                       "shot(s) the camera was holding")
+                            else:
+                                self._restart_live("live view stuck busy, nothing held")
+                    if (not data and self._resume_at is not None
+                            and self._clock() - self._resume_at >= RESUME_GRACE_S):
+                        self._resume_at = None
+                        self._restart_live(f"no live view {RESUME_GRACE_S:g} s after "
+                                           "measuring / shooting")
                 events = self.backend.poll(0.01 if self._live else 0.1)
                 if self._live and not data and not events:
                     # No frame (camera busy, backing off) and the event check
@@ -380,6 +400,27 @@ class UsbCamera(WorkerThread):
         exp = b.exposure()
         if exp:
             self.exposure_changed.emit(exp)
+
+    def _restart_live(self, why):
+        """Reconnect once to bring live view back (revision 6 of
+        spec/film-base-exposure.md: live view froze after Measure). Never
+        with a shot on its way."""
+        restart = getattr(self.backend, "restart_live", None)
+        if restart is None or self._restarted:
+            return False
+        pending = getattr(self.backend, "shot_pending", None)
+        if callable(pending) and pending():
+            self._resume_at = self._clock()      # look again once the shot is in
+            return False
+        self._restarted = True
+        print(f"usb camera: {why}; reconnecting to restart it")
+        try:
+            return bool(restart())
+        except cb.CameraLost:
+            raise
+        except Exception as e:
+            print(f"usb camera: restarting live view failed: {e}")
+            return False
 
     def _publish(self, data):
         frame = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
