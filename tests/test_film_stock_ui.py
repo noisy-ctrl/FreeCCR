@@ -175,3 +175,28 @@ def test_delete_falls_back_to_default(panel, monkeypatch):
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+def test_a_greyed_plus_says_what_it_needs(panel, monkeypatch):
+    """The user couldn't tell why ＋ was greyed out (2026-10-31)."""
+    class Frame:
+        wp_sample = None
+        conversion_inputs = {}
+    frame = Frame()
+    monkeypatch.setattr(ccr_backend, "get_image_by_index", lambda i: frame)
+    panel.current_idx = 0
+    panel._update_bwp_mode_label()
+    assert not panel.save_film_stock_btn.isEnabled()
+    assert "Set White Point" in panel.save_film_stock_btn.toolTip()
+    frame.wp_sample = WHITE_BGR                        # white but no black yet
+    panel._update_bwp_mode_label()
+    assert not panel.save_film_stock_btn.isEnabled()
+    assert "black point" in panel.save_film_stock_btn.toolTip()
+    frame.conversion_inputs = {"bw": (BASE_BGR, WHITE_BGR)}    # converted with both
+    panel._update_bwp_mode_label()
+    assert panel.save_film_stock_btn.isEnabled()
+    assert panel.save_film_stock_btn.toolTip() == panel.FILM_STOCK_SAVE_TIP
+    ccr_backend.positive_mode = True
+    panel._update_bwp_mode_label()
+    assert "Positive mode" in panel.save_film_stock_btn.toolTip()
+    ccr_backend.positive_mode = False
