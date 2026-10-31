@@ -258,3 +258,65 @@ def compute_awb_balance(ccr_image, algorithm=None):
     spec/white-balance-restore.md and spec/auto-white-balance.md.
     """
     return _awb_solve(ccr_image, algorithm, "solve_neutral_balance")
+
+
+# --------------------------------------------------------------------------- #
+# the roll guard (spec/awb-roll-guard.md)
+# --------------------------------------------------------------------------- #
+TEMP_ROLL_CAP = 0.06        # this frame's own extra beyond the roll, R/B density
+TINT_ROLL_CAP = 0.15        # the same on the G against R,B axis
+TEMP_WARM_CAP = 0.20        # no roll: warming (a cool cast) removed up to this
+TEMP_COOL_CAP = 0.06        # no roll: cooling (a warm scene) at most this
+ROLL_MIN = 3
+
+
+def temp_density(t_slider):
+    """Temperature slider -> the R/B density it applies (White Balance stage:
+    r *= 1+s, b *= 1-s, s = slider/100 * 0.40)."""
+    s = max(-0.99, min(0.99, float(t_slider) / 100.0 * 0.40))
+    return float(np.log10((1 + s) / (1 - s)))
+
+
+def temp_slider(d):
+    r = 10.0 ** float(d)
+    return (r - 1) / (r + 1) / 0.40 * 100.0
+
+
+def tint_density(n_slider):
+    """Tint slider -> its G against R,B density (g *= 1-t, r,b *= 1+0.3t,
+    t = tanh(slider*0.02)*0.26)."""
+    t = float(np.tanh(float(n_slider) * 0.02) * 0.26)
+    return float(np.log10((1 + 0.3 * t) / (1 - t)))
+
+
+def tint_slider(d):
+    r = 10.0 ** float(d)
+    t = (r - 1) / (r + 0.3)
+    t = max(-0.2599, min(0.2599, t))
+    return float(np.arctanh(t / 0.26) / 0.02)
+
+
+def guard_wb(full, roll=None):
+    """(temperature, tint) to apply, from this frame's full neutralising pair
+    and the roll's (median of other frames' full pairs, or None)."""
+    dt, dn = temp_density(full[0]), tint_density(full[1])
+    if roll is not None:
+        rt, rn = temp_density(roll[0]), tint_density(roll[1])
+        dt = rt + max(-TEMP_ROLL_CAP, min(TEMP_ROLL_CAP, dt - rt))
+        dn = rn + max(-TINT_ROLL_CAP, min(TINT_ROLL_CAP, dn - rn))
+    else:
+        dt = max(-TEMP_COOL_CAP, min(TEMP_WARM_CAP, dt))
+        dn = max(-TINT_ROLL_CAP, min(TINT_ROLL_CAP, dn))
+    t = int(round(max(-100.0, min(100.0, temp_slider(dt)))))
+    n = int(round(max(-100.0, min(100.0, tint_slider(dn)))))
+    return t, n
+
+
+def roll_of(pairs):
+    """The roll's full pair: the per-axis median of the others', or None with
+    fewer than ROLL_MIN."""
+    pairs = [p for p in pairs if p is not None]
+    if len(pairs) < ROLL_MIN:
+        return None
+    arr = np.asarray(pairs, dtype=float)
+    return float(np.median(arr[:, 0])), float(np.median(arr[:, 1]))

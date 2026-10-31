@@ -1125,6 +1125,9 @@ class CCRBackend:
         only from fresh-conversion sites, not replay/reconvert paths. Pure
         numpy + a dict write, so it is safe from the auto-frame worker threads.
         See spec/auto-white-balance.md and spec/white-balance-restore.md."""
+        # a fresh conversion: a full AWB pair solved on the old base is stale
+        # (it is the roll's data for the AWB guard, spec/awb-roll-guard.md)
+        image_obj.awb_full = None
         if not self.auto_awb or not image_obj.converted:
             return
         ci = image_obj.adjustment_settings
@@ -1143,11 +1146,45 @@ class CCRBackend:
             return
         if ci.get("temperature", 0) or ci.get("tint", 0):
             return
-        from core.awb import compute_awb_wb
-        res = compute_awb_wb(image_obj)
-        if res is not None and any(res):
-            ci["temperature"], ci["tint"] = res
-            image_obj.awb_auto = tuple(res)
+        res = self.awb_for(image_obj, fill_roll=False)
+        if res is not None and any(res[:2]):
+            ci["temperature"], ci["tint"] = res[:2]
+            image_obj.awb_auto = tuple(res[:2])
+
+    AWB_FILL_MAX = 6            # other frames the AWB button may solve for a roll
+
+    def awb_for(self, img, fill_roll=False, guard=True):
+        """(temperature, tint, note) for AWB on `img`, guarded by the roll
+        (spec/awb-roll-guard.md), or None with too little to go on. Records
+        the frame's full pair as `img.awb_full`. `fill_roll` (the button, GUI
+        thread only) first solves up to AWB_FILL_MAX other converted frames
+        that have none."""
+        from core.awb import compute_awb_wb, guard_wb, roll_of
+        full = compute_awb_wb(img)
+        if full is None:
+            return None
+        img.awb_full = tuple(int(v) for v in full)
+        if not guard:
+            return full[0], full[1], "neutralised fully"
+        others = [o for o in list(self.images) if o is not img and getattr(o, "converted", False)]
+        if fill_roll:
+            todo = [o for o in others if getattr(o, "awb_full", None) is None]
+            for o in todo[:self.AWB_FILL_MAX]:
+                try:
+                    r = compute_awb_wb(o)
+                except Exception:
+                    r = None
+                if r is not None:
+                    o.awb_full = tuple(int(v) for v in r)
+        pairs = [getattr(o, "awb_full", None) for o in others]
+        roll = roll_of(pairs)
+        t, n = guard_wb(full, roll)
+        if roll is not None:
+            k = sum(1 for p_ in pairs if p_ is not None)
+            note = f"guarded by the roll ({k} frames)"
+        else:
+            note = "no roll yet: warm scenes keep their warmth"
+        return t, n, note
 
     def convert_negative_by_index(self, idx: int):
         """
