@@ -300,3 +300,11 @@ Test files are run in small groups (full-suite run hangs — pre-existing).
    B/W points; the catalog stays per-session image state.
 5. **Auto-select after save** — RESOLVED: yes; clearing the white point then
    activates the stock immediately.
+
+## Revision: the greyed ＋ says why (2026-10-31)
+The user found ＋ greyed out and couldn't add a stock. ＋ still needs a pair
+(a White Point sampled by hand on the frame, plus the black point that frame
+converted with, or a roll-wide pair from code); its tooltip now names the
+missing piece: "Needs a White Point sampled on this frame…" / "Needs this
+frame's black point…" / "Not in Positive mode…", and the usual text once it
+can save (`SlidersPanel._film_stock_save_tip`).

@@ -989,9 +989,7 @@ class SlidersPanel(QWidget):
         self.save_film_stock_btn = QPushButton("＋")
         self.save_film_stock_btn.setFixedWidth(theme.GLYPH_W)
         self.save_film_stock_btn.setFixedHeight(theme.CONTROL_H)
-        self.save_film_stock_btn.setToolTip(
-            "Save the sampled B/W-point pair as a named film stock — its "
-            "slope then converts future rolls from just a black point")
+        self.save_film_stock_btn.setToolTip(self.FILM_STOCK_SAVE_TIP)
         self.delete_film_stock_btn = QPushButton("−")
         self.delete_film_stock_btn.setFixedWidth(theme.GLYPH_W)
         self.delete_film_stock_btn.setFixedHeight(theme.CONTROL_H)
@@ -3587,8 +3585,10 @@ class SlidersPanel(QWidget):
             "use a film-stock slope" if wp_set else
             "Slope preset for black-point-only conversion: a saved film "
             "stock's per-channel slopes, or the built-in default")
-        self.save_film_stock_btn.setEnabled(
-            self._film_stock_pair() is not None and not positive)
+        pair = self._film_stock_pair()
+        self.save_film_stock_btn.setEnabled(pair is not None and not positive)
+        # Greyed out, it says what it is waiting for (the user couldn't tell).
+        self.save_film_stock_btn.setToolTip(self._film_stock_save_tip(pair, positive))
         self.delete_film_stock_btn.setEnabled(
             not wp_set and not positive
             and self.film_stock_combo.currentIndex() > 0)
@@ -3995,6 +3995,26 @@ class SlidersPanel(QWidget):
         if ccr_backend.positive_mode:
             return
         self._on_convert_current_bwpoint()
+
+    FILM_STOCK_SAVE_TIP = ("Save the sampled B/W-point pair as a named film stock — its "
+                           "slope then converts future rolls from just a black point")
+
+    def _film_stock_save_tip(self, pair, positive):
+        """The ＋'s tooltip: what it does, or what it still needs."""
+        if positive:
+            return "Not in Positive mode: there is nothing to convert."
+        if pair is not None:
+            return self.FILM_STOCK_SAVE_TIP
+        img = (ccr_backend.get_image_by_index(self.current_idx)
+               if self.current_idx is not None else None)
+        if img is None:
+            return "Open a frame first. " + self.FILM_STOCK_SAVE_TIP
+        if not getattr(img, "wp_sample", None):
+            return ("Needs a White Point sampled on this frame: click Set White Point, "
+                    "then a neutral, dense area (a grey card, a white wall). With the "
+                    "frame's black point that pair gives the stock's slopes.")
+        return ("Needs this frame's black point: convert it (its clear border is "
+                "measured) or click Set Black Point on the film base.")
 
     def _film_stock_pair(self):
         """(black, white) to save a film stock from: a roll-wide pair (from
