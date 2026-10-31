@@ -1191,7 +1191,10 @@ class SlidersPanel(QWidget):
         self.auto_wb_btn.setToolTip(
             "Automatic white balance — estimates the neutral color from the "
             "whole image and sets Temperature and Tint. The algorithm is "
-            "chosen in Settings → General.")
+            "chosen in Settings → General.\nGuarded by the roll: a warm scene keeps "
+            "its warmth. Right-click: Neutralise Fully.")
+        self.auto_wb_btn.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.auto_wb_btn.customContextMenuRequested.connect(self._awb_menu)
         # Crop: non-destructive crop of the preview/export (same gating).
         self.crop_btn = QPushButton("Crop")
         self.crop_btn.setToolTip(
@@ -3498,16 +3501,33 @@ class SlidersPanel(QWidget):
         """Fully automatic white balance: estimate the neutral from the whole
         converted frame (Settings → General algorithm) and set the sliders via
         the same path as an eyedropper pick."""
+        self._run_awb(guard=True)
+
+    def _run_awb(self, guard=True):
+        """AWB, guarded by the roll unless `guard` is False (right-click:
+        Neutralise Fully). spec/awb-roll-guard.md."""
         img = ccr_backend.get_image_by_index(self.current_idx)
         if img is None or not img.converted:
             return
-        from core.awb import compute_awb_wb
-        res = compute_awb_wb(img)
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            res = ccr_backend.awb_for(img, fill_roll=guard, guard=guard)
+        finally:
+            QApplication.restoreOverrideCursor()
         if res is None:
             self.set_temporary_hint(
                 "<b>AWB:</b> not enough usable image content.", duration=5000)
             return
-        self.on_wb_sampled(*res)
+        t, n, note = res
+        self.on_wb_sampled(t, n)
+        self.set_temporary_hint(
+            f"Auto WB applied: Temperature {t}, Tint {n} ({note}).", duration=6000)
+
+    def _awb_menu(self, pos):
+        m = QMenu(self)
+        m.addAction("Neutralise Fully (ignore the roll)", lambda: self._run_awb(guard=False))
+        m.popup(self.auto_wb_btn.mapToGlobal(pos))
+        self._awb_popup = m
 
     def on_wb_sampled(self, temp_value, tint_value):
         """Apply the auto-computed Temperature/Tint from the WB eyedropper or AWB."""

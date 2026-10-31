@@ -268,6 +268,7 @@ def serialize_image(img) -> dict:
         # Temperature/Tint the after-conversion AWB wrote, so a later white
         # point conversion can undo them (spec/auto-white-balance.md §10).
         "awb_auto": (list(img.awb_auto) if getattr(img, "awb_auto", None) else None),
+        "awb_full": (list(img.awb_full) if getattr(img, "awb_full", None) else None),
         "rotation_angle": int(img.rotation_angle),
         "fine_rotation_angle": int(img.fine_rotation_angle),
         "horizontal_mirrored": bool(img.horizontal_mirrored),
@@ -755,6 +756,8 @@ def _restore_image(file_path: str, state: dict, live_merge_sources=None,
     img.wp_sample_rect = tuple(wr) if wr else None
     aa = state.get("awb_auto")
     img.awb_auto = tuple(aa) if aa else None
+    af = state.get("awb_full")
+    img.awb_full = tuple(af) if af else None
     img.tint_balance_factor = state.get("tint_balance_factor",
                                         getattr(img, "tint_balance_factor", 1.0))
 
