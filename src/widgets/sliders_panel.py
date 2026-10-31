@@ -7,6 +7,7 @@ from PySide6.QtCore import Qt, QTimer, QThread, Signal, QRectF, QSettings
 from PySide6.QtGui import (QKeySequence, QShortcut, QPainter, QColor,
                            QLinearGradient, QPen)
 from core.ccr_backend import ccr_backend
+from core import detail_defaults
 from utils.qt_threads import WorkerThread
 from core.ccr_processor import (COLOR_BANDS, BAND_PARAMS, BAND_ADJUSTMENT_KEYS,
                                 compute_density_slopes, CHROMA_NR_RADIUS_DEFAULT,
@@ -770,9 +771,10 @@ class SlidersPanel(QWidget):
     # pin these to 0 on restore so old scans render unchanged — see
     # catalog._restore_image and spec/sharpening.md.
     # Chroma NR: mid-range radius; Amount (chroma_nr) 0 = off.
+    # Sharpening's defaults are the user's, from Settings → Details
+    # (core.detail_defaults, spec/details-defaults.md): _default_for reads them.
     SLIDER_DEFAULTS = {"band_feather": 10,
-                       "chroma_nr_radius": CHROMA_NR_RADIUS_DEFAULT,
-                       "sharpen_amount": 25, "sharpen_radius": 25}
+                       "chroma_nr_radius": CHROMA_NR_RADIUS_DEFAULT}
 
     CROSSTALK_HINT = ("Unmixes the film's dye layers in density, after the film "
                       "base is removed, so the base and greys stay neutral. "
@@ -806,7 +808,19 @@ class SlidersPanel(QWidget):
         self.crosstalk_hint.setText(text)
 
     def _default_for(self, key):
+        if key in detail_defaults.KEYS:
+            return detail_defaults.get(key)
         return self.SLIDER_DEFAULTS.get(key, 0)
+
+    def apply_detail_defaults(self):
+        """Settings changed the Details defaults: each sharpening slider's
+        double-click value follows, and so does the frame on screen if it
+        hasn't set its own sharpening."""
+        for i, key in enumerate(self.adjustment_keys):
+            if key in detail_defaults.KEYS and i < len(self.sliders):
+                self.sliders[i].reset_value = detail_defaults.get(key)
+        if self.current_idx is not None:
+            self.set_current_idx(self.current_idx)
 
     COLOUR_ORGANICS_HINT = ("Constrains colours for print, the way lab scanners "
                             "do. The result is often more natural.")

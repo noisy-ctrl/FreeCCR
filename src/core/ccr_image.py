@@ -29,6 +29,7 @@ from core.ccr_processor import (adjust_image, adjust_image_opencl,
                                 positive_base_curve_points)
 from core import color_management
 from core import load_progress
+from core import detail_defaults
 
 # Import optional libraries with fallbacks
 try:
@@ -2248,10 +2249,13 @@ class CCRImage:
         # "Bypass until export" (sharpen_export_only) skips it outside
         # exports; see spec/bypass-until-export.md.
         if sharpen_live and not skip_dust:
+            # an image that never set its own sharpening takes the Details
+            # defaults, the values its panel shows (spec/details-defaults.md)
+            dd = detail_defaults
             adjusted = apply_sharpening(adjusted,
-                                        s.get('sharpen_amount', 0),
-                                        s.get('sharpen_radius', 25),
-                                        s.get('sharpen_masking', 0),
+                                        s.get('sharpen_amount', dd.get('sharpen_amount')),
+                                        s.get('sharpen_radius', dd.get('sharpen_radius')),
+                                        s.get('sharpen_masking', dd.get('sharpen_masking')),
                                         sharpen_scale)
         return adjusted
 

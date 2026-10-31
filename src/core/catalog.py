@@ -225,7 +225,7 @@ def serialize_image(img) -> dict:
         "source_ops": [[int(rot), list(region)] for rot, region in img.source_ops],
         "converted": bool(img.converted),
         "conversion_inputs": _ci_to_json(img.conversion_inputs),
-        "adjustment_settings": dict(img.adjustment_settings),
+        "adjustment_settings": _adjustments_to_json(img.adjustment_settings),
         "areas": _areas_to_json(getattr(img, "area_layers", None)),
         "dust_spots": copy.deepcopy(getattr(img, "dust_spots", None) or []),
         # The heal plan (each segment's chosen source patch + verdicts):
@@ -304,6 +304,15 @@ def _dust_plan_from_json(plan):
     """Inverse of _dust_plan_to_json (tuples, offset as a tuple)."""
     return [(r[0], r[1], (tuple(r[2]) if r[2] is not None else None),
              *r[3:6]) for r in plan]
+
+
+def _adjustments_to_json(adj):
+    """The adjustments as saved: an edited dict with no sharpen_* keys gets
+    the Details defaults it rendered with written in, so the old-catalogue
+    rule in `_restore_image` (no sharpen keys -> sharpening off) only ever
+    meets catalogues from before the Details section. spec/details-defaults.md."""
+    from core import detail_defaults
+    return detail_defaults.written_down(adj)
 
 
 def _is_pristine(state: dict) -> bool:

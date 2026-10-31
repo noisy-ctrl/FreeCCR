@@ -140,9 +140,13 @@ def test_masking_spares_flat_areas_but_keeps_edges():
 
 # --- defaults and backward compatibility ---------------------------------------
 
-def test_slider_defaults_are_visible_25():
-    assert SlidersPanel.SLIDER_DEFAULTS["sharpen_amount"] == 25
-    assert SlidersPanel.SLIDER_DEFAULTS["sharpen_radius"] == 25
+def test_slider_defaults_are_the_details_defaults():
+    """The user's 30 / 2 / 0 (spec/details-defaults.md), from Settings."""
+    from core import detail_defaults
+    assert detail_defaults.FACTORY == {"sharpen_amount": 30, "sharpen_radius": 2,
+                                       "sharpen_masking": 0}
+    panel = SlidersPanel()
+    assert [panel._default_for(k) for k in detail_defaults.KEYS] == [30, 2, 0]
 
 
 def test_keys_are_last_so_the_positional_zip_is_unchanged():
@@ -157,8 +161,8 @@ def test_panel_has_one_slider_per_key_in_order():
     panel = SlidersPanel()
     assert len(panel.sliders) == len(SlidersPanel.ADJUSTMENT_KEYS)
     tail = dict(zip(SlidersPanel.ADJUSTMENT_KEYS, panel.sliders))
-    assert tail["sharpen_amount"].value() == 25
-    assert tail["sharpen_radius"].value() == 25
+    assert tail["sharpen_amount"].value() == 30
+    assert tail["sharpen_radius"].value() == 2
     assert tail["sharpen_masking"].value() == 0
 
 

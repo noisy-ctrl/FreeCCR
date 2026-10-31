@@ -111,6 +111,9 @@ def _paste(panel, monkeypatch, chosen=None, accepted=True, indices=None,
 
 
 def _default(key):
+    from core import detail_defaults
+    if key in detail_defaults.KEYS:
+        return detail_defaults.get(key)
     return SlidersPanel.SLIDER_DEFAULTS.get(key, 0)
 
 
@@ -137,7 +140,8 @@ class TestPasteOptions:
             assert rows[0][0] == "Detail"
         rows = paste_options(_clip(flags={"sharpen_export_only": True}), _default)
         assert [r[1] for r in rows] == ["sharpen"]
-        assert "amount 25" in rows[0][2] and "bypass until export" in rows[0][2]
+        assert f"amount {_default('sharpen_amount')}" in rows[0][2]
+        assert "bypass until export" in rows[0][2]
         assert paste_options(_clip(), _default) == []
 
     def test_noise_row_still_follows_the_amount(self):
@@ -300,7 +304,7 @@ class TestPasteAdjustments:
         _set(panel, "sharpen_amount", 60)
         _paste(panel, monkeypatch)
         assert _val(tgt, "sharpen_masking") == 30
-        assert _val(tgt, "sharpen_amount") == 25       # the row's values travel together
+        assert _val(tgt, "sharpen_amount") == _default("sharpen_amount")   # travel together
 
     def test_default_source_values_do_not_reset_target(self, tmp_path, monkeypatch):
         src, tgt = _images(tmp_path)
