@@ -977,6 +977,11 @@ class SlidersPanel(QWidget):
         theme.style_button(self.clear_white_point_btn, "danger", glyph_only=True)
         self.black_point_btn = QPushButton("Set Black Point")
         self.black_point_btn.setFixedHeight(theme.CONTROL_H)
+        # Right-click: Auto / Reset (spec/bw-point-menu.md)
+        for b, which in ((self.black_point_btn, "black"), (self.white_point_btn, "white")):
+            b.setContextMenuPolicy(Qt.CustomContextMenu)
+            b.customContextMenuRequested.connect(
+                lambda pos, w=which: self._bw_point_menu(w, pos))
         self.white_point_btn.setFixedHeight(theme.CONTROL_H)
         bwp_row.addWidget(self.black_point_btn)
         bwp_row.addWidget(self.white_point_btn)
@@ -3523,6 +3528,91 @@ class SlidersPanel(QWidget):
             self.image_preview.set_bwpoint_mode("black")
             self.set_temporary_hint(
                 "<b>Black Point:</b> Draw a rect over the transparent/clear film base.", duration=6000)
+
+    def _bw_point_menu_actions(self, which):
+        """[(label, handler, enabled)] for a B/W point button's right-click
+        menu (spec/bw-point-menu.md)."""
+        img = (ccr_backend.get_image_by_index(self.current_idx)
+               if self.current_idx is not None else None)
+        live = img is not None and not ccr_backend.positive_mode
+        if which == "black":
+            return [("Auto from This Frame's Border", self._auto_black_point_here, live),
+                    ("Reset Black Point", self._reset_black_point,
+                     ccr_backend.black_point_bgr is not None)]
+        own = img is not None and (getattr(img, "wp_sample", None)
+                                   or getattr(img, "wp_choice", None))
+        return [("Auto for This Frame", self._auto_white_point_here, live),
+                ("Reset White Point", self._reset_white_point, bool(own) and live)]
+
+    def _bw_point_menu(self, which, pos):
+        btn = self.black_point_btn if which == "black" else self.white_point_btn
+        m = QMenu(self)
+        for label, fn, enabled in self._bw_point_menu_actions(which):
+            m.addAction(label, fn).setEnabled(bool(enabled))
+        m.popup(btn.mapToGlobal(pos))
+        self._bw_popup = m
+
+    def _persist_bwpoint(self):
+        mw = self.parent().parent() if self.parent() is not None else None
+        if hasattr(mw, "persist_bwpoint"):
+            mw.persist_bwpoint()
+
+    def _auto_black_point_here(self):
+        """The roll's Black Point from this frame's clear border, measured as
+        Convert measures it (the unconverted preview; the conversion is left
+        alone). Returns the RebateResult."""
+        img = ccr_backend.get_image_by_index(self.current_idx)
+        if img is None:
+            return None
+        from core.auto_black_point import find_rebate
+        res = find_rebate(ccr_backend.raw_preview(img))
+        if res.black_point is None or res.confidence not in ("high", "medium"):
+            self.set_temporary_hint(
+                f"No Black Point set: {res.summary()}. Draw over the clear film base "
+                "with Set Black Point instead.", duration=7000)
+            return res
+        ccr_backend.set_black_point(tuple(float(v) for v in res.black_point))
+        self._persist_bwpoint()
+        self._update_bwp_mode_label()
+        ip = getattr(self, "image_preview", None)
+        if ip is not None and res.rect:
+            ip.flash_auto_bp_strip(res.rect)
+        self.set_temporary_hint(
+            f"Black Point set from this frame's {res.side} border ({res.confidence} "
+            "confidence, outlined): frames with no border of their own use it.",
+            duration=7000)
+        return res
+
+    def _reset_black_point(self):
+        ccr_backend.clear_black_point()
+        self._persist_bwpoint()
+        self._update_bwp_mode_label()
+        self.set_temporary_hint(
+            "Black Point cleared: each frame's own clear border is used when you "
+            "convert.", duration=5000)
+
+    def _set_frame_white_point(self, choice, clear_sample):
+        img = ccr_backend.get_image_by_index(self.current_idx)
+        if img is None:
+            return
+        if clear_sample:
+            img.wp_sample = None
+            img.wp_sample_rect = None
+        img.wp_choice = choice
+        self._sync_wp_combo()
+        ccr_backend.save_catalog()
+        if img.converted and not ccr_backend.positive_mode:
+            self._on_convert_current_bwpoint()       # this frame, straight away
+        else:
+            self.set_temporary_hint(
+                "White Point kept for this frame: it applies when you convert.",
+                duration=4000)
+
+    def _auto_white_point_here(self):
+        self._set_frame_white_point("frame", clear_sample=False)
+
+    def _reset_white_point(self):
+        self._set_frame_white_point(None, clear_sample=True)
 
     def _on_clear_white_point(self):
         """Clear the sampled Black Point and this frame's hand-sampled White
