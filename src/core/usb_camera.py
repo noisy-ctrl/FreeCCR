@@ -31,6 +31,7 @@ class UsbCamera(WorkerThread):
     file_skipped = Signal(str)          # a shot's file had nowhere to go
     exposure_changed = Signal(dict)
     zoom_levels = Signal(list)
+    zoom_changed = Signal(str)          # the magnification the camera is at
     addons_found = Signal(list)         # unofficial add-ons on the card (spec §12)
     fired = Signal()
     fire_failed = Signal(str)
@@ -56,6 +57,8 @@ class UsbCamera(WorkerThread):
         self._restarted = False          # one reconnect per hold / per stall
         self._hold_live = False          # no previews while held (film base, Shoot)
         self._want = {}                  # exposure asked for, latest wins
+        self._want_zoom = None           # magnification asked for, latest wins
+        self._zoom_seen = None           # what the camera last read as
         self.backend = None
         self.key = None
         self.model = ""
@@ -96,7 +99,11 @@ class UsbCamera(WorkerThread):
         self._wake.set()
 
     def set_zoom(self, level):
-        self._command(("zoom", str(level)))
+        """The camera's own live view magnification (spec/live-magnifier.md):
+        latest wins, applied when no shot is on its way."""
+        with self._lock:
+            self._want_zoom = str(level)
+        self._wake.set()
 
     def set_dest(self, folder):
         self._command(("dest", folder or None))
@@ -181,6 +188,10 @@ class UsbCamera(WorkerThread):
                     self._apply_exposure()
                     if self.backend is None or self.status != "open":
                         continue
+                if self._want_zoom is not None:
+                    self._apply_zoom()
+                    if self.backend is None or self.status != "open":
+                        continue
                 data = None
                 if (self._live and not self._hold_live
                         and not getattr(self.backend, "no_preview", False)):
@@ -236,6 +247,7 @@ class UsbCamera(WorkerThread):
                     exp = self.backend.exposure()
                     if exp:
                         self.exposure_changed.emit(exp)
+                    self._note_zoom(None)
             except cb.CameraLost as e:
                 self._lose(str(e))
         self._shut()
@@ -324,6 +336,7 @@ class UsbCamera(WorkerThread):
                 self._lose(str(e))
                 return
         self.state.emit("open", self.model)
+        self._zoom_seen = None
         self.zoom_levels.emit(list(backend.zoom_levels()))
         try:
             choices = backend.exposure_choices() if hasattr(backend, "exposure_choices") else {}
@@ -400,6 +413,29 @@ class UsbCamera(WorkerThread):
         exp = b.exposure()
         if exp:
             self.exposure_changed.emit(exp)
+
+    def _apply_zoom(self):
+        pending = getattr(self.backend, "shot_pending", None)
+        if callable(pending) and pending():
+            return                                   # after the shot
+        with self._lock:
+            level, self._want_zoom = self._want_zoom, None
+        if level is None:
+            return
+        got = self.backend.set_zoom(level)
+        self._note_zoom(got if got is not None else None, force=True)
+
+    def _note_zoom(self, level, force=False):
+        """Tell the monitor the magnification when it changed (also by the
+        camera's own button, or a shot that dropped it)."""
+        if level is None:
+            now = getattr(self.backend, "zoom_now", None)
+            level = now() if callable(now) else None
+        if level is None:
+            return
+        if force or level != self._zoom_seen:
+            self._zoom_seen = level
+            self.zoom_changed.emit(str(level))
 
     def _restart_live(self, why):
         """Reconnect once to bring live view back (revision 6 of

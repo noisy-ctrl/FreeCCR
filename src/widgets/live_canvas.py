@@ -87,6 +87,8 @@ class LiveCanvas(QWidget):
         self.pick_hint = None             # pick mode: the hint's text, if not the usual
         self._hover = None                # the pointer (logical px) while picking a box
         self.mark = None                  # (rect in frame fractions, label) to outline
+        self.magnified = None             # the camera's magnifier is on: its label ("8×")
+        self.zoom_spot = None             # (fx, fy, magnification) last magnified, to outline
         self._drag = None
         self._rubber = None
         self._last_size = None
@@ -129,6 +131,19 @@ class LiveCanvas(QWidget):
         if not self.pick_box:
             self._hover = None
         self.setCursor(Qt.CrossCursor if mode else Qt.ArrowCursor)
+        self.update()
+
+    def set_magnified(self, label):
+        """The camera's own magnifier (spec/live-magnifier.md): the picture is
+        a small part of the frame, so whole-frame overlays are hidden and the
+        guide can't be dragged while it is on."""
+        self.magnified = label or None
+        self._drag = None
+        self.update()
+
+    def set_zoom_spot(self, spot):
+        """Outline where the magnifier last looked: (fx, fy, magnification)."""
+        self.zoom_spot = tuple(spot) if spot else None
         self.update()
 
     def set_mark(self, rect, label=""):
@@ -308,7 +323,7 @@ class LiveCanvas(QWidget):
             # best (the right-click menu's Reset Best)
             self.meter_clicked.emit()
             return
-        if self.guide_on:
+        if self.guide_on and not self.magnified:
             hit = self._guide_hit(g, pos)
             if hit:
                 self._drag = (hit[0], hit[1], pos, dict(self.guide))
@@ -331,7 +346,7 @@ class LiveCanvas(QWidget):
         if self._drag is None or g is None:
             if not self.mode and self._on_readout(pos):
                 self.setCursor(Qt.PointingHandCursor)
-            elif g is not None and self.guide_on and not self.mode:
+            elif g is not None and self.guide_on and not self.mode and not self.magnified:
                 hit = self._guide_hit(g, pos)
                 shape = {"move": Qt.SizeAllCursor, "resize": Qt.SizeFDiagCursor,
                          "rotate": Qt.CrossCursor}.get(hit[0] if hit else None, Qt.ArrowCursor)
@@ -473,14 +488,15 @@ class LiveCanvas(QWidget):
         p.setRenderHint(QPainter.Antialiasing, True)
         p.save()
         p.setClipRect(target)
-        if self.align_on:
+        whole = not self.magnified        # whole-frame overlays only on the whole frame
+        if self.align_on and whole:
             lx, _ = self._to_logical(g, self.align_x * g.full_w, 0)
             if target.left() <= lx <= target.right():
                 p.setPen(QPen(QColor(0, 0, 0, 150), 3))
                 p.drawLine(QPointF(lx, target.top()), QPointF(lx, target.bottom()))
                 p.setPen(QPen(QColor(0, 200, 255, 220), 1.5))
                 p.drawLine(QPointF(lx, target.top()), QPointF(lx, target.bottom()))
-        if self.guide_on:
+        if self.guide_on and whole:
             self._paint_guide(p, g)
         if self.sharp_on and self.sharp_area:
             x0, y0, x1, y1 = self.sharp_area
@@ -489,15 +505,36 @@ class LiveCanvas(QWidget):
             p.setPen(QPen(QColor(255, 255, 255, 210), 1, Qt.DashLine))
             p.setBrush(Qt.NoBrush)
             p.drawRect(QRectF(QPointF(ax, ay), QPointF(bx, by)))
-        if self.mark is not None:
+        if self.mark is not None and whole:
             self._paint_box(p, self._frac_rect(g, self.mark[0]), QColor(theme.WARN_TEXT))
+        if self.zoom_spot is not None and whole:
+            fx, fy, mag = self.zoom_spot
+            h = 0.5 / max(1.0, float(mag))
+            zr = self._frac_rect(g, (fx - h, fy - h, fx + h, fy + h))
+            p.setBrush(Qt.NoBrush)
+            p.setPen(QPen(QColor(0, 0, 0, 170), 3))
+            p.drawRect(zr)
+            p.setPen(QPen(QColor(255, 255, 255, 230), 1.5, Qt.DashLine))
+            p.drawRect(zr)
         if self.mode == "pick" and self._hover is not None:
             box = self.box_at(self._hover)
             if box is not None:
                 self._paint_box(p, self._frac_rect(g, box), QColor(255, 255, 255, 235))
         p.restore()
-        if self.mark is not None and self.mark[1]:
+        if self.mark is not None and self.mark[1] and whole:
             self._paint_label_near(p, self._frac_rect(g, self.mark[0]), self.mark[1])
+        if self.zoom_spot is not None and whole:
+            fx, fy, mag = self.zoom_spot
+            h = 0.5 / max(1.0, float(mag))
+            self._paint_label_near(p, self._frac_rect(g, (fx - h, fy - h, fx + h, fy + h)),
+                                   "Last magnified here")
+        if self.magnified:
+            text = f"Magnified {self.magnified}  ·  Z steps, Whole goes back"
+            f = QFont(self.font())
+            f.setPixelSize(theme.FS_CAPTION)
+            w = QFontMetricsF(f).horizontalAdvance(text) + 16
+            self._paint_label(p, QPointF(max(target.left() + 12, target.right() - w - 12),
+                                         target.top() + 12), text)
         if self._rubber is not None:
             a, b = self._rubber
             p.setPen(QPen(QColor(255, 255, 255), 1.5, Qt.DashLine))

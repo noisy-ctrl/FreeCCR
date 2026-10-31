@@ -215,6 +215,7 @@ class LiveCaptureMonitor(QWidget):
 
     closed = Signal()
     _patch_read = Signal(int, object)    # a film-base test shot's reading (or error)
+    _zoom_spot_found = Signal(int, object)   # where the magnifier looked (or None)
 
     def __init__(self, main_window=None, feed=None, light=None, usb=None, parent=None):
         super().__init__(parent, Qt.Window)
@@ -252,6 +253,10 @@ class LiveCaptureMonitor(QWidget):
         self._measure_token = 0          # voids a finished measuring's timers / reads
         self._pending_measure = None     # (name, index) waiting for a Film Base click
         self._neg_base_pos = None        # the last Film Base click, frame fractions
+        self._cam_zoom = "1"             # the camera's magnifier (spec/live-magnifier.md)
+        self._zoom_whole = None          # the last whole-frame picture before magnifying
+        self._zoom_token = 0
+        self._zoom_spot = None           # (fx, fy) where it last looked
         self._shoot_exp_before = None    # the camera's exposure before a film-base Shoot
         self._read_patch = be.read_patch
 
@@ -767,7 +772,10 @@ class LiveCaptureMonitor(QWidget):
                 lambda i, f=field, c=combo: self._on_exposure_picked(f, c.itemData(i)))
         self.shutter_combo.activated.connect(self._on_shutter_chosen)
         self.cam_zoom_combo.activated.connect(
-            lambda i: self.usb.set_zoom(self.cam_zoom_combo.itemData(i)))
+            lambda i: self._set_cam_zoom(self.cam_zoom_combo.itemData(i)))
+        if hasattr(self.usb, "zoom_changed"):
+            self.usb.zoom_changed.connect(self._on_cam_zoom)
+        self._zoom_spot_found.connect(self._on_zoom_spot)
         self.release_btn.clicked.connect(self._on_release_camera)
         self.light.state_changed.connect(self._on_light_state)
         self.light.telemetry_changed.connect(lambda t: self._refresh_light_status())
@@ -793,6 +801,7 @@ class LiveCaptureMonitor(QWidget):
         for key, slot in (("1", lambda: self.solo("r")), ("2", lambda: self.solo("g")),
                           ("3", lambda: self.solo("b")), ("4", lambda: self.solo("w")),
                           ("S", self.shoot), ("Esc", self._on_escape),
+                          ("Z", self._step_cam_zoom),
                           ("F", lambda: self.canvas.zoom("1:1" if self.canvas.is_fit() else "fit"))):
             sc = QShortcut(QKeySequence(key), self)
             sc.setContext(Qt.WindowShortcut)
@@ -1299,6 +1308,8 @@ class LiveCaptureMonitor(QWidget):
             a.setChecked(False)
 
     def _on_neg_button(self, key):
+        if key != "auto" and self._refuse_when_magnified("Picking"):
+            return
         if key == "auto":
             self._neg.update(base=None, hi=None, mid=None)
             self._rebuild_negative(force_auto=True)
@@ -1822,6 +1833,8 @@ class LiveCaptureMonitor(QWidget):
             self._warn_caption("Measuring for trichrome needs the Scanlight connected: it "
                                "lights each colour.")
             return False
+        if self._refuse_when_magnified("Measuring"):
+            return False
         rect, where = self._film_base_patch()
         if rect is None:
             self._pending_measure = (name, index)
@@ -2141,6 +2154,7 @@ class LiveCaptureMonitor(QWidget):
                 self._measure_finish()
             self._exposure = {}
             self.cam_zoom_combo.setVisible(False)
+            self._on_cam_zoom("1")
             self._on_exposure_choices({})
         self._rebuild_shutter_combo()
         if kind == "lost" and self.sequence.running and self.sequence.camera_shutter:
@@ -2286,11 +2300,99 @@ class LiveCaptureMonitor(QWidget):
             self.capture_caption.setText("")
         self._select_exposure()
 
+    @staticmethod
+    def cam_zoom_label(lv):
+        lv = str(lv)
+        return "Whole" if lv == "1" else ("Max" if lv == "16" else f"{lv}×")
+
     def _on_zoom_levels(self, levels):
         self.cam_zoom_combo.clear()
         for lv in levels or []:
-            self.cam_zoom_combo.addItem(f"{lv}×", lv)
+            self.cam_zoom_combo.addItem(self.cam_zoom_label(lv), lv)
         self.cam_zoom_combo.setVisible(bool(levels))
+        self.cam_zoom_combo.setToolTip(
+            "The camera's own live view magnifier, for focusing: it reads the sensor, "
+            "so 8× shows about one sensor pixel per screen pixel. It zooms where the "
+            "camera's focus point is (move it with the joystick). Z steps through.")
+        if not levels:
+            self._on_cam_zoom("1")
+
+    # --- the camera's magnifier (spec/live-magnifier.md) -------------------
+    def magnified(self):
+        return self._cam_zoom not in (None, "1")
+
+    def _set_cam_zoom(self, level):
+        level = str(level)
+        if level == self._cam_zoom:
+            return
+        if not self.magnified():
+            self._zoom_whole = self.feed.last_full_frame()   # to find where it looks
+        self.usb.set_zoom(level)
+
+    def _step_cam_zoom(self):
+        n = self.cam_zoom_combo.count()
+        if n < 2 or not self.cam_zoom_combo.isVisible():
+            return
+        i = self.cam_zoom_combo.findData(self._cam_zoom)
+        nxt = self.cam_zoom_combo.itemData((i + 1) % n if i >= 0 else 1)
+        self._set_cam_zoom(nxt)
+
+    def _on_cam_zoom(self, level):
+        level = str(level or "1")
+        was = self._cam_zoom
+        self._cam_zoom = level
+        i = self.cam_zoom_combo.findData(level)
+        if i >= 0:
+            self.cam_zoom_combo.blockSignals(True)
+            self.cam_zoom_combo.setCurrentIndex(i)
+            self.cam_zoom_combo.blockSignals(False)
+        self.canvas.set_magnified(None if level == "1" else self.cam_zoom_label(level))
+        if level != was:
+            self._reset_sharp_best()             # a different picture scale
+        self._zoom_token += 1
+        if level != "1":
+            self.canvas.set_zoom_spot(None)
+            if self._zoom_whole is not None:
+                tok = self._zoom_token
+                QTimer.singleShot(1200, lambda: self._find_zoom_spot(tok, level))
+        elif was not in (None, "1") and self._zoom_spot is not None:
+            fx, fy, mag = self._zoom_spot
+            self.canvas.set_zoom_spot((fx, fy, mag))
+            tok = self._zoom_token
+            QTimer.singleShot(5000, lambda: tok == self._zoom_token
+                              and self.canvas.set_zoom_spot(None))
+
+    def _find_zoom_spot(self, token, level):
+        if token != self._zoom_token or self._zoom_whole is None:
+            return
+        whole, zoomed = self._zoom_whole, self.feed.last_full_frame()
+        try:
+            mag = float(level)
+        except ValueError:
+            return
+        if zoomed is None:
+            return
+
+        def work():
+            from core import zoom_spot
+            try:
+                spot = zoom_spot.locate(whole, zoomed, mag)
+            except Exception:
+                spot = None
+            self._zoom_spot_found.emit(token, None if spot is None else (*spot, mag))
+        import threading
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_zoom_spot(self, token, spot):
+        if spot is not None:
+            self._zoom_spot = spot          # kept even if the level changed since
+
+    def _refuse_when_magnified(self, what):
+        if not self.magnified():
+            return False
+        self._warn_caption(f"{what}: go back to the whole frame first (Z, or Whole in "
+                           "the magnifier list), as it records whole-frame positions.")
+        return True
 
     ADDON_TEXT = (
         "FreeCCR only uses the camera's standard USB controls and doesn't need "
