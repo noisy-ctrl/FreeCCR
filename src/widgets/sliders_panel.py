@@ -1192,7 +1192,9 @@ class SlidersPanel(QWidget):
         self.crop_btn.setToolTip(
             "Crop the image. Opens the Crop panel: pick an aspect ratio "
             "(or Free), straighten, and drag the box on the image. Enter "
-            "confirms, Esc cancels, right-click clears the crop.")
+            "confirms, Esc cancels, right-click clears the crop.\n"
+            "Right-click this button: Reset Crop.")
+        self.crop_btn.setContextMenuPolicy(Qt.CustomContextMenu)
         # Slice: split one scan containing several photos into separate
         # images. Not conversion-gated — slicing is most useful BEFORE
         # converting, so each frame gets its own reference/conversion.
@@ -1665,6 +1667,7 @@ class SlidersPanel(QWidget):
         self.wb_picker_btn.clicked.connect(self._on_pick_neutral_point)
         self.auto_wb_btn.clicked.connect(self._on_auto_wb)
         self.crop_btn.clicked.connect(self._on_crop_clicked)
+        self.crop_btn.customContextMenuRequested.connect(self._crop_menu)
         self.slice_btn.clicked.connect(self._on_slice_clicked)
         self.slice_btn.longPressed.connect(self._on_slice_long_press)
         self.white_point_btn.clicked.connect(self._on_set_white_point)
@@ -3388,6 +3391,42 @@ class SlidersPanel(QWidget):
         self.image_preview.set_wb_pick_mode(True)
         self.set_temporary_hint(
             "<b>Auto WB:</b> Click a neutral gray or white point on the image.", duration=8000)
+
+    def _crop_menu_actions(self):
+        """[(label, indices, enabled)] for the Crop button's right-click menu
+        (spec/crop-reset-menu.md)."""
+        ip = getattr(self, "image_preview", None)
+        if ip is None:
+            return []
+        out = []
+        cur = self.current_idx
+        if cur is not None:
+            img = ccr_backend.get_image_by_index(cur)
+            out.append(("Reset Crop", [cur], ip.has_crop(img)))
+        mw = self.window()
+        tl = getattr(mw, "thumbnail_list", None)
+        sel = tl.selected_indices() if tl is not None and hasattr(tl, "selected_indices") else []
+        if len(sel) > 1:
+            n = sum(1 for i in sel if ip.has_crop(ccr_backend.get_image_by_index(i)))
+            out.append((f"Reset Crop on the {len(sel)} Selected Frames", sel, n > 0))
+        return out
+
+    def _crop_menu(self, pos):
+        acts = self._crop_menu_actions()
+        if not acts:
+            return
+        m = QMenu(self)
+        for label, indices, enabled in acts:
+            a = m.addAction(label, lambda ix=indices: self._reset_crops(ix))
+            a.setEnabled(enabled)
+        m.popup(self.crop_btn.mapToGlobal(pos))
+        self._crop_popup = m
+
+    def _reset_crops(self, indices):
+        n = self.image_preview.reset_crops(indices)
+        if n:
+            self.set_temporary_hint("Crop reset." if n == 1 else f"Crop reset on {n} frames.",
+                                    duration=3000)
 
     def _on_crop_clicked(self):
         if not (hasattr(self, 'image_preview') and self.image_preview):

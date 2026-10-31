@@ -5305,6 +5305,39 @@ class ImagePreview(QWidget):
             img_obj.update_thumbnail_and_preview()
         self.update_preview(self.current_idx)
 
+    @staticmethod
+    def has_crop(img):
+        return img is not None and (img.crop_rect is not None
+                                    or bool(getattr(img, "crop_angle", 0.0)))
+
+    def reset_crops(self, indices):
+        """Right-click Crop → Reset Crop (spec/crop-reset-menu.md): each frame
+        back to no crop, one undo step each, and open to auto crop again.
+        Returns how many frames changed."""
+        if self.crop_mode:
+            self.cancel_crop_mode()
+        changed = 0
+        for idx in indices:
+            img = ccr_backend.get_image_by_index(idx)
+            if not self.has_crop(img):
+                continue
+            img.push_undo_state()
+            img.crop_rect = None
+            img.crop_angle = 0.0
+            img.auto_crop_rect = None
+            img.auto_crop_example = None
+            img.update_thumbnail_and_preview()
+            changed += 1
+        if changed:
+            mw = self.window()
+            tl = getattr(mw, "thumbnail_list", None)
+            if tl is not None:
+                tl.update_all_thumbnails()
+            if self.current_idx is not None:
+                self.update_preview(self.current_idx)
+            ccr_backend.save_catalog()
+        return changed
+
     def _exit_crop_mode(self):
         self.set_horizon_tool(False)
         self.crop_mode = False
