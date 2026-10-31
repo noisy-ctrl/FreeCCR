@@ -66,6 +66,9 @@ class FakeFeed(QObject):
     def open_camera(self, i, fmt="auto"):
         self.log.append(("open", i, fmt))
 
+    def close_camera(self):
+        self.log.append(("close",))
+
     def find_cameras(self, pref=None, fmt="auto", open_found=True):
         self.log.append(("find", pref, fmt))
 
@@ -246,6 +249,47 @@ def test_idle_turns_the_light_off_and_only_wake_turns_it_on(iso_settings):
         mon._last_use -= 10_000
         mon._check_idle()
         assert mon._sleeping is None
+    finally:
+        _close(mon)
+
+
+def test_idle_lets_go_of_the_camera_and_wake_reconnects_it(iso_settings):
+    """2026-10-31: the camera times out with the light, 8 minutes by default."""
+    mon, feed, light, dev = _monitor()
+    try:
+        st = lm._settings()
+        st.remove("live/idle_minutes")
+        st.remove("live/idle_default_8")
+        assert mon._idle_minutes() == 8
+        st.setValue("live/idle_minutes", 5)               # the old default, saved
+        st.remove("live/idle_default_8")
+        assert mon._idle_minutes() == 8                   # moved to 8, once
+        st.setValue("live/idle_minutes", 5)
+        assert mon._idle_minutes() == 5                   # a 5 chosen afterwards stays
+        st.setValue("live/idle_minutes", 1)
+        # the light unlit, the camera connected: the camera alone sleeps
+        mon.led_sliders["w"].setValue(0)
+        feed.log.clear()
+        mon._last_use -= 61
+        mon._check_idle()
+        assert mon._sleeping is not None and ("close",) in feed.log
+        assert "camera was let go" in mon.wake_note.text()
+        assert "off while idle" not in mon.light_status.text()
+        assert "Wake reconnects" in mon.canvas.message
+        mon.wake_btn.click()
+        assert mon._sleeping is None and feed.log[-1][:2] == ("open", feed.index)
+        # lit and connected: both, and both come back
+        mon.led_sliders["w"].setValue(150)
+        feed.log.clear()
+        mon._last_use -= 61
+        mon._check_idle()
+        assert "turned off and the camera was let go" in mon.wake_note.text()
+        assert ("close",) in feed.log
+        mon.wake_btn.click()
+        light.link._last_colour = -1e9
+        light.link.tick()
+        assert dev.written[-1] == cl.colour_packet({"w": 150})
+        assert feed.log[-1][:2] == ("open", feed.index)
     finally:
         _close(mon)
 

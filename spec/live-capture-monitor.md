@@ -585,3 +585,23 @@ Grouping each three into one merge as they arrive would be its own spec.
 5. Negative preview.
 6. Settings group, File menu and the Hot Folder Tether prompt, build script
    and plist changes, CLAUDE.md.
+
+## Revision (2026-10-31): idle lets go of the camera too; 8 minutes
+The user: "Can the connection to the camera time out too? But maybe
+connection + light timeout is 8 mins or something like that."
+
+- One idle time for both, default **8 minutes** (was 5): Settings → General
+  → Live capture, "Turn the Scanlight off and let go of the camera when idle
+  after N min" (0 = never). A stored 5 (the old default, saved whenever
+  Settings was closed with Done) is moved to 8 once (`live/idle_default_8`).
+- Idle now also releases the camera: the feed closes its source
+  (`LiveFeed.close_camera`) and a USB camera is closed (`UsbCamera.close`),
+  so its live view stops. Sleeping happens if the light is lit OR a camera is
+  connected; the overlay says which ("The Scanlight turned off and the camera
+  was let go after 8 min without use.") and the canvas says "Asleep: Wake
+  reconnects the camera."
+- **Wake** puts back exactly what it took: the light's levels (only if it was
+  lit), then the feed's source (`feed.open_camera(key)`, which reopens a USB
+  camera through its frame source) and a USB camera used only as the shutter
+  (`usb.open(key)`), when that isn't the same camera.
+- Never while shooting or measuring (as before).

@@ -342,7 +342,7 @@ class LiveCaptureMonitor(QWidget):
         lay = QVBoxLayout(ov)
         lay.setContentsMargins(theme.SPACE_XL, theme.SPACE_XL, theme.SPACE_XL, theme.SPACE_XL)
         lay.addStretch(1)
-        title = QLabel("Light off while idle")
+        title = QLabel("Asleep while idle")
         title.setAlignment(Qt.AlignCenter)
         title.setStyleSheet(f"color: {theme.TEXT}; font-weight: bold;")
         lay.addWidget(title)
@@ -353,7 +353,8 @@ class LiveCaptureMonitor(QWidget):
         self.wake_btn = QPushButton("Wake")
         self.wake_btn.setFixedHeight(theme.CONTROL_H_LG)
         theme.style_button(self.wake_btn, "primary")
-        self.wake_btn.setToolTip("Turn the Scanlight back on at the levels it had")
+        self.wake_btn.setToolTip("Turn the Scanlight back on at the levels it had and "
+                                 "reconnect the camera")
         self.wake_btn.clicked.connect(self._wake)
         lay.addWidget(self.wake_btn)
         lay.addStretch(1)
@@ -1458,7 +1459,8 @@ class LiveCaptureMonitor(QWidget):
             text = "Not connected"
         else:
             text = detail or state
-        if self._sleeping is not None:
+        if self._sleeping is not None and (getattr(self, "_sleep_state", None) or
+                                           {"lit": True}).get("lit"):
             text += "  ·  off while idle"
         self.light_status.setText(text)
         self._refresh_shoot_enabled()
@@ -2608,35 +2610,79 @@ class LiveCaptureMonitor(QWidget):
         # being idle, Wake (and nothing else) turns it back on.
         self._last_use = time.monotonic()
 
+    IDLE_DEFAULT_MIN = 8
+
     def _idle_minutes(self):
+        st = _settings()
         try:
-            return max(0, int(_settings().value("live/idle_minutes", 5)))
+            # the old default of 5 (written whenever Settings closed with
+            # Done) moves to 8 once: the user asked for 8 (2026-10-31)
+            if not st.value("live/idle_default_8", False, type=bool):
+                if int(st.value("live/idle_minutes", self.IDLE_DEFAULT_MIN)) == 5:
+                    st.setValue("live/idle_minutes", self.IDLE_DEFAULT_MIN)
+                st.setValue("live/idle_default_8", True)
+            return max(0, int(st.value("live/idle_minutes", self.IDLE_DEFAULT_MIN)))
         except (TypeError, ValueError):
-            return 5
+            return self.IDLE_DEFAULT_MIN
+
+    def _camera_keys(self):
+        """(the feed's source, a USB camera open as the shutter only)."""
+        feed_key = getattr(self.feed, "index", None)
+        usb_key = None
+        if self.usb.is_open():
+            usb_key = getattr(self.usb, "key", None)
+            if usb_key == feed_key:
+                usb_key = None                       # the feed reopens it
+        return feed_key, usb_key
 
     def _check_idle(self):
         mins = self._idle_minutes()
         if (self._sleeping is not None or mins <= 0 or self.sequence.running
-                or self._measure is not None
-                or not self.light.is_open() or not any(self._levels.values())):
+                or self._measure is not None):
             return
-        if time.monotonic() - self._last_use >= mins * 60:
-            self._sleeping = dict(self._levels)
+        lit = self.light.is_open() and any(self._levels.values())
+        feed_key, usb_key = self._camera_keys()
+        camera = feed_key is not None or usb_key is not None or self.usb.is_open()
+        if not (lit or camera):
+            return
+        if time.monotonic() - self._last_use < mins * 60:
+            return
+        # Asleep: the light off and the camera let go (spec/live-capture-monitor.md,
+        # revision 2026-10-31); Wake puts back exactly this
+        self._sleeping = dict(self._levels)
+        self._sleep_state = {"lit": lit, "feed": feed_key, "usb": usb_key}
+        if lit:
             self.light.set_levels(dict(cl.OFF))       # off, not dimmed: spares the LEDs
-            self.wake_note.setText(
-                f"The Scanlight turned off after {mins} min without use. Wake puts "
-                "it back at the levels it had.")
-            self._place_wake_overlay()
-            self.wake_overlay.setVisible(True)
-            self._refresh_light_status()
+        if camera:
+            if feed_key is not None:
+                self.feed.close_camera()
+            if self.usb.is_open():
+                self.usb.close()
+            self.canvas.set_message("Asleep: Wake reconnects the camera.")
+        what = ("The Scanlight turned off and the camera was let go" if lit and camera
+                else "The Scanlight turned off" if lit else "The camera was let go")
+        back = ("puts them back" if lit and camera
+                else "puts it back at the levels it had" if lit else "reconnects it")
+        self.wake_note.setText(f"{what} after {mins} min without use. Wake {back}.")
+        self._place_wake_overlay()
+        self.wake_overlay.setVisible(True)
+        self._refresh_light_status()
 
     def _wake(self):
         if self._sleeping is None:
             return
+        state = getattr(self, "_sleep_state", None) or {"lit": True}
         self._sleeping = None
+        self._sleep_state = None
         self.wake_overlay.setVisible(False)
         self._last_use = time.monotonic()
-        self.light.set_levels(self._levels)
+        if state.get("lit"):
+            self.light.set_levels(self._levels)
+        if state.get("feed") is not None:
+            self.canvas.set_message("Reconnecting the camera…")
+            self.feed.open_camera(state["feed"], self._video_format())
+        if state.get("usb"):
+            self.usb.open(state["usb"])               # the shutter-only camera
         self._refresh_light_status()
 
     # ------------------------------------------------------------------ #
