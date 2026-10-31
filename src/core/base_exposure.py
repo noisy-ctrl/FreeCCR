@@ -502,8 +502,11 @@ def _clean_colour(e):
                 levels[k] = max(0, min(255, int(round(float(lv.get(k, 0))))))
             except (TypeError, ValueError):
                 levels[k] = 0
-    return {"shutter": shutter, "iso": iso, "base": max(0.0, min(2.0, base)),
-            "levels": levels, "dimmed": bool(e.get("dimmed", False))}
+    out = {"shutter": shutter, "iso": iso, "base": max(0.0, min(2.0, base)),
+           "levels": levels, "dimmed": bool(e.get("dimmed", False))}
+    if e.get("edited"):
+        out["edited"] = True     # set by hand: `base` is an estimate (revision 4)
+    return out
 
 
 def _clean_base(b):
@@ -624,6 +627,96 @@ def delete(data, index):
     return d
 
 
+# --------------------------------------------------------------------------- #
+# editing by hand (spec revision 4)
+# --------------------------------------------------------------------------- #
+def led_level(colour):
+    """A colour's LED level, 1-255: the brightest lit channel of its levels;
+    None when it has none (one exposure with the light as it was)."""
+    lv = (colour or {}).get("levels")
+    if not lv:
+        return None
+    top = max(lv.values())
+    return int(top) if top > 0 else None
+
+
+def scale_levels(levels, level):
+    """`levels` with every lit channel scaled so the brightest is `level`;
+    a preset's mix keeps its balance."""
+    top = max(levels.values()) if levels else 0
+    if top <= 0:
+        return dict(levels or {})
+    level = max(1, min(255, int(level)))
+    if level == top:
+        return dict(levels)
+    f = level / float(top)
+    return {k: (max(1, min(255, int(round(v * f)))) if v > 0 else 0)
+            for k, v in levels.items()}
+
+
+def estimate_base(colour, shutter, iso, level=None):
+    """The base reading at a hand-set exposure, from the measured one: twice
+    the time, ISO or LED level, twice the level (test 10: linear). None when
+    a value has no number."""
+    e_old = exposure_of(colour["shutter"], colour["iso"])
+    e_new = exposure_of(shutter, iso)
+    if not e_old or not e_new:
+        return None
+    est = float(colour["base"]) * e_new / e_old
+    old = led_level(colour)
+    if level is not None and old:
+        est *= max(1, min(255, int(level))) / float(old)
+    return est
+
+
+def edited_colours(old, values):
+    """The colours after an edit. `values` = {k: {"shutter", "iso", "level"}}
+    for the colours shown; a colour whose values didn't change is copied as
+    it was, a changed one is marked `edited` with an estimated base."""
+    out = {}
+    for k, col in old.items():
+        v = values.get(k)
+        if not v:
+            out[k] = dict(col)
+            continue
+        shutter = str(v.get("shutter") or col["shutter"])
+        iso = str(v.get("iso") or col["iso"])
+        lvl = v.get("level")
+        old_lvl = led_level(col)
+        levels = col.get("levels")
+        led_changed = lvl is not None and old_lvl is not None and int(lvl) != old_lvl
+        if shutter == col["shutter"] and iso == col["iso"] and not led_changed:
+            out[k] = dict(col)
+            continue
+        if led_changed:
+            levels = scale_levels(levels, lvl)
+        est = estimate_base(col, shutter, iso, lvl if led_changed else None)
+        new = dict(col, shutter=shutter, iso=iso, levels=levels, edited=True,
+                   base=est if est is not None else col["base"])
+        if led_changed:
+            new["dimmed"] = True
+        out[k] = new
+    return out
+
+
+def edit(data, index, name, colours):
+    """Save: the film base at `index` takes `colours` (from `edited_colours`)
+    and `name` (made unique against the others); when/camera/notes stay."""
+    d = normalise(data)
+    if not 0 <= index < len(d["bases"]):
+        return d
+    old = d["bases"][index]
+    others = dict(d, bases=[b for i, b in enumerate(d["bases"]) if i != index])
+    name = (name or "").strip() or old["name"]
+    if name.lower() != old["name"].lower():
+        name = unique_name(others, name)
+    c = _clean_base(dict(old, name=name, colours=colours))
+    if c:
+        d["bases"][index] = c
+        d["selected"] = index
+    return d
+
+
 def exposures_for(base, trichrome):
     """The sequence's exposures for this scan type, or None if the film base
     wasn't measured for it."""
@@ -652,13 +745,13 @@ def summary(base, trichrome):
     if trichrome:
         speeds = " · ".join(f"{k.upper()} {short_text(cols[k]['shutter'])}"
                             + ("" if iso else f" ISO {cols[k]['iso']}") for k in keys)
-        bases = " / ".join(f"{100 * cols[k]['base']:.0f}" for k in keys)
     else:
         speeds = short_text(cols["w"]["shutter"]) + ("" if iso else f" ISO {cols['w']['iso']}")
-        bases = f"{100 * cols['w']['base']:.0f}"
+    bases = " / ".join(("≈" if cols[k].get("edited") else "") + f"{100 * cols[k]['base']:.0f}"
+                       for k in keys)
     line = f"{speeds}{iso} (base {bases} %)"
-    dimmed = [f"{NAMES.get(k, k)} LED {max(v for v in cols[k]['levels'].values())}"
-              for k in keys if cols[k].get("dimmed") and cols[k].get("levels")]
+    dimmed = [(f"{NAMES[k]} LED" if k in COLOURS else "light") + f" {led_level(cols[k])}"
+              for k in keys if cols[k].get("dimmed") and led_level(cols[k])]
     if dimmed:
         line += "; " + ", ".join(dimmed)
     return line

@@ -354,6 +354,87 @@ def test_a_dimmed_led_is_named_in_the_summary():
     assert "; blue LED " in s
 
 
+# --------------------------------------------------------------------------- #
+# editing by hand (revision 4)
+# --------------------------------------------------------------------------- #
+def _measured():
+    return be.normalise({"bases": [be.entry("Ektar", {
+        "r": {"shutter": "1/4", "iso": "100", "base": 0.79, "levels": solo("r")},
+        "g": {"shutter": "1/4", "iso": "100", "base": 0.70, "levels": solo("g")},
+        "b": {"shutter": "1/5", "iso": "100", "base": 0.71, "levels": solo("b")}},
+        "Fujifilm GFX50S II", ["a note"], when="2026-10-30")]})
+
+
+def test_the_estimate_follows_time_iso_and_led():
+    col = _measured()["bases"][0]["colours"]["g"]
+    assert be.led_level(col) == 255
+    assert be.estimate_base(col, "1/4", "100") == pytest.approx(0.70)
+    assert be.estimate_base(col, "1/2", "100") == pytest.approx(1.40)
+    assert be.estimate_base(col, "1/8", "200") == pytest.approx(0.70)
+    assert be.estimate_base(col, "1/4", "100", level=128) == pytest.approx(0.70 * 128 / 255)
+    assert be.estimate_base(col, "bulb", "100") is None
+    assert be.estimate_base(col, "1/4", "-1") is None             # Auto ISO
+    assert be.led_level({"levels": None}) is None
+
+
+def test_an_edit_marks_only_the_colours_that_changed():
+    old = _measured()["bases"][0]["colours"]
+    new = be.edited_colours(old, {
+        "r": {"shutter": "1/4", "iso": "100", "level": 255},       # unchanged
+        "g": {"shutter": "1/3", "iso": "100", "level": 255},       # slower
+        "b": {"shutter": "1/5", "iso": "100", "level": 200}})      # dimmer
+    assert new["r"] == old["r"] and "edited" not in new["r"]
+    assert new["g"]["edited"] and new["g"]["shutter"] == "1/3"
+    assert new["g"]["base"] == pytest.approx(0.70 * 4 / 3)
+    assert new["g"]["levels"] == old["g"]["levels"] and not new["g"]["dimmed"]
+    assert new["b"]["edited"] and new["b"]["dimmed"]
+    assert be.led_level(new["b"]) == 200 and new["b"]["levels"]["r"] == 0
+    assert new["b"]["base"] == pytest.approx(0.71 * 200 / 255)
+
+
+def test_a_mixed_light_keeps_its_balance_when_dimmed():
+    mix = {"r": 200, "g": 160, "b": 100, "w": 0, "ir": 0}
+    assert be.scale_levels(mix, 100) == {"r": 100, "g": 80, "b": 50, "w": 0, "ir": 0}
+    assert be.scale_levels(mix, 200) == mix
+    assert be.scale_levels({"r": 0, "g": 0}, 50) == {"r": 0, "g": 0}
+    assert min(v for v in be.scale_levels({"r": 255, "g": 2}, 1).values() if v) == 1
+
+
+def test_save_renames_and_keeps_the_rest():
+    d = be.add(_measured(), be.entry("Portra", {"w": {"shutter": "1/2", "iso": "100",
+                                                      "base": 0.8, "levels": None}}))
+    old = d["bases"][0]
+    cols = be.edited_colours(old["colours"], {"g": {"shutter": "1/3", "iso": "100",
+                                                    "level": 255}})
+    e = be.edit(d, 0, "Ektar · batch 2", cols)
+    b = e["bases"][0]
+    assert b["name"] == "Ektar · batch 2" and e["selected"] == 0
+    assert (b["when"], b["camera"], b["notes"]) == ("2026-10-30", "Fujifilm GFX50S II",
+                                                    ["a note"])
+    assert b["colours"]["g"]["edited"] and not b["colours"]["r"].get("edited")
+    assert be.edit(d, 0, "portra", cols)["bases"][0]["name"] == "portra 2"   # taken
+    assert be.edit(d, 0, "", cols)["bases"][0]["name"] == "Ektar"            # kept
+    assert be.edit(d, 0, "EKTAR", cols)["bases"][0]["name"] == "EKTAR"       # its own
+    assert be.edit(d, 9, "x", cols) == be.normalise(d)                       # no such
+    # stored and read back
+    back = be.normalise(be.dumps(e))
+    assert back["bases"][0]["colours"]["g"]["edited"] is True
+    assert "edited" not in back["bases"][0]["colours"]["r"]
+
+
+def test_the_summary_marks_estimates_and_hand_set_leds():
+    old = _measured()["bases"][0]
+    cols = be.edited_colours(old["colours"], {"b": {"shutter": "1/5", "iso": "100",
+                                                    "level": 200}})
+    e = be.normalise({"bases": [dict(old, colours=cols)]})["bases"][0]
+    s = be.summary(e, trichrome=True)
+    assert "(base 79 / 70 / ≈56 %)" in s and s.endswith("; blue LED 200")
+    one = be.normalise({"bases": [be.entry("BW", {"w": {
+        "shutter": "1/2", "iso": "100", "base": 0.84, "dimmed": True,
+        "levels": {"r": 0, "g": 0, "b": 0, "w": 180, "ir": 0}}})]})["bases"][0]
+    assert be.summary(one, trichrome=False) == "1/2, ISO 100 (base 84 %); light 180"
+
+
 def test_default_name():
     import datetime
     assert be.default_name(datetime.date(2026, 10, 30)) == "Film base · 30 Oct"

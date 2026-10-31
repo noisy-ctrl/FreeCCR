@@ -456,6 +456,119 @@ def test_trichrome_measures_each_led_from_full_whatever_the_preset(film_mon):
     assert cols["r"]["shutter"] == '1/3'                      # not slowed by the preset's 120
 
 
+# --------------------------------------------------------------------------- #
+# editing a film base by hand (spec revision 4)
+# --------------------------------------------------------------------------- #
+def _ektar():
+    return be.entry("Ektar", {
+        "r": {"shutter": "1/4", "iso": "100", "base": 0.79, "levels": solo("r", 255)},
+        "g": {"shutter": "1/4", "iso": "100", "base": 0.70, "levels": solo("g", 255)},
+        "b": {"shutter": "1/5", "iso": "100", "base": 0.71, "levels": solo("b", 255)}},
+        "Fujifilm GFX50S II", when="2026-10-30")
+
+
+def test_the_edit_window_lists_the_cameras_values_and_estimates():
+    from widgets.film_base_dialog import FilmBaseEditDialog
+    base = be.normalise({"bases": [_ektar()]})["bases"][0]
+    base["colours"]["g"]["shutter"] = "1/3.2"           # another body's speed
+    dlg = FilmBaseEditDialog(base, SPEEDS, ISOS)
+    assert list(dlg.rows) == ["r", "g", "b"]
+    sh = dlg.rows["g"]["shutter"]
+    items = [sh.itemData(i) for i in range(sh.count())]
+    assert "1m" in items and "1/3.2" in items
+    assert items.index("1/4") + 1 == items.index("1/3.2") == items.index("1/3") - 1
+    assert sh.currentData() == "1/3.2"
+    isos = dlg.rows["r"]["iso"]
+    assert [isos.itemData(i) for i in range(isos.count())][-1] == "12800"   # no Auto
+    assert dlg.rows["r"]["base"].text() == "79 %"          # measured: no ≈
+    dlg.rows["r"]["shutter"].setCurrentIndex(dlg.rows["r"]["shutter"].findData("1/3"))
+    assert dlg.rows["r"]["base"].text() == "≈ 105 % · may clip"
+    assert theme_warn(dlg.rows["r"]["base"])
+    dlg.rows["b"]["led"].setValue(30)
+    assert "stops under" in dlg.rows["b"]["base"].text()
+    dlg.rows["b"]["led"].setValue(255)
+    assert dlg.rows["b"]["base"].text() == "71 %"
+    name, vals = dlg.values()
+    assert name == "Ektar" and vals["r"] == {"shutter": "1/3", "iso": "100", "level": 255}
+    dlg.save_btn.click()
+    assert dlg.action == "save"
+    one = be.normalise({"bases": [be.entry("BW", {"w": {"shutter": "1/2", "iso": "100",
+                                                       "base": 0.84, "levels": None}})]})
+    d2 = FilmBaseEditDialog(one["bases"][0], SPEEDS, ISOS)
+    assert list(d2.rows) == ["w"] and not d2.rows["w"]["led"].isEnabled()
+    assert d2.values()[1]["w"]["level"] is None
+    d2.reject()
+    assert d2.action is None
+
+
+def theme_warn(label):
+    from ui import theme
+    return theme.WARN_TEXT in label.styleSheet()
+
+
+def test_edit_save_overwrites_and_save_as_new_adds(film_mon):
+    mon, usb, light, lm, path = film_mon
+    assert not mon.edit_btn.isEnabled()                    # nothing to edit yet
+    mon._bases = be.add(mon._bases, _ektar())
+    mon._refresh_film_bases()
+    assert mon.edit_btn.isEnabled()
+    seen = {}
+
+    def answer(action, name, values):
+        def seam(base):
+            seen["base"] = base
+            return action, name, values
+        return seam
+    vals = {"r": {"shutter": "1/4", "iso": "100", "level": 255},
+            "g": {"shutter": "1/3", "iso": "100", "level": 255},
+            "b": {"shutter": "1/5", "iso": "100", "level": 200}}
+    mon._edit_film_base_dialog = answer(None, "", {})          # Cancel
+    mon.edit_btn.click()
+    assert seen["base"]["name"] == "Ektar" and len(mon._bases["bases"]) == 1
+    assert "edited" not in mon._film_base()["colours"]["g"]
+    mon._edit_film_base_dialog = answer("new", "Ektar", vals)  # Save as New
+    mon.edit_btn.click()
+    names = [b["name"] for b in mon._bases["bases"]]
+    assert names == ["Ektar", "Ektar 2"] and mon._bases["selected"] == 1
+    assert mon._film_base()["colours"]["g"]["shutter"] == "1/3"
+    assert "edited" not in mon._bases["bases"][0]["colours"]["g"]
+    assert mon.film_base_combo.currentText() == "Ektar 2"
+    assert "≈" in mon.film_base_note.text() and "blue LED 200" in mon.film_base_note.text()
+    assert "saved" in mon.capture_caption.text()
+    mon.film_base_combo.setCurrentIndex(0)
+    mon._edit_film_base_dialog = answer("save", "Ektar · fresh", vals)   # Save
+    mon.edit_btn.click()
+    names = [b["name"] for b in mon._bases["bases"]]
+    assert names == ["Ektar · fresh", "Ektar 2"] and mon._bases["selected"] == 0
+    assert mon._film_base()["colours"]["g"]["edited"]
+    saved = be.normalise(QSettings(path, QSettings.IniFormat).value("live/film_bases"))
+    assert [b["name"] for b in saved["bases"]] == names
+    # the sequence uses the edit
+    ex = be.exposures_for(mon._film_base(), trichrome=True)
+    assert ex["g"]["shutter"] == "1/3" and ex["b"]["levels"]["b"] == 200
+
+
+def test_edit_is_off_while_measuring_or_shooting(film_mon):
+    mon, usb, light, lm, path = film_mon
+    mon._bases = be.add(mon._bases, _ektar())
+    mon._refresh_film_bases()
+    called = []
+    mon._edit_film_base_dialog = lambda base: called.append(1) or (None, "", {})
+    mon._neg_base_pos = (0.5, 0.05, 640, 480)
+    mon.start_measure("Ektar", 0)
+    assert mon._measure is not None and not mon.edit_btn.isEnabled()
+    mon._on_edit_film_base()
+    assert called == []
+    assert _wait(lambda: mon._measure is None, 20)
+    assert mon.edit_btn.isEnabled()
+    mon._shutter_is_usb = lambda: True
+    mon._ensure_hot_folder = lambda: True
+    mon.shoot()
+    assert mon.sequence.running and not mon.edit_btn.isEnabled()
+    assert _wait(lambda: not mon.sequence.running, 20)
+    assert mon.edit_btn.isEnabled()
+
+
 def test_a_colour_at_a_raised_iso_shows_its_iso():
     e = be.normalise({"bases": [be.entry("x", {
         "r": {"shutter": "1/3", "iso": "100", "base": 0.82, "levels": None},
