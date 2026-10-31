@@ -22,7 +22,7 @@ from PySide6.QtGui import QAction, QKeySequence, QShortcut, QPainter, QPen, QCol
 from PySide6.QtWidgets import (QWidget, QFrame, QHBoxLayout, QVBoxLayout, QLabel,
                                QPushButton, QComboBox, QToolBar, QCheckBox, QSizePolicy,
                                QScrollArea, QSlider, QMenu, QInputDialog, QMessageBox,
-                               QFileDialog, QApplication)
+                               QFileDialog, QApplication, QDialog)
 
 from core import base_exposure as be
 from core import camera_backends as cb
@@ -640,13 +640,18 @@ class LiveCaptureMonitor(QWidget):
         self.film_base_combo.setToolTip(
             "Film bases measured so far: each colour's shutter speed (and LED level) "
             "that puts this film's base just under the sensor's ceiling.\n"
-            "Right-click: measure again, rename, delete.")
+            "Right-click: measure again, edit, rename, delete.")
         self.measure_btn = QPushButton("Measure…")
         self.measure_btn.setToolTip(
             "With the film base in view (click it in Negative Preview, or let the "
             "border be found): test shots read the base in the RAW and pick each "
             "colour's shutter speed at ISO 100. The shots aren't kept.")
+        self.edit_btn = QPushButton("Edit…")
+        self.edit_btn.setToolTip(
+            "Set this film base's shutter speed, ISO and LED level per colour by "
+            "hand. Save overwrites it; Save as New keeps it and adds the edit.")
         r.addWidget(self.film_base_combo, 1)
+        r.addWidget(self.edit_btn)
         r.addWidget(self.measure_btn)
         fb.addLayout(r)
         self.film_base_note = _muted("")
@@ -777,6 +782,7 @@ class LiveCaptureMonitor(QWidget):
         self.film_base_combo.currentIndexChanged.connect(self._on_film_base_selected)
         self.film_base_combo.customContextMenuRequested.connect(self._film_base_menu)
         self.measure_btn.clicked.connect(self._on_measure_clicked)
+        self.edit_btn.clicked.connect(self._on_edit_film_base)
         self.film_base_use.toggled.connect(
             lambda on: (_settings().setValue("live/film_base_use", bool(on)),
                         self._refresh_film_bases()))
@@ -1580,6 +1586,7 @@ class LiveCaptureMonitor(QWidget):
             self._await_exposure = True
             self.shoot_btn.setText("Stop   (Esc)")
             self.measure_btn.setEnabled(False)
+            self.edit_btn.setEnabled(False)
             self._refresh_capture_caption()
             note = self._film_base_shoot_note(tri)
             if note:
@@ -1616,6 +1623,7 @@ class LiveCaptureMonitor(QWidget):
             ring.set_progress(None)
         self.shoot_btn.setText("Shoot   (S)")
         self.measure_btn.setEnabled(True)
+        self._refresh_edit_enabled()
         self._refresh_light_status()
         if reason == "disconnected":
             self._warn_caption("Stopped: the Scanlight disconnected.")
@@ -1655,10 +1663,16 @@ class LiveCaptureMonitor(QWidget):
             self.film_base_combo.addItem("No film base yet")
         self.film_base_combo.setEnabled(bool(d["bases"]) and self._measure is None)
         self.film_base_combo.blockSignals(False)
+        self._refresh_edit_enabled()
         tri = self.scan_type() == "trichrome"
         base = self._film_base()
         self.film_base_note.setText(be.summary(base, tri))
         self.film_base_use.setEnabled(be.exposures_for(base, tri) is not None)
+
+    def _refresh_edit_enabled(self):
+        seq = getattr(self, "sequence", None)
+        self.edit_btn.setEnabled(bool(self._bases["bases"]) and self._measure is None
+                                 and not (seq is not None and seq.running))
 
     def _on_film_base_selected(self, i):
         if i < 0 or not self._bases["bases"]:
@@ -1675,6 +1689,8 @@ class LiveCaptureMonitor(QWidget):
         a = m.addAction("Measure Again", lambda: self.start_measure(
             self._film_base()["name"], self._bases["selected"]))
         a.setEnabled(has)
+        m.addAction("Edit…", self._on_edit_film_base).setEnabled(
+            has and not self.sequence.running)
         m.addAction("Rename…", self._on_rename_film_base).setEnabled(has)
         m.addAction("Delete…", self._on_delete_film_base).setEnabled(has)
         m.popup(self.film_base_combo.mapToGlobal(pos))
@@ -1685,6 +1701,38 @@ class LiveCaptureMonitor(QWidget):
         name, ok = QInputDialog.getText(self, "Measure Film Base", "Name this film base "
                                         "(stock, batch):", text=default)
         return name.strip() if ok and name.strip() else None
+
+    def _edit_film_base_dialog(self, base):
+        """The test seam: (action, name, values) with action "save", "new" or
+        None (cancelled)."""
+        from widgets.film_base_dialog import FilmBaseEditDialog
+        dlg = FilmBaseEditDialog(base, self._exp_choices.get("shutter") or [],
+                                 self._exp_choices.get("iso") or [], self)
+        if dlg.exec() != QDialog.Accepted or dlg.action is None:
+            return None, "", {}
+        name, values = dlg.values()
+        return dlg.action, name, values
+
+    def _on_edit_film_base(self):
+        """spec/film-base-exposure.md revision 4: set a film base by hand."""
+        base = self._film_base()
+        if base is None or self._measure is not None or self.sequence.running:
+            return
+        action, name, values = self._edit_film_base_dialog(base)
+        if action not in ("save", "new"):
+            return
+        colours = be.edited_colours(base["colours"], values)
+        if action == "save":
+            self._bases = be.edit(self._bases, self._bases["selected"], name, colours)
+        else:
+            self._bases = be.add(self._bases, be.entry(
+                name or base["name"], colours, base.get("camera", ""), base.get("notes", ())))
+        self._save_film_bases()
+        self._refresh_film_bases()
+        new = self._film_base()
+        if new is not None:
+            self._note_caption(f"Film base “{new['name']}” saved: "
+                               f"{be.summary(new, self.scan_type() == 'trichrome')}")
 
     def _on_rename_film_base(self):
         base = self._film_base()

@@ -300,6 +300,70 @@ shot (sticky for the connection, `_use_capture`). The capture call holds the
 worker for the shot and its download (~4-5 s), which Shoot and measuring
 wait for anyway.
 
+## Revision 4: editing a film base by hand (2026-10-31)
+The user: "We need an edit button for the measured profiles." Measuring picks
+the exposures; he wants to set them himself too (it also covers his earlier
+idea of a shutter speed per colour in Timing: the film base IS that table).
+
+**UX.** `Edit…` sits beside `Measure…` in the Film base row (and in the
+combo's right-click menu), enabled when a film base is selected and nothing
+is measuring or shooting. It opens `FilmBaseEditDialog`
+(`widgets/film_base_dialog.py`):
+
+    Name   [ Ektar 100 · batch 2          ]
+             Shutter    ISO        LED    Base
+    Red     [ 1/4  ▾]  [ISO 100 ▾] [255]  ≈ 79 %
+    Green   [ 1/4  ▾]  [ISO 100 ▾] [255]  ≈ 70 %
+    Blue    [ 1/5  ▾]  [ISO 100 ▾] [255]  ≈ 71 %
+    Base is estimated from the measured reading: twice the time, ISO or LED
+    level gives twice the level. Measure Again reads it for real.
+                              [Cancel] [Save as New] [Save]
+
+- One row per colour the film base has, in R, G, B, then "One exposure" (w).
+- Shutter and ISO list the camera's own values (the Exposure row's lists;
+  Auto ISO and Bulb/Time, which have no number, are left out); a value the
+  film base holds that the camera doesn't list (another body) is added in
+  speed order so opening and saving never changes it.
+- LED: the level 1-255, as the light's own sliders and the summary show it
+  (the brightest lit channel of the entry's `levels`). A one-exposure entry
+  measured with the light off/unconnected has no levels: the field is
+  disabled and reads "as it is".
+- Base: the estimate, `base x (E_new / E_old) x (L_new / L_old)` with
+  `E = seconds x ISO / 100` (`exposure_of`) — test 10 measured speed and ISO
+  linear, and the calibration already dims the LED linearly and confirms with
+  a shot. At or above `CLIP_TRUST` (0.95) it turns warning-coloured and says
+  "may clip"; more than two stops under `TARGET` it says how many stops under.
+  Unchanged rows show the measured reading without "≈".
+- **Save** overwrites the selected film base (name too; a name another film
+  base already has gets " 2"). **Save as New** keeps the measured one and adds
+  the edit as a new film base under the Name field (made unique, so leaving
+  the name alone gives "… 2"), and selects it. Cancel / Esc changes nothing.
+
+**Data.** A colour changed by hand carries `"edited": true` (kept by
+`_clean_colour`; absent = false, so old settings read unchanged) and its
+`base` is the estimate. A changed LED scales every lit channel of `levels` by
+`L_new / L_old` (rounded, 1-255), so a preset's mix keeps its balance, and
+sets `dimmed` true (the summary then lists the hand-set level). An unchanged
+colour is copied as it was. `when`, `camera` and `notes` stay on Save; Save as
+New takes today's date.
+
+**Summary.** An edited colour's base is shown with "≈" ("base 79 / ≈70 /
+71 %"); a lit LED below full or set by hand is listed as before ("red LED
+200"; one exposure: "light 200" — it used to read "the base LED", a slip).
+
+**Code.** `base_exposure`: `led_level(colour)`, `scale_levels(levels, level)`,
+`estimate_base(colour, shutter, iso, level=None)`, `edited_colours(old,
+values)` (values = `{k: {"shutter", "iso", "level"}}`), `edit(data, index,
+name, colours)`; the monitor's `_edit_film_base_dialog(base)` is the test seam
+returning `(action, name, values)` with action `"save"`, `"new"` or None.
+
+**Tests.** `estimate_base` (time, ISO, LED, unchanged); `edited_colours`
+marks only changed colours and scales a preset mix; `edit` renames (unique)
+and keeps `when`/`camera`; old entries without `edited` load; summary shows
+"≈" and the LED; the dialog lists the camera's values plus a foreign one,
+disables LED without levels, updates the estimate and warns at 95 %; the
+monitor's Save / Save as New / Cancel, and Edit disabled while measuring.
+
 ## Code
 - `core/base_exposure.py` (new, Qt-free): `seconds`, `iso_number`,
   `exposure_of`, `Reading` + `reading_from_mosaic` + `read_patch`, `Plan` +
