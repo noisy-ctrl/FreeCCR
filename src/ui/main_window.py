@@ -835,7 +835,7 @@ class MainWindow(QMainWindow):
         self.tether_action.triggered.connect(self.toggle_tethering)
 
         # The camera's live view and the Scanlight (spec/live-capture-monitor.md)
-        self.live_monitor_action = file_menu.addAction("Live Capture Monitor…")
+        self.live_monitor_action = file_menu.addAction("Capture…")
         self.live_monitor_action.triggered.connect(self.open_live_monitor)
 
         file_menu.addSeparator()

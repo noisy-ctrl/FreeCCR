@@ -66,7 +66,7 @@ class TetherBanner(QWidget):
         self._scan.setToolTip(
             "What you are scanning. Trichrome: each three files (red, green, "
             "blue) load as one merged frame. Black & white: frames load in "
-            "Black & White. Also set in the Live Capture Monitor.")
+            "Black & White. Also set in Capture.")
         self._scan.currentIndexChanged.connect(
             lambda i: self.scanTypeChanged.emit(self._scan.itemData(i)))
         self._black = QPushButton("Black Point…")

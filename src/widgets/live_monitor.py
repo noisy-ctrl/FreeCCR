@@ -252,7 +252,7 @@ class LiveCaptureMonitor(QWidget):
     def __init__(self, main_window=None, feed=None, light=None, usb=None, rail=None,
                  parent=None):
         super().__init__(parent, Qt.Window)
-        self.setWindowTitle("Live Capture Monitor")
+        self.setWindowTitle("Capture")
         self.setAttribute(Qt.WA_DeleteOnClose, False)
         self._mw = main_window
         self._closing = False
@@ -2255,7 +2255,7 @@ class LiveCaptureMonitor(QWidget):
 
     @staticmethod
     def _meter_shots_on():
-        """Settings → Live Capture → Show Meter (`live/frame_meter`, off)."""
+        """Settings → Capture → Show Meter (`live/frame_meter`, off)."""
         return _settings().value("live/frame_meter", False) in (True, "true", "1", 1)
 
     def _meter_blocker(self, ctx=None):
