@@ -80,6 +80,7 @@ class LiveCanvas(QWidget):
         self.cx = None
         self.cy = None
         self.guide_on = False
+        self.guide_waiting = None         # following, no whole frame: the note to show
         self.guide = dict(GUIDE_DEFAULT)
         self.align_on = False
         self.align_x = 0.15
@@ -191,6 +192,15 @@ class LiveCanvas(QWidget):
         if on is not None:
             self.guide_on = bool(on)
         self.update()
+
+    def set_guide_waiting(self, text):
+        """spec/auto-frame-guide.md: the guide is following the frame but no
+        whole frame is in view: drawn dashed and dim with `text` beside it
+        (None: drawn as usual)."""
+        text = text or None
+        if text != self.guide_waiting:
+            self.guide_waiting = text
+            self.update()
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
@@ -609,10 +619,18 @@ class LiveCanvas(QWidget):
         p.rotate(self.guide["angle"])
         rect = QRectF(-w / 2, -h / 2, w, h)
         p.setBrush(Qt.NoBrush)
-        p.setPen(QPen(QColor(0, 0, 0, 170), 3))
+        waiting = self.guide_waiting is not None
+        p.setPen(QPen(QColor(0, 0, 0, 110 if waiting else 170), 3))
         p.drawRect(rect)
-        p.setPen(QPen(QColor(255, 255, 255, 235), 1.5))
+        p.setPen(QPen(QColor(255, 255, 255, 140 if waiting else 235), 1.5,
+                      Qt.DashLine if waiting else Qt.SolidLine))
         p.drawRect(rect)
+        if waiting:
+            p.restore()
+            box = QRectF(c.x() - w / 2, c.y() - h / 2, w, h)
+            self._paint_label(p, QPointF(max(8.0, box.left() + 8), max(8.0, box.top() + 8)),
+                              "No whole frame in view")
+            return
         p.setPen(QPen(QColor(255, 255, 255, 70), 1))
         for i in (1, 2):
             x = rect.left() + w * i / 3

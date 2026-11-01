@@ -32,6 +32,7 @@ from core import capture_sequence as cs
 from core import frame_meter as fm
 from core import light_presets as lp
 from core import live_feed as lf
+from core import live_frame
 from core import live_negative as ln
 from core import orp
 from core import rail_autofocus as raf
@@ -66,6 +67,7 @@ RING_KEYS = (("r", "R", "1"), ("g", "G", "2"), ("b", "B", "3"), ("w", "W", "4"))
 LED_VALUE_W = 52
 FRAME_ESTIMATE_MS = 1000         # the live estimate of this frame's exposure
 FRAME_ESTIMATES = 5              # ... the median of this many
+AUTO_GUIDE_MS = 250              # the guide looks for the frame this often
 LED_ROW_H = 20                   # the LED sliders: compact rows (the user, 2026-11-01)
 LED_ROW_GAP = 1
 # the focus rail's jog steps, µm (spec/focus-rail.md §5)
@@ -1039,6 +1041,16 @@ class LiveCaptureMonitor(QWidget):
         self.use_frame_btn.clicked.connect(self._on_use_frame)
         self.frame_auto.toggled.connect(self._on_frame_auto)
         self.canvas.guide_changed.connect(lambda g: self._frame_changed())
+        self.canvas.guide_changed.connect(lambda g: self._guide_placed_by_hand())
+        # the guide finds the frame by itself (spec/auto-frame-guide.md)
+        self._follower = live_frame.GuideFollower()
+        self._guide_auto = _settings().value("live/guide_auto", True) not in (
+            False, "false", "0", 0)
+        self._remembered_base = None     # (base8, key): film base seen, for the estimate
+        self._auto_timer = QTimer(self)
+        self._auto_timer.setInterval(AUTO_GUIDE_MS)
+        self._auto_timer.timeout.connect(self._auto_guide_tick)
+        self._auto_timer.start()
         self._frame_timer = QTimer(self)
         self._frame_timer.setInterval(FRAME_ESTIMATE_MS)
         self._frame_timer.timeout.connect(self._update_frame_estimate)
@@ -1170,7 +1182,7 @@ class LiveCaptureMonitor(QWidget):
         self._closing = True
         QApplication.instance().removeEventFilter(self)
         for t in (self._idle_timer, self._status_timer, self._ring_timer, self._af_timer,
-                  self._frame_timer):
+                  self._frame_timer, self._auto_timer):
             t.stop()
         if self._af is not None and self._af.running:
             self._af.on_finished = None
@@ -1373,6 +1385,13 @@ class LiveCaptureMonitor(QWidget):
     def _guide_menu(self, pos):
         from core.film_formats import FILM_FORMATS
         m = QMenu(self)
+        follow = m.addAction("Follow the Frame")
+        follow.setCheckable(True)
+        follow.setChecked(self._guide_auto)
+        follow.setToolTip("The guide finds the frame by itself and follows it as focusing "
+                          "moves it; it waits while the film is wound on.")
+        follow.triggered.connect(lambda on: self.set_guide_auto(bool(on)))
+        m.addSeparator()
         fmt = self.canvas.guide.get("format")
         sub = m.addMenu("Format")
         a = sub.addAction("Free")
@@ -1400,11 +1419,67 @@ class LiveCaptureMonitor(QWidget):
         m.popup(pos)
         self._popup = m
 
-    def _set_guide(self, g):
+    def _set_guide(self, g, by_hand=True):
         if not self.actions["guide"].isChecked():
             self.actions["guide"].setChecked(True)
         self.canvas.set_guide(g)
         self._save_view_state()
+        if by_hand:
+            self._guide_placed_by_hand()
+
+    # --- the guide finds the frame (spec/auto-frame-guide.md) ---------------
+    def set_guide_auto(self, on):
+        self._guide_auto = bool(on)
+        _settings().setValue("live/guide_auto", self._guide_auto)
+        self._follower.reset()
+        self.canvas.set_guide_waiting(None)
+        if on:
+            if not self.actions["guide"].isChecked():
+                self.actions["guide"].setChecked(True)
+            self._note_caption("The frame guide follows the frame.")
+            self._auto_guide_tick()
+
+    def _guide_placed_by_hand(self):
+        if self._guide_auto:
+            self.set_guide_auto(False)
+            self._note_caption("You placed the guide, so it no longer follows the frame. "
+                               "Right-click Frame guide → Follow the Frame turns it back on.")
+
+    def _remembered_key(self):
+        return (self._exposure.get("shutter"), self._exposure.get("iso"),
+                tuple(sorted((k, int(v)) for k, v in self._levels.items())),
+                str(self._cam_zoom))
+
+    def _auto_guide_tick(self):
+        """Find the frame in the newest full live picture and move the guide
+        to it (4 times a second while the guide follows)."""
+        if self._closing:
+            return
+        if (not self._guide_auto or not self.actions["guide"].isChecked()
+                or self.magnified() or self._sleeping is not None
+                or self._measure is not None or self.sequence.running):
+            self.canvas.set_guide_waiting(None)
+            return
+        frame = self.feed.last_full_frame()
+        if frame is None:
+            return
+        find = live_frame.find_frame(frame)
+        if find.base8 is not None:
+            self._remembered_base = (find.base8, self._remembered_key())
+        ratio = None
+        fmt = self.canvas.guide.get("format")
+        if fmt:
+            from core.film_formats import ratio as format_ratio
+            ratio = format_ratio(fmt)
+        was = self._follower.state
+        changed = self._follower.update(find, time.monotonic(), ratio,
+                                        (frame.shape[1], frame.shape[0]))
+        if changed and self._follower.guide is not None:
+            self.canvas.set_guide(dict(self._follower.guide, format=fmt))
+        waiting = self._follower.state != "following" and self._follower.guide is not None
+        self.canvas.set_guide_waiting(self._follower.reason if waiting else None)
+        if was == "waiting" and self._follower.state == "following":
+            self._frame_changed()                  # a new frame is in
 
     def _set_guide_format(self, key):
         g = dict(self.canvas.guide)
@@ -1423,7 +1498,7 @@ class LiveCaptureMonitor(QWidget):
             nw = math.sqrt(area * want)
             nh = nw / want
             g["w"], g["h"] = nw / fw, nh / fh
-        self._set_guide(g)
+        self._set_guide(g, by_hand=not self._guide_auto)    # following keeps the frame's size
 
     def _nudge_guide(self, scale=None, dx=0.0, dy=0.0, dangle=0.0, angle=None):
         g = dict(self.canvas.guide)
@@ -2238,9 +2313,18 @@ class LiveCaptureMonitor(QWidget):
                 self._frame_est = []
             elif self.magnified():
                 pass                                  # paused: the picture is a part
+            elif self._guide_auto and self._follower.state != "following":
+                # the film is between frames: nothing to estimate yet
+                self._frame_live_reason = (self._follower.reason or "No whole frame in view.")
+                self._frame_live_source = ""
+                self._frame_est = []
             else:
+                remembered = None
+                if (self._remembered_base is not None
+                        and self._remembered_base[1] == self._remembered_key()):
+                    remembered = self._remembered_base[0]
                 est = fm.live_estimate(self.feed.last_full_frame(), dict(self.canvas.guide),
-                                       self._neg_base_pos)
+                                       self._neg_base_pos, remembered=remembered)
                 self._frame_live_reason = est.reason
                 self._frame_live_source = est.source
                 if est.ok:
@@ -2280,10 +2364,12 @@ class LiveCaptureMonitor(QWidget):
         if sug is not None and sug.live:
             self.frame_note.setToolTip(
                 "Estimated from the live view, no photos: the frame's brightest part "
-                "inside the guide against the film base " + (
-                    "you clicked (Negative Preview → Film Base)."
-                    if getattr(self, "_frame_live_source", "") == "click" else
-                    "found beside the guide. A Film Base click overrides it."))
+                "inside the guide against the film base " + {
+                    "click": "you clicked (Negative Preview → Film Base).",
+                    "remembered": "seen earlier between frames, under the same light and "
+                                  "exposure. A Film Base click overrides it.",
+                }.get(getattr(self, "_frame_live_source", ""),
+                      "found beside the guide. A Film Base click overrides it."))
         else:
             self.frame_note.setToolTip("")
         busy = self._measure is not None or self.sequence.running
