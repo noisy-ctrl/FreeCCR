@@ -66,6 +66,14 @@ def test_channel_groups_exclude_each_other():
     assert cl.exclusive(lv, "g", 120) == {"r": 0, "g": 120, "b": 0, "w": 0, "ir": 0}
     assert cl.exclusive({"r": 9, "g": 9, "b": 9, "w": 0, "ir": 0}, "ir", 50) == \
         {"r": 0, "g": 0, "b": 0, "w": 0, "ir": 50}
+    # infrared runs alone (the user, 2026-11-01): it turns White off too, and
+    # White (or any colour) turns it off
+    assert cl.exclusive({"r": 0, "g": 0, "b": 0, "w": 200, "ir": 0}, "ir", 50) == \
+        {"r": 0, "g": 0, "b": 0, "w": 0, "ir": 50}
+    assert cl.exclusive({"r": 0, "g": 0, "b": 0, "w": 0, "ir": 90}, "w", 10) == \
+        {"r": 0, "g": 0, "b": 0, "w": 10, "ir": 0}
+    assert cl.exclusive({"r": 0, "g": 0, "b": 0, "w": 0, "ir": 90}, "b", 10)["ir"] == 0
+    assert cl.clean_levels({"w": 5, "ir": 9}) == {"r": 0, "g": 0, "b": 0, "w": 5, "ir": 0}
     # lowering a channel to 0 leaves the other group alone
     assert cl.exclusive(lv, "r", 0)["w"] == 200
     # a set with both keeps RGB, like the light

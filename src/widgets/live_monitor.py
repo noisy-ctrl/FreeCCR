@@ -42,6 +42,8 @@ CHANNEL_COLOURS = {"r": theme.CH_R, "g": theme.CH_G, "b": theme.CH_B,
                    "w": "#e8e8e8", "ir": "#b06a7e"}
 RING_KEYS = (("r", "R", "1"), ("g", "G", "2"), ("b", "B", "3"), ("w", "W", "4"))
 LED_VALUE_W = 52
+LED_ROW_H = 20                   # the LED sliders: compact rows (the user, 2026-11-01)
+LED_ROW_GAP = 1
 # the focus rail's jog steps, µm (spec/focus-rail.md §5)
 RAIL_JOG_DEFAULT = {"fine_um": 20, "coarse_um": 200}
 RAIL_JOG_LIMITS = {"fine_um": (1, 200), "coarse_um": (10, 2000)}
@@ -547,29 +549,36 @@ class LiveCaptureMonitor(QWidget):
         # --- LED ---
         lay.addWidget(_heading("LED"))
         self.led_sliders, self.led_values = {}, {}
+        leds = QVBoxLayout()
+        leds.setContentsMargins(0, 0, 0, 0)
+        leds.setSpacing(LED_ROW_GAP)
+        alone = {"w": "White runs alone: it turns the others off.",
+                 "ir": "Infrared runs alone: it turns the others off."}
         for k in cl.CHANNELS:
             row = QHBoxLayout()
             row.setSpacing(theme.GAP_TIGHT)
             lab = QLabel(cl.NAMES[k])
             lab.setFixedWidth(theme.LABEL_COL_W)
-            lab.setFixedHeight(theme.CONTROL_H)
+            lab.setFixedHeight(LED_ROW_H)
             lab.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
             s = GradientSlider(("#262626", CHANNEL_COLOURS[k]), Qt.Horizontal)
             s.setRange(0, 255)
             s.reset_value = 0
-            s.setFixedHeight(theme.CONTROL_H)
-            s.setToolTip(f"{cl.NAMES[k]} LED. Double-click: off.")
+            s.setFixedHeight(LED_ROW_H)
+            s.setToolTip(f"{cl.NAMES[k]} LED. Double-click: off.\n"
+                         + alone.get(k, "Red, green and blue mix; they turn White and "
+                                        "Infrared off."))
             v = QLabel("0.0 %")
             v.setFixedWidth(LED_VALUE_W)
+            v.setFixedHeight(LED_ROW_H)
             v.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
             s.valueChanged.connect(lambda val, ch=k: self._on_led_slider(ch, val))
             row.addWidget(lab)
             row.addWidget(s, 1)
             row.addWidget(v)
-            lay.addLayout(row)
+            leds.addLayout(row)
             self.led_sliders[k], self.led_values[k] = s, v
-        lay.addWidget(_muted("Red, Green and Blue turn White and Infrared off (and the "
-                             "other way round): the light can't run both groups."))
+        lay.addLayout(leds)
         lay.addWidget(theme.section_separator())
 
         # --- Presets ---

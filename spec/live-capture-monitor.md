@@ -605,3 +605,16 @@ connection + light timeout is 8 mins or something like that."
   camera through its frame source) and a USB camera used only as the shutter
   (`usb.open(key)`), when that isn't the same camera.
 - Never while shooting or measuring (as before).
+
+## Revision 2026-11-01: compact LED rows, Infrared alone
+The user (with a screenshot of the LED panel): "The sliders for the levels now
+take up a fair bit of space vertically. Can we make it less tall? … when the
+infrared slider is activated the other leds should turn off. We don't need
+explanation text though."
+- The five LED rows are `LED_ROW_H` 20 px with `LED_ROW_GAP` 1 px in their own
+  layout (were the panel's 28 px controls at its 4 px rhythm), and the line
+  under them is gone; each slider's tooltip says what it turns off.
+- The channel groups are now **RGB, White, Infrared** (`capture_light.GROUPS`,
+  `group_of`): raising a channel turns every channel outside its group off, so
+  Infrared turns White off too and White (or a colour) turns Infrared off.
+  `clean_levels` keeps one group: RGB beats White beats Infrared.
