@@ -46,3 +46,12 @@ images that have no frame yet.
 ## Tests
 
 `tests/test_scope_sample_area.py`.
+
+## Revision 2026-11-01: no longer offered
+The user: "The ref frame metering button no longer makes sense to have in the
+main screen." Auto crop and the crop-aware histogram took over what it was
+for. The **Ref frame metering** toggle is gone from the Scopes header; the
+scopes and the histogram read the whole (cropped) picture. The machinery
+stays (`samples_reference()`, the region code), off, and a stored
+`scopes/sample_reference = true` is ignored: nothing on screen could turn it
+off again. Tests: the toggle is not shown and is off even when stored on.

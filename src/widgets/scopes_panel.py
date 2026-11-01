@@ -339,7 +339,11 @@ class ScopesPanel(QWidget):
         super().__init__(parent)
         self._settings = QSettings("FreeCCR", "FreeCCR")
         expanded = self._settings.value("scopes/expanded", False, type=bool)
-        sample_ref = self._settings.value("scopes/sample_reference", False, type=bool)
+        # "Ref frame metering" is no longer offered in the main window (the
+        # user, 2026-11-01: auto crop and the crop-aware histogram replaced
+        # it). The machinery stays, off; a stored "on" is ignored, since
+        # nothing on screen could turn it off again.
+        sample_ref = False
         self._sampling_note = ""
 
         self._toggle_btn = QPushButton()
@@ -392,7 +396,8 @@ class ScopesPanel(QWidget):
         header.setContentsMargins(0, 0, 0, 0)
         header.setSpacing(theme.GAP_BTN)
         header.addWidget(self._toggle_btn, 1)
-        header.addWidget(self._sample_btn)
+        self._sample_btn.setParent(self)
+        self._sample_btn.hide()                   # not in the header (see above)
         header.addWidget(self._swatch)
         header.addWidget(self._readout)
 

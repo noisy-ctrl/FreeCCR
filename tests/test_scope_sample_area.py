@@ -183,6 +183,18 @@ class TestProbe:
 
 
 class TestButton:
+    def test_not_offered_and_off_even_if_stored_on(self):
+        """2026-11-01: the toggle left the Scopes header; a stored "on" can't
+        silently narrow the histogram with nothing on screen to undo it."""
+        from widgets.scopes_panel import ScopesPanel
+        QSettings("FreeCCR", "FreeCCR").setValue("scopes/sample_reference", True)
+        panel = ScopesPanel()
+        panel.resize(360, 200)
+        panel.show()
+        _app.processEvents()
+        assert not panel._sample_btn.isVisible() and not panel.samples_reference()
+        panel.hide()
+
     def test_label_and_tooltip(self):
         from widgets.scopes_panel import ScopesPanel
         btn = ScopesPanel()._sample_btn
