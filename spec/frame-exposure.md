@@ -144,3 +144,80 @@ for this scan type — naming one measured for the other type — the USB camera
 the Scanlight for trichrome, the frame guide, Camera zoom back to Whole); a
 press says the same in the caption. Use for This Frame's tooltip says why
 there is nothing to use yet. The line names the scan type it needs.
+
+## Revision 2 (2026-11-01): no click, no photos, fewer buttons
+The user: "Can software not guess, based on white light levels and
+histogram? Or at least there be a quick option without photos needing to be
+taken. I'd also like to have fewer buttons on the UI. Maybe the full version
+(that takes photos) could be enabled in settings."
+
+The live estimate already took no photos; what held it back was the Film
+Base click it compared the frame with. Now it finds the film base itself,
+beside the frame guide, in the same live picture. The live view is lit
+white, and the comparison is a ratio inside one picture, so the light's level
+and the live view's own brightening cancel. Without the base in the picture
+there is nothing to compare with: the live view's absolute level is the
+camera's choice (it brightens a dense frame), so it says so rather than
+guessing.
+
+### The film base beside the guide (`frame_meter.find_base_beside`)
+On the ≤ 640 px copy, 3×3-blurred, in the guide's own (turned) axes:
+- On each of the four sides, the band from `BESIDE_NEAR` (1.5 %) to
+  `BESIDE_FAR` (5 %) of the guide's short side OUTSIDE it: past a guide laid
+  on the gate's edge, short of 35 mm sprocket holes (~8 %), inside the gap
+  between frames on a strip (~8 %).
+- Each band's middle (`BESIDE_CORNER` 8 % off each end, away from the
+  corners) in `BESIDE_SEGMENTS` (6) pieces; a piece needs `BESIDE_MIN_PX`
+  (12) pixels on the picture.
+- A piece is a base candidate when, per channel in linear light: even
+  (IQR / median ≤ `BESIDE_EVEN` 0.10), unclipped (≤ 2 % of its pixels at
+  `BASE_CLIP` 250 in any channel), not too dark (median ≥ `BASE_DARK` 12),
+  and at least as bright as the frame's thinnest part
+  (`max_c(frame_c / piece_c)` ≤ `BESIDE_SLACK` 1.10): the base is the
+  thinnest film, so anything darker than the frame's brightest part is
+  picture or holder.
+- Candidates are grouped (greedy, brightest first) when every channel is
+  within `BESIDE_AGREE` (12 %) of the group's first. A group counts only when
+  its pieces are on at least TWO sides (as auto black point's "high"
+  confidence: one bright edge on a real negative can be bare light). Of
+  those, the group with the most pieces; a tie goes to the darker (film,
+  not light past it). The base = per-channel median of its pieces' medians.
+- Nothing found: the reason names what was seen ("clipped in the live view"
+  when pieces were rejected for that and none passed, otherwise "couldn't
+  find the film base beside the frame: lay the guide on the frame's edges,
+  or click the base once").
+
+### Which base
+A Film Base click (Negative Preview) still wins: it is the user's own
+choice. With none, the base beside the guide. `LiveEstimate.source` is
+"click" or "beside"; the line says "(live view)" as before, and its tooltip
+says which base it compared with.
+
+### Fewer buttons
+**Meter** (the RAW test shots, §4) is hidden unless Settings → Live Capture
+→ "Show Meter: this frame's exposure from RAW test shots" (`live/frame_meter`,
+default off). The row is then the line and **Use for This Frame** only. The
+setting is read when the line refreshes (every second while the film base
+row shows), so it applies without reopening the monitor; a metering already
+running keeps its button until it finishes.
+
+### Refinement (second pass)
+- The base piece medians are taken on the blurred copy but the evenness on
+  the same pixels: the blur is what makes an 8-bit live view's noise (σ ≈ 2
+  levels) pass 0.10 at a base as dark as ~40/255.
+- The local axes grid (`lx`, `ly` per pixel) is computed per call (≈ 0.3 M
+  floats at 640 × 427: a few ms once a second; no cache to go stale).
+- The guide may run off the picture: pieces outside it simply have no
+  pixels. A guide covering the whole picture finds nothing (and says so).
+- `live_estimate(bgr, guide, base_pos=None)`: the click path is unchanged
+  (its refusals included); `find_base_beside` is only the no-click path.
+- Use for This Frame's "nothing yet" tooltip no longer tells the user to
+  click the base or press Meter; it gives the line's reason.
+
+### Tests
+A synthetic live frame: a picture inside the guide, an even base band round
+it (with a dark lettering patch on one side and bare light further out) →
+found, ratio as with a click on the band; rotated guide; one side only → not
+found; base darker than the picture's brightest → not found; a clipped band
+→ the clipped reason; the click still wins. The monitor: Meter hidden by
+default, shown with the setting; the estimate runs with no click.

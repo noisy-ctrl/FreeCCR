@@ -50,6 +50,21 @@ def _negative(base8=200, frame_lin_ratio=0.5, w=800, h=600):
     return img
 
 
+def _noisy(img, sigma=2.0, seed=0):
+    """A live view's noise (8-bit, σ levels)."""
+    rng = np.random.default_rng(seed)
+    return np.clip(img.astype(np.float32) + rng.normal(0, sigma, img.shape), 0, 255
+                   ).astype(np.uint8)
+
+
+def _band_rows(guide=GUIDE, w=800, h=600):
+    """Rows of the band just above the guide, as find_base_beside reads it."""
+    gh, gw = guide["h"] * h, guide["w"] * w
+    top = guide["cy"] * h - gh / 2
+    short = min(gw, gh)
+    return int(top - fm.BESIDE_FAR * short) + 1, int(top - fm.BESIDE_NEAR * short)
+
+
 # --------------------------------------------------------------------------- #
 # the guide on a frame
 # --------------------------------------------------------------------------- #
@@ -108,13 +123,89 @@ def test_a_frame_a_stop_under_the_base_reads_a_stop_longer():
 
 def test_the_live_estimate_says_why_it_has_none():
     img = _negative()
-    assert "Click the film base" in fm.live_estimate(img, GUIDE, None).reason
     assert "inside the frame guide" in fm.live_estimate(img, GUIDE, (0.5, 0.5, 800, 600)).reason
     assert "clipped" in fm.live_estimate(_negative(base8=255), GUIDE,
                                          (0.5, 0.08, 800, 600)).reason
     assert "too dark" in fm.live_estimate(_negative(base8=8, frame_lin_ratio=0.9), GUIDE,
                                           (0.5, 0.08, 800, 600)).reason
     assert "frame guide on" in fm.live_estimate(img, None, (0.5, 0.08, 800, 600)).reason
+
+
+# --- revision 2: the film base found beside the guide, no click ------------
+def test_the_base_is_found_beside_the_guide_with_no_click():
+    img = _negative(frame_lin_ratio=0.5)
+    r0, r1 = _band_rows()
+    img[r0:r1, 300:340] = 60                        # edge lettering in the top band
+    img[:60] = 255                                  # bare light further out (sprocket holes)
+    img = _noisy(img)
+    est = fm.live_estimate(img, GUIDE)
+    assert est.ok and est.source == "beside"
+    assert est.stops == pytest.approx(1.0, abs=0.1)
+    clicked = fm.live_estimate(img, GUIDE, (0.05, 0.5, 800, 600))
+    assert clicked.source == "click"
+    assert est.stops == pytest.approx(clicked.stops, abs=0.05)
+    small = fm._reduce(img, fm.LIVE_MAX_SIDE)
+    blur = cv2.blur(small, (3, 3))
+    found = fm.find_base_beside(small, blur, GUIDE, fm._thinnest(small, blur, GUIDE, img))
+    assert found.ok and found.sides == ("top", "right", "bottom", "left")
+    assert np.all(np.abs(found.base8 - 200) <= 2)
+
+
+def test_the_base_beside_a_turned_guide():
+    g = dict(GUIDE, angle=12.0)
+    h, w = 600, 800
+    img = np.full((h, w, 3), 200, np.uint8)
+    img[fm.guide_mask(g, w, h) > 0] = 40
+    top = int(_linear_to_8(fm.srgb_linear(200) * 0.5))
+    img[int(0.5 * h):int(0.6 * h), int(0.45 * w):int(0.55 * w)] = top
+    est = fm.live_estimate(_noisy(img), g)
+    assert est.ok and est.stops == pytest.approx(1.0, abs=0.1)
+
+
+def test_bare_light_on_one_side_is_not_taken_for_the_base():
+    """Unclipped bare light in one band (the guide laid past the film on that
+    side) agrees with nothing on another side: the base, on three, wins."""
+    img = _negative(frame_lin_ratio=0.5)
+    x_right = int((GUIDE["cx"] + GUIDE["w"] / 2) * 800)
+    img[:, x_right + 3:] = 235
+    est = fm.live_estimate(_noisy(img), GUIDE)
+    assert est.ok and est.stops == pytest.approx(1.0, abs=0.1)
+
+
+def test_no_base_beside_the_guide_says_why():
+    # holder all round (darker than the picture's brightest part), base on
+    # one side only
+    img = _negative(frame_lin_ratio=0.5)
+    m = fm.guide_mask(GUIDE, 800, 600) > 0
+    img[~m] = 20
+    x_right = int((GUIDE["cx"] + GUIDE["w"] / 2) * 800)
+    img[:, x_right + 3:] = 200
+    est = fm.live_estimate(_noisy(img), GUIDE)
+    assert not est.ok and "only one side" in est.reason
+    # nothing brighter than the picture beside it at all
+    img[~m] = 20
+    est = fm.live_estimate(_noisy(img), GUIDE)
+    assert not est.ok and "Couldn't find the film base" in est.reason
+    # a base brighter than... the picture: a light leak inside the guide
+    est = fm.live_estimate(_noisy(_negative(frame_lin_ratio=1.6)), GUIDE)
+    assert not est.ok and "Couldn't find" in est.reason
+    # clipped in the live view
+    est = fm.live_estimate(_negative(base8=255), GUIDE)
+    assert not est.ok and "clipped in the live view" in est.reason
+    # a guide over the whole picture
+    whole = dict(GUIDE, cx=0.5, cy=0.5, w=1.0, h=1.0)
+    est = fm.live_estimate(_noisy(_negative()), whole)
+    assert not est.ok and "Couldn't find" in est.reason
+
+
+def test_a_film_base_click_still_wins():
+    img = _negative(frame_lin_ratio=0.5)
+    img[:40, :40] = 150                              # the user clicked somewhere else
+    est = fm.live_estimate(_noisy(img), GUIDE, (0.02, 0.03, 800, 600))
+    assert est.source == "click"
+    want = -math.log2(fm.srgb_linear(int(_linear_to_8(fm.srgb_linear(200) * 0.5)))
+                      / fm.srgb_linear(150))
+    assert est.stops == pytest.approx(want, abs=0.1)
 
 
 # --------------------------------------------------------------------------- #
@@ -308,7 +399,8 @@ def _with_base(mon, shutter="1/4"):
 
 def test_the_histogram_looks_inside_the_guide_and_pauses_magnified(film_mon):
     mon, usb, light, lm, path = film_mon
-    assert mon.meter_btn.isVisibleTo(mon)                 # with the film base rows
+    assert mon.use_frame_btn.isVisibleTo(mon)             # with the film base rows
+    assert not mon.meter_btn.isVisibleTo(mon)             # revision 2: a setting
     assert mon.panel.minimumSizeHint().width() <= lm.theme.PANEL_W
     mon.actions["guide"].setChecked(True)
     assert mon.feed.params.hist_area == mon.canvas.guide
@@ -347,6 +439,35 @@ def test_the_live_line_then_use_for_this_frame_feeds_one_shoot(film_mon):
     mon.shoot()
     assert _wait(lambda: not mon.sequence.running, 20)
     assert usb.fires == [None, None, None]       # back to the old Shoot
+
+
+def test_the_live_line_needs_no_click_and_meter_is_a_setting(film_mon):
+    """Revision 2: the base is found beside the guide; Meter (test shots)
+    shows only with Settings → Live Capture → Show Meter."""
+    mon, usb, light, lm, path = film_mon
+    _with_base(mon)
+    mon.actions["guide"].setChecked(True)
+    mon.canvas.guide = dict(GUIDE)
+    assert mon._neg_base_pos is None
+    mon.feed.full = _noisy(_negative(frame_lin_ratio=0.25))
+    mon._update_frame_estimate()
+    assert mon.frame_note.text() == "This frame: ≈ +1⅔ stops (live view)"
+    assert "found beside the guide" in mon.frame_note.toolTip()
+    assert mon.use_frame_btn.isEnabled()
+    # nothing to compare with: the line and the button say why
+    img = _negative(frame_lin_ratio=0.25)
+    img[fm.guide_mask(GUIDE, 800, 600) == 0] = 20             # holder, no base beside
+    mon.feed.full = _noisy(img)
+    mon._update_frame_estimate()
+    assert "Couldn't find the film base beside the frame" in mon.frame_note.text()
+    assert "Couldn't find the film base" in mon.use_frame_btn.toolTip()
+    assert not mon.meter_btn.isVisibleTo(mon)
+    lm._settings().setValue("live/frame_meter", True)
+    mon._refresh_frame_line()
+    assert mon.meter_btn.isVisibleTo(mon)
+    lm._settings().setValue("live/frame_meter", False)
+    mon._refresh_frame_line()
+    assert not mon.meter_btn.isVisibleTo(mon)
 
 
 def test_meter_shoots_each_colour_reads_inside_the_guide_and_suggests(film_mon):

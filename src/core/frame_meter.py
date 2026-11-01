@@ -34,6 +34,18 @@ STRIP_ROWS = 512           # RAW: rows read at a time (memory)
 MIN_CHANGE_STOPS = 1 / 6   # a suggestion closer than this to the base's is "no change"
 METER_INSET = 0.03         # measured inside the guide this share in from each side: a
                            # guide laid a little over the rebate must not read the base
+# The film base found beside the guide, for the live estimate with no click
+# (revision 2): bands this far outside the guide (shares of its short side),
+# their middles in pieces; see find_base_beside.
+BESIDE_NEAR = 0.015
+BESIDE_FAR = 0.05
+BESIDE_CORNER = 0.08       # each band's ends left out (corners)
+BESIDE_SEGMENTS = 6
+BESIDE_MIN_PX = 12
+BESIDE_EVEN = 0.10         # IQR / median, linear, per channel
+BESIDE_CLIP_SHARE = 0.02   # pixels at BASE_CLIP allowed in a piece
+BESIDE_SLACK = 1.10        # the frame's thinnest part / the base, at most
+BESIDE_AGREE = 0.12        # pieces within this of each other, every channel
 
 
 # --------------------------------------------------------------------------- #
@@ -118,11 +130,15 @@ def srgb_linear(v8):
     return np.where(v <= 0.04045, v / 12.92, ((v + 0.055) / 1.055) ** 2.4)
 
 
+_LIN8 = srgb_linear(np.arange(256))                   # 8-bit level -> linear
+
+
 @dataclass
 class LiveEstimate:
     ratio: float = None             # the frame's thinnest part / the base, linear (max of RGB)
     ratios: dict = field(default_factory=dict)
     reason: str = ""
+    source: str = ""                # "click" (the Film Base click) or "beside" (found)
 
     @property
     def ok(self):
@@ -135,17 +151,124 @@ class LiveEstimate:
         return -math.log2(self.ratio) if self.ok and self.ratio > 0 else None
 
 
-def live_estimate(bgr, guide, base_pos):
+@dataclass
+class BaseBeside:
+    """The film base found beside the guide (or why not)."""
+    base8: np.ndarray = None        # B, G, R on the live picture's 8-bit scale
+    sides: tuple = ()               # which sides it was found on ("top", ...)
+    pieces: int = 0
+    reason: str = ""
+
+    @property
+    def ok(self):
+        return self.base8 is not None
+
+
+def _thinnest(small, blur, guide, full):
+    """The frame's thinnest part inside the (inset) guide: per channel B, G,
+    R, 8-bit, or None when the guide is off the picture."""
+    mask = _inner_mask(inset_guide(guide), small, full) > 0
+    if mask.sum() < 50:
+        return None
+    return np.array([np.percentile(blur[..., c][mask], HIGH_PCT) for c in range(3)])
+
+
+def find_base_beside(small, blur, guide, frame8):
+    """The film base in the bands just outside the guide (revision 2 of
+    spec/frame-exposure.md): even, unclipped pieces at least as bright as the
+    frame's thinnest part `frame8`, agreeing on at least two sides."""
+    h, w = small.shape[:2]
+    cx, cy = float(guide["cx"]) * w, float(guide["cy"]) * h
+    gw, gh = float(guide["w"]) * w, float(guide["h"]) * h
+    a = math.radians(float(guide.get("angle", 0.0)))
+    ys, xs = np.mgrid[0:h, 0:w].astype(np.float32)
+    dx, dy = xs + 0.5 - cx, ys + 0.5 - cy
+    lx = dx * math.cos(a) + dy * math.sin(a)
+    ly = -dx * math.sin(a) + dy * math.cos(a)
+    short = min(gw, gh)
+    near, far = BESIDE_NEAR * short, max(BESIDE_FAR * short, BESIDE_NEAR * short + 2.0)
+    # side: (distance outside the guide, position along the side 0..1)
+    sides = {"top": (-gh / 2 - ly, lx / gw + 0.5), "bottom": (ly - gh / 2, lx / gw + 0.5),
+             "left": (-gw / 2 - lx, ly / gh + 0.5), "right": (lx - gw / 2, ly / gh + 0.5)}
+    frame_l = srgb_linear(np.maximum(frame8, 0.5))
+    clipped_seen = False
+    cands = []                                        # (linear BGR, 8-bit BGR, side)
+    span = 1.0 - 2 * BESIDE_CORNER
+    flat = blur.reshape(-1, 3)
+    for name, (dist, t) in sides.items():
+        band = np.flatnonzero((dist >= near) & (dist <= far)
+                              & (t >= BESIDE_CORNER) & (t <= 1 - BESIDE_CORNER))
+        if band.size == 0:
+            continue
+        idx = np.clip(((t.ravel()[band] - BESIDE_CORNER) / span * BESIDE_SEGMENTS
+                       ).astype(np.int32), 0, BESIDE_SEGMENTS - 1)
+        px_band = flat[band]
+        for k in range(BESIDE_SEGMENTS):
+            px8 = px_band[idx == k]                   # n x 3
+            if len(px8) < BESIDE_MIN_PX:
+                continue
+            if np.mean(np.any(px8 >= BASE_CLIP, axis=1)) > BESIDE_CLIP_SHARE:
+                clipped_seen = True
+                continue
+            med8 = np.median(px8, axis=0)
+            if np.any(med8 < BASE_DARK):
+                continue
+            pl = _LIN8[px8]
+            q1, med, q3 = np.percentile(pl, (25, 50, 75), axis=0)
+            if np.any((q3 - q1) / np.maximum(med, 1e-6) > BESIDE_EVEN):
+                continue
+            if float(np.max(frame_l / np.maximum(med, 1e-9))) > BESIDE_SLACK:
+                continue                              # darker than the picture: not base
+            cands.append((med, med8, name))
+    if not cands:
+        why = ("The film base beside the frame is clipped in the live view: the camera's "
+               "live view is too bright to compare." if clipped_seen else
+               "Couldn't find the film base beside the frame: lay the guide on the "
+               "frame's edges, or click the base once (Negative Preview → Film Base).")
+        return BaseBeside(reason=why)
+    cands.sort(key=lambda c: -float(np.sum(c[0])))   # brightest first
+    groups = []
+    for c in cands:
+        for g in groups:
+            ref = g[0][0]
+            if np.all(np.abs(c[0] / np.maximum(ref, 1e-9) - 1.0) <= BESIDE_AGREE):
+                g.append(c)
+                break
+        else:
+            groups.append([c])
+    good = [g for g in groups if len({c[2] for c in g}) >= 2]
+    if not good:
+        return BaseBeside(reason="The film base shows on only one side of the frame "
+                                 "guide: lay the guide on the frame's edges, or click "
+                                 "the base once (Negative Preview → Film Base).")
+    best = max(good, key=lambda g: (len(g), -float(np.sum(g[0][0]))))
+    base8 = np.median(np.array([c[1] for c in best]), axis=0)
+    order = ("top", "right", "bottom", "left")
+    return BaseBeside(base8=base8, sides=tuple(s for s in order if s in {c[2] for c in best}),
+                      pieces=len(best))
+
+
+def live_estimate(bgr, guide, base_pos=None):
     """`bgr` the live frame (8-bit), `guide` the frame guide, `base_pos`
-    (fx, fy, frame_w, frame_h) the Film Base click. A LiveEstimate (with a
-    `reason` when there is none)."""
+    (fx, fy, frame_w, frame_h) the Film Base click, or None to find the base
+    beside the guide (revision 2). A LiveEstimate (with a `reason` when there
+    is none)."""
     if bgr is None:
         return LiveEstimate(reason="No live picture.")
     if guide is None:
         return LiveEstimate(reason="Turn the frame guide on and place it on the frame.")
     if base_pos is None:
-        return LiveEstimate(reason="Click the film base once (Negative Preview → Film Base) "
-                                   "to compare the frame with.")
+        small = _reduce(bgr, LIVE_MAX_SIDE)
+        blur = cv2.blur(small, (3, 3))
+        frame8 = _thinnest(small, blur, guide, bgr)
+        if frame8 is None:
+            return LiveEstimate(reason="The frame guide is off the picture.")
+        found = find_base_beside(small, blur, guide, frame8)
+        if not found.ok:
+            return LiveEstimate(reason=found.reason)
+        if np.any(found.base8 < BASE_DARK):
+            return LiveEstimate(reason="The film base is too dark in the live view to compare.")
+        return _ratio(found.base8, frame8, "beside")
     fx, fy = float(base_pos[0]), float(base_pos[1])
     H0, W0 = bgr.shape[:2]
     if inside_guide(guide, fx, fy, W0, H0):
@@ -171,11 +294,17 @@ def live_estimate(bgr, guide, base_pos):
         return LiveEstimate(reason="The frame guide is off the picture.")
     blur = cv2.blur(small, (3, 3))
     frame8 = np.array([np.percentile(blur[..., c][mask], HIGH_PCT) for c in range(3)])
+    return _ratio(base8, frame8, "click")
+
+
+def _ratio(base8, frame8, source):
+    """One factor for all colours: the frame's thinnest part over the base,
+    linear, the largest of R, G, B (so no colour goes past the base's place)."""
     base_l = srgb_linear(base8)
     frame_l = srgb_linear(np.maximum(frame8, 0.5))
     ratios = {"R": float(frame_l[2] / base_l[2]), "G": float(frame_l[1] / base_l[1]),
               "B": float(frame_l[0] / base_l[0])}
-    return LiveEstimate(ratio=max(ratios.values()), ratios=ratios)
+    return LiveEstimate(ratio=max(ratios.values()), ratios=ratios, source=source)
 
 
 # --------------------------------------------------------------------------- #

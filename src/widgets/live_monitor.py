@@ -794,6 +794,7 @@ class LiveCaptureMonitor(QWidget):
             "the file records it and conversion follows.")
         r.addWidget(self.meter_btn, 1)
         r.addWidget(self.use_frame_btn, 2)
+        self.meter_btn.setVisible(self._meter_shots_on())
         fb.addLayout(r)
         self.film_base_box.setVisible(False)
         lay.addWidget(self.film_base_box)
@@ -2161,6 +2162,7 @@ class LiveCaptureMonitor(QWidget):
                 est = fm.live_estimate(self.feed.last_full_frame(), dict(self.canvas.guide),
                                        self._neg_base_pos)
                 self._frame_live_reason = est.reason
+                self._frame_live_source = est.source
                 if est.ok:
                     self._frame_est = (self._frame_est + [est.ratio])[-FRAME_ESTIMATES:]
                 else:
@@ -2195,6 +2197,15 @@ class LiveCaptureMonitor(QWidget):
             text += "  ·  the next Shoot uses it"
         self._frame_suggestion = sug
         self.frame_note.setText(text)
+        if sug is not None and sug.live:
+            self.frame_note.setToolTip(
+                "Estimated from the live view, no photos: the frame's brightest part "
+                "inside the guide against the film base " + (
+                    "you clicked (Negative Preview → Film Base)."
+                    if getattr(self, "_frame_live_source", "") == "click" else
+                    "found beside the guide. A Film Base click overrides it."))
+        else:
+            self.frame_note.setToolTip("")
         busy = self._measure is not None or self.sequence.running
         usable = bool(sug is not None and sug.changes and not busy)
         self.use_frame_btn.setEnabled(usable)
@@ -2204,12 +2215,13 @@ class LiveCaptureMonitor(QWidget):
             self._USE_TIP if usable else
             "Nothing to use yet: " + (
                 "this frame is within a sixth of a stop of the film base's exposures."
-                if sug is not None else
-                "press Meter, or turn the frame guide on with the film base clicked "
-                "(Negative Preview → Film Base) for the live estimate."))
-        # Meter stays clickable (it says what's missing when pressed); it is
-        # off only while a shot, measuring or another metering is running
+                if sug is not None else text.replace("This frame: ", "")))
+        # Meter (RAW test shots) shows only with its setting (revision 2:
+        # fewer buttons); a metering already running keeps it until it ends.
+        # It stays clickable (it says what's missing when pressed); it is off
+        # only while a shot, measuring or another metering is running
         metering = self._measure is not None and self._measure.get("kind") == "frame"
+        self.meter_btn.setVisible(metering or self._meter_shots_on())
         self.meter_btn.setEnabled(metering or not busy)
         why = self._meter_blocker(ctx)
         self.meter_btn.setToolTip(self._METER_TIP + (f"\n\nFirst: {why}" if why else ""))
@@ -2220,6 +2232,11 @@ class LiveCaptureMonitor(QWidget):
     _USE_TIP = ("The next Shoot uses this frame's exposures (longer for a dense frame), "
                 "then it goes back to the film base's. Only the shutter speed and ISO "
                 "change, so the file records it and conversion follows.")
+
+    @staticmethod
+    def _meter_shots_on():
+        """Settings → Live Capture → Show Meter (`live/frame_meter`, off)."""
+        return _settings().value("live/frame_meter", False) in (True, "true", "1", 1)
 
     def _meter_blocker(self, ctx=None):
         """What Meter still needs, in words, or "" when it can go."""
