@@ -221,3 +221,24 @@ found, ratio as with a click on the band; rotated guide; one side only → not
 found; base darker than the picture's brightest → not found; a clipped band
 → the clipped reason; the click still wins. The monitor: Meter hidden by
 default, shown with the setting; the estimate runs with no click.
+
+## Revision 3 (2026-11-01): Expose each frame for itself
+The user: "Can there be a check box to enable auto exposure changes."
+**Expose each frame for itself** (`frame_auto`, under the This frame line,
+`live/frame_auto`, default off): every Shoot over USB uses the frame's own
+suggestion, what Use for This Frame does once, without the click; Use is
+hidden while it is ticked (and ticking it drops an unused arm).
+`_shoot_exposures` refreshes the line first (the suggestion as it is at the
+press), then, in order: an armed Use (still one-off); the suggestion when it
+changes something (≥ ⅙ stop) — caption "Shooting at this frame's own
+exposures: ≈ +1⅔ stops (live view)."; otherwise the film base's exposures,
+and when there was no estimate at all the caption says why ("No estimate for
+this frame (…): shot at the film base's exposures."). A metered reading is
+the suggestion while it stands. With no film base for the scan type, Shoot
+behaves as before. The automatic frame guide (spec/auto-frame-guide.md)
+pauses the estimate while no whole frame is in view, which lands in the
+no-estimate case.
+
+Tests: ticked → two Shoots in a row both at the frame's exposures with the
+caption; no base beside the frame → the film base's exposures and the reason;
+Use hidden while ticked.
