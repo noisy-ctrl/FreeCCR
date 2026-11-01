@@ -59,6 +59,42 @@ class _LightTheme:
 
 theme = _LightTheme()
 
+
+def light_up(widget):
+    """Capture's light look on `widget` and everything in it: palette and
+    stylesheet from the light tokens, every descendant's inline stylesheet
+    recoloured (`light_qss_text` is idempotent, so ones already light stay),
+    and each check box's own palette (its box is drawn from it; under a
+    stylesheet a child gets the app's dark palette, not the window's)."""
+    t = _theme.LIGHT_TOKENS
+    pal = widget.palette()
+    for role, key in ((QPalette.Window, "window"), (QPalette.Base, "surface"),
+                      (QPalette.Button, "surface"), (QPalette.AlternateBase, "panel"),
+                      (QPalette.WindowText, "text"), (QPalette.Text, "text"),
+                      (QPalette.ButtonText, "text"), (QPalette.PlaceholderText, "text_muted"),
+                      (QPalette.Highlight, "selection_bg"),
+                      (QPalette.HighlightedText, "selection_text")):
+        pal.setColor(role, QColor(t[key]))
+    for role in (QPalette.WindowText, QPalette.Text, QPalette.ButtonText):
+        pal.setColor(QPalette.Disabled, role, QColor(t["text_disabled"]))
+    widget.setPalette(pal)
+    widget.setAutoFillBackground(True)
+    widget.setStyleSheet(_theme.light_qss())
+    for w in widget.findChildren(QWidget):
+        qss = w.styleSheet()
+        if qss:
+            light = _theme.light_qss_text(qss)
+            if light != qss:
+                w.setStyleSheet(light)
+    for cb_ in widget.findChildren(QCheckBox):
+        cpal = cb_.palette()
+        cpal.setColor(QPalette.Base, QColor(t["surface"]))
+        cpal.setColor(QPalette.Text, QColor(t["text"]))
+        cpal.setColor(QPalette.Window, QColor(t["window"]))
+        cpal.setColor(QPalette.Disabled, QPalette.Base, QColor(t["panel"]))
+        cpal.setColor(QPalette.Disabled, QPalette.Text, QColor(t["text_disabled"]))
+        cb_.setPalette(cpal)
+
 CHANNEL_COLOURS = {"r": theme.CH_R, "g": theme.CH_G, "b": theme.CH_B,
                    "w": "#8a8a8a", "ir": "#b06a7e"}    # white: a grey ring on light
 LED_GROOVE_LOW = "#c4c4c4"       # an LED slider's groove at 0 (light look)
@@ -391,48 +427,25 @@ class LiveCaptureMonitor(QWidget):
         self._build_wake_overlay()
 
     def _apply_light(self):
-        """Light grey with black text (revision 2026-11-01 (3)): the window's
-        own stylesheet and palette from the light tokens, the control panel's
-        own palette (it fills its background inside the scroll area, out of
-        the window palette's reach), every descendant's inline stylesheet
-        recoloured (idempotent, so ones already made light are unchanged),
-        and a neutral mid-grey surround for the picture."""
+        """Light grey with black text (revision 2026-11-01 (3)): `light_up`
+        on the window, the control panel's own palette (it fills its
+        background inside the scroll area, out of the window palette's
+        reach), and a neutral mid-grey surround for the picture."""
         t = _theme.LIGHT_TOKENS
-        pal = self.palette()
-        for role, key in ((QPalette.Window, "window"), (QPalette.Base, "surface"),
-                          (QPalette.Button, "surface"), (QPalette.AlternateBase, "panel"),
-                          (QPalette.WindowText, "text"), (QPalette.Text, "text"),
-                          (QPalette.ButtonText, "text"), (QPalette.PlaceholderText, "text_muted"),
-                          (QPalette.Highlight, "selection_bg"),
-                          (QPalette.HighlightedText, "selection_text")):
-            pal.setColor(role, QColor(t[key]))
-        for role in (QPalette.WindowText, QPalette.Text, QPalette.ButtonText):
-            pal.setColor(QPalette.Disabled, role, QColor(t["text_disabled"]))
-        self.setPalette(pal)
-        self.setAutoFillBackground(True)
-        self.setStyleSheet(_theme.light_qss())
+        light_up(self)
         ppal = self.panel.palette()
         ppal.setColor(QPalette.Window, QColor(t["window"]))
         self.panel.setPalette(ppal)
         self.canvas.surround = QColor(t["canvas"])
         self.canvas.message_colour = QColor(t["text"])
-        for w in self.findChildren(QWidget):
-            qss = w.styleSheet()
-            if qss:
-                light = _theme.light_qss_text(qss)
-                if light != qss:
-                    w.setStyleSheet(light)
-        # a check box's box is drawn from its own palette's Base / Text (the
-        # stylesheet names no indicator, and under a stylesheet a child gets
-        # the app's dark palette, not the window's)
-        for cb_ in self.findChildren(QCheckBox):
-            cpal = cb_.palette()
-            cpal.setColor(QPalette.Base, QColor(t["surface"]))
-            cpal.setColor(QPalette.Text, QColor(t["text"]))
-            cpal.setColor(QPalette.Window, QColor(t["window"]))
-            cpal.setColor(QPalette.Disabled, QPalette.Base, QColor(t["panel"]))
-            cpal.setColor(QPalette.Disabled, QPalette.Text, QColor(t["text_disabled"]))
-            cb_.setPalette(cpal)
+
+    def light_dialog(self, dlg):
+        """A window Capture opens, made light like Capture (the user,
+        2026-11-01: the Start Hot Folder Tether window stayed dark)."""
+        light_up(dlg)
+        if hasattr(dlg, "restyle"):               # its later stylesheets too
+            dlg.restyle = _theme.light_qss_text
+        return dlg
 
     def _build_wake_overlay(self):
         """Covers the whole control panel while the light is off for being
@@ -1245,14 +1258,33 @@ class LiveCaptureMonitor(QWidget):
         self._refresh_status_strip()
 
     def _start_hot_folder(self, from_monitor=False):
-        """The main window's start window; its answers (None if it wasn't
-        shown). The test seam."""
-        return self._mw.enter_tethering(from_monitor=from_monitor)
+        """The main window's start window, opened over Capture and light like
+        it; its answers (None if it wasn't shown). Capture comes back to the
+        front afterwards (the user, 2026-11-01: it was left behind the main
+        window). The test seam."""
+        try:
+            opts = self._mw.enter_tethering(from_monitor=from_monitor, parent=self)
+        except TypeError:                         # a main window without `parent`
+            opts = self._mw.enter_tethering(from_monitor=from_monitor)
+        self._to_front()
+        return opts
+
+    def _to_front(self):
+        if self._closing:
+            return
+        self.raise_()
+        self.activateWindow()
+        QTimer.singleShot(0, lambda: (not self._closing) and (self.raise_(),
+                                                               self.activateWindow()))
 
     def _on_tether_button(self):
         if self._mw is None:
             return
-        self._mw.toggle_tethering()
+        active, _label, _count = self._tether_state()
+        if active:
+            self._mw.toggle_tethering()           # Stop
+        else:
+            self._start_hot_folder()
         self._refresh_status_strip()
 
     def _on_tether_captured(self, path):
@@ -2178,6 +2210,7 @@ class LiveCaptureMonitor(QWidget):
         from widgets.film_base_dialog import FilmBaseEditDialog
         dlg = FilmBaseEditDialog(base, self._exp_choices.get("shutter") or [],
                                  self._exp_choices.get("iso") or [], self)
+        self.light_dialog(dlg)
         if dlg.exec() != QDialog.Accepted or dlg.action is None:
             return None, "", {}
         name, values = dlg.values()

@@ -627,3 +627,38 @@ def test_a_light_connected_after_the_camera_comes_on_too_but_not_asleep(iso_sett
         mon._sleeping = None
     finally:
         _close(mon)
+
+
+def test_the_start_window_is_light_and_capture_comes_back_to_the_front():
+    """Start Hot Folder Tether from Capture: the window is light like Capture,
+    and Capture is raised afterwards rather than left behind the main window
+    (the user, 2026-11-01)."""
+    from ui import theme
+    from widgets.tether_start_dialog import TetherStartDialog
+
+    class MW:
+        _tether_active = False
+        calls = []
+
+        def enter_tethering(self, from_monitor=False, parent=None):
+            self.calls.append((from_monitor, parent))
+            dlg = TetherStartDialog(parent, n_open=0, folder="", scan_type="colour",
+                                    from_monitor=from_monitor)
+            parent.light_dialog(dlg)
+            self.dlg = dlg
+            return {"start": False}
+    mw = MW()
+    mon, feed, light, dev = _monitor(mw=mw)
+    try:
+        raised = []
+        mon.raise_ = lambda: raised.append(1)
+        lm.LiveCaptureMonitor._start_hot_folder(mon, from_monitor=True)
+        assert mw.calls == [(True, mon)]
+        pal = mw.dlg.palette()
+        assert pal.color(pal.ColorRole.Window).name().lower() == theme.LIGHT_TOKENS["window"].lower()
+        assert raised                                  # now ...
+        n = len(raised)
+        _app.processEvents()
+        assert len(raised) > n                         # ... and once more after the event loop
+    finally:
+        _close(mon)

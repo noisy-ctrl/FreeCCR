@@ -172,3 +172,28 @@ def test_the_lead_frame_nudges_the_banner_not_a_pop_up(mw):
     w.refresh_tether_banner()
     assert not banner._nudging and banner._black.styleSheet() == ""
     ccr_backend.black_point_bgr = None
+
+
+def test_from_capture_the_window_sits_over_capture_and_is_light(mw, monkeypatch):
+    """Opened from Capture it is parented to Capture and made light like it
+    (the user, 2026-11-01: it stayed dark and Capture went behind)."""
+    from PySide6.QtWidgets import QDialog, QWidget
+    from widgets.tether_start_dialog import TetherStartDialog
+    w = mw[0]
+    del w._tether_start_options                    # the real one, not the fixture's seam
+    seen = []
+    monkeypatch.setattr(TetherStartDialog, "exec",
+                        lambda self: (seen.append(self), QDialog.Rejected)[1])
+
+    class Capture(QWidget):
+        lit = []
+
+        def light_dialog(self, dlg):
+            self.lit.append(dlg)
+            return dlg
+    cap = Capture()
+    opts = w._tether_start_options(0, "", True, parent=cap)
+    assert not opts["start"]
+    assert seen and seen[0].parent() is cap and Capture.lit == seen
+    w._tether_start_options(0, "", False)          # from the main window: unchanged
+    assert seen[1].parent() is w and len(Capture.lit) == 1

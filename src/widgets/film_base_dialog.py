@@ -60,6 +60,13 @@ def base_text(est, changed):
 
 
 class FilmBaseEditDialog(QDialog):
+
+    # Stylesheets set after building go through this; Capture makes it the
+    # light look's recolouring when it opens the window (`light_dialog`).
+    @staticmethod
+    def restyle(qss):
+        return qss
+
     def __init__(self, base, shutters=(), isos=(), parent=None):
         super().__init__(parent)
         self.setWindowTitle("Edit Film Base")
@@ -170,4 +177,5 @@ class FilmBaseEditDialog(QDialog):
                 est = col["base"]
             text, warn = base_text(est, changed or bool(col.get("edited")))
             r["base"].setText(text)
-            r["base"].setStyleSheet(f"color: {theme.WARN_TEXT if warn else theme.TEXT};")
+            qss = f"color: {theme.WARN_TEXT if warn else theme.TEXT};"
+            r["base"].setStyleSheet(self.restyle(qss))

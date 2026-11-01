@@ -682,7 +682,8 @@ red danger, the LED colours; the amber warning text goes dark amber
 look denser than it is, and the main window's near-black would be the odd one
 out here. The histogram stays a dark scope. Everything drawn over the picture
 (readout, badges, guides) is unchanged. Dialogs the monitor opens (Edit film
-base, Settings) are their own windows and follow the app.
+base, Settings) are their own windows and follow the app (superseded by
+revision (5): the ones it opens are light too).
 
 **How.** `theme.light_qss()` is the app's stylesheet template filled with the
 light tokens, set on the window (it cascades over the app's, so the combo
@@ -717,3 +718,31 @@ The user: "Can we rename Live capture… to simply 'Capture'." File → **Captur
 capture"), and the texts that named it ("Don't ask when Capture opens", the
 tether banner's tooltip). Code identifiers (`live_monitor`, `live/*` settings
 keys, `LiveCaptureMonitor`) stay, so stored settings carry over.
+
+## Revision 2026-11-01 (5): its windows are light too, and it stays in front
+The user: "When you go to capture, it opens up this dialogue (that should now
+match the new capture UI colours if possible). When you click start, the
+capture window doesn't come to the front. It's hidden behind the main window."
+
+**Light dialogs.** `LiveCaptureMonitor.light_dialog(dlg)` makes a window
+Capture opens light by the same means as Capture itself (module-level
+`light_up(widget)`: palette roles, `theme.light_qss()`, every descendant's
+inline stylesheet through `light_qss_text`, each checkbox's palette). A dialog
+that sets stylesheets later (Edit film base's base label) declares a
+`restyle(qss)` hook, identity by default, which `light_dialog` replaces with
+`light_qss_text`. `light_qss()` also gives QDialog / QMessageBox /
+QInputDialog the light window colour. Lightened: the Start Hot Folder Tether
+window opened from Capture, and Edit film base. Settings (from the main
+window's menu) keeps the app's look.
+
+**Parent and front.** The tether start window opened from Capture is
+parented to Capture (`MainWindow.enter_tethering(parent=)` →
+`_tether_start_options(parent=)`; from the main window nothing changes), so
+it sits over Capture and closing it returns focus there; afterwards
+`_to_front()` raises and activates Capture now and again after the event loop
+(the main window's own updates after starting would otherwise come last).
+
+Tests: the window from Capture is parented to it and passed to
+`light_dialog`, from the main window it isn't; its palette's Window is
+`LIGHT_TOKENS["window"]`; Capture is raised immediately and once more after
+the event loop.
