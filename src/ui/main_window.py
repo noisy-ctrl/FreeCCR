@@ -1976,18 +1976,21 @@ class MainWindow(QMainWindow):
                     "Set the Black Point (film base) to auto-convert.")
         return ""
 
-    def enter_tethering(self, from_monitor=False):
+    def enter_tethering(self, from_monitor=False, parent=None):
         """Start Hot Folder Tether from ONE window (folder, scan type, close the
         open images, import the folder's files: spec/tether-start-window.md).
-        Returns the window's answers (None when already on)."""
+        Returns the window's answers (None when already on). `parent`: the
+        window it opens over (Capture passes itself, and the window is then
+        light like Capture)."""
         if self._tether_active:
             return None
         # The batch is about to grow — persist current edits first (like the
         # open flows) so nothing is lost if the session is interrupted.
         ccr_backend.save_catalog()
         start_dir = self._settings.value("files/last_tether_dir", "", type=str)
+        extra = {"parent": parent} if parent is not None else {}
         opts = self._tether_start_options(len(ccr_backend.images or []), start_dir,
-                                          from_monitor)
+                                          from_monitor, **extra)
         if not opts or not opts.get("start") or not opts.get("folder"):
             return opts
         folder = opts["folder"]
@@ -2458,14 +2461,16 @@ class MainWindow(QMainWindow):
                  and ccr_backend.black_point_bgr is None
                  and not ccr_backend.positive_mode))
 
-    def _tether_start_options(self, n_open, start_dir, from_monitor=False):
+    def _tether_start_options(self, n_open, start_dir, from_monitor=False, parent=None):
         """The Start Hot Folder Tether window's answers (dict, see
         TetherStartDialog.options), "start" False on Cancel. The test seam."""
         from widgets.tether_start_dialog import TetherStartDialog
-        dlg = TetherStartDialog(self, n_open=n_open,
+        dlg = TetherStartDialog(parent or self, n_open=n_open,
                                 folder=start_dir if start_dir and os.path.isdir(start_dir) else "",
                                 scan_type=getattr(ccr_backend, "scan_type", "colour"),
                                 from_monitor=from_monitor)
+        if hasattr(parent, "light_dialog"):
+            parent.light_dialog(dlg)
         started = dlg.exec() == QDialog.Accepted
         return dlg.options(started)
 

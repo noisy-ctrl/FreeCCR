@@ -411,7 +411,11 @@ def light_qss() -> str:
         "\nQLabel:disabled, QCheckBox:disabled, QRadioButton:disabled"
         " { color: %(text_disabled)s; }"
         "\nQToolBar::separator { background-color: %(border_strong)s; width: 1px;"
-        " margin: 4px 6px; }\n" % tokens)
+        " margin: 4px 6px; }"
+        # a message box or input box Capture opens inherits this stylesheet
+        # but not Capture's palette: give it the light background itself
+        "\nQDialog, QMessageBox, QInputDialog { background-color: %(window)s; }\n"
+        % tokens)
 
 
 def global_qss(chevron_path=None) -> str:
