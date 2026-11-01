@@ -478,6 +478,7 @@ def test_expose_each_frame_for_itself_uses_the_suggestion_every_shoot(film_mon):
     mon, usb, light, lm, path = film_mon
     _with_base(mon)
     mon.actions["guide"].setChecked(True)
+    mon.set_guide_auto(False)                    # a guide placed by hand
     mon.canvas.guide = dict(GUIDE)
     mon.feed.full = _noisy(_negative(frame_lin_ratio=0.25))
     mon._update_frame_estimate()
@@ -573,3 +574,30 @@ def test_meter_needs_the_guide_and_a_film_base(film_mon):
     mon.actions["guide"].setChecked(False)
     assert not mon.start_frame_meter()
     assert "frame guide" in mon.capture_caption.text()
+
+
+def test_winding_on_with_a_following_guide_shoots_at_the_film_base(film_mon):
+    """spec/auto-frame-guide.md + frame-exposure revision 3: while the guide
+    waits for a whole frame, Expose each frame for itself has no estimate and
+    shoots at the film base's exposures, saying why."""
+    from test_auto_frame_guide import _live
+    mon, usb, light, lm, path = film_mon
+    _with_base(mon)
+    mon.actions["guide"].setChecked(True)
+    mon.film_base_box.setVisible(True)
+    mon.frame_auto.setChecked(True)
+    mon.feed.full = _live()
+    mon._auto_guide_tick()
+    mon._auto_guide_tick()
+    mon.feed.full = _live(gap=(330, 430))         # the film is being wound on
+    mon._auto_guide_tick()
+    assert mon.canvas.guide_waiting
+    mon._update_frame_estimate()
+    mon._shutter_is_usb = lambda: True
+    mon._ensure_hot_folder = lambda: True
+    usb.dest = usb.dest or mon._usb_dest
+    usb.fires.clear()
+    mon.shoot()
+    assert "No estimate for this frame (No whole frame in view" in mon.capture_caption.text()
+    assert _wait(lambda: not mon.sequence.running, 20)
+    assert usb.fires == [{"shutter": "1/4", "iso": "100"}] * 3
