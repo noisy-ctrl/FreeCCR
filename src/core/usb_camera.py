@@ -64,6 +64,7 @@ class UsbCamera(WorkerThread):
         self.model = ""
         self.dest = None
         self.status = "closed"           # read by sources and the GUI
+        self.holders = []                # who held it on the last busy open (camera_holder)
 
     # -- GUI side ---------------------------------------------------------
     def scan(self):
@@ -320,6 +321,14 @@ class UsbCamera(WorkerThread):
             model = backend.open(parts[1], self.dest)
         except cb.CameraBusy as e:
             self.status = "busy"
+            # who has it (spec/camera-holder.md): read only, ~0.1 s, and only
+            # on a failed open; the monitor names it over the picture
+            try:
+                from core import camera_holder
+                model = (getattr(backend, "_models", None) or {}).get(parts[1], "")
+                self.holders = camera_holder.find(parts[1], model)
+            except Exception:
+                self.holders = []
             self.state.emit("busy", str(e))
             return
         except Exception as e:
@@ -328,6 +337,7 @@ class UsbCamera(WorkerThread):
             return
         self.backend = backend
         self.model = model or ""
+        self.holders = []
         self.status = "open"
         if self._live:
             try:

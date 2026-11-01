@@ -2351,7 +2351,12 @@ class LiveCaptureMonitor(QWidget):
         self._refresh_capture_caption()
 
     def _on_usb_state(self, kind, text):
-        self.release_btn.setVisible(kind == "busy" and sys.platform == "darwin")
+        holders = list(getattr(self.usb, "holders", None) or []) if kind == "busy" else []
+        others = [h for h in holders if not h.system]
+        # Release Camera ends macOS's own camera service: offered only when
+        # that (or nothing we can name) holds it, never for another program
+        self.release_btn.setVisible(kind == "busy" and sys.platform == "darwin"
+                                    and not others)
         if kind == "open":
             self._usb_model = text
             if self._usb_dest:
@@ -2364,12 +2369,28 @@ class LiveCaptureMonitor(QWidget):
                 if i >= 0 and key.startswith("usb:gphoto2:"):
                     self.camera_combo.setItemText(i, f"USB · {text}")
         elif kind == "busy":
-            self.canvas.set_message(
-                "macOS is holding the camera, so FreeCCR can't open it.\nRelease "
-                "Camera ends that hold (it may come back when the camera is replugged)."
-                if sys.platform == "darwin" else
-                "Another program is using the camera.\nClose it (or its tether "
-                "window), then Find Cameras.")
+            # who has it (spec/camera-holder.md), when the system can tell
+            if others:
+                names = " and ".join(h.describe() for h in others)
+                self.canvas.set_message(
+                    f"{names} {'is' if len(others) == 1 else 'are'} using the camera, "
+                    "so FreeCCR can't open it.\nQuit it (or close its tether window), "
+                    "then Find Cameras.")
+            elif sys.platform == "darwin":
+                who = f" ({holders[0].describe()})" if holders else ""
+                self.canvas.set_message(
+                    f"macOS is holding the camera{who}, so FreeCCR can't open it.\n"
+                    "Release Camera ends that hold (it may come back when the camera "
+                    "is replugged).")
+            elif holders:
+                self.canvas.set_message(
+                    f"{holders[0].describe()} is holding the camera, so FreeCCR can't "
+                    "open it.\nUnmount the camera in the file manager (or quit it), "
+                    "then Find Cameras.")
+            else:
+                self.canvas.set_message(
+                    "Another program is using the camera.\nClose it (or its tether "
+                    "window), then Find Cameras.")
         elif kind == "error":
             self.canvas.set_message(f"The camera didn't open.\n{text}")
         elif kind == "nopreview":
