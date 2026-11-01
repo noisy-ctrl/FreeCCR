@@ -646,3 +646,18 @@ after the camera does the same (`_camera_up`). Levels set by hand stay; idle
 sleep (Wake puts back what was lit), a running Shoot and film-base measuring
 are left alone. Settings → Live capture → "Turn the light on (white, 100 %)
 when a camera connects" (`live/light_on_camera`, default on).
+
+## Revision 2026-11-01 (2): a 20 % grey, all of it
+The user: "Can the live view capture UI grey be lighter grey. It's still too
+close to main." The first try lifted only the window behind the picture and
+the toolbar (×1.2, #242424), and the control panel kept the main window's
+#1e1e1e: it fills its own background inside the scroll area and the
+stylesheet's transparent scroll area stopped the window's palette reaching it.
+Now every grey is lifted by the same `SHADE_ADD` 21 levels (`shade()`), so
+each control keeps its contrast with what is behind it: the background
+#1e1e1e → #333333 (a 20 % grey), buttons and combos #333333 → #484848, the
+picture's surround #1a1a1a → #2f2f2f, borders and disabled text with them.
+The window carries `theme.shaded_qss(shade)` (the app's stylesheet re-made
+with shaded greys; it cascades over the app's, so the combo arrow still comes
+from there), its palette, the control panel's own palette, and the section
+headers' own stylesheets re-coloured. Text keeps its colours.

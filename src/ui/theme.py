@@ -328,6 +328,31 @@ QLabel[caption="true"] { color: %(text_muted)s; font-size: %(fs_caption)dpx; }
 """
 
 
+# The greys a window may lift together (the Live Capture Monitor does, so it
+# can't be mistaken for the main window): surfaces, borders, disabled text.
+SHADE_TOKENS = ("window", "canvas", "panel", "surface", "surface_hover",
+                "surface_active", "border", "border_strong", "text_disabled",
+                "accent", "selection_bg")
+
+
+def shaded_qss(shade) -> str:
+    """The central stylesheet with every grey in SHADE_TOKENS passed through
+    `shade` (a colour string -> a colour string); text and the rest stay.
+    For a window's own stylesheet: it cascades over the app's, so rules it
+    leaves out (the combo's arrow image) still come from there."""
+    tokens = {
+        "window": WINDOW, "canvas": CANVAS, "panel": PANEL, "surface": SURFACE,
+        "surface_hover": SURFACE_HOVER, "surface_active": SURFACE_ACTIVE,
+        "border": BORDER, "border_strong": BORDER_STRONG,
+        "text": TEXT, "text_muted": TEXT_MUTED, "text_disabled": TEXT_DISABLED,
+        "accent": ACCENT, "selection_bg": SELECTION_BG, "selection_text": SELECTION_TEXT,
+        "r_sm": RADIUS_SM, "r_md": RADIUS_MD, "fs_caption": FS_CAPTION,
+    }
+    for k in SHADE_TOKENS:
+        tokens[k] = shade(tokens[k])
+    return _QSS_TEMPLATE % tokens
+
+
 def global_qss(chevron_path=None) -> str:
     """The central stylesheet, built from the tokens above (one source of truth).
 

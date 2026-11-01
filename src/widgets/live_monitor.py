@@ -46,15 +46,19 @@ RING_KEYS = (("r", "R", "1"), ("g", "G", "2"), ("b", "B", "3"), ("w", "W", "4"))
 LED_VALUE_W = 52
 FRAME_ESTIMATE_MS = 1000         # the live estimate of this frame's exposure
 FRAME_ESTIMATES = 5              # ... the median of this many
-# The monitor's greys are this % of the main window's, so the two windows
-# can't be mistaken for each other (the user, 2026-11-01: "slightly lighter,
-# like 20 %"). QColor.lighter: value x 1.2, #1e1e1e -> #242424.
-SHADE_LIGHTER = 120
+# The monitor's greys are all lifted by this many levels, so the two windows
+# can't be mistaken for each other: the background goes from #1e1e1e to
+# #333333, a 20 % grey (the user, 2026-11-01: "still too close to main";
+# the first try, 20 % lighter, made it #242424). Adding the same to every grey
+# keeps each control's contrast with what's behind it.
+SHADE_ADD = 21
 
 
 def shade(colour):
-    """A theme colour as the monitor shows it: 8-bit, SHADE_LIGHTER % lighter."""
-    return QColor(QColor(colour).lighter(SHADE_LIGHTER).name())
+    """A theme grey as the monitor shows it: SHADE_ADD levels lighter."""
+    c = QColor(colour)
+    return QColor(min(255, c.red() + SHADE_ADD), min(255, c.green() + SHADE_ADD),
+                  min(255, c.blue() + SHADE_ADD))
 
 
 LED_ROW_H = 20                   # the LED sliders: compact rows (the user, 2026-11-01)
@@ -378,17 +382,34 @@ class LiveCaptureMonitor(QWidget):
         self._build_wake_overlay()
 
     def _apply_shade(self):
-        """The window, toolbar, scroll bars and the picture's surround 20 %
-        lighter than the main window's; controls keep their colours."""
+        """Every grey of the window lifted by SHADE_ADD: the background, the
+        toolbar, the controls (the app's stylesheet re-made with shaded greys,
+        so they keep their contrast), the section headers and the picture's
+        surround. Text keeps its colours."""
         win = shade(theme.WINDOW)
         pal = self.palette()
-        pal.setColor(QPalette.Window, win)
+        for role, token in ((QPalette.Window, theme.WINDOW), (QPalette.Base, theme.SURFACE),
+                            (QPalette.Button, theme.SURFACE),
+                            (QPalette.AlternateBase, theme.PANEL)):
+            pal.setColor(role, shade(token))
         self.setPalette(pal)
         self.setAutoFillBackground(True)
-        self.setStyleSheet(
-            f"QToolBar {{ background-color: {win.name()}; }}"
-            f"QScrollBar:vertical, QScrollBar:horizontal {{ background-color: {win.name()}; }}")
+        self.setStyleSheet(theme.shaded_qss(lambda c: shade(c).name()))
+        # the control panel fills its own background inside the scroll area
+        # (QScrollArea.setWidget turns that on), and the stylesheet's
+        # transparent scroll area stops the window's palette reaching it
+        ppal = self.panel.palette()
+        ppal.setColor(QPalette.Window, win)
+        self.panel.setPalette(ppal)
         self.canvas.surround = shade(theme.CANVAS)
+        # a collapsible section's header carries its own stylesheet
+        for sec in self.findChildren(CollapsibleSection):
+            btn = sec._toggle_btn
+            qss = btn.styleSheet()
+            for token in (theme.SURFACE_ACTIVE, theme.SURFACE):
+                qss = qss.replace(token, shade(token).name())
+            btn.setStyleSheet(qss)
+        self._shade_window = win
 
     def _build_wake_overlay(self):
         """Covers the whole control panel while the light is off for being

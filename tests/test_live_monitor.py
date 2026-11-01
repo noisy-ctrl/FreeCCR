@@ -353,10 +353,18 @@ def test_the_monitor_is_a_lighter_grey_than_the_main_window():
     try:
         from PySide6.QtGui import QPalette, QColor
         want = lm.shade(lm.theme.WINDOW)
-        assert want.name() == "#242424"                    # #1e1e1e, 20 % lighter
+        assert want.name() == "#333333"                    # #1e1e1e lifted to a 20 % grey
+        # every grey lifted the same: a button keeps its contrast with the window
+        assert lm.shade(lm.theme.SURFACE).name() == "#484848"
+        assert lm.shade(lm.theme.SURFACE).red() - want.red() == \
+            QColor(lm.theme.SURFACE).red() - QColor(lm.theme.WINDOW).red()
+        assert "#484848" in mon.styleSheet()               # the controls' stylesheet
+        sec_qss = mon.rail_section._toggle_btn.styleSheet()
+        assert lm.theme.SURFACE not in sec_qss and "#484848" in sec_qss
         assert mon.palette().color(QPalette.Window).name() == want.name()
         assert mon.canvas.surround.name() == lm.shade(lm.theme.CANVAS).name()
         assert want.name() in mon.styleSheet()
+        assert mon.panel.palette().color(QPalette.Window).name() == want.name()
         img = mon.canvas.grab().toImage()                 # no picture yet: all surround
         assert img.pixelColor(5, 5).name() == mon.canvas.surround.name()
     finally:
