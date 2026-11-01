@@ -137,6 +137,15 @@ def test_led_groups_exclude_and_reach_the_light():
         assert mon.led_sliders["w"].value() == 0           # the other group goes off
         assert not mon.actions["negative"].isEnabled()     # no white: no positive
         assert mon.led_values["g"].text() == "39.2 %"
+        # Infrared runs alone: up, everything else off; White up turns it off
+        mon.led_sliders["w"].setValue(120)
+        mon.led_sliders["ir"].setValue(80)
+        assert mon._levels == {"r": 0, "g": 0, "b": 0, "w": 0, "ir": 80}
+        assert mon.led_sliders["w"].value() == 0
+        mon.led_sliders["w"].setValue(60)
+        assert mon.led_sliders["ir"].value() == 0
+        # compact rows, no explanation line under them
+        assert mon.led_sliders["r"].height() == lm.LED_ROW_H
     finally:
         _close(mon)
 

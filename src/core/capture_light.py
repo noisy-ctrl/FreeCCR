@@ -161,25 +161,43 @@ def list_ports():
     return [p.device for p in ranked]
 
 
+# Channels that light together: red, green and blue mix; white and infrared
+# each run alone (the light can't run RGB with White/IR, and infrared is for
+# a dust pass on its own: the user, 2026-11-01).
+GROUPS = (RGB, ("w",), ("ir",))
+
+
+def group_of(channel):
+    for g in GROUPS:
+        if channel in g:
+            return g
+    return (channel,)
+
+
 def clean_levels(levels):
-    """A full r/g/b/w/ir dict of ints 0..255 (missing = 0). A set holding
-    both groups keeps RGB, as the light itself does."""
+    """A full r/g/b/w/ir dict of ints 0..255 (missing = 0) holding one group
+    only: RGB beats White and Infrared (as the light itself does), White
+    beats Infrared."""
     out = {k: _byte((levels or {}).get(k, 0)) for k in CHANNELS}
-    if any(out[k] for k in RGB) and any(out[k] for k in WIR):
-        for k in WIR:
-            out[k] = 0
+    for g in GROUPS:
+        if any(out[k] for k in g):
+            for k in CHANNELS:
+                if k not in g:
+                    out[k] = 0
+            break
     return out
 
 
 def exclusive(levels, channel, value):
-    """`levels` with `channel` set to `value`; raising a channel of one
-    group sets the other group to 0 (the light can't run RGB and White/IR
-    together). A new dict."""
+    """`levels` with `channel` set to `value`; raising a channel sets every
+    channel outside its group to 0. A new dict."""
     out = {k: _byte((levels or {}).get(k, 0)) for k in CHANNELS}
     out[channel] = _byte(value)
     if out[channel] > 0:
-        for k in (WIR if channel in RGB else RGB):
-            out[k] = 0
+        keep = group_of(channel)
+        for k in CHANNELS:
+            if k not in keep:
+                out[k] = 0
     return out
 
 
