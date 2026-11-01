@@ -21,7 +21,7 @@ class LookLUT:
     (red varies fastest in the file, as the Adobe .cube spec requires)."""
 
     def __init__(self, table, domain_min=(0.0, 0.0, 0.0),
-                 domain_max=(1.0, 1.0, 1.0), title="", path=None):
+                 domain_max=(1.0, 1.0, 1.0), title="", path=None, headroom=False):
         table = np.ascontiguousarray(table, dtype=np.float32)
         if table.ndim != 4 or table.shape[3] != 3 or len(set(table.shape[:3])) != 1:
             raise CubeError(f"bad LUT table shape {table.shape}")
@@ -34,21 +34,36 @@ class LookLUT:
         self.title = title
         self.path = path
         self._flat = table.reshape(-1, 3)
+        # headroom (spec/film-look-lut.md revision 4): past DOMAIN_MAX each
+        # output channel carries on at its grey-axis end slope instead of
+        # clamping; only for a cube that says so (HEADROOM_MARK)
+        self.headroom = bool(headroom)
+        n = self.size
+        g = table[[n - 1, n - 2], [n - 1, n - 2], [n - 1, n - 2]]    # last two grey nodes
+        step = (self.domain_max - self.domain_min) / (n - 1)
+        self.top_slope = np.maximum((g[0] - g[1]) / np.maximum(step, 1e-9), 0.0).astype(
+            np.float32)
 
 
 # --------------------------------------------------------------------------- #
 # .cube I/O (Adobe Cube LUT Specification 1.0; Resolve's LUT_3D_INPUT_RANGE)
 # --------------------------------------------------------------------------- #
 
+HEADROOM_MARK = "FREECCR_HEADROOM"   # a comment line: continue past DOMAIN_MAX
+
+
 def read_cube(path) -> LookLUT:
     size = None
     dmin, dmax = [0.0, 0.0, 0.0], [1.0, 1.0, 1.0]
     title = ""
     rows = []
+    headroom = False
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as fh:
             for raw in fh:
                 line = raw.strip()
+                if line.startswith("#") and line.lstrip("# ").strip() == HEADROOM_MARK:
+                    headroom = True
                 if not line or line.startswith("#"):
                     continue
                 head = line.split(None, 1)[0].upper()
@@ -84,16 +99,19 @@ def read_cube(path) -> LookLUT:
         raise CubeError(f"expected {size ** 3} entries for LUT_3D_SIZE {size}, "
                         f"found {len(rows)}")
     table = np.asarray(rows, dtype=np.float32).reshape(size, size, size, 3)
-    return LookLUT(table, dmin, dmax, title=title, path=path)
+    return LookLUT(table, dmin, dmax, title=title, path=path, headroom=headroom)
 
 
 def write_cube(path, table, domain_min=(0.0, 0.0, 0.0), domain_max=(1.0, 1.0, 1.0),
-               title="", comments=()):
+               title="", comments=(), headroom=False):
     table = np.asarray(table, dtype=np.float64)
     n = table.shape[0]
     with open(path, "w", encoding="utf-8", newline="\n") as fh:
         for c in comments:
-            fh.write(f"# {c}\n")
+            if str(c).strip() != HEADROOM_MARK:
+                fh.write(f"# {c}\n")
+        if headroom:
+            fh.write(f"# {HEADROOM_MARK}\n")
         if title:
             fh.write(f'TITLE "{title}"\n')
         fh.write(f"LUT_3D_SIZE {n}\n")
@@ -120,8 +138,10 @@ _CHUNK = 1 << 20          # pixels per pass: bounds the gather arrays' memory
 
 def apply_look(d: np.ndarray, lut: LookLUT) -> np.ndarray:
     """Map display values `d` (..., 3) through the LUT (trilinear). Inputs
-    outside the domain clamp to its edge, as .cube consumers do. Returns
-    float32 of the same shape."""
+    outside the domain clamp to its edge, as .cube consumers do, except past
+    DOMAIN_MAX in a cube with headroom: each output channel carries on there
+    at its grey-axis end slope, by its own input (spec/film-look-lut.md
+    revision 4). Returns float32 of the same shape."""
     d = np.asarray(d, dtype=np.float32)
     shape = d.shape
     flat = d.reshape(-1, 3)
@@ -153,6 +173,9 @@ def apply_look(d: np.ndarray, lut: LookLUT) -> np.ndarray:
         c0 = c00 + (c10 - c00) * fg
         c1 = c01 + (c11 - c01) * fg
         out[s:s + _CHUNK] = c0 + (c1 - c0) * fb
+        if lut.headroom and np.any(lut.top_slope > 0):
+            past = np.maximum(np.nan_to_num(x) - lut.domain_max, 0.0)
+            out[s:s + _CHUNK] += past * lut.top_slope
     return out.reshape(shape)
 
 
