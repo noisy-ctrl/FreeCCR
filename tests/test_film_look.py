@@ -279,7 +279,7 @@ def panel(tmp_path, monkeypatch):
 
 def test_combo_lists_library(panel):
     texts = [panel.look_combo.itemText(i) for i in range(panel.look_combo.count())]
-    assert texts[0] == "None"
+    assert texts[0] == "LUT (none loaded)"
     assert "Noritsu Test" in texts
     assert texts[-1].startswith("Import")
 
@@ -298,10 +298,13 @@ def test_the_look_has_its_own_fold_above_the_histogram(panel, monkeypatch):
     top = panel.look_combo_top
     assert [top.itemText(i) for i in range(top.count())] == \
         [panel.look_combo.itemText(i) for i in range(panel.look_combo.count())]
-    # the section holds the list only (no Master Gain, no sliders)
-    from PySide6.QtWidgets import QSlider, QComboBox
+    # the row holds the list only: no fold to open, no label, no slider
+    from PySide6.QtWidgets import QSlider, QComboBox, QPushButton, QLabel
     assert not panel.look_top_section.findChildren(QSlider)
+    assert not panel.look_top_section.findChildren(QPushButton)
+    assert not panel.look_top_section.findChildren(QLabel)
     assert panel.look_top_section.findChildren(QComboBox) == [top]
+    assert top.itemText(0) == "LUT (none loaded)"
     # picking in either list sets the look and both show it
     picked = []
     monkeypatch.setattr(panel, "set_look", lambda name: (picked.append(name),
