@@ -636,3 +636,13 @@ toolbar and scroll bars (a window-level stylesheet) and the picture's
 surround (`LiveCanvas.surround`, #1a1a1a → #1f1f1f). Buttons, combos and
 sliders keep their colours; dialogs and popups opened from it keep the app's
 (palettes don't propagate to other windows).
+
+## Revision 2026-11-01: the light comes on with the camera
+The user: "When the camera is connected, can the light turn on (white at
+100 %)." When a camera connects (the feed opens one, or a USB camera opens,
+as live view or as the shutter only) and the light is connected and dark,
+the LEDs go to White 255 (`_light_on_for_camera`); a light that connects
+after the camera does the same (`_camera_up`). Levels set by hand stay; idle
+sleep (Wake puts back what was lit), a running Shoot and film-base measuring
+are left alone. Settings → Live capture → "Turn the light on (white, 100 %)
+when a camera connects" (`live/light_on_camera`, default on).

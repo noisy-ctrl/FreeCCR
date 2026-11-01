@@ -540,3 +540,47 @@ def test_clicking_the_sharpness_meter_resets_the_best():
         assert feed.params.reset_best == before + 1
     finally:
         _close(mon)
+
+
+def test_the_light_comes_on_white_when_a_camera_connects(iso_settings):
+    mon, feed, light, dev = _monitor()
+    try:
+        assert not any(mon._levels.values())
+        dev.written.clear()
+        feed.status.emit("open", "1")
+        _app.processEvents()
+        assert mon._levels == {"r": 0, "g": 0, "b": 0, "w": 255, "ir": 0}
+        assert dev.written[-1] == cl.colour_packet({"w": 255})
+        assert mon.led_sliders["w"].value() == 255
+        # levels set by hand stay
+        mon.led_sliders["w"].setValue(0)
+        mon.led_sliders["r"].setValue(90)
+        mon.usb.state.emit("open", "Some camera")
+        _app.processEvents()
+        assert mon._levels["r"] == 90 and mon._levels["w"] == 0
+        # turned off in Settings: nothing
+        mon.led_sliders["r"].setValue(0)
+        lm._settings().setValue("live/light_on_camera", False)
+        feed.status.emit("open", "1")
+        assert not any(mon._levels.values())
+    finally:
+        _close(mon)
+
+
+def test_a_light_connected_after_the_camera_comes_on_too_but_not_asleep(iso_settings):
+    mon, feed, light, dev = _monitor(connect=False)
+    try:
+        feed.status.emit("open", "1")                 # no light yet: nothing to do
+        assert not any(mon._levels.values())
+        light.open_port("/dev/cu.usbmodem1")
+        light.link.tick()
+        _app.processEvents()
+        assert mon._levels["w"] == 255
+        # asleep: the camera reopening at Wake doesn't light it by itself
+        mon.led_sliders["w"].setValue(0)
+        mon._sleeping = {}
+        feed.status.emit("open", "1")
+        assert not any(mon._levels.values())
+        mon._sleeping = None
+    finally:
+        _close(mon)
