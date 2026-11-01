@@ -85,6 +85,11 @@ def main(argv=None):
     ap.add_argument("--single", action="store_true",
                     help="one RAW per frame instead of RGB triplets")
     ap.add_argument("--size", type=int, default=33, help="cube size (default 33)")
+    ap.add_argument("--highlight-detail", type=float, default=0.0,
+                    help="0..100: the shoulder rebuilt smooth above the data "
+                         "(core/look_shoulder.py). 0 (default) removes a flat top or "
+                         "a jump to white and clips nothing new; more keeps more "
+                         "highlight contrast and reaches white sooner")
     ap.add_argument("--smooth", type=float, default=1.0,
                     help="smoothness of the 3D part (higher = smoother; default 1)")
     ap.add_argument("--no-validate", action="store_true",
@@ -175,10 +180,19 @@ def main(argv=None):
             p["render_q"], p["render_look"] = qj, lj
 
     cube = os.path.join(out, f"{a.name}.cube")
+    from core import look_shoulder
+    detail = max(0.0, min(100.0, a.highlight_detail)) / 100.0
+    table, sh = look_shoulder.reshape(look.cube_table(a.size), lf.DOMAIN[0], lf.DOMAIN[1],
+                                      detail)
+    if sh is not None:
+        log(f"shoulder rebuilt from density {sh['knee']:.2f} (white at "
+            f"{sh['white']:.2f}, was {sh['white_before']:.2f}; highlight detail "
+            f"{a.highlight_detail:g})")
     look_lut.write_cube(
-        cube, look.cube_table(a.size), (lf.DOMAIN[0],) * 3, (lf.DOMAIN[1],) * 3,
+        cube, table, (lf.DOMAIN[0],) * 3, (lf.DOMAIN[1],) * 3,
         title=a.name,
         comments=[f"FreeCCR Film Look '{a.name}' - fitted by tools/fit_look.py",
+                  f"Shoulder: core/look_shoulder.py, highlight detail {a.highlight_detail:g}",
                   "Input: FreeCCR density base after Channel Levels "
                   f"(0.8*log10(black point / scan)), domain {lf.DOMAIN[0]}..{lf.DOMAIN[1]}",
                   "Output: sRGB-encoded display values",

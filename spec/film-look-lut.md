@@ -146,3 +146,55 @@ path + mtime.
 - Fitter: synthetic pairs from a known look + per-frame corrections are
   recovered (fit core only, small sizes); a synthetically warped/mirrored image
   registers back.
+
+## Revision 2026-11-01 (2): a smooth shoulder (flat whites in Lomo 800)
+The user: "The Lomo 800 LUT is flattening whites and there's a loss of
+detail", with the same frame through FreeCCR without the look (statice
+petals: spread 3.7 levels with the look, 9.8 without).
+
+**What was wrong.** Along its grey axis the fitted look went nearly flat at
+the top (red 245.3 → 246.6 → 247.1 → 247.3 over densities 0.83 → 0.97) and
+then JUMPED to 255 at 1.02. The lab scans had few unclipped samples that
+dense, so the curve there was guessed. Whites a Master Shift pushed up landed
+on that plateau. (Lower down the look's shoulder is the lab's own: a textured
+white at density 0.65 measures 3.4 levels of spread through it, matching the
+user's 3.7.)
+
+**The fix** (`core/look_shoulder.py`, Qt-free, numpy): `reshape(table, lo,
+hi, detail)` rebuilds the shoulder along the grey axis, and
+`tools/look_shoulder.py` writes a fixed copy of an existing `.cube`;
+`tools/fit_look.py --highlight-detail N` (default 0) does it before writing.
+- The knee: the first grey node at luma ≥ 0.5 after which the slope falls
+  under a floor, `r · m` (m = the mid-tone slope, r = 0.25 at detail 0 to
+  0.70 at detail 100).
+- From the knee: straight at the floor's slope to `top − 0.04`, then a C¹
+  Hermite roll into `top` (the highest level the old curve reaches). If that
+  would end past the old curve's own white point, one Hermite from the knee
+  to that point instead (steepest monotone start), so **detail 0 reaches
+  white nowhere it didn't before**.
+- Carried to every node as a headroom ratio `(1 − Y')/(1 − Y)` (≤ 1) on each
+  output channel by its OWN input density, so: the grey axis is exactly the
+  new curve, the highlights keep their tint, nothing gets darker, a channel
+  with a dark input doesn't move, and every node below the knee is returned
+  exactly.
+
+**Measured on "Noritsu Lomo 800"** (grey luma, levels of 255; texture is a
+white patch with fine density texture, std of the output):
+
+| | knee | white at | 0.65–0.80 | texture @0.65 | @0.75 | @0.85 |
+|---|---|---|---|---|---|---|
+| as fitted | – | 1.02 (jump) | 23.9 | 3.38 | 2.54 | 1.27 |
+| detail 0 | 0.83 | 1.02 | 23.9 | 3.38 | 2.54 | 1.71 |
+| detail 50 | 0.64 | 0.92 | 27.6 | 3.39 | 3.19 | 2.09 |
+| detail 100 | 0.55 | 0.83 | 35.0 | 4.71 | 4.03 | clipped |
+
+Monotone along every output's own input axis (the fitted table had 1,144
+small reversals there; none after), never darker. Detail buys highlight
+contrast with whites reaching 255 sooner: that is the choice, so the user
+gets all three as separate looks to compare from the list.
+
+Tests (`tests/test_look_shoulder.py`): a synthetic look with a plateau and
+a jump: below the knee exact, never darker, monotone, the flat run climbs,
+detail 0 keeps the white point, no jump; more detail → more contrast and
+white sooner; tint and per-channel behaviour; a look with no flat shoulder is
+returned unchanged; the tool writes a readable cube.
