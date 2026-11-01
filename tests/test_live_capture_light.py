@@ -21,6 +21,7 @@ from core import capture_light as cl  # noqa: E402
 from core import capture_sequence as cs  # noqa: E402
 from core import light_presets as lp  # noqa: E402
 from core.light_link import LightLink, LightClient  # noqa: E402
+from core import light_link as ll  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #
@@ -92,6 +93,7 @@ class FakeDevice:
         self.answers = answers
         self.written = []
         self.unplugged = False
+        self.log = []                    # write / flush / close, in order
 
 
 class FakeSerial:
@@ -114,6 +116,10 @@ class FakeSerial:
 
     def close(self):
         self.is_open = False
+        self.dev.log.append("close")
+
+    def flush(self):
+        self.dev.log.append("flush")
 
     def reset_input_buffer(self):
         self._out.clear()
@@ -135,6 +141,7 @@ class FakeSerial:
         if self.dev.unplugged:
             raise OSError("device gone")
         self.dev.written.append(bytes(b))
+        self.dev.log.append("write")
         return len(b)
 
 
@@ -510,3 +517,26 @@ def test_presets_import_the_other_apps_file():
     assert d["presets"][1] == {"name": "Night", "r": 255, "g": 0, "b": 5, "w": 0, "ir": 0}
     assert lp.normalise(other)["selected"] == 1
     assert lp.import_from(d, "not json") == (d, 0)
+
+
+def test_shutdown_lets_the_off_bytes_reach_the_light_before_closing():
+    """2026-11-01: the light stayed on when Capture closed. The OFF packet is
+    drained (pyserial flush) and given a moment before the port closes."""
+    dev = FakeDevice()
+    slept = []
+    made = []
+
+    def factory():
+        s = FakeSerial(dev)
+        made.append(s)
+        return s
+    link = LightLink(serial_factory=factory, port_lister=lambda: ["/dev/cu.usbmodem1"],
+                     sleep=slept.append, available=True)
+    link.open_port("/dev/cu.usbmodem1")
+    link.tick()
+    dev.log.clear()
+    slept.clear()
+    link.shutdown(light_off=True)
+    assert dev.written[-1] == cl.colour_packet(cl.OFF)
+    assert dev.log[-3:] == ["write", "flush", "close"]
+    assert slept == [ll.DRAIN_S]

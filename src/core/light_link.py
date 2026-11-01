@@ -15,6 +15,7 @@ from core import capture_light as cl
 from core import olp
 
 STATES_OPEN = ("waiting", "ok", "silent")
+DRAIN_S = 0.05            # after the last bytes, before the port closes
 
 
 def _pyserial_factory():
@@ -106,8 +107,23 @@ class LightLink(QObject):
                 self._write(self._off_bytes())
             else:
                 self._flush_colour(force=True)
+            self._drain()
         self._close_quietly()
         self._auto_port = ""
+
+    def _drain(self):
+        """Let the last bytes reach the light before the port closes: closing
+        straight after a write can drop them, and the light stayed on when
+        Capture closed (the user, 2026-11-01)."""
+        ser = self._ser
+        if ser is None:
+            return
+        try:
+            if hasattr(ser, "flush"):
+                ser.flush()                  # pyserial: waits until written (tcdrain)
+        except Exception:
+            pass
+        self._sleep(DRAIN_S)
 
     # ------------------------------------------------------------------ #
     # commands (queued from the GUI)

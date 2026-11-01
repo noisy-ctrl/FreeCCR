@@ -535,13 +535,18 @@ class MainWindow(QMainWindow):
             self._settings.setValue("update/skipped_version", release["tag"])
 
     def closeEvent(self, event):
-        reply = QMessageBox.question(
-            self,
-            "Confirm Exit",
-            "Are you sure you want to exit FreeCCR?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
-        )
+        # Capture turns the light off and lets the camera go while this asks
+        # (the user, 2026-11-01); No puts them back, as Wake does
+        mon = self._live_monitor
+        slept = False
+        if mon is not None and hasattr(mon, "sleep_for_quit"):
+            try:
+                slept = bool(mon.sleep_for_quit())
+            except Exception as ex:
+                print(f"quit: capture sleep: {ex}")
+        reply = self._confirm_quit()
+        if reply != QMessageBox.Yes and slept and self._live_monitor is mon:
+            mon.wake_after_quit()
         if reply == QMessageBox.Yes:
             # Stop any active tethering session (poller + worker thread) cleanly
             # before persisting, so no capture is mid-write into a locked catalog.
@@ -2473,6 +2478,16 @@ class MainWindow(QMainWindow):
             parent.light_dialog(dlg)
         started = dlg.exec() == QDialog.Accepted
         return dlg.options(started)
+
+    def _confirm_quit(self):
+        """The Quit? box's answer. The test seam."""
+        return QMessageBox.question(
+            self,
+            "Confirm Exit",
+            "Are you sure you want to exit FreeCCR?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
 
     def _close_session_for_tether(self):
         """Close the open images, as opening new files does: edits saved

@@ -440,6 +440,54 @@ def test_closing_turns_the_light_off_and_releases_everything():
     assert ("stop",) in feed.log
 
 
+def test_the_quit_box_turns_the_light_off_and_lets_the_camera_go(iso_settings):
+    """2026-11-01: while the app asks Quit?, Capture is asleep (light off,
+    camera let go); No wakes it exactly as Wake does."""
+    mon, feed, light, dev = _monitor()
+    try:
+        mon.led_sliders["w"].setValue(200)
+        feed.log.clear()
+        assert mon.sleep_for_quit()
+        light.link._last_colour = -1e9
+        light.link.tick()
+        assert dev.written[-1] == cl.colour_packet(dict(cl.OFF))
+        assert ("close",) in feed.log
+        assert "while FreeCCR asked to quit" in mon.wake_note.text()
+        assert not mon.sleep_for_quit()                    # already asleep
+        mon.wake_after_quit()
+        light.link._last_colour = -1e9
+        light.link.tick()
+        assert mon._sleeping is None and dev.written[-1] == cl.colour_packet({"w": 200})
+        assert feed.log[-1][:2] == ("open", feed.index)
+    finally:
+        _close(mon)
+
+
+def test_the_main_windows_quit_box_sleeps_capture_and_no_wakes_it():
+    from ui.main_window import MainWindow
+    from PySide6.QtWidgets import QMessageBox
+    from PySide6.QtGui import QCloseEvent
+
+    class Mon:
+        def __init__(self):
+            self.calls = []
+
+        def sleep_for_quit(self):
+            self.calls.append("sleep")
+            return True
+
+        def wake_after_quit(self):
+            self.calls.append("wake")
+
+    class Stub:
+        _live_monitor = Mon()
+        _confirm_quit = staticmethod(lambda: QMessageBox.No)
+    stub = Stub()
+    ev = QCloseEvent()
+    MainWindow.closeEvent(stub, ev)
+    assert stub._live_monitor.calls == ["sleep", "wake"] and not ev.isAccepted()
+
+
 def test_the_panel_fits_its_width():
     mon, feed, light, dev = _monitor()
     try:
