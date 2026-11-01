@@ -470,6 +470,44 @@ def test_the_live_line_needs_no_click_and_meter_is_a_setting(film_mon):
     assert not mon.meter_btn.isVisibleTo(mon)
 
 
+def test_expose_each_frame_for_itself_uses_the_suggestion_every_shoot(film_mon):
+    """Revision 3: with the box ticked, every Shoot uses the frame's own
+    exposures, no Use click; no estimate → the film base's, said so."""
+    mon, usb, light, lm, path = film_mon
+    _with_base(mon)
+    mon.actions["guide"].setChecked(True)
+    mon.canvas.guide = dict(GUIDE)
+    mon.feed.full = _noisy(_negative(frame_lin_ratio=0.25))
+    mon._update_frame_estimate()
+    assert mon.use_frame_btn.isVisibleTo(mon)
+    mon.frame_auto.setChecked(True)
+    assert lm._settings().value("live/frame_auto") in (True, "true")
+    assert not mon.use_frame_btn.isVisibleTo(mon)            # the box does its job
+    mon._shutter_is_usb = lambda: True
+    mon._ensure_hot_folder = lambda: True
+    usb.dest = usb.dest or mon._usb_dest
+    for _ in range(2):                                        # not a one-off
+        usb.fires.clear()
+        mon.shoot()
+        assert "this frame's own exposures: ≈ +1⅔ stops" in mon.capture_caption.text()
+        assert _wait(lambda: not mon.sequence.running, 20)
+        assert usb.fires == [{"shutter": "1/1.3", "iso": "100"}] * 3
+    # no base beside the frame: the film base's exposures, and why
+    img = _negative(frame_lin_ratio=0.25)
+    img[fm.guide_mask(GUIDE, 800, 600) == 0] = 20
+    mon.feed.full = _noisy(img)
+    mon._frame_est = []
+    mon._update_frame_estimate()
+    usb.fires.clear()
+    mon.shoot()
+    assert "No estimate for this frame" in mon.capture_caption.text()
+    assert "film base's exposures" in mon.capture_caption.text()
+    assert _wait(lambda: not mon.sequence.running, 20)
+    assert usb.fires == [{"shutter": "1/4", "iso": "100"}] * 3
+    mon.frame_auto.setChecked(False)
+    assert mon.use_frame_btn.isVisibleTo(mon)
+
+
 def test_meter_shoots_each_colour_reads_inside_the_guide_and_suggests(film_mon):
     mon, usb, light, lm, path = film_mon
     _with_base(mon)

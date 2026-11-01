@@ -801,6 +801,16 @@ class LiveCaptureMonitor(QWidget):
         # this frame's own exposure, inside the frame guide (spec/frame-exposure.md)
         self.frame_note = _muted("")
         fb.addWidget(self.frame_note)
+        # revision 3: every Shoot uses this frame's suggestion, no Use click
+        self.frame_auto = QCheckBox("Expose each frame for itself")
+        self.frame_auto.setToolTip(
+            "Every Shoot uses the frame's own exposures, from the line above (the "
+            "live view's estimate, or a Meter reading): longer for a dense frame. "
+            "With no estimate for the frame, it shoots at the film base's exposures "
+            "and says so. Only the shutter speed and ISO change.")
+        self.frame_auto.setChecked(_settings().value("live/frame_auto", False)
+                                   in (True, "true", "1", 1))
+        fb.addWidget(self.frame_auto)
         r = QHBoxLayout()
         r.setContentsMargins(0, 0, 0, 0)
         theme.apply_button_row(r)
@@ -1027,6 +1037,7 @@ class LiveCaptureMonitor(QWidget):
         self._patch_read.connect(self._on_patch_read)
         self.meter_btn.clicked.connect(self._on_meter_clicked)
         self.use_frame_btn.clicked.connect(self._on_use_frame)
+        self.frame_auto.toggled.connect(self._on_frame_auto)
         self.canvas.guide_changed.connect(lambda g: self._frame_changed())
         self._frame_timer = QTimer(self)
         self._frame_timer.setInterval(FRAME_ESTIMATE_MS)
@@ -1966,7 +1977,7 @@ class LiveCaptureMonitor(QWidget):
             self.measure_btn.setEnabled(False)
             self.edit_btn.setEnabled(False)
             self._refresh_capture_caption()
-            note = self._film_base_shoot_note(tri)
+            note = getattr(self, "_frame_shot_note", "") or self._film_base_shoot_note(tri)
             if note:
                 self._note_caption(note)
 
@@ -2142,14 +2153,38 @@ class LiveCaptureMonitor(QWidget):
 
     def _shoot_exposures(self, tri):
         """The film base's exposures for a USB Shoot, or None. Use for This
-        Frame's exposures go first, once (spec/frame-exposure.md §6)."""
+        Frame's exposures go first, once (spec/frame-exposure.md §6); then,
+        with Expose each frame for itself ticked, the frame's own suggestion
+        (revision 3), which also sets the note Shoot shows (`_frame_shot_note`)."""
+        self._frame_shot_note = ""
         armed, self._frame_exposures = self._frame_exposures, None
         if armed:
             self._refresh_frame_line()
             return armed
+        if self.frame_auto.isChecked():
+            self._refresh_frame_line()              # the suggestion as it is now
+            sug = self._frame_suggestion
+            base = be.exposures_for(self._film_base(), tri)
+            if sug is not None and sug.changes:
+                self._frame_shot_note = ("Shooting at this frame's own exposures: "
+                                         + sug.text().replace("This frame", "").strip(" :,")
+                                         + ".")
+                return {k: dict(v) for k, v in sug.exposures.items()}
+            if base is not None:
+                if sug is None:
+                    why = self.frame_note.text().replace("This frame: ", "").rstrip(".")
+                    self._frame_shot_note = ("No estimate for this frame (" + why + "): "
+                                             "shot at the film base's exposures.")
+                return base
         if not self.film_base_use.isChecked():
             return None
         return be.exposures_for(self._film_base(), tri)
+
+    def _on_frame_auto(self, on):
+        _settings().setValue("live/frame_auto", bool(on))
+        if on:
+            self._frame_exposures = None            # the box does what Use did
+        self._refresh_frame_line()
 
     def _film_base_shoot_note(self, tri):
         base = self._film_base()
@@ -2254,6 +2289,7 @@ class LiveCaptureMonitor(QWidget):
         busy = self._measure is not None or self.sequence.running
         usable = bool(sug is not None and sug.changes and not busy)
         self.use_frame_btn.setEnabled(usable)
+        self.use_frame_btn.setVisible(not self.frame_auto.isChecked())   # it does Use's job
         self.use_frame_btn.setText("Using for This Frame" if self._frame_exposures
                                    else "Use for This Frame")
         self.use_frame_btn.setToolTip(
