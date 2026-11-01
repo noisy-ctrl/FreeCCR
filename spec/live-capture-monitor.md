@@ -618,3 +618,12 @@ explanation text though."
   `group_of`): raising a channel turns every channel outside its group off, so
   Infrared turns White off too and White (or a colour) turns Infrared off.
   `clean_levels` keeps one group: RGB beats White beats Infrared.
+
+## Revision 2026-11-01: the toolbar's Negative Preview
+The user: "On the upper menu, can Negative say Negative Preview. Right click
+and you can change between colour negative and black and white."
+- The toggle reads **Negative Preview** (the panel section's name).
+- Right-click (`_negative_menu`): **Colour Negative** / **Black & White**,
+  checked from the panel's Black & white box, which it sets
+  (`set_negative_kind`); picking one also turns the preview on when the white
+  light allows it. Scan type B&W still ticks the box as before.

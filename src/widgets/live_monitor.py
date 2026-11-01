@@ -434,10 +434,12 @@ class LiveCaptureMonitor(QWidget):
                "up against every time.\nRight-click: place the line.",
                self._align_menu)
         tb.addSeparator()
-        toggle("negative", "Negative",
+        toggle("negative", "Negative Preview",
                "A rough positive of the white-lit negative, for judging the "
                "frame (FreeCCR converts the RAW). Its controls are in the "
-               "panel under Negative Preview.")
+               "panel under Negative Preview.\nRight-click: colour negative or "
+               "black and white.",
+               self._negative_menu)
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         tb.addWidget(spacer)
@@ -1215,6 +1217,26 @@ class LiveCaptureMonitor(QWidget):
         m.addAction("Reset Best", self._reset_sharp_best)
         m.popup(pos)
         self._popup = m
+
+    def _negative_menu(self, pos):
+        """Right-click Negative Preview: colour negative or black and white
+        (the panel's Black & white box, which scan type B&W also sets)."""
+        m = QMenu(self)
+        for text, bw in (("Colour Negative", False), ("Black && White", True)):
+            a = m.addAction(text)
+            a.setCheckable(True)
+            a.setChecked(self.neg_bw.isChecked() == bw)
+            a.triggered.connect(lambda _c=False, v=bw: self.set_negative_kind(v))
+        m.popup(pos)
+        self._popup = m
+
+    def set_negative_kind(self, bw):
+        """Colour or black-and-white negative; picking one turns the preview
+        on when it can be."""
+        self.neg_bw.setChecked(bool(bw))
+        a = self.actions["negative"]
+        if a.isEnabled() and not a.isChecked():
+            a.setChecked(True)
 
     def _sharp_whole_view(self):
         self.canvas.sharp_area = None
