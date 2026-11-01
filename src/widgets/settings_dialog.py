@@ -422,6 +422,13 @@ class SettingsDialog(QDialog):
         self._cb_live_light_on_camera.setToolTip(
             "Only when the light is connected and off: levels you set yourself stay.")
         gl.addWidget(self._cb_live_light_on_camera)
+        self._cb_live_frame_meter = QCheckBox(
+            "Show Meter: this frame's exposure from RAW test shots")
+        self._cb_live_frame_meter.setToolTip(
+            "Off: the frame's exposure is estimated from the live view alone, with "
+            "no shots taken. On: Meter takes one RAW shot per colour for an exact "
+            "reading.")
+        gl.addWidget(self._cb_live_frame_meter)
         gl.addWidget(self._muted(
             "Dimming: the lit channels breathe low while nothing is used, and come "
             "back when you move the pointer over the monitor, press a key, or the "
@@ -799,6 +806,7 @@ class SettingsDialog(QDialog):
         self._cb_live_ask_tether.setChecked(_st.value("live/ask_tether", True, type=bool))
         self._cb_live_light_on_camera.setChecked(
             _st.value("live/light_on_camera", True, type=bool))
+        self._cb_live_frame_meter.setChecked(_st.value("live/frame_meter", False, type=bool))
         scale, source = self._live_fc_scale()
         for combo, value in ((self._combo_fc_scale, scale),
                              (self._combo_zone_source, source)):
@@ -934,6 +942,7 @@ class SettingsDialog(QDialog):
         _st.setValue("live/video_format", self._combo_live_format.currentData() or "auto")
         _st.setValue("live/ask_tether", bool(self._cb_live_ask_tether.isChecked()))
         _st.setValue("live/light_on_camera", bool(self._cb_live_light_on_camera.isChecked()))
+        _st.setValue("live/frame_meter", bool(self._cb_live_frame_meter.isChecked()))
         # Panel visibility: display-only, so no reprocess.
         if self._panel_checks:
             panel = self._mw.sliders_panel
