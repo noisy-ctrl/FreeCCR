@@ -873,26 +873,23 @@ class SlidersPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(theme.GAP_ROW)
 
-        # --- Film Look — its own fold above the histogram (the user,
-        # 2026-11-01: "its own single drop down box, above the histogram as
-        # well as being in channel levels"). Only the look's list: a second
-        # view of the same choice as Channel Levels' Film Look, kept in step
-        # (`_look_combos`). spec/film-look-lut.md, revision 2026-11-01.
-        self.look_top_section = CollapsibleSection("Film Look")
+        # --- Film Look — a plain list above the histogram (the user,
+        # 2026-11-01: first "its own single drop down box, above the histogram
+        # as well as being in channel levels", then "the +/− tab doesn't need
+        # to exist"). A second view of the same choice as Channel Levels' Film
+        # Look, kept in step (`_look_combos`); its empty entry reads
+        # "LUT (none loaded)" (LOOK_NONE). spec/film-look-lut.md, revisions
+        # 2026-11-01. Hideable in Settings → Panel ("look_top").
+        self.look_top_section = QWidget()
+        look_top_row = QHBoxLayout(self.look_top_section)
+        look_top_row.setContentsMargins(0, 0, 0, 0)
         self.look_combo_top = QComboBox()
         self.look_combo_top.setToolTip(self.LOOK_TOOLTIP)
-        self.look_top_section.add_widget(self.look_combo_top)
-        look_st = QSettings("FreeCCR", "FreeCCR")      # (self._settings comes later)
-        look_open = look_st.value(self.LOOK_TOP_OPEN_KEY, True, type=bool)
-        self.look_top_section._toggle_btn.setChecked(bool(look_open))
-        self.look_top_section._on_toggle(bool(look_open))
-        self.look_top_section._toggle_btn.toggled.connect(
-            lambda on: QSettings("FreeCCR", "FreeCCR").setValue(self.LOOK_TOP_OPEN_KEY,
-                                                                bool(on)))
-        look_top_row = QHBoxLayout()
-        look_top_row.setContentsMargins(theme.GAP_PANEL, 0, theme.GAP_PANEL, 0)
-        look_top_row.addWidget(self.look_top_section)
-        layout.addLayout(look_top_row)
+        look_top_row.addWidget(self.look_combo_top)
+        look_top_outer = QHBoxLayout()
+        look_top_outer.setContentsMargins(theme.GAP_PANEL, theme.GAP_PANEL, theme.GAP_PANEL, 0)
+        look_top_outer.addWidget(self.look_top_section)
+        layout.addLayout(look_top_outer)
 
         # --- Histogram — fixed at top, outside scroll area ---
         # Self-painting widget (paints its own rounded background + curves at the
@@ -2369,7 +2366,7 @@ class SlidersPanel(QWidget):
 
     # --- Settings -> Panel: show / hide sections (spec/panel-visibility.md) ----
     BWP_OPEN_KEY = "panel/bwp_open"     # the Film B/W Point section left open?
-    LOOK_TOP_OPEN_KEY = "panel/look_top_open"   # the Film Look fold above the histogram
+    LOOK_NONE = "LUT (none loaded)"     # the Film Look lists' empty entry
     HIDEABLE_SECTIONS = (("look_top", "Film Look (above the histogram)", "look_top_section"),
                          ("layers", "Layers (shown anyway on a frame that has areas)",
                           "layers_container"),
@@ -2956,7 +2953,7 @@ class SlidersPanel(QWidget):
         for combo in self._look_combos:
             combo.blockSignals(True)
             combo.clear()
-            combo.addItem("None", "")
+            combo.addItem(self.LOOK_NONE, "")
             for name in names:
                 combo.addItem(_look_display_name(name), name)
             combo.insertSeparator(combo.count())

@@ -212,3 +212,12 @@ a jump: below the knee exact, never darker, monotone, the flat run climbs,
 detail 0 keeps the white point, no jump; more detail → more contrast and
 white sooner; tint and per-channel behaviour; a look with no flat shoulder is
 returned unchanged; the tool writes a readable cube.
+
+## Revision 2026-11-01 (3): a plain list, "LUT (none loaded)"
+The user: "the film look +/− tab doesn't need to exist. Instead of 'none' it
+can read as 'LUT (none loaded)'." The fold above the histogram is now a
+plain row holding only the list (`look_top_section` is a bare QWidget, still
+hideable in Settings → Panel as `look_top`; `panel/look_top_open` is no
+longer read). Both lists' empty entry reads **LUT (none loaded)**
+(`SlidersPanel.LOOK_NONE`); its data is still "" (no look), so nothing
+stored changes.
