@@ -17,6 +17,15 @@
 //   Homing on a switch: a normally-open switch from SWITCH_PIN to GND at the
 //   end of travel. Homing on stall: DIAG -> DIAG_PIN, no switch needed.
 // Never plug or unplug the motor with VM powered: it kills the driver.
+//
+// A ball screw turns back easily under load: on a vertical stand the
+// camera's weight can turn it, and the camera slides down, whenever the motor
+// has no current (motor supply off, the ESP32 restarting, ENABLE 0). Keep the
+// motor supply on while the camera is on the rail, and a stop collar on the
+// rail just below the focus range is cheap insurance for the lens and the
+// film. Holding a camera of about 2 kg on a 4-5 mm lead takes roughly
+// 15 mN m, a small share of a NEMA 17's torque even at the hold current;
+// on a 10 mm lead it is about 2.5 times that, so raise HOLD_FRACTION.
 #include <FastAccelStepper.h>
 #include <TMCStepper.h>
 
@@ -26,7 +35,9 @@
 #define RAIL_NAME "DIY Focus Rail (ESP32 + TMC2209)"
 #define FULL_STEPS_PER_REV 200      // a 1.8 degree NEMA 17
 #define MICROSTEPS 16               // interpolated to 256 inside the TMC2209
-#define LEAD_MM 8.0f                // mm per screw turn: T8x8 = 8, T8x2 = 2
+#define LEAD_MM 4.0f                // mm per screw turn. A ball screw's code ends in
+                                    // it: SFU1204 = 4, SFU1605 = 5, SFU1610 = 10
+                                    // (a T8x8 lead screw = 8, T8x2 = 2)
 #define TRAVEL_MM 100.0f            // soft limit from home (applies once homed)
 #define RUN_CURRENT_MA 600          // RMS; a small NEMA 17 is happy at 400-800
 #define HOLD_FRACTION 0.5f          // current while standing still
@@ -103,6 +114,7 @@ static orp::Config makeConfig() {
   orp::Config c;
   c.name = RAIL_NAME;
   c.stepsPerMm = STEPS_PER_MM;
+  c.stepsPerRev = FULL_STEPS_PER_REV * MICROSTEPS;
   c.hasLimits = HOME_MODE != orp::HOME_NONE;
   c.minPos = 0;
   c.maxPos = (int32_t)(TRAVEL_MM * STEPS_PER_MM);

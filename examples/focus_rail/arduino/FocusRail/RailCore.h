@@ -38,6 +38,7 @@ enum HomeMode { HOME_NONE = 0, HOME_SWITCH = 1, HOME_STALL = 2 };
 struct Config {
   const char* name;
   float stepsPerMm;          // 0: unknown
+  uint32_t stepsPerRev;      // steps per screw turn (0: unknown); hosts show turns
   bool hasLimits;            // soft limits (only once homed)
   int32_t minPos, maxPos;
   int homeMode;              // HomeMode
@@ -190,6 +191,8 @@ class RailCore {
     if (!strcmp(cmd, "HELLO")) {
       char l[MAX_LINE + 64];
       int k = snprintf(l, sizeof l, "ORP 1 STEPS_PER_MM=%g", (double)c_.stepsPerMm);
+      if (c_.stepsPerRev)
+        k += snprintf(l + k, sizeof l - k, " STEPS_PER_REV=%lu", (unsigned long)c_.stepsPerRev);
       if (c_.hasLimits) k += snprintf(l + k, sizeof l - k, " MIN=%ld MAX=%ld",
                                       (long)c_.minPos, (long)c_.maxPos);
       const char* hm = c_.homeMode == HOME_SWITCH ? "SWITCH"

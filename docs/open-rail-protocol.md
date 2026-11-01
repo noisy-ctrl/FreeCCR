@@ -23,7 +23,7 @@ implement; the reference firmware in `examples/focus_rail/` is MIT licensed.
 
 | Command | Reply | Meaning |
 |---|---|---|
-| `HELLO` | `ORP 1 STEPS_PER_MM=400 MIN=0 MAX=40000 HOME=SWITCH NAME=My rail` | Who are you? |
+| `HELLO` | `ORP 1 STEPS_PER_MM=800 STEPS_PER_REV=3200 MIN=0 MAX=80000 HOME=SWITCH NAME=My rail` | Who are you? |
 | `STATUS` | `STATUS POS=1234 MOVING=0 HOMED=1 ENABLED=1` | Where are you? |
 | `GOTO 1500 ID=7` | `OK`, later `DONE ID=7 POS=1500` | Move to a position. `ID=` is optional and echoed on the DONE. |
 | `MOVE -200 ID=8` | `OK`, later `DONE ID=8 POS=1300` | Move by this many steps from the current move's **target** (from the position when stopped), so quick jog presses add up. |
@@ -43,6 +43,8 @@ comes for the old one, only for the last.
 `ORP 1` (the protocol version), then `KEY=VALUE` fields in any order:
 - `STEPS_PER_MM=` steps per millimetre of travel (decimals allowed; 0 or
   absent: unknown, and hosts show steps).
+- `STEPS_PER_REV=` steps per turn of the screw (optional): hosts can then
+  show a distance as an angle of the screw, and its lead (mm a turn).
 - `MIN=` / `MAX=` soft limits in steps, applied only while `HOMED=1`: a
   target beyond one is clamped and its `DONE` carries `LIMIT=1`.
 - `HOME=SWITCH`, `HOME=STALL` (the driver's stall detection, no switch) or
@@ -81,17 +83,19 @@ of the line).
 ```
 
 ## Building a rail
-- A NEMA 17 on a lead screw, through a TMC2209 driver in StealthChop, is
-  quiet and fine: with 1/16 microsteps and an 8 mm lead, 400 steps/mm
-  (2.5 µm a step); a 2 mm lead gives 1600 steps/mm.
+- A NEMA 17 on a ball screw or lead screw, through a TMC2209 driver in
+  StealthChop, is quiet and fine: with 1/16 microsteps (3200 steps a turn)
+  a 4 mm-lead ball screw (SFU1204) gives 800 steps/mm, 1.25 µm a step; an
+  8 mm lead screw gives 400 steps/mm.
 - An ESP32 dev board's USB bridge resets the chip when RTS is asserted
   without DTR. Hosts should open the port **DTR on, RTS off** (FreeCCR does);
   a board that resets anyway answers a later `HELLO`, so hosts repeat it for
   a few seconds.
-- A lead screw has play: approach every position from the same side (FreeCCR's
-  autofocus does) or compensate in firmware.
-- On a vertical stand, keep the motor enabled: a fast lead screw can be
-  back-driven by the camera's weight.
+- A screw has play: approach every position from the same side (FreeCCR's
+  autofocus does) or compensate in firmware. A ball screw has little.
+- On a vertical stand, keep the motor enabled: a ball screw (and a fast lead
+  screw) turns back under the camera's weight when the motor has no current.
+  A stop collar just below the focus range protects the lens and the film.
 - Reference firmware: `examples/focus_rail/arduino/FocusRail/` (ESP32 +
   TMC2209, homing by switch, by stall or none). Its protocol and motion logic,
   `RailCore.h`, has no Arduino headers and is compiled and tested on a

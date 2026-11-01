@@ -91,7 +91,7 @@ class OptionsPopup(QFrame):
     closed = Signal()
     LABEL_W = 80
 
-    def __init__(self, title, rows, values, defaults, parent=None, step=1):
+    def __init__(self, title, rows, values, defaults, parent=None, step=1, value_w=56):
         super().__init__(parent, Qt.Popup | Qt.FramelessWindowHint)
         self.setObjectName("liveOptionsPopup")
         self.setStyleSheet(
@@ -121,7 +121,7 @@ class OptionsPopup(QFrame):
             sl.setToolTip(tip)
             sl.setMinimumWidth(160)
             val = QLabel(fmt(sl.value()))
-            val.setFixedWidth(56)
+            val.setFixedWidth(value_w)
             sl.valueChanged.connect(lambda v, k=key, lab=val, fm=fmt: (lab.setText(fm(v)), self._emit()))
             row.addWidget(lbl)
             row.addWidget(sl, 1)
@@ -803,16 +803,12 @@ class LiveCaptureMonitor(QWidget):
         r = QHBoxLayout()
         theme.apply_button_row(r)
         self.rail_jog_btns = {}
-        jog_tip = ("Move the camera {way} by {size} ({keys}).\nUp is away from the "
-                   "rail's home end. Right-click: the step sizes.")
         for key, sign, size, keys in (("down_coarse", -1, "coarse", "{"),
                                       ("down_fine", -1, "fine", "["),
                                       ("up_fine", 1, "fine", "]"),
                                       ("up_coarse", 1, "coarse", "}")):
             b = QPushButton()
-            b.setToolTip(jog_tip.format(way="down" if sign < 0 else "up",
-                                        size="a coarse step" if size == "coarse"
-                                        else "a fine step", keys=keys))
+            b._jog = (sign, size, keys)              # the tooltip is set with the rail's units
             b.setContextMenuPolicy(Qt.CustomContextMenu)
             b.customContextMenuRequested.connect(
                 lambda _p, w=b: self._rail_jog_menu(w.mapToGlobal(_p)))
@@ -2820,6 +2816,9 @@ class LiveCaptureMonitor(QWidget):
                 bits.append("zero set here")
             else:
                 bits.append("position not set")
+            lead = orp.lead_mm(spm, self.rail.steps_per_rev())
+            if lead:
+                bits.append(f"{lead:g} mm a turn")
             if not spm:
                 bits.append(f"steps ({raf.ASSUMED_STEPS_PER_MM:g}/mm assumed for "
                             "jogs and autofocus)")
@@ -2832,10 +2831,16 @@ class LiveCaptureMonitor(QWidget):
             text = self.rail.detail or state
         self.rail_status.setText(text)
         self.rail_pos.setText(orp.mm_text(st.get("pos"), spm) if state == "ok" else "—")
-        for key, b in self.rail_jog_btns.items():
-            size = "coarse" if key.endswith("coarse") else "fine"
-            b.setText(orp.jog_text(self._rail_jog[f"{size}_um"],
-                                   -1 if key.startswith("down") else 1))
+        spr = self.rail.steps_per_rev()
+        for b in self.rail_jog_btns.values():
+            sign, size, keys = b._jog
+            um = self._rail_jog[f"{size}_um"]
+            b.setText(orp.jog_text(um, sign))
+            turn = orp.turn_text(um, spm, spr)
+            b.setToolTip(f"Move the camera {'down' if sign < 0 else 'up'} by "
+                         f"{um / 1000:g} mm" + (f", {turn} of the screw" if turn else "")
+                         + f" ({keys}).\nUp is away from the rail's home end. "
+                         "Right-click: the step sizes.")
         ready = self.rail.is_ready()
         running = self._af is not None and self._af.running
         for b in list(self.rail_jog_btns.values()) + [self.rail_zero_btn]:
@@ -2984,8 +2989,13 @@ class LiveCaptureMonitor(QWidget):
 
     def _rail_af_menu(self, pos):
         L = raf.LIMITS
+        spm, spr = self.rail.steps_per_mm(), self.rail.steps_per_rev()
+
+        def range_text(v):
+            turn = orp.turn_text(v, spm, spr)
+            return f"±{v / 1000:.2f} mm" + (f" · {turn}" if turn else "")
         pop = OptionsPopup("Autofocus", [
-            ("range_um", "Range", L["range_um"], lambda v: f"±{v / 1000:.2f} mm",
+            ("range_um", "Range", L["range_um"], range_text,
              "How far either side of where it starts the coarse sweep looks"),
             ("coarse_um", "Coarse", L["coarse_um"], lambda v: f"{v} µm",
              "The coarse sweep's step: about half the depth of field"),
@@ -2999,7 +3009,8 @@ class LiveCaptureMonitor(QWidget):
              "their way)"),
             ("readings", "Readings", L["readings"], lambda v: str(v),
              "Readings per position (their median counts)")],
-            self._rail_af_opts, raf.DEFAULTS, self)
+            self._rail_af_opts, raf.DEFAULTS, self,
+            value_w=104 if orp.turn_text(1000, spm, spr) else 56)
         pop.changed.connect(self._on_rail_af_opts)
         self._place(pop, pos)
 

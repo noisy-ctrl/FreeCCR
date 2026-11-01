@@ -4,7 +4,8 @@ spec/focus-rail.md). Qt-free. The line rules are the Open Light Protocol's
 (`core.olp`): ASCII, one message per line, bytes outside printable ASCII
 ignored.
 
-    HELLO                  -> ORP 1 STEPS_PER_MM=400 MIN=0 MAX=40000 HOME=SWITCH NAME=...
+    HELLO                  -> ORP 1 STEPS_PER_MM=800 STEPS_PER_REV=3200 MIN=0 MAX=80000
+                              HOME=SWITCH NAME=...  (one line)
     STATUS                 -> STATUS POS=1234 MOVING=0 HOMED=1 ENABLED=1
     GOTO 1500 ID=7         -> OK   ... later: DONE ID=7 POS=1500
     MOVE -200 ID=8         -> OK   ... later: DONE ID=8 POS=1300   (from the target)
@@ -99,7 +100,8 @@ def _flag(f, key):
 
 def parse_reply(line):
     """One of:
-    ("hello", {"version", "steps_per_mm", "min", "max", "home", "name"})
+    ("hello", {"version", "steps_per_mm", "steps_per_rev", "min", "max", "home",
+               "name"})
     ("status", {"pos", "moving", "homed", "enabled", "driver"} - the keys given)
     ("done", {"id", "pos", "stopped", "limit", "fail"})
     ("ok", "") | ("err", text) | ("light", info): an Open Light Protocol
@@ -123,6 +125,7 @@ def parse_reply(line):
         if home not in ("SWITCH", "STALL", "NONE"):
             home = "NONE"
         return ("hello", {"version": v, "steps_per_mm": max(0.0, spm),
+                          "steps_per_rev": max(0, _int(f.get("STEPS_PER_REV"), 0)),
                           "min": _int(f.get("MIN")), "max": _int(f.get("MAX")),
                           "home": home.lower(), "name": f.get("NAME", "")})
     if head == "STATUS":
@@ -188,6 +191,22 @@ def mm_text(steps, steps_per_mm):
     if steps_per_mm and steps_per_mm > 0:
         return f"{steps / steps_per_mm:.3f} mm"
     return f"{int(steps)} steps"
+
+
+def turn_text(um, steps_per_mm, steps_per_rev):
+    """A distance as an angle of the screw ("1.8°", "18°"), or "" when the
+    rail doesn't say its steps per mm and per turn."""
+    if not (steps_per_mm and steps_per_mm > 0 and steps_per_rev and steps_per_rev > 0):
+        return ""
+    deg = abs(float(um)) / 1000.0 * steps_per_mm / steps_per_rev * 360.0
+    return f"{deg:.1f}°" if deg < 10 else f"{deg:.0f}°"
+
+
+def lead_mm(steps_per_mm, steps_per_rev):
+    """Millimetres of travel per screw turn, or None."""
+    if steps_per_mm and steps_per_mm > 0 and steps_per_rev and steps_per_rev > 0:
+        return steps_per_rev / steps_per_mm
+    return None
 
 
 def jog_text(um, sign):

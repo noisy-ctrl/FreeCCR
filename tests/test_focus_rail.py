@@ -44,8 +44,10 @@ def test_replies_freeccr_understands():
     kind, h = orp.parse_reply("ORP 1 STEPS_PER_MM=400 MIN=0 MAX=40000 HOME=SWITCH "
                               "NAME=Bench focus rail")
     assert kind == "hello"
-    assert h == {"version": 1, "steps_per_mm": 400.0, "min": 0, "max": 40000,
-                 "home": "switch", "name": "Bench focus rail"}
+    assert h == {"version": 1, "steps_per_mm": 400.0, "steps_per_rev": 0, "min": 0,
+                 "max": 40000, "home": "switch", "name": "Bench focus rail"}
+    assert orp.parse_reply("ORP 1 STEPS_PER_MM=800 STEPS_PER_REV=3200")[1][
+        "steps_per_rev"] == 3200
     assert orp.parse_reply("orp 1 home=stall")[1]["home"] == "stall"
     assert orp.parse_reply("ORP 1")[1]["steps_per_mm"] == 0.0
     assert orp.parse_reply("STATUS POS=-12 MOVING=1 HOMED=0 ENABLED=1 DRIVER=0") == (
@@ -80,6 +82,11 @@ def test_position_and_jog_text():
     assert orp.jog_text(20, 1) == "+0.02"
     assert orp.jog_text(200, -1) == "−0.2"
     assert orp.jog_text(5, 1) == "+0.005"
+    # a 4 mm ball screw at 3200 steps a turn: 20 µm is 1.8°, 1 mm a quarter turn
+    assert orp.turn_text(20, 800, 3200) == "1.8°"
+    assert orp.turn_text(1000, 800, 3200) == "90°"
+    assert orp.turn_text(20, 800, 0) == ""
+    assert orp.lead_mm(800, 3200) == 4.0 and orp.lead_mm(0, 3200) is None
 
 
 # --------------------------------------------------------------------------- #
@@ -118,8 +125,8 @@ class FakeRail:
             if self.light:
                 self.say("OLP 1 CH=R,G,B,W SHUTTER=1 FOCUS=0 NAME=Bench light")
             else:
-                self.say(f"ORP 1 STEPS_PER_MM=400 MIN=0 MAX=40000 HOME={self.home} "
-                         "NAME=Fake Rail")
+                self.say(f"ORP 1 STEPS_PER_MM=400 STEPS_PER_REV=3200 MIN=0 MAX=40000 "
+                         f"HOME={self.home} NAME=Fake Rail")
         elif cmd == "STATUS":
             self.status()
         elif cmd in ("GOTO", "MOVE"):
@@ -547,6 +554,13 @@ def test_the_rail_list_leaves_out_the_lights_port_and_jogs_move_it():
         client.link.tick()
         assert "Fake Rail" in mon.rail_status.text()
         assert "position not set" in mon.rail_status.text()
+        assert "8 mm a turn" in mon.rail_status.text()
+        assert "0.9° of the screw" in mon.rail_jog_btns["up_fine"].toolTip()
+        assert "(])" in mon.rail_jog_btns["up_fine"].toolTip()
+        from PySide6.QtCore import QPoint
+        mon._rail_af_menu(QPoint(10, 10))                 # Range as an angle too
+        assert mon._popup.values_lbl["range_um"].text() == "±1.00 mm · 45°"
+        mon._popup.close()
         assert mon.rail_pos.text() == "0.000 mm"
         assert mon.rail_jog_btns["up_fine"].text() == "+0.02"
         assert mon.rail_jog_btns["down_coarse"].text() == "−0.2"

@@ -40,7 +40,8 @@ Non-goals (this pass):
 ## 2. Hardware assumptions (documented, not required)
 - NEMA 17, 200 full steps/rev; TMC2209 at 1/16 microsteps (interpolated to
   256 internally) → 3200 steps/rev. Lead screw T8 × 8 mm lead → **400
-  steps/mm, 2.5 µm a step**; a 2 mm lead → 1600 steps/mm. The firmware
+  steps/mm, 2.5 µm a step** (revision 1: his rail is a 4 mm ball screw, 800
+  steps/mm); a 2 mm lead → 1600 steps/mm. The firmware
   reports `STEPS_PER_MM`, FreeCCR shows millimetres from it.
 - Depth of field at the user's magnifications (m ≈ 0.6–1.2, f/8, c ≈ 2
   pixels = 10.6 µm): `2·N·c·(1+m)/m²` ≈ 0.75 mm at 0.6×, 0.26 mm at 1.2×.
@@ -224,3 +225,41 @@ Typical run with the defaults: ~10–21 coarse + ~11 fine positions at
   ZERO, soft limits only when homed, HOME with the simulated switch, HOME
   NONE refused, unknown → ERR; and FreeCCR's link driving the host build end
   to end.
+
+## Revision 1 (2026-11-01): his rail is a ball screw, focus within a quarter turn
+The user: "the macro lens is a 120mm Schneider lens on my GFX body. The Focus
+is likely to be within a 90 degree turn of the ballscrew at absolute most.
+There is no focus ring."
+- No focus ring: the rail is the only focus (as §2 assumed: extension fixed,
+  the whole camera moves). Nothing to add for a lens motor.
+- A **ball screw**, not a lead screw. The firmware's `LEAD_MM` default is now
+  **4** (SFU1204, the usual small ball screw; the comment lists SFU1605 = 5,
+  SFU1610 = 10, read off the screw's code): 1/16 microsteps → 3200 steps a
+  turn, **800 steps/mm, 1.25 µm a step**, a quarter turn = 800 steps = 1 mm.
+  The lead is to be confirmed by the user when he flashes it.
+- The rail reports **`STEPS_PER_REV`** (optional HELLO field;
+  `RailCore::Config::stepsPerRev`; `orp.parse_reply` → `steps_per_rev`,
+  `RailClient.steps_per_rev()`), so FreeCCR shows distances in his terms:
+  the status line says "4 mm a turn" (`orp.lead_mm`), the jog tooltips give
+  each step as an angle of the screw ("0.02 mm, 1.8° of the screw";
+  `orp.turn_text`), and the Autofocus options show the Range as "±1.00 mm ·
+  90°" (its value column widened to 104 px when the angle is known;
+  `OptionsPopup(value_w=)`).
+- Autofocus defaults unchanged: ±1 mm is ±90° on a 4 mm lead, which covers
+  "within a 90 degree turn at absolute most" from anywhere in that zone
+  (±72° on a 5 mm lead, ±36° on 10 mm: set Range to a quarter turn there).
+  The DoF (§2) is 0.26–0.75 mm, so the 100 µm coarse step is 9° of a 4 mm
+  screw and the 20 µm fine step 1.8°.
+- A ball screw back-drives: on a vertical stand the camera slides when the
+  motor has no current (supply off, the ESP32 restarting, `ENABLE 0`).
+  FreeCCR never sends `ENABLE 0`; the firmware header says to keep the motor
+  supply on and fit a stop collar below the focus range. Holding about 2 kg
+  on a 4–5 mm lead is roughly 15 mN·m (`F·lead / 2π·η`, η ≈ 0.9), a small
+  share of a NEMA 17's torque at the hold current; ~2.5× that on a 10 mm
+  lead (raise `HOLD_FRACTION`). An estimate, not measured.
+- Backlash stays 100 µm: a ball screw has little play, but the approach from
+  below also takes up the coupling's wind-up, and on a vertical stand
+  gravity already loads the nut one way; it costs one short move per pass.
+- Tests: `STEPS_PER_REV` parsed and in the host build's HELLO; `turn_text`
+  / `lead_mm` (20 µm on a 4 mm lead = 1.8°, 1 mm = 90°); the monitor's status
+  line and jog tooltip with a rail that reports it.

@@ -50,10 +50,10 @@ def run(exe, lines, mode="SWITCH", moving_status=False):
 
 def test_hello_status_and_other_bytes_ignored(host):
     out = run(host, b"\xfe\x02\x00\nHELLO\r\nSTATUS\nhello\nFOO 1\n\n")
-    assert out == ["ORP 1 STEPS_PER_MM=400 MIN=0 MAX=40000 HOME=SWITCH "
+    assert out == ["ORP 1 STEPS_PER_MM=400 STEPS_PER_REV=3200 MIN=0 MAX=40000 HOME=SWITCH "
                    "NAME=Host Rail (simulated)",
                    "STATUS POS=0 MOVING=0 HOMED=0 ENABLED=1 DRIVER=1",
-                   "ORP 1 STEPS_PER_MM=400 MIN=0 MAX=40000 HOME=SWITCH "
+                   "ORP 1 STEPS_PER_MM=400 STEPS_PER_REV=3200 MIN=0 MAX=40000 HOME=SWITCH "
                    "NAME=Host Rail (simulated)",
                    "ERR unknown FOO"]
 
@@ -194,6 +194,7 @@ def test_freeccr_drives_the_reference_firmware_end_to_end(host):
         link.open_port("sim")
         assert until(lambda: got["state"] and got["state"][-1][0] == "ok")
         assert link.info()["steps_per_mm"] == 400.0 and link.info()["home"] == "switch"
+        assert link.info()["steps_per_rev"] == 3200
         link.goto(800, 11)
         assert until(lambda: got["done"])
         assert got["done"][-1][:2] == (11, 800)
