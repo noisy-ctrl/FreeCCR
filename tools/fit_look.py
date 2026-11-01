@@ -85,6 +85,9 @@ def main(argv=None):
     ap.add_argument("--single", action="store_true",
                     help="one RAW per frame instead of RGB triplets")
     ap.add_argument("--size", type=int, default=33, help="cube size (default 33)")
+    ap.add_argument("--no-headroom", dest="headroom", action="store_false", default=True,
+                    help="stop at white instead of carrying the top end on past it "
+                         "(spec/film-look-lut.md revision 4)")
     ap.add_argument("--highlight-detail", type=float, default=0.0,
                     help="0..100: the shoulder rebuilt smooth above the data "
                          "(core/look_shoulder.py). 0 (default) removes a flat top or "
@@ -188,9 +191,16 @@ def main(argv=None):
         log(f"shoulder rebuilt from density {sh['knee']:.2f} (white at "
             f"{sh['white']:.2f}, was {sh['white_before']:.2f}; highlight detail "
             f"{a.highlight_detail:g})")
+    room = None
+    if a.headroom:
+        # spec/film-look-lut.md revision 4: on past white, so Master Gain
+        # brought down finds the highlights instead of a flat grey
+        table, room = look_shoulder.headroom(table, lf.DOMAIN[0], lf.DOMAIN[1])
+        if room is not None:
+            log(f"headroom past white from density {room['knee']:.2f}")
     look_lut.write_cube(
         cube, table, (lf.DOMAIN[0],) * 3, (lf.DOMAIN[1],) * 3,
-        title=a.name,
+        title=a.name, headroom=room is not None,
         comments=[f"FreeCCR Film Look '{a.name}' - fitted by tools/fit_look.py",
                   f"Shoulder: core/look_shoulder.py, highlight detail {a.highlight_detail:g}",
                   "Input: FreeCCR density base after Channel Levels "

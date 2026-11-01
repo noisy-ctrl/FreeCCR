@@ -103,3 +103,64 @@ def test_the_tool_writes_a_readable_cube(tmp_path, capsys):
     assert lut.size == N and lut.title == "Lab Look"
     text = capsys.readouterr().out
     assert "knee at density" in text and "monotone: True, never darker: True" in text
+
+
+# --------------------------------------------------------------------------- #
+# headroom above white (revision 4)
+# --------------------------------------------------------------------------- #
+def _smooth(x):
+    """A smooth lab-like shoulder that reaches white at ~1.0 and holds it."""
+    y = 1.0 / (1.0 + np.exp(-(x - 0.35) * 5.0))
+    return np.clip((y - 0.15) / (0.96 - 0.15), 0.0, 1.0)
+
+
+def _smooth_table(tint=(1.0, 1.0, 1.0)):
+    b, g, r = np.meshgrid(X, X, X, indexing="ij")
+    return np.stack([np.minimum(_smooth(r) * tint[0] + 0.01 * _smooth(g), 1.0),
+                     np.minimum(_smooth(g) * tint[1] + 0.01 * _smooth(r), 1.0),
+                     np.minimum(_smooth(b) * tint[2] + 0.01 * _smooth(g), 1.0)], -1)
+
+
+def test_headroom_carries_the_top_on_past_white_and_changes_little_as_shown():
+    """The user (2026-11-01): petals flat at 215 with the look and Master Gain
+    down. Past the knee the grey axis goes on rising, above 1."""
+    t = _smooth_table()
+    new, info = ls.headroom(t, LO, HI)
+    assert info is not None
+    k = int(np.searchsorted(X, info["knee"]))
+    Y0, Y1 = ls.grey_axis(t) @ ls.LUMA, ls.grey_axis(new) @ ls.LUMA
+    np.testing.assert_array_equal(Y1[:k + 1], Y0[:k + 1])        # below the knee: exact
+    np.testing.assert_allclose(np.diff(Y1[k:]), info["slope"] * (X[1] - X[0]), rtol=1e-9)
+    assert Y1[-1] > 1.05                                          # above white
+    assert np.all(np.diff(Y1) >= 0) and np.all(np.diff(Y1[k:]) > 0)   # monotone, rising
+    assert np.all(new >= t - 1e-12)                               # never darker
+    shown = np.abs(np.minimum(new, 1.0) - np.minimum(t, 1.0)).max() * 255
+    assert shown <= 2.0                                           # as rendered: ≤ 2 levels
+    below = X < info["knee"]
+    np.testing.assert_array_equal(new[np.ix_(below, below, below)],
+                                  t[np.ix_(below, below, below)])
+    # tints: only red's input past the knee -> only the red output moves
+    i_lo, i_hi = 10, N - 1
+    node, node_new = t[i_lo, i_lo, i_hi], new[i_lo, i_lo, i_hi]       # [b][g][r]
+    assert node_new[0] > node[0] and node_new[1] == node[1] and node_new[2] == node[2]
+
+
+def test_headroom_leaves_a_look_that_never_gets_near_white():
+    for t in (_smooth_table() * 0.8,                          # no shoulder near white
+              _smooth_table(tint=(1.0, 0.98, 0.96))):         # a matte white, 252.6
+        new, info = ls.headroom(t, LO, HI)
+        assert info is None and np.array_equal(new, t)
+
+
+def test_the_tool_writes_headroom_by_default(tmp_path, capsys):
+    import look_shoulder as tool
+    src = tmp_path / "Smooth.cube"
+    ll.write_cube(str(src), _smooth_table(), (LO,) * 3, (HI,) * 3, title="Smooth")
+    out = tmp_path / "Smooth (headroom).cube"
+    assert tool.main([str(src), "--out", str(out)]) == 0
+    lut = ll.read_cube(str(out))
+    assert lut.headroom and float(lut.table.max()) > 1.0
+    assert "headroom" in capsys.readouterr().out
+    out2 = tmp_path / "plain.cube"                    # no flat shoulder, no headroom:
+    assert tool.main([str(src), "--out", str(out2), "--no-headroom"]) == 0
+    assert not out2.exists()                           # nothing to change

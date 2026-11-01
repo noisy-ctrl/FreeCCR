@@ -182,6 +182,48 @@ class TestPipeline:
         ref = np.clip(ll.apply_look(img.astype(np.float32) / 65535, lut), 0, 1)
         np.testing.assert_allclose(out.astype(np.float64) / 65535, ref, atol=2.5 / 65535)
 
+    def test_headroom_keeps_whites_apart_for_master_gain(self):
+        """2026-11-01: with Master Gain down, a look that held white past
+        density 1.0 rendered the petals as one flat grey; with headroom their
+        texture comes back (spec/film-look-lut.md revision 4)."""
+        from core import look_shoulder as ls
+        lo, hi, n = -0.25, 1.25, 17
+        x = np.linspace(lo, hi, n)
+        y = np.clip(1.0 / (1.0 + np.exp(-(x - 0.35) * 5.0)) / 0.93, 0, 1)
+        t = ll.identity_table(n, (lo,) * 3, (hi,) * 3).astype(np.float64)
+        idx = np.round((t - lo) / (hi - lo) * (n - 1)).astype(int)
+        t = y[idx]                                   # each channel its own curve
+        old = ll.LookLUT(t, (lo,) * 3, (hi,) * 3)
+        new_t, info = ls.headroom(t, lo, hi)
+        new = ll.LookLUT(new_t, (lo,) * 3, (hi,) * 3, headroom=True)
+        rng = np.random.default_rng(7)
+        d = 1.12 + rng.normal(0, 0.02, (8, 32, 1)).astype(np.float32)    # petals
+        d = np.repeat(d, 3, axis=2)
+        base = _base(d)
+        kw = dict(ws_windowed=True, ch_master_gain=-60)       # Master Gain down (x0.71)
+        flat = adjust_image(base, look_lut=old, **kw).astype(np.float64)
+        kept = adjust_image(base, look_lut=new, **kw).astype(np.float64)
+        assert flat.std() < 1.0                               # one grey: clipped in the look
+        assert kept.std() > 200 and kept.max() < 65535        # 16-bit codes: texture back
+        # as shown with no gain change: identical where the old look was white
+        a = adjust_image(base, ws_windowed=True, look_lut=old)
+        b = adjust_image(base, ws_windowed=True, look_lut=new)
+        np.testing.assert_array_equal(a, b)
+
+    def test_headroom_marker_round_trips_and_extrapolates(self, tmp_path):
+        tab = _curvy_table(7)
+        p = tmp_path / "h.cube"
+        ll.write_cube(str(p), tab, (-0.25,) * 3, (1.25,) * 3, headroom=True)
+        lut = ll.read_cube(str(p))
+        assert lut.headroom and np.all(lut.top_slope >= 0)
+        past = np.array([[1.45, 1.25, 1.65]], np.float32)
+        edge = np.array([[1.25, 1.25, 1.25]], np.float32)
+        got = ll.apply_look(past, lut) - ll.apply_look(edge, lut)
+        np.testing.assert_allclose(got[0], np.array([0.2, 0.0, 0.4]) * lut.top_slope,
+                                   rtol=1e-5, atol=1e-6)
+        plain = ll.LookLUT(tab, (-0.25,) * 3, (1.25,) * 3)          # no marker: clamped
+        np.testing.assert_array_equal(ll.apply_look(past, plain), ll.apply_look(edge, plain))
+
     @pytest.mark.parametrize("ws", [True, False])
     def test_opencl_parity(self, ws):
         lut = _lut()

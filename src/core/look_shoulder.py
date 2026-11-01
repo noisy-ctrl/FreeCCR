@@ -33,6 +33,9 @@ and carries the change to every node:
    So the tint the look gives its highlights is kept, nothing is ever darker
    than before (ratio ≤ 1), and below the knee the table is returned exactly.
 
+`headroom(table, lo, hi)` (revision 4) carries the top end on past white
+instead, so a later control that brings white down finds the detail there.
+
 Qt-free; numpy only.
 """
 import numpy as np
@@ -141,6 +144,64 @@ def reshape(table, lo, hi, detail=0.0):
         out[..., c][moved] = np.clip(1.0 - (1.0 - table[..., c][moved]) * ratio[moved],
                                      0.0, 1.0)
     return out, info               # nodes not moved are returned exactly
+
+
+KNEE_Y = 0.97           # headroom: a channel's last steady stretch starts here (0.95
+                        # moved near-white saturated colours up to 4 levels as rendered)
+TOP_MIN = 1.0 - 2.0 / 255   # ... for a look whose whites reach white; one whose top
+                            # stops under it (a matte white) would have it brightened
+
+
+def headroom(table, lo, hi):
+    """(new table, info): the look's top end carried on past white
+    (spec/film-look-lut.md revision 4), or (copy, None) when the look's
+    whites don't reach white (TOP_MIN) or its grey axis never nears it.
+
+    For each output channel, along the grey axis: from the first node where
+    that channel reaches KNEE_Y, its curve goes on as a straight line at the
+    slope it had over the two segments before, above 1.0 where it gets there.
+    The difference d_c(x) (never negative) is ADDED to that output channel at
+    its own input density (red by red, ...): below the knee nothing changes,
+    the grey axis keeps its tint, nothing is darker. With the display's clamp
+    the look renders as before except for the last levels before white;
+    brought down later (Master Gain, the White Point), the densities that used
+    to be one white come apart."""
+    table = np.asarray(table, np.float64)
+    n = table.shape[0]
+    x = np.linspace(float(lo), float(hi), n)
+    step = x[1] - x[0]
+    grey = grey_axis(table)                               # (n, 3): R, G, B
+    Y = grey @ LUMA
+    if float(Y.max()) < TOP_MIN:
+        return table.copy(), None                         # its whites aren't white
+    out = table.copy()
+    axis_of = {0: 2, 1: 1, 2: 0}                          # output channel -> its input axis
+    knees, slopes, line_y = [], [], np.zeros_like(grey)
+    for c in range(3):
+        cur = grey[:, c]
+        at = np.nonzero(cur >= KNEE_Y)[0]
+        if not len(at) or at[0] < 2:
+            return table.copy(), None
+        k = int(at[0])
+        slope = float((cur[k] - cur[k - 2]) / (2.0 * step))
+        if slope <= 0:
+            return table.copy(), None
+        line = cur.copy()
+        line[k:] = cur[k] + slope * (x[k:] - x[k])
+        line_y[:, c] = line
+        d = np.maximum(line - cur, 0.0)
+        shape = [1, 1, 1]
+        shape[axis_of[c]] = n
+        out[..., c] = table[..., c] + np.broadcast_to(d.reshape(shape), table.shape[:3])
+        knees.append(float(x[k]))
+        slopes.append(slope)
+    Yn = line_y @ LUMA
+    white_now = x[np.nonzero(Yn >= 1.0)[0][0]] if np.any(Yn >= 1.0) else x[-1]
+    return out, {"knee": min(knees), "knee_y": float(np.interp(min(knees), x, Y)),
+                 "slope": float(np.dot(slopes, LUMA)), "knees": knees, "slopes": slopes,
+                 "white_was": float(x[np.nonzero(Y >= WHITE_Y)[0][0]])
+                 if np.any(Y >= WHITE_Y) else float(x[-1]),
+                 "white_now": float(white_now), "top": float(Yn[-1])}
 
 
 def report(table, new, lo, hi):

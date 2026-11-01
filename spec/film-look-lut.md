@@ -221,3 +221,60 @@ hideable in Settings → Panel as `look_top`; `panel/look_top_open` is no
 longer read). Both lists' empty entry reads **LUT (none loaded)**
 (`SlidersPanel.LOOK_NONE`); its data is still "" (no look), so nothing
 stored changes.
+
+## Revision 2026-11-01 (4): headroom above white
+The user, after revision (2): "The bright whites of the petals are still mega
+clipped. It looks weird when it's crushing dynamic range that is there."
+Measured on his renders (with the LUT and without): the petals sat FLAT at
+214–217 (local variation 0.45 levels) with the LUT, 235–242 (1.49) without.
+A flat level under 255 means a clip pulled down by a later control; he had
+turned Master Gain down. The look reached white at density 1.02 and held it
+there to the end of its domain, so everything denser came out as one value,
+and nothing after the look (Master Gain, the White Point) could part it
+again. Cineon keeps the values above white for exactly this; the look didn't.
+
+**Goal.** Detail above the look's white survives the look, so a later
+control that brings white down (Master Gain, White Point) brings it back,
+as with Cineon. Non-goal: changing the look as rendered with no such control
+(only the last couple of levels before white may move).
+
+**The table** (`look_shoulder.headroom(table, lo, hi)`): for each output
+channel along the grey axis, the knee is the first node where that channel
+reaches `KNEE_Y` (0.97; 0.95 was tried and moved near-white saturated
+colours up to 4 levels as rendered), its slope the mean over the two
+segments before it. From the knee the channel carries on as a straight line
+at that slope, past 1.0 (table values above 1 are written; nothing reads a
+.cube clamped). The difference `d_c(x) = max(0, line − old)` is ADDED to
+that output channel at its own input density (red by red, …), so the grey
+axis keeps its tint, every node with all inputs under the knees is exactly as
+before, and nothing gets darker. Only a look whose whites reach white
+(`TOP_MIN`, within 2/255) gets it: on a matte white the extra would show.
+Measured on "Noritsu Lomo 800": knees 0.83–0.88, slopes 3.5–5.1 levels a
+node; as rendered with no gain change the largest move anywhere in the table
+is 2.1 levels (grey axis 1.3); 284/255 at the end of the range. Through the
+real pipeline, a textured petal patch (density ± 0.02) with Master Gain −28
+(×0.84, the user's case): the old look gives 214.9 ± 0.05 at densities 1.05,
+1.15 and 1.30 alike (his flat 215); with headroom 222.2 / 230.7 / 243.4 ± 1.7.
+At Master Gain 0 both render 255 there.
+
+**Past the domain** (density > 1.25): .cube consumers clamp to the edge, which
+would put the plateau back further up. A cube written with headroom carries
+the comment line `# FREECCR_HEADROOM` (other apps ignore comments);
+`read_cube` sets `LookLUT.headroom`, and `apply_look` then continues each
+output channel past `DOMAIN_MAX` at its own grey-axis end slope (`top_slope`,
+the last segment's; never negative). Without the marker: clamped, as before,
+byte for byte.
+
+**Tools.** `tools/look_shoulder.py --headroom` (default on; `--no-headroom`)
+and `fit_look.py` (default on) write it; the detail reshape (revision 2) is
+unchanged and can be combined (the user found detail > 0 worse: it reaches
+white sooner).
+
+**Tests.** The grey axis below the knee and every all-below-the-knee node
+unchanged exactly; above the knee linear at `s` and above 1; with the
+display clamp, the grey axis moves ≤ 2 levels anywhere; monotone; tints:
+`out − grey` kept for nodes on one input axis above the knee; the marker
+round-trips through write/read; `apply_look` extrapolates with the marker
+and clamps without; through `adjust_image` (windowed), a textured
+"petal" patch at density 1.05–1.20 has no texture with the old look and
+Master Gain down, and keeps it with headroom.
