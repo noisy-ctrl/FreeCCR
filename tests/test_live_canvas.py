@@ -373,3 +373,31 @@ def test_a_short_bar_beside_the_number_shows_it_as_a_percentage():
     c.flash_readout_note("New frame: best reset", seconds=5)
     c.grab()
     assert c._readout_bar is None                   # the note replaces it
+
+
+def test_a_right_click_on_the_guides_outline_opens_the_guide_menu():
+    """2026-11-01: "hovering over the frame guide itself (the outline) and
+    right clicking - should allow you to change format also"."""
+    from PySide6.QtGui import QContextMenuEvent
+    from PySide6.QtCore import QPoint
+    c, render = _canvas()
+    c.guide_on = True
+    c.guide = {"cx": 0.5, "cy": 0.5, "w": 0.6, "h": 0.6, "angle": 0.0, "format": None}
+    g = c.result.geometry
+    centre, w, h = c._guide_frame(g)
+    guide_hits, picture_hits = [], []
+    c.guide_menu_requested.connect(guide_hits.append)
+    c.menu_requested.connect(picture_hits.append)
+
+    def right_click(x, y):
+        c.contextMenuEvent(QContextMenuEvent(QContextMenuEvent.Mouse, QPoint(int(x), int(y)),
+                                             QPoint(int(x), int(y))))
+    right_click(centre.x() + w / 2 - 3, centre.y())           # on the right edge
+    right_click(centre.x(), centre.y() - h / 2 + 4)           # on the top edge
+    assert len(guide_hits) == 2 and not picture_hits
+    right_click(centre.x(), centre.y())                       # inside: the picture's menu
+    right_click(centre.x() + w / 2 + 40, centre.y())          # well outside
+    assert len(picture_hits) == 2 and len(guide_hits) == 2
+    c.guide_on = False                                        # no guide shown: picture's menu
+    right_click(centre.x() + w / 2, centre.y())
+    assert len(picture_hits) == 3

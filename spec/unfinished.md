@@ -19,14 +19,21 @@ remove an entry when it ships.
   channels (10 px rebates to ±1 px on synthetic frames), remembered rebate
   widths (`FrameFinder`), a steady follower (median of 5 finds + dead band),
   film-format shaping; the user's two recordings pass. Not done:
-  - the **Format** list in Capture's toolbar, left of Camera zoom;
-  - a right-click on the guide's **outline** opening the guide menu;
+  - (the Format list and the outline's right-click shipped on their own:
+    revision (3));
   - **35 mm**: sprocket holes are bare light beside the rebate (the user's
     screenshots, 2026-11-01); untested;
   - speed: 20–40 ms a find at 640 px on the GUI thread, 4 times a second —
     move it to a worker or cut it;
   - tests for the new cases (patch / stripe / noise helpers exist in
     `tests/test_auto_frame_guide.py`, unused).
+
+## Known, not yet fixed
+- **Live view doesn't come back after Measure** (GFX 50S II, 2026-11-01: 0.0
+  fps, the last frame held). Waiting on the user's `usb camera:` Terminal
+  lines and a `FREECCR_GPHOTO2_LOG` log of one Measure.
+- **The Camera list names libgphoto2's table entry** ("Fuji Fujifilm GFX100")
+  where the Shutter row shows the model the camera reports ("GFX50S II").
 
 ## To check on the user's machine
 - **Film base Measure on a 35 mm roll** (2026-11-01): it still failed as

@@ -536,6 +536,29 @@ class LiveCaptureMonitor(QWidget):
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         tb.addWidget(spacer)
+        # The frame guide's film format, left of Camera zoom (the user,
+        # 2026-11-01: "a 'Format' drop down ... There you select format and it
+        # changes the frame guide"); the guide's menu offers the same list
+        fmt_box = QWidget()
+        fz = QHBoxLayout(fmt_box)
+        fz.setContentsMargins(0, 0, theme.GAP_BTN, 0)
+        fz.setSpacing(theme.GAP_TIGHT * 2)
+        fz.addWidget(QLabel("Format"))
+        self.format_combo = QComboBox()
+        self.format_combo.setToolTip("The frame guide's film format: the guide takes its "
+                                     "shape. Free: any shape.")
+        from core.film_formats import FILM_FORMATS
+        self.format_combo.addItem("Free", "")
+        for key, label, _ratio, _cols in FILM_FORMATS:
+            self.format_combo.addItem(label, key)
+        # compact in the toolbar (the camera's own lists sit beside it); the
+        # open list is as wide as its longest entry
+        self.format_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.format_combo.setMinimumContentsLength(8)
+        self.format_combo.view().setMinimumWidth(
+            self.format_combo.view().sizeHintForColumn(0) + 24)
+        fz.addWidget(self.format_combo)
+        self._format_action = tb.addWidget(fmt_box)
         # The camera's own magnifier sits beside the window's zoom, labelled
         # so the two can't be confused (spec/live-magnifier.md revision 1)
         cam_box = QWidget()
@@ -1029,6 +1052,9 @@ class LiveCaptureMonitor(QWidget):
         self.cam_zoom_combo.activated.connect(
             lambda i: self._set_cam_zoom(self.cam_zoom_combo.itemData(i)))
         self.canvas.menu_requested.connect(self._canvas_menu)
+        self.canvas.guide_menu_requested.connect(self._guide_menu)
+        self.format_combo.activated.connect(
+            lambda i: self._set_guide_format(self.format_combo.itemData(i) or None))
         if hasattr(self.usb, "zoom_changed"):
             self.usb.zoom_changed.connect(self._on_cam_zoom)
         self._zoom_spot_found.connect(self._on_zoom_spot)
@@ -1452,10 +1478,21 @@ class LiveCaptureMonitor(QWidget):
         m.popup(pos)
         self._popup = m
 
+    def _sync_format_combo(self):
+        """The toolbar's Format list shows the guide's format."""
+        combo = getattr(self, "format_combo", None)
+        if combo is None:
+            return
+        i = combo.findData(self.canvas.guide.get("format") or "")
+        combo.blockSignals(True)
+        combo.setCurrentIndex(max(0, i))
+        combo.blockSignals(False)
+
     def _set_guide(self, g, by_hand=True):
         if not self.actions["guide"].isChecked():
             self.actions["guide"].setChecked(True)
         self.canvas.set_guide(g)
+        self._sync_format_combo()
         self._save_view_state()
         if by_hand:
             self._guide_placed_by_hand()
@@ -3888,6 +3925,7 @@ class LiveCaptureMonitor(QWidget):
     def _load_view_state(self):
         st = _settings()
         self.canvas.set_guide(_json_setting("live/guide", dict(GUIDE_DEFAULT)))
+        self._sync_format_combo()
         try:
             self.canvas.align_x = min(1.0, max(0.0, float(st.value("live/align_x", 0.15))))
         except (TypeError, ValueError):

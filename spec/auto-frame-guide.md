@@ -122,3 +122,23 @@ and is dropped under a different exposure.
   lag a change by up to 3 s; a base remembered under the old values is then
   refused by the "darker than the frame" check in the common case (more
   exposure makes the frame brighter than the old base).
+
+## Revision 2026-11-01 (3): the Format list and the outline's right-click (shipped alone)
+Two parts of revision (2) that don't depend on its finding, built on their own
+while (2) stays parked (the user, 2026-11-01: "The format drop down box is also
+missing from the menu?"):
+- **Format** in Capture's toolbar, left of Camera zoom (`format_combo`,
+  `_format_action`): Free and the film formats of `core/film_formats`, compact
+  in the bar (8 characters wide, the open list as wide as its longest entry).
+  Picking one is the Frame guide menu's Format (`_set_guide_format`: the guide
+  takes the format's shape at the same area); the list follows the guide's
+  format wherever it is set (`_sync_format_combo` in `_set_guide` and when the
+  view state loads). With Follow the Frame on, the format is the shape the
+  follower checks finds against, as before.
+- **A right-click on the guide's outline** (within `OUTLINE_PX` 8 px of an
+  edge, inside or out; not while magnified or with the guide off) emits
+  `LiveCanvas.guide_menu_requested` → the Frame guide menu (Follow the Frame,
+  Format, Size, …); elsewhere on the picture the camera-zoom menu as before.
+Tests: the list sits left of Camera zoom, sets the guide's format and shape,
+follows the menu's Format; right-clicks on two edges open the guide menu,
+inside / well outside / guide off open the picture's.
