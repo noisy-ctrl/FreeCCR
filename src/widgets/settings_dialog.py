@@ -417,6 +417,11 @@ class SettingsDialog(QDialog):
         self._cb_live_ask_tether = QCheckBox(
             "Ask about Hot Folder Tether when the monitor opens")
         gl.addWidget(self._cb_live_ask_tether)
+        self._cb_live_light_on_camera = QCheckBox(
+            "Turn the light on (white, 100 %) when a camera connects")
+        self._cb_live_light_on_camera.setToolTip(
+            "Only when the light is connected and off: levels you set yourself stay.")
+        gl.addWidget(self._cb_live_light_on_camera)
         gl.addWidget(self._muted(
             "Dimming: the lit channels breathe low while nothing is used, and come "
             "back when you move the pointer over the monitor, press a key, or the "
@@ -792,6 +797,8 @@ class SettingsDialog(QDialog):
         self._combo_live_format.setCurrentIndex(max(0, self._combo_live_format.findData(
             str(_st.value("live/video_format", "auto") or "auto"))))
         self._cb_live_ask_tether.setChecked(_st.value("live/ask_tether", True, type=bool))
+        self._cb_live_light_on_camera.setChecked(
+            _st.value("live/light_on_camera", True, type=bool))
         scale, source = self._live_fc_scale()
         for combo, value in ((self._combo_fc_scale, scale),
                              (self._combo_zone_source, source)):
@@ -926,6 +933,7 @@ class SettingsDialog(QDialog):
         _st.setValue("live/idle_minutes", int(self._spin_live_idle.value()))
         _st.setValue("live/video_format", self._combo_live_format.currentData() or "auto")
         _st.setValue("live/ask_tether", bool(self._cb_live_ask_tether.isChecked()))
+        _st.setValue("live/light_on_camera", bool(self._cb_live_light_on_camera.isChecked()))
         # Panel visibility: display-only, so no reprocess.
         if self._panel_checks:
             panel = self._mw.sliders_panel

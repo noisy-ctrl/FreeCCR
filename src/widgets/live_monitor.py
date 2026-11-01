@@ -289,6 +289,7 @@ class LiveCaptureMonitor(QWidget):
         self._rail_zeroed = False        # Set Zero pressed since the rail connected
         self._rail_home_id = None
         self._last_frame_t = -1e9
+        self._camera_up = False          # a camera connected (the feed's or a USB one)
         # this frame's own exposure (spec/frame-exposure.md)
         self._frame_est = []             # recent live ratios
         self._frame_metered = None       # a Meter's Suggestion for the frame in view
@@ -1512,6 +1513,7 @@ class LiveCaptureMonitor(QWidget):
                 except (TypeError, ValueError):
                     pass
             self.canvas.set_message("Waiting for the first frame…")
+            self._on_camera_connected()
         elif kind == "none":
             self.canvas.set_message(
                 "No camera found.\nCheck the capture device is plugged in and the camera "
@@ -1521,6 +1523,8 @@ class LiveCaptureMonitor(QWidget):
         elif kind == "lost":
             self.canvas.set_message("The camera stopped sending frames.\nFind Cameras to "
                                     "reconnect.")
+        if kind in ("lost", "closed", "none"):
+            self._camera_up = self.usb.is_open()
         self._refresh_status_strip()
 
     def _refresh_status_strip(self):
@@ -1679,10 +1683,32 @@ class LiveCaptureMonitor(QWidget):
             # panel (all 0) leaves the light as it is, and one off while idle
             # stays off until Wake
             self.light.set_levels(self._levels)
+        if (state == "waiting" and not was_open and self._camera_up
+                and not any(self._levels.values())):
+            self._light_on_for_camera()            # the camera came first
         self._prev_light = state
         self._refresh_light_status()
         self.rail.set_blocked([port] if state in ("ok", "waiting", "silent") and port else [])
         self._on_rail_ports(self.rail.ports)
+
+    # --- the light comes on with the camera (the user, 2026-11-01) --------
+    def _on_camera_connected(self):
+        self._camera_up = True
+        self._light_on_for_camera()
+
+    def _light_on_for_camera(self):
+        """White at 100 % when a camera connects, if the light is there and
+        dark: levels set by hand stay, idle sleep and a running shot or
+        measuring are left alone, and Settings can turn it off
+        (`live/light_on_camera`)."""
+        if not _settings().value("live/light_on_camera", True, type=bool):
+            return
+        if (self._closing or self._sleeping is not None or self.sequence.running
+                or self._measure is not None or not self.light.is_open()
+                or any(self._levels.values())):
+            return
+        self.set_levels(cl.exclusive(cl.OFF, "w", 255))
+        self._note_caption("The light came on (white, 100 %) with the camera.")
 
     def _refresh_light_status(self):
         state, detail = self.light.state, self.light.detail
@@ -2589,6 +2615,7 @@ class LiveCaptureMonitor(QWidget):
         self.release_btn.setVisible(kind == "busy" and sys.platform == "darwin"
                                     and not others)
         if kind == "open":
+            self._on_camera_connected()
             self._usb_model = text
             if self._usb_dest:
                 self.usb.set_dest(self._usb_dest)
