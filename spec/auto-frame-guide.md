@@ -122,3 +122,114 @@ and is dropped under a different exposure.
   lag a change by up to 3 s; a base remembered under the old values is then
   refused by the "darker than the frame" check in the common case (more
   exposure makes the frame brighter than the old base).
+
+## Revision 2026-11-01 (2): the carrier's opening first, steady, and a Format list
+**Status: PARKED, not merged** (the user, 2026-11-01: "Forget about the frame
+tracking for now. We'll come back to that."). Built so far on branch
+`fix/auto-guide-mask-first`: mask-first finding with rebate trimming,
+`FrameFinder` (remembered rebate widths), the steady follower and format
+shaping; synthetic rebates of 10 px trimmed to ±1 px, the recordings pass.
+Not done: the Format toolbar list, right-click on the outline, 35 mm
+(sprocket holes: see the user's 2026-11-01 screenshots), timing (20–40 ms
+at 640 px, on the GUI thread), tests for the new cases.
+
+The user, after using it: "Follow the frame feature seems to be grabbing the
+film border and too much of the mask. It also seems to be changing the format
+when I scroll through the other frames, mistaking where the frame is. But I
+like the feeling generally. The noise in the image seems to also make the
+frame guide change every fraction of a second when the film, lens and camera
+isn't moving. I wonder if there should be a 'Format' drop down window to the
+left of the Camera Zoom drop down. … Maybe also, hovering over the frame
+guide itself (the outline) and right clicking - should allow you to change
+format also."
+
+### Why the first version failed (measured on the recordings and screenshots)
+- **Clear film can't be told from the picture by colour.** In the user's
+  live view the rebate reads B 65 G 139 R 230; a bright tree trunk in the
+  picture 64 / 139 / 230. The max-channel test (`BASE_NEAR`) called both base
+  and both picture alike. The trunk became a "gap" edge (screenshot 3: the
+  guide's left edge on the trunk), and the rebate, blurred into the mask's
+  edge by the 5×5 texture blur, counted as picture (screenshot 2: the guide
+  on the opening, rebate and all).
+- **Jitter**: every find was taken (eased by half), so noise of a fraction
+  of a working pixel moved the guide 4 times a second.
+
+### Finding (mask first)
+1. **The opening.** Work at `WORK_SIDE` 640 (was 384: a 10 px rebate at 1024
+   was 4 px). Holder = the dark mask, as before. Each side of the opening is
+   found in 16 slices coming in from the view's edge: a slice that STARTS in
+   the mask gives an edge (sub-pixel: where the slice's level crosses half
+   way between the mask and the film just inside); a slice that starts on film
+   votes "this side runs off the view". A robust line (Theil–Sen, then a
+   least-squares refit on the points within 1.5 px) per side; a side is found
+   with ≥ 6 agreeing slices, cut with ≥ half its slices starting on film.
+   Only the outermost dark-to-film step counts, so nothing inside the
+   picture can move the opening.
+2. **The rebate, trimmed by colour on all three channels.** Inside each found
+   side: skip the mask's edge (`EDGE_SKIP`, ~0.6 % of the long side), take
+   each slice's colour there; the side has a rebate when those colours agree
+   across the side (≥ 60 % of slices within 10 % per channel of their
+   median) and are bright (max channel ≥ 0.75 of the film's p99). Each slice
+   then runs inward while its colour stays within 12 % per channel of that
+   rebate colour; the side's width is the 30th percentile of the slices'
+   runs (a picture area the rebate's colour, like the trunk, only makes ITS
+   slices longer), the line is fitted through the slices that agree with it
+   (± max(1.5 px, 25 %)), else the opening's line moved in by the width. A
+   side with no rebate is the opening's line.
+3. **A band wider than a rebate** (`REBATE_MAX` 6 % of the frame's size that
+   way) is clear film beyond the picture: that side goes in `gap_sides` (part
+   of a frame: the follower waits, as before).
+4. **Between frames**: clear film ACROSS the trimmed frame, judged with the
+   rebate's own colour (all channels, within 10 %) and flatness, and
+   `GAP_SHARE` raised to 0.85 (a gap is clear all the way across; a trunk
+   isn't).
+5. **base8** is the rebate colour (the median of the sides that had one), or
+   a gap's, never a bright picture area's.
+6. No mask in view (≤ 1 side found): the picture-first method as before.
+
+### Following
+- **Steady**: the guide is the per-value MEDIAN of the last 5 agreeing finds,
+  and it moves only when that median leaves a dead band (centre 0.25 % of the
+  view, size 0.35 %, turn 0.12°); then it goes straight there (the median
+  has already smoothed it, so no easing). Measured target: no movement over
+  the recording's still stretches.
+- Large moves, part frames and waiting are unchanged.
+- **Format**: with a film format set, the found frame is given the format's
+  shape (largest rectangle of that ratio inside it, same centre and turn) when
+  it is within `RATIO_TOL` (now 8 %) of it; further off it is part of a frame,
+  as before. Free keeps the found shape.
+
+### Capture
+- **Format** list in the toolbar, left of Camera zoom: Free and the film
+  formats (`core/film_formats`); always shown; picking one sets the guide's
+  format (the same as the Frame guide menu's Format, which it stays in step
+  with).
+- **Right-click on the guide's outline** opens the Frame guide menu (Follow
+  the Frame, Format, …) instead of the camera zoom menu; elsewhere on the
+  picture the zoom menu as before.
+
+### Tests
+Synthetic: a rebate of 3 and 10 px is trimmed (guide on the picture, ≤ 1 px);
+a picture area in the rebate's exact colour touching one side doesn't move
+that side; a vertical stripe in the base colour (the trunk) is neither an
+edge nor a gap; a wide band on one side → `gap_sides`; still frame + noise →
+the guide doesn't move over 20 finds; format shaping. Recordings (with
+`FREECCR_AFG_FRAMES`): as before, plus the guide's edges lie inside the
+rebate on r2 and it doesn't move over still runs; crops of the two
+screenshots: the guide is inside the opening and its left edge isn't on the
+trunk. UI: the Format combo sets the guide's format and follows the menu; a
+right-click on the outline opens the guide menu.
+
+### Refinement (second pass)
+- Slices cover the middle 80 % of the rough opening (film rows / columns ≥
+  half film), so a rounded corner of the mask never feeds a side.
+- The opening's corners come from the side lines as before; a CUT side is
+  the view's own edge (x = 0 / w, y = 0 / h), so a frame focusing bigger than
+  the view is still followed with `cut` set.
+- The rebate colour per slice is the mean of 3 positions after the skip; the
+  run inward stops at the first 2 positions in a row off the colour, so the
+  picture's edge halo (sharpening in the camera's live view) ends the run.
+- The dead band is in the follower, so the canvas, the frame estimate and
+  "new frame" logic see a guide that only moves when the frame does.
+- `find_frame` stays one call (~ ms budget: under 25 ms at 640 on the user's
+  1024 × 768 live view).

@@ -41,16 +41,29 @@ def _picture(w, h, seed=0):
     return np.dstack([b, g, r]).astype(np.uint8)
 
 
-def _live(rect=(60, 40, 980, 740), angle=0.0, gap=None, rebate=3, seed=0):
+def _live(rect=(60, 40, 980, 740), angle=0.0, gap=None, rebate=3, seed=0, patch=None,
+          stripe=None, noise=0.0):
     """A live picture: the carrier's black mask, the frame (rect, turned by
-    `angle` degrees about its centre) with a thin rebate strip of clear film
-    round it; `gap` = (y0, y1) rows of clear film across it (between frames)."""
+    `angle` degrees about its centre) with a rebate strip of clear film
+    round it (`rebate` px, or a dict side -> px); `gap` = (y0, y1) rows of
+    clear film across it (between frames); `patch` = (x0, y0, x1, y1) of the
+    picture in the clear film's exact colour (deep shadows: a tree trunk in
+    the user's live view reads B 64 G 139 R 230, the rebate 65 / 139 / 230);
+    `stripe` = (x0, x1) a column of it, lightly textured, top to bottom;
+    `noise`: the camera's noise (sd, 8-bit)."""
     img = np.zeros((H, W, 3), np.uint8)
     x0, y0, x1, y1 = rect
     cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
     pic = _picture(W, H, seed)
     if gap is not None:
         pic[gap[0]:gap[1], :] = BASE
+    if patch is not None:
+        pic[patch[1]:patch[3], patch[0]:patch[2]] = BASE
+    if stripe is not None:
+        rng = np.random.default_rng(seed + 7)
+        tex = rng.normal(0, 12, (H, stripe[1] - stripe[0], 1))
+        pic[:, stripe[0]:stripe[1]] = np.clip(np.array(BASE) + tex, 0, 255).astype(np.uint8)
+    rb = rebate if isinstance(rebate, dict) else {k: rebate for k in ("top", "bottom", "left", "right")}
 
     def poly(dx0, dy0, dx1, dy1):
         a = math.radians(angle)
@@ -61,11 +74,15 @@ def _live(rect=(60, 40, 980, 740), angle=0.0, gap=None, rebate=3, seed=0):
                         cy + px * math.sin(a) + py * math.cos(a)))
         return np.round(np.array(pts)).astype(np.int32)
     film = np.zeros((H, W), np.uint8)
-    cv2.fillConvexPoly(film, poly(x0 - rebate, y0 - rebate, x1 + rebate, y1 + rebate), 255)
+    cv2.fillConvexPoly(film, poly(x0 - rb["left"], y0 - rb["top"], x1 + rb["right"],
+                                  y1 + rb["bottom"]), 255)
     inner = np.zeros((H, W), np.uint8)
     cv2.fillConvexPoly(inner, poly(x0, y0, x1, y1), 255)
     img[film > 0] = BASE
     img[inner > 0] = pic[inner > 0]
+    if noise:
+        rng = np.random.default_rng(seed + 99)
+        img = np.clip(img + rng.normal(0, noise, img.shape), 0, 255).astype(np.uint8)
     return img
 
 
@@ -128,10 +145,14 @@ def test_the_follower_takes_a_frame_eases_breathing_and_waits_while_winding_on()
     assert not fol.update(a, 0.0) and fol.state == "none"      # one find: not yet
     assert fol.update(a, 0.25) and fol.state == "following"
     g0 = dict(fol.guide)
-    # breathing: 1.5 % bigger, eased half way each find
+    # breathing: 1.5 % bigger; the guide is the median of the last finds, so
+    # it moves once most of them say so
     b = _find((53, 35, 987, 745))
-    assert fol.update(b, 0.5)
+    assert not fol.update(b, 0.5)                   # [a, a, b]: still a
+    assert fol.update(b, 0.55)                      # [a, a, b, b]: half way
     assert g0["w"] < fol.guide["w"] < b.guide["w"]
+    fol.update(b, 0.6)
+    assert fol.guide["w"] == pytest.approx(b.guide["w"], abs=1e-9)
     # winding on: part of a frame (the gap just left), then the gap across
     part = _find((60, 40, 980, 500))
     assert not fol.update(part, 0.75) and fol.state == "waiting"
@@ -147,13 +168,17 @@ def test_the_follower_takes_a_frame_eases_breathing_and_waits_while_winding_on()
     fol.update(nxt, 1.5)
     assert fol.state == "following"
     assert fol.guide["cx"] == pytest.approx(nxt.guide["cx"], abs=1e-6)
-    # one where the old one was is followed at once
+    # after waiting, even one where the old one was takes two finds (winding
+    # on can pass a part frame that happens to sit there)
     fol2 = lfr.GuideFollower()
     fol2.update(a, 0.0)
     fol2.update(a, 0.25)
     fol2.update(gap, 0.5)
     assert fol2.state == "waiting"
-    fol2.update(_find((62, 42, 982, 742)), 0.75)
+    back = _find((62, 42, 982, 742))
+    fol2.update(back, 0.75)
+    assert fol2.state == "waiting"
+    fol2.update(back, 1.0)
     assert fol2.state == "following"
 
 
