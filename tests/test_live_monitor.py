@@ -348,6 +348,30 @@ def test_frames_histogram_and_the_negative_preview():
         _close(mon)
 
 
+def test_negative_preview_is_named_so_and_its_right_click_picks_colour_or_bw():
+    mon, feed, light, dev = _monitor()
+    try:
+        a = mon.actions["negative"]
+        assert a.text() == "Negative Preview"
+        mon.led_sliders["w"].setValue(200)
+        from PySide6.QtCore import QPoint
+        mon._negative_menu(QPoint(10, 10))
+        acts = mon._popup.actions()
+        assert [x.text() for x in acts] == ["Colour Negative", "Black && White"]
+        assert acts[0].isChecked() and not acts[1].isChecked()
+        acts[1].trigger()
+        assert mon.neg_bw.isChecked() and a.isChecked()     # picked: the preview comes on
+        assert feed.params.bw
+        mon._popup.close()
+        mon._negative_menu(QPoint(10, 10))
+        assert mon._popup.actions()[1].isChecked()
+        mon._popup.actions()[0].trigger()
+        assert not mon.neg_bw.isChecked() and not feed.params.bw
+        mon._popup.close()
+    finally:
+        _close(mon)
+
+
 def test_closing_turns_the_light_off_and_releases_everything():
     mon, feed, light, dev = _monitor()
     mon.led_sliders["w"].setValue(180)
