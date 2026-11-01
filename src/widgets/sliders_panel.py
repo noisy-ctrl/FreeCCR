@@ -464,6 +464,32 @@ class CollapsibleSection(QWidget):
         outer.addWidget(self._toggle_btn)
         outer.addWidget(self._content)
         self.setLayout(outer)
+        self._header_menu = None
+
+    def set_header_menu(self, fill):
+        """`fill(menu)` adds the entries of a right-click on the header (e.g.
+        Hide This Section, spec/panel-visibility.md); None: no menu."""
+        self._header_menu = fill
+        self._toggle_btn.setContextMenuPolicy(Qt.CustomContextMenu if fill
+                                              else Qt.DefaultContextMenu)
+        if fill and not getattr(self, "_menu_wired", False):
+            self._toggle_btn.customContextMenuRequested.connect(self._show_header_menu)
+            self._menu_wired = True
+
+    def header_menu(self):
+        """The right-click menu as it would show (a QMenu), or None."""
+        if self._header_menu is None:
+            return None
+        from PySide6.QtWidgets import QMenu
+        menu = QMenu(self)
+        self._header_menu(menu)
+        return menu
+
+    def _show_header_menu(self, pos):
+        menu = self.header_menu()
+        if menu is not None and menu.actions():
+            menu.popup(self._toggle_btn.mapToGlobal(pos))
+            self._menu = menu
 
     def add_layout(self, layout):
         self._content_layout.addLayout(layout)
@@ -938,6 +964,7 @@ class SlidersPanel(QWidget):
         layers_vbox.setContentsMargins(0, 0, 0, 0)
         layers_vbox.setSpacing(2)
         layers_title = QLabel("Layers")
+        self._layers_title = layers_title          # right-click: hide (panel-visibility)
         layers_title.setStyleSheet(theme.section_header_qss())
         layers_title.setAlignment(Qt.AlignLeft)
         layers_vbox.addWidget(layers_title)
@@ -1474,8 +1501,10 @@ class SlidersPanel(QWidget):
         scroll_layout.addLayout(buttons_layout)
         scroll_layout.addLayout(sync_layout)
         # Every hideable section exists now: apply the user's Settings -> Panel
-        # choice (spec/panel-visibility.md).
+        # choice (spec/panel-visibility.md), and let each one's header hide it
+        # (revision 2026-11-01)
         self.apply_section_visibility(self.hidden_sections())
+        self._wire_hide_from_header()
 
         # --- Populate Channel Levels (the section widget itself is placed far
         # above, just under the Convert row) ---
@@ -2411,6 +2440,61 @@ class SlidersPanel(QWidget):
                 below = getattr(self, "_lab_finish_sep_below", None)
                 if below is not None:
                     below.setVisible(visible)
+
+    def _section_name(self, sid):
+        """The name a section's header shows."""
+        for s_id, label, attr in self.HIDEABLE_SECTIONS:
+            if s_id == sid:
+                w = getattr(self, attr, None)
+                if isinstance(w, CollapsibleSection):
+                    return w._toggle_btn.text()[2:]
+                return label.split(" (")[0]
+        return sid
+
+    def _wire_hide_from_header(self):
+        """Right-click a hideable section's header → Hide (the user,
+        2026-11-01; spec/panel-visibility.md)."""
+        for sid, _label, attr in self.HIDEABLE_SECTIONS:
+            w = getattr(self, attr, None)
+            fill = (lambda menu, s=sid: menu.addAction(
+                f"Hide “{self._section_name(s)}”…",
+                lambda: self.hide_section_asked(s)))
+            if isinstance(w, CollapsibleSection):
+                w.set_header_menu(fill)
+            elif sid == "layers" and getattr(self, "_layers_title", None) is not None:
+                t = self._layers_title
+                t.setContextMenuPolicy(Qt.CustomContextMenu)
+                t.customContextMenuRequested.connect(
+                    lambda pos, t=t, f=fill: self._popup_header_menu(t, pos, f))
+
+    def _popup_header_menu(self, widget, pos, fill):
+        from PySide6.QtWidgets import QMenu
+        menu = QMenu(self)
+        fill(menu)
+        menu.popup(widget.mapToGlobal(pos))
+        self._header_popup = menu
+
+    def _confirm_hide_section(self, name):
+        """Ask before hiding a section from its header. The test seam."""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Question)
+        box.setWindowTitle("Hide Section")
+        box.setText(f"Are you sure you want to hide “{name}”?")
+        box.setInformativeText("Sections can be unhidden in Settings → Panel.")
+        hide = box.addButton("Hide", QMessageBox.AcceptRole)
+        cancel = box.addButton(QMessageBox.Cancel)
+        box.setDefaultButton(cancel)
+        box.exec()
+        return box.clickedButton() is hide
+
+    def hide_section_asked(self, sid):
+        """Hide one section after asking; True if it was hidden."""
+        if sid in self.hidden_sections():
+            return False
+        if not self._confirm_hide_section(self._section_name(sid)):
+            return False
+        self.set_hidden_sections(self.hidden_sections() | {sid})
+        return True
 
     def _apply_layers_visibility(self, idx=None):
         """Layers hidden in Settings -> Panel stays shown on a frame that has
