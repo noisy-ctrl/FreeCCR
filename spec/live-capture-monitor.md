@@ -627,3 +627,12 @@ and you can change between colour negative and black and white."
   checked from the panel's Black & white box, which it sets
   (`set_negative_kind`); picking one also turns the preview on when the white
   light allows it. Scan type B&W still ticks the box as before.
+
+## Revision 2026-11-01: a lighter grey than the main window
+The user: "make the tether capture live window a slightly lighter shade of
+grey, like 20 % to differentiate." `SHADE_LIGHTER` 120 (`QColor.lighter`, value
+× 1.2) via `shade()`: the window's palette Window (#1e1e1e → #242424), its
+toolbar and scroll bars (a window-level stylesheet) and the picture's
+surround (`LiveCanvas.surround`, #1a1a1a → #1f1f1f). Buttons, combos and
+sliders keep their colours; dialogs and popups opened from it keep the app's
+(palettes don't propagate to other windows).
