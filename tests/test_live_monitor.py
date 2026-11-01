@@ -348,25 +348,60 @@ def test_frames_histogram_and_the_negative_preview():
         _close(mon)
 
 
-def test_the_monitor_is_a_lighter_grey_than_the_main_window():
+def test_the_light_map_is_idempotent_and_leaves_other_colours_alone():
+    """Revision 2026-11-01 (3): recolouring a stylesheet twice = once, so the
+    monitor can recolour every descendant after building."""
+    from ui import theme as T
+    assert not set(T.LIGHT_MAP.values()) & set(T.LIGHT_MAP)     # no light value is a key
+    qss = (f"color: {T.TEXT_MUTED}; background: rgba(30, 30, 30, 248); "
+           f"border: 1px solid {T.BORDER.upper()}; x: #333; y: {T.DANGER}; z: #123456")
+    once = T.light_qss_text(qss)
+    assert once == T.light_qss_text(once)
+    assert "color: #555555" in once and "rgba(212, 212, 212, 248)" in once
+    assert "#a8a8a8" in once and "x: #ececec" in once
+    assert T.DANGER in once and "#123456" in once                 # meaning and others kept
+    assert T.light_colour(T.TEXT) == "#111111" and T.light_colour("not a colour") == "not a colour"
+    assert lm.theme.TEXT_MUTED == "#555555" and lm.theme.PANEL_W == T.PANEL_W
+
+
+def test_the_monitor_is_light_grey_with_black_text():
     mon, feed, light, dev = _monitor()
     try:
-        from PySide6.QtGui import QPalette, QColor
-        want = lm.shade(lm.theme.WINDOW)
-        assert want.name() == "#333333"                    # #1e1e1e lifted to a 20 % grey
-        # every grey lifted the same: a button keeps its contrast with the window
-        assert lm.shade(lm.theme.SURFACE).name() == "#484848"
-        assert lm.shade(lm.theme.SURFACE).red() - want.red() == \
-            QColor(lm.theme.SURFACE).red() - QColor(lm.theme.WINDOW).red()
-        assert "#484848" in mon.styleSheet()               # the controls' stylesheet
+        from PySide6.QtGui import QPalette
+        from ui import theme as T
+        t = T.LIGHT_TOKENS
+        assert mon.palette().color(QPalette.Window).name() == t["window"]
+        assert mon.palette().color(QPalette.WindowText).name() == t["text"]
+        assert mon.panel.palette().color(QPalette.Window).name() == t["window"]
+        assert t["surface"] in mon.styleSheet() and "QLabel, QCheckBox" in mon.styleSheet()
+        # a section header made by another module: recoloured
         sec_qss = mon.rail_section._toggle_btn.styleSheet()
-        assert lm.theme.SURFACE not in sec_qss and "#484848" in sec_qss
-        assert mon.palette().color(QPalette.Window).name() == want.name()
-        assert mon.canvas.surround.name() == lm.shade(lm.theme.CANVAS).name()
-        assert want.name() in mon.styleSheet()
-        assert mon.panel.palette().color(QPalette.Window).name() == want.name()
-        img = mon.canvas.grab().toImage()                 # no picture yet: all surround
-        assert img.pixelColor(5, 5).name() == mon.canvas.surround.name()
+        assert T.SURFACE not in sec_qss and T.TEXT not in sec_qss
+        # the primary button
+        assert T.SURFACE_ACTIVE not in mon.shoot_btn.styleSheet()
+        assert t["surface_active"] in mon.shoot_btn.styleSheet()
+        # captions set at run time
+        mon._warn_caption("careful")
+        assert T.light_colour(T.WARN_TEXT) in mon.capture_caption.styleSheet()
+        mon._note_caption("fine")
+        assert t["text_muted"] in mon.capture_caption.styleSheet()
+        # the picture's surround: a neutral mid grey, its message dark
+        assert mon.canvas.surround.name() == "#808080"
+        assert mon.canvas.message_colour.name() == t["text"]
+        img = mon.canvas.grab().toImage()
+        assert img.pixelColor(5, 5).name() == "#808080"
+        # on screen: the panel reads light, its text dark
+        import numpy as np
+        mon.resize(1200, 900)
+        mon.show()
+        _app.processEvents()
+        shot = mon.panel.grab().toImage().convertToFormat(img.Format.Format_RGB888)
+        w, h = shot.width(), shot.height()
+        arr = np.frombuffer(shot.constBits(), np.uint8, shot.bytesPerLine() * h)
+        arr = arr.reshape(h, shot.bytesPerLine())[:, :w * 3].reshape(h, w, 3)
+        assert np.median(arr) >= 200          # light (the dark scope is a small part)
+        dark = (arr.max(axis=2) < 60).mean()
+        assert dark > 0.002                          # black text is there
     finally:
         _close(mon)
 
