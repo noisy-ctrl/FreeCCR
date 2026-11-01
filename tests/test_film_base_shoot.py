@@ -615,6 +615,34 @@ def test_only_a_confident_border_is_read_without_a_click(film_mon, monkeypatch):
     assert mon._film_base_patch()[1] == "where you clicked"
 
 
+def test_an_old_click_inside_the_frame_guide_asks_again(film_mon):
+    """2026-11-01: a new roll's Measure read an old Film Base click that now
+    lay in the picture and failed as uneven. A click inside the frame guide is
+    asked for again; the click made for this Measure counts wherever it is
+    (the gap between two frames can sit inside the guide)."""
+    mon, usb, light, lm, path = film_mon
+    import numpy as np
+    mon.feed.full = None
+    mon.actions["guide"].setChecked(True)
+    mon.set_guide_auto(False)
+    mon.canvas.guide = {"cx": 0.5, "cy": 0.5, "w": 0.8, "h": 0.7, "angle": 0.0,
+                        "format": None}
+    mon._neg_base_pos = (0.5, 0.5, 640, 480)                 # inside: an old one
+    assert mon._film_base_patch() == (None, "")
+    mon._neg_base_pos = (0.5, 0.05, 640, 480)                # beside the frame: used
+    assert mon._film_base_patch()[1] == "where you clicked"
+    mon._ask_film_base_name = lambda default: "Gold"
+    mon._neg_base_pos = (0.5, 0.5, 640, 480)
+    mon.measure_btn.click()
+    assert mon._measure is None and mon._pending_measure == ("Gold", None)
+    mon.feed.full = np.zeros((480, 640, 3), np.uint8)
+    mon.feed.samples["any"] = (200.0, 150.0, 120.0)
+    mon._on_picked(352.0, 230.0)                             # in the gap, inside the guide
+    assert _wait(lambda: mon._measure is not None, 5)
+    assert mon._measure["rect"] == pytest.approx(be.patch_around(0.55, 230 / 480, 640, 480))
+    mon._measure_stop()
+
+
 def test_trichrome_measures_each_led_from_full_whatever_the_preset(film_mon):
     mon, usb, light, lm, path = film_mon
     mon._presets["presets"][mon._presets["selected"]].update(r=120, g=180, b=255)

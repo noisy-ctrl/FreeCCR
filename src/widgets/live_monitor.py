@@ -1770,6 +1770,7 @@ class LiveCaptureMonitor(QWidget):
             if self._pending_measure is not None:
                 name, index = self._pending_measure
                 self._pending_measure = None
+                self._fresh_base_click = True
                 QTimer.singleShot(0, lambda: self.start_measure(name, index))
         self._neg[target] = bgr
         if target == "base" and self._neg.get("hi") is None:
@@ -2280,7 +2281,7 @@ class LiveCaptureMonitor(QWidget):
                 return {k: dict(v) for k, v in sug.exposures.items()}
             if base is not None:
                 if sug is None:
-                    why = self.frame_note.text().replace("This frame: ", "").rstrip(".")
+                    why = (getattr(self, "_frame_reason", "") or "none yet").rstrip(".")
                     self._frame_shot_note = ("No estimate for this frame (" + why + "): "
                                              "shot at the film base's exposures.")
                 return base
@@ -2393,7 +2394,14 @@ class LiveCaptureMonitor(QWidget):
         if self._frame_exposures is not None:
             text += "  ·  the next Shoot uses it"
         self._frame_suggestion = sug
-        self.frame_note.setText(text)
+        # The line shows only an estimate; why there is none goes in the Use
+        # button's tooltip and the Shoot note (the user, 2026-11-01: "The
+        # warning ... is wrong. Don't think there needs this warning anyway"
+        # — a 35 mm roll read as "the film base shows on only one side")
+        self._frame_reason = "" if sug is not None else text.replace("This frame: ", "")
+        shown = text if sug is not None else ""
+        self.frame_note.setText(shown)
+        self.frame_note.setVisible(bool(shown))
         if sug is not None and sug.live:
             self.frame_note.setToolTip(
                 "Estimated from the live view, no photos: the frame's brightest part "
@@ -2564,9 +2572,16 @@ class LiveCaptureMonitor(QWidget):
         (two edges agreeing), else (None, ""). A lone bright edge can be bare
         light round the film, which would expose the base a stop or more
         under, so anything less asks for the click."""
+        fresh, self._fresh_base_click = getattr(self, "_fresh_base_click", False), False
         if self._neg_base_pos is not None:
             fx, fy, w, h = self._neg_base_pos
-            return be.patch_around(fx, fy, w, h), "where you clicked"
+            # an older click inside the frame guide is another roll's, or a gap
+            # that has since been wound on into a frame (the user, 2026-11-01:
+            # a new roll's Measure read the picture there and failed as
+            # uneven): ask again. A click made for this Measure always counts.
+            if fresh or not (self.actions["guide"].isChecked()
+                             and fm.inside_guide(dict(self.canvas.guide), fx, fy, w, h)):
+                return be.patch_around(fx, fy, w, h), "where you clicked"
         frame = self.feed.last_full_frame()
         if frame is None:
             return None, ""

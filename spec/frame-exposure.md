@@ -242,3 +242,16 @@ no-estimate case.
 Tests: ticked → two Shoots in a row both at the frame's exposures with the
 caption; no base beside the frame → the film base's exposures and the reason;
 Use hidden while ticked.
+
+## Revision 2026-11-01 (4): no warning on the line
+The user, with a 35 mm roll in the carrier: "The warning that comes up …
+('The film base...') is wrong. Don't think there needs this warning anyway?"
+(It read "The film base shows on only one side of the frame guide" with the
+rebate above and below the frame.) The "This frame" line now shows only an
+estimate (or a metered result); when there is none it is empty and hidden.
+Why there is none stays in the Use for This Frame button's tooltip, and the
+Shoot note of Expose each frame for itself still says it at shot time
+(`_frame_reason`). A Film Base click INSIDE the frame guide is ignored by the
+live estimate (an older click: another roll's, or a gap since wound on into a
+frame): it looks beside the guide instead of answering "the click is inside
+the frame guide".

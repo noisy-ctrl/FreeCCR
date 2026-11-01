@@ -31,6 +31,9 @@ MAX_SPREAD = 0.08         # IQR / median of the patch: more is not an even base
 SPREAD_FROM = 0.10        # ... judged only from this level up (below, shot noise alone
                           # can spread a dim patch that much)
 PATCH_SIDE = 0.03         # a clicked point's patch: this share of the short side
+CELLS = 4                 # the patch is read in CELLS x CELLS cells ...
+CELLS_MIN = 9             # ... on the largest group of cells that agree, if that is
+                          # most of the patch (half and half is still uneven)
 INSET = 0.20              # a rebate band is read inside this inset on each side
 BASE_ISO = "100"
 ISO_UP_STOPS = 2          # ISO may rise this far (100 -> 400), only past PREFERRED_S
@@ -141,6 +144,14 @@ def reading_from_mosaic(mosaic, colors, desc, black, white, rect=(0.0, 0.0, 1.0,
     blk = np.asarray(black, dtype=np.float32).ravel()
     desc = str(desc).upper()
     out = Reading()
+    ph, pw = m.shape[:2]
+    # the patch in CELLS x CELLS cells: the base is read on the largest group
+    # of cells that agree (2026-11-01: a patch in the narrow gap between two
+    # 35 mm frames, or by a sprocket hole, took in the picture's edge or bare
+    # light and failed as uneven)
+    cell_r = np.minimum((np.arange(ph) * CELLS) // max(1, ph), CELLS - 1)
+    cell_c = np.minimum((np.arange(pw) * CELLS) // max(1, pw), CELLS - 1)
+    cell = cell_r[:, None] * CELLS + cell_c[None, :]
     for name in "RGB":
         idx = [i for i, ch in enumerate(desc) if ch == name]
         if not idx:
@@ -150,12 +161,35 @@ def reading_from_mosaic(mosaic, colors, desc, black, white, rect=(0.0, 0.0, 1.0,
             continue
         b = blk[cols[sel]] if blk.size > 1 else np.float32(blk[0] if blk.size else 0.0)
         f = (m[sel] - b) / np.maximum(float(white) - b, 1.0)
+        f = f[_agreeing_cells(f, cell[sel])]
         med = float(np.median(f))
         p25, p75 = (float(v) for v in np.percentile(f, (25, 75)))
         out.levels[name] = med
         out.spreads[name] = (p75 - p25) / med if med > 1e-6 else float("inf")
         out.counts[name] = int(sel.sum())
     return out
+
+
+def _agreeing_cells(values, cells):
+    """A mask of `values` in the largest group of cells whose medians lie
+    within MAX_SPREAD / 2 of one cell's (ties: the brighter group). All of
+    them when the group is under CELLS_MIN cells or the patch is too small
+    to cut, so a patch that is uneven all over still reads as uneven."""
+    ids = np.unique(cells)
+    if len(ids) < CELLS_MIN:
+        return np.ones(len(values), bool)
+    meds = np.array([np.median(values[cells == i]) for i in ids])
+    best, best_key = None, None
+    for m0 in meds:
+        if m0 <= 1e-6:
+            continue
+        group = np.abs(meds - m0) <= (MAX_SPREAD / 2) * m0
+        key = (int(group.sum()), float(m0))
+        if best_key is None or key > best_key:
+            best, best_key = group, key
+    if best is None or best_key[0] < CELLS_MIN:
+        return np.ones(len(values), bool)
+    return np.isin(cells, ids[best])
 
 
 def read_patch(path, rect):

@@ -135,6 +135,26 @@ def test_a_reading_is_each_colours_own_photosites_inside_the_patch():
     assert whole.spreads["B"] > 1.0                                         # two levels: uneven
 
 
+def test_a_patch_mostly_on_the_base_reads_the_base():
+    """2026-11-01: a patch in the narrow gap between two 35 mm frames took in
+    the picture's edge and failed as uneven. The largest agreeing group of
+    cells is read, if it is most of the patch."""
+    h, w = 64, 64
+    cols = np.tile(np.array([[0, 1], [3, 2]]), (h // 2, w // 2))
+    base, edge = np.array([0.8, 0.6, 0.3, 0.6]), np.array([0.3, 0.2, 0.1, 0.2])
+    frac = base[cols].copy()
+    frac[:, 48:] = edge[cols[:, 48:]]                     # a quarter on the picture
+    frac[20:22, 10:12] = 0.05                             # a speck of dust
+    m = (1024 + frac * (16383 - 1024)).astype(np.uint16)
+    r = be.reading_from_mosaic(m, cols, "RGBG", [1024] * 4, 16383)
+    assert r.levels["R"] == pytest.approx(0.8, abs=2e-3)
+    assert r.spreads["R"] <= be.MAX_SPREAD
+    # an even patch reads exactly as before (every cell agrees)
+    even = (1024 + base[cols] * (16383 - 1024)).astype(np.uint16)
+    assert be.reading_from_mosaic(even, cols, "RGBG", [1024] * 4, 16383).levels["G"] == \
+        pytest.approx(0.6, abs=1e-3)
+
+
 def test_patches():
     x0, y0, x1, y1 = be.patch_around(0.5, 0.5, 800, 600)
     assert (x1 - x0) * 800 == pytest.approx(0.03 * 600)
