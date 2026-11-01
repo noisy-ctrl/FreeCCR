@@ -303,6 +303,24 @@ def test_a_part_clipped_patch_goes_shorter_instead_of_failing_as_uneven():
     assert cal.done and "isn't even" in cal.error and "varies 15 %" in cal.error
 
 
+def test_a_grainy_base_is_even():
+    """2026-11-01: the user's GFX at 1:1, red light, 35 mm base + fog: 9 % from
+    photosite to photosite (grain), so every Measure failed as "isn't even".
+    Evenness is judged on 16-px block means; a two-level patch still fails."""
+    h, w = 192, 192
+    cols = np.tile(np.array([[0, 1], [3, 2]]), (h // 2, w // 2))
+    rng = np.random.default_rng(5)
+    frac = 0.157 * (1 + rng.normal(0, 0.09, (h, w)))
+    m = (64 + frac * (15872 - 64)).astype(np.uint16)
+    r = be.reading_from_mosaic(m, cols, "RGBG", [64] * 4, 15872)
+    assert r.level("r") == pytest.approx(0.157, rel=0.02)
+    assert r.spread("r") < 0.04                      # photosites alone: ~0.12
+    # the same grain over two levels side by side is still uneven
+    frac[:, 96:] *= 0.5
+    m = (64 + frac * (15872 - 64)).astype(np.uint16)
+    assert be.reading_from_mosaic(m, cols, "RGBG", [64] * 4, 15872).spread("r") > be.MAX_SPREAD
+
+
 def test_a_reading_counts_a_pile_at_the_top_value():
     h, w = 32, 32
     cols = np.tile(np.array([[0, 1], [3, 2]]), (h // 2, w // 2))

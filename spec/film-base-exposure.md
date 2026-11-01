@@ -548,3 +548,19 @@ and gives its spread; a pile is counted; a drawn box is measured; a failed
 Measure keeps its shot, and the next one asks where (so does the one after a
 success); the canvas emits `picked` on a click's release and `box_picked` on
 a drag.
+
+## Revision 2026-11-01 (8): grain is not unevenness
+The user sent the kept test shots (GFX 50S II, red LED only, 1/13 s, ISO 100,
+a 35 mm colour negative's rebate between the sprocket holes). Measured on
+them: the base reads 0.157 of the range in red, and varies by 12 % (IQR /
+median; σ 8.8 %) from photosite to photosite. A sprocket hole (bare light,
+0.49) varies by 0.9 %, so that is not noise: at 1:1 on 50 MP the base + fog
+shows its grain. Revision 7's numbers in the message (12 % at 16 %) were
+exactly this. Evenness is now judged on the means of 16 × 16-photosite blocks
+(`BLOCK_PX`, 8 × 8 of each colour; `_block_spread`), where grain averages out
+and an edge, dust or picture still shows: the same patches read 2.6–3.2 %
+(limit 8 %); a patch of 4 blocks or fewer is judged per photosite as before.
+The level is unchanged (the median of the agreeing cells' photosites). The
+frame meter already reads 16 × 16 block means.
+Tests: a synthetic base with 9 % photosite grain reads even (< 4 %) at its
+level; the same grain over two levels is uneven.

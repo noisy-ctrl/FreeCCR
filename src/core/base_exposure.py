@@ -27,12 +27,15 @@ TOO_DARK = 0.02           # under: too little to measure; go 3 stops longer
 SHORT_BY = 2 ** (-1 / 3)  # more than a third of a stop under at the longest speed
 BIG_STEP = 8.0            # 3 stops
 MAX_SHOTS = 6             # per colour
-MAX_SPREAD = 0.08         # IQR / median of the patch: more is not an even base
+MAX_SPREAD = 0.08         # IQR / median of the patch's block means: more is not an even base
 SPREAD_FROM = 0.10        # ... judged only from this level up (below, shot noise alone
                           # can spread a dim patch that much)
 PATCH_SIDE = 0.03         # a clicked point's patch: this share of the short side
 PILE_SHARE = 0.02         # this share of a colour's photosites on one top value: clipped
 PILE_FROM = 0.5           # ... when that value is at least this of the range
+BLOCK_PX = 16              # evenness is judged on means of blocks this many photosites
+                           # square (8 x 8 of each colour on a Bayer sensor) ...
+BLOCKS_MIN = 4             # ... when the patch holds this many whole blocks
 CELLS = 4                 # the patch is read in CELLS x CELLS cells ...
 CELLS_MIN = 9             # ... on the largest group of cells that agree, if that is
                           # most of the patch (half and half is still uneven)
@@ -160,6 +163,15 @@ def reading_from_mosaic(mosaic, colors, desc, black, white, rect=(0.0, 0.0, 1.0,
     cell_r = np.minimum((np.arange(ph) * CELLS) // max(1, ph), CELLS - 1)
     cell_c = np.minimum((np.arange(pw) * CELLS) // max(1, pw), CELLS - 1)
     cell = cell_r[:, None] * CELLS + cell_c[None, :]
+    # ... and its evenness is judged on BLOCK_PX-square block means, not on
+    # single photosites: at 1:1 on a 50 MP sensor a colour negative's base +
+    # fog has grain, 9 % from photosite to photosite (the user's GFX, red
+    # light, 2026-11-01), while edges, dust and the picture are block-sized
+    nbx = max(1, pw // BLOCK_PX)
+    block = ((np.arange(ph) // BLOCK_PX)[:, None] * (nbx + 1)
+             + np.minimum(np.arange(pw) // BLOCK_PX, nbx)[None, :])
+    whole_block = ((np.arange(ph) < (ph // BLOCK_PX) * BLOCK_PX)[:, None]
+                   & (np.arange(pw) < nbx * BLOCK_PX)[None, :])
     for name in "RGB":
         idx = [i for i, ch in enumerate(desc) if ch == name]
         if not idx:
@@ -175,13 +187,29 @@ def reading_from_mosaic(mosaic, colors, desc, black, white, rect=(0.0, 0.0, 1.0,
         top = float(raw.max())
         f_top = float(np.max(f))
         out.piles[name] = (float(np.mean(raw >= top)) if f_top >= PILE_FROM else 0.0)
-        f = f[_agreeing_cells(f, cell[sel])]
+        keep = _agreeing_cells(f, cell[sel])
+        whole = whole_block[sel][keep]
+        blocks = block[sel][keep]
+        f = f[keep]
         med = float(np.median(f))
-        p25, p75 = (float(v) for v in np.percentile(f, (25, 75)))
         out.levels[name] = med
-        out.spreads[name] = (p75 - p25) / med if med > 1e-6 else float("inf")
+        out.spreads[name] = _block_spread(f[whole], blocks[whole], med) if whole.any() \
+            else float("nan")
+        if not np.isfinite(out.spreads[name]):          # too small to cut in blocks
+            p25, p75 = (float(v) for v in np.percentile(f, (25, 75)))
+            out.spreads[name] = (p75 - p25) / med if med > 1e-6 else float("inf")
         out.counts[name] = int(sel.sum())
     return out
+
+
+def _block_spread(values, blocks, med):
+    """IQR / median of the blocks' means (NaN with fewer than BLOCKS_MIN)."""
+    ids, inv = np.unique(blocks, return_inverse=True)
+    if len(ids) < BLOCKS_MIN or med <= 1e-6:
+        return float("nan")
+    means = np.bincount(inv, weights=values) / np.bincount(inv)
+    p25, p75 = (float(v) for v in np.percentile(means, (25, 75)))
+    return (p75 - p25) / float(np.median(means))
 
 
 def _agreeing_cells(values, cells):

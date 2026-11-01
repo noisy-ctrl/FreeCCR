@@ -36,10 +36,9 @@ remove an entry when it ships.
   where the Shutter row shows the model the camera reports ("GFX50S II").
 
 ## To check on the user's machine
-- **Film base Measure on a 35 mm roll** (2026-11-01): it still failed as
-  "isn't even" after the first red shot. Fixed since: a part-clipped patch goes
-  shorter instead, a box can be drawn, Measure asks again after a failure. If
-  it still fails, the caption gives the spread and level and names the kept
-  test shot (`<app data>/measure-failed/`): ask the user before reading it.
+- **Film base Measure on a 35 mm roll** (2026-11-01): the cause was the base's
+  grain (9 % photosite to photosite at 1:1, measured on the user's kept shots);
+  evenness is now judged on 16-px block means (2.6–3.2 % on those shots).
+  Confirm a Measure completes.
 - **The light at Capture's close / the Quit? box** (2026-11-01): the OFF bytes
   are now drained before the port closes; confirm the Scanlight goes dark.
