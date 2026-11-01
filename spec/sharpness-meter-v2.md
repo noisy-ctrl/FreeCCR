@@ -79,3 +79,15 @@ zoom is toggled off?"
 - A magnification change resets the best twice: at once and again 1.5 s later,
   when the new picture is actually arriving (frames already on their way set
   the best at the old scale).
+
+## Revision 2 (2026-11-01): the bar back, short, beside the number
+The user: "Crossed wires about the focus meter. I'd like the bar back in,
+visually showing percentage. Doesn't have to be mega long though."
+- The readout is **Focus N** plus a 72 px bar (`LiveCanvas.READOUT_BAR_W`)
+  filled to N % — the SAME shown number, updated at most 4 times a second
+  from the 15-reading median, so the bar can't flicker the way revision 2's
+  bar (raw score / best) did. Filled light grey, green at N ≥ 95. A note
+  ("New frame: best reset") replaces both. The bar is inside the readout's
+  box, so a click on it starts a new best as before.
+- Test: the bar's fill is N % of its width, follows the number, and gives way
+  to the note (`LiveCanvas._readout_bar`).

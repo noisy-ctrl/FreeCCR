@@ -340,3 +340,21 @@ def test_the_readout_is_one_steady_number():
     c._focus_t -= 1.0
     c.grab()
     assert c._focus_shown == 6
+
+
+def test_a_short_bar_beside_the_number_shows_it_as_a_percentage():
+    c, render = _canvas()
+    c.sharp_on = True
+    c.result.sharp = (0.95, 1.0)
+    c.grab()
+    track, fill = c._readout_bar
+    assert track.width() == c.READOUT_BAR_W
+    assert fill == pytest.approx(track.width() * 0.81)
+    assert c._readout_rect.contains(track)          # a click on the bar resets the best too
+    c.result.sharp = (1.0, 1.0)
+    c._focus_t -= 1.0
+    c.grab()
+    assert c._readout_bar[1] == pytest.approx(track.width())
+    c.flash_readout_note("New frame: best reset", seconds=5)
+    c.grab()
+    assert c._readout_bar is None                   # the note replaces it
