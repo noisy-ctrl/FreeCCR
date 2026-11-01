@@ -115,7 +115,7 @@ def fake_gp(cameras=(("Canon EOS 5D Mark III", "usb:001,004"),), shot=("IMG_0001
                                      capture_error=None, capture_echo=False,
                                      event_checks=0, file_errors=[],
                                      folder="/store/DCIM", held=set(), deleted=[],
-                                     size_lie=0,
+                                     size_lie=0, previews=0, frozen=False,
                                      shot=list(shot), fired=0, inited=False, exited=False,
                                      config=config if config is not None else _Widget({
                                          "shutterspeed": _Widget(value="1/60"),
@@ -150,7 +150,14 @@ def fake_gp(cameras=(("Canon EOS 5D Mark III", "usb:001,004"),), shot=("IMG_0001
                 raise GPhoto2Error(gp.GP_ERROR_CAMERA_BUSY)
             if st.preview_errors:
                 raise GPhoto2Error(st.preview_errors.pop(0))
-            ok, buf = cv2.imencode(".jpg", np.full((30, 40, 3), 90, np.uint8))
+            # a live view's noise makes every frame differ; a stopped one
+            # (`frozen`) serves its last picture again, byte for byte
+            if not st.frozen:
+                st.previews += 1
+            pic = np.full((30, 40, 3), 90, np.uint8)
+            pic[0, 0] = st.previews % 256
+            pic[0, 1] = st.previews // 256 % 256
+            ok, buf = cv2.imencode(".jpg", pic)
             return _File(buf.tobytes())
 
         def trigger_capture(self):
@@ -623,6 +630,8 @@ def test_ports_ranked_by_usb_id():
 class FakeUsb(QObject):
     addons_found = Signal(list)
     live_paused = Signal(bool)
+    live_restarting = Signal(int, int)
+    live_not_back = Signal()
     cameras_found = Signal(list)
     state = Signal(str, str)
     file_saved = Signal(str)
@@ -1525,6 +1534,36 @@ def test_live_view_stuck_busy_after_frames_counts_as_paused(tmp_path):
     assert b.preview() is not None and not b.live_stalled()
 
 
+def test_live_view_sending_the_same_picture_counts_as_paused(tmp_path):
+    """The user, 2026-11-01: after Measure and a reconnect, live view came
+    back as a picture that never changed. A repeat is no picture, and a run of
+    them is a stopped live view, reported like a busy one."""
+    b, gp, clock = _fuji_backend(tmp_path, shot=("DSCF0007.RAF",))
+    assert b.preview() is not None
+    gp.state.frozen = True
+    assert b.preview() is None                         # the same bytes: no new frame
+    clock.t += cb.LIVE_STALL_S - 0.5
+    assert b.preview() is None and not b.live_stalled()
+    clock.t += 1.0
+    assert b.preview() is None and b.live_stalled()
+    # a reconnect that brings back the SAME picture is still stopped, on a
+    # fresh clock
+    b.restart_live()
+    clock.t += cb.RECONNECT_SETTLE_S
+    assert b.preview() is None and not b.live_stalled()
+    clock.t += cb.LIVE_STALL_S + 0.1
+    assert b.preview() is None and b.live_stalled()
+    gp.state.frozen = False                            # it moves again
+    assert b.preview() is not None and not b.live_stalled()
+    # a picture repeated briefly (fetched faster than the camera refreshes)
+    # is never a stall
+    for _ in range(20):
+        gp.state.frozen = not gp.state.frozen
+        b.preview()
+        clock.t += 0.4
+    assert not b.live_stalled()
+
+
 def test_worker_reports_a_paused_live_view():
     flags = {"stalled": False}
 
@@ -1560,10 +1599,32 @@ def test_monitor_says_why_the_usb_picture_stopped(mon_usb):
     usb.key = key
     usb.live_paused.emit(True)
     _app.processEvents()
-    assert "paused" in mon.canvas.message
-    # the picture from a capture device: not this camera's live view
-    mon.canvas.set_message("")
-    mon.camera_combo.setCurrentIndex(mon.camera_combo.findData(0))
+    assert mon.canvas.message.startswith("Live view stopped.\nChecking")
+    assert "holding" not in mon.canvas.message     # nothing held was found (revision 7)
+    usb.live_restarting.emit(1, 2)
+    _app.processEvents()
+    assert "Reconnecting the camera to restart it (try 1 of 2)" in mon.canvas.message
+    usb.live_paused.emit(False)
+    usb.live_paused.emit(True)                     # stalled again after the reconnect
+    _app.processEvents()
+    assert "try 1 of 2" in mon.canvas.message      # the tries' message stays
+    usb.live_not_back.emit()
+    _app.processEvents()
+    assert "Unplug the camera's USB cable and plug it back in" in mon.canvas.message
     usb.live_paused.emit(True)
     _app.processEvents()
-    assert "paused" not in mon.canvas.message
+    assert "Unplug" in mon.canvas.message
+    # a picture: live view is back, and the next stop is reported afresh
+    mon._live_trouble = None
+    usb.live_paused.emit(True)
+    _app.processEvents()
+    assert mon.canvas.message.startswith("Live view stopped.\nChecking")
+    # the picture from a capture device: not this camera's live view
+    mon.canvas.set_message("")
+    mon._live_trouble = None
+    mon.camera_combo.setCurrentIndex(mon.camera_combo.findData(0))
+    usb.live_paused.emit(True)
+    usb.live_restarting.emit(1, 2)
+    usb.live_not_back.emit()
+    _app.processEvents()
+    assert mon.canvas.message == ""

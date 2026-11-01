@@ -22,6 +22,12 @@ EXPOSURE_EVERY_S = 3.0
 FRAME_WAIT_S = 0.2          # a source read waits this long for a new frame
 IDLE_LIVE_S = 0.02          # live view wanted but nothing came this turn: pause
 RESUME_GRACE_S = 3.0        # after a hold, live view gets this long before a reconnect
+# Live view that doesn't come back is reconnected; each try gets the gap after
+# it (seconds) to bring a picture, then the next try, then it is given up on
+# (`live_not_back`, which asks for the cable to be unplugged and plugged in:
+# the user, 2026-11-01, after Measure / Meter, found reconnecting brought back
+# a picture that never changed, and only replugging the cable restarted it).
+RESTART_GAPS_S = (3.0, 8.0)
 
 
 class UsbCamera(WorkerThread):
@@ -36,6 +42,8 @@ class UsbCamera(WorkerThread):
     fired = Signal()
     fire_failed = Signal(str)
     live_paused = Signal(bool)          # live view stuck busy after giving frames
+    live_restarting = Signal(int, int)  # reconnecting to restart live view: try, of
+    live_not_back = Signal()            # every try made, live view still stopped
     # spec/usb-exposure-control.md
     exposure_choices = Signal(dict)     # {"shutter": [...], "iso": [...]}; {} = none
     exposure_set = Signal(dict)         # {field: (ok, text, value)}
@@ -54,7 +62,8 @@ class UsbCamera(WorkerThread):
         self._live = False
         self._paused = False
         self._resume_at = None           # when a hold ended, until a frame comes
-        self._restarted = False          # one reconnect per hold / per stall
+        self._restarts = 0               # reconnects since live view was last seen
+        self._restart_due = None         # when the next try is due (None: none planned)
         self._hold_live = False          # no previews while held (film base, Shoot)
         self._want = {}                  # exposure asked for, latest wins
         self._want_zoom = None           # magnification asked for, latest wins
@@ -96,7 +105,8 @@ class UsbCamera(WorkerThread):
         was, self._hold_live = self._hold_live, bool(on)
         if was and not on:
             self._resume_at = self._clock()
-            self._restarted = False
+            self._restarts = 0
+            self._restart_due = None
         self._wake.set()
 
     def set_zoom(self, level):
@@ -205,7 +215,8 @@ class UsbCamera(WorkerThread):
                                 print(f"usb camera: live view back {took:.1f} s after "
                                       "the hold")
                         self._resume_at = None
-                        self._restarted = False
+                        self._restarts = 0
+                        self._restart_due = None
                     elif getattr(self.backend, "no_preview", False):
                         self.state.emit("nopreview", self.model)
                     stalled = getattr(self.backend, "live_stalled", None)
@@ -231,6 +242,15 @@ class UsbCamera(WorkerThread):
                         self._resume_at = None
                         self._restart_live(f"no live view {RESUME_GRACE_S:g} s after "
                                            "measuring / shooting")
+                    if (not data and self._restart_due is not None
+                            and self._clock() >= self._restart_due):
+                        self._restart_due = None
+                        if self._restarts >= len(RESTART_GAPS_S):
+                            print(f"usb camera: live view still stopped after "
+                                  f"{self._restarts} reconnects; giving up")
+                            self.live_not_back.emit()
+                        else:
+                            self._restart_live("live view still not back")
                 events = self.backend.poll(0.01 if self._live else 0.1)
                 if self._live and not data and not events:
                     # No frame (camera busy, backing off) and the event check
@@ -309,6 +329,11 @@ class UsbCamera(WorkerThread):
         if parts is None:
             return
         self._shut()
+        # a fresh connection: live view's watch starts over
+        self._paused = False
+        self._resume_at = None
+        self._restarts = 0
+        self._restart_due = None
         backend = self._backend_named(parts[0])
         self.key = key
         if backend is None:
@@ -448,18 +473,26 @@ class UsbCamera(WorkerThread):
             self.zoom_changed.emit(str(level))
 
     def _restart_live(self, why):
-        """Reconnect once to bring live view back (revision 6 of
-        spec/film-base-exposure.md: live view froze after Measure). Never
-        with a shot on its way."""
+        """Reconnect to bring live view back (revision 6 of
+        spec/film-base-exposure.md: live view froze after Measure; revision 7:
+        again after each of RESTART_GAPS_S while it stays stopped, then
+        `live_not_back`). Never with a shot on its way, never while the
+        previous try's gap runs, never again once given up until a picture
+        comes, a hold ends or the camera is opened afresh."""
         restart = getattr(self.backend, "restart_live", None)
-        if restart is None or self._restarted:
+        if restart is None or self._restart_due is not None:
+            return False
+        if self._restarts >= len(RESTART_GAPS_S):
             return False
         pending = getattr(self.backend, "shot_pending", None)
         if callable(pending) and pending():
             self._resume_at = self._clock()      # look again once the shot is in
             return False
-        self._restarted = True
-        print(f"usb camera: {why}; reconnecting to restart it")
+        self._restarts += 1
+        self._restart_due = self._clock() + RESTART_GAPS_S[self._restarts - 1]
+        self.live_restarting.emit(self._restarts, len(RESTART_GAPS_S))
+        print(f"usb camera: {why}; reconnecting to restart it "
+              f"(try {self._restarts} of {len(RESTART_GAPS_S)})")
         try:
             return bool(restart())
         except cb.CameraLost:
