@@ -378,6 +378,32 @@ def test_meter_shoots_each_colour_reads_inside_the_guide_and_suggests(film_mon):
     assert mon._frame_metered is None and mon._frame_exposures is None
 
 
+def test_meter_stays_clickable_and_says_what_it_needs(film_mon):
+    mon, usb, light, lm, path = film_mon
+    mon._refresh_frame_line()
+    assert mon.meter_btn.isEnabled()                       # not greyed: it explains
+    assert "First: needs a film base measured for trichrome" in mon.meter_btn.toolTip()
+    assert mon.frame_note.text().startswith("This frame: needs a film base measured for "
+                                            "trichrome first")
+    assert not mon.use_frame_btn.isEnabled()
+    assert "Nothing to use yet" in mon.use_frame_btn.toolTip()
+    # a film base measured for the other scan type says so
+    entry = be.entry("Ektar W", {"w": {"shutter": "1/4", "iso": "100", "base": 0.85,
+                                       "levels": None}})
+    mon._bases = be.add(mon._bases, entry)
+    mon._refresh_film_bases()
+    mon._refresh_frame_line()
+    assert "“Ektar W” was measured for one exposure; Measure Again for trichrome" in \
+        mon.frame_note.text()
+    _with_base(mon)
+    mon.actions["guide"].setChecked(False)
+    mon._refresh_frame_line()
+    assert "First: the frame guide on" in mon.meter_btn.toolTip()
+    mon.actions["guide"].setChecked(True)
+    mon._refresh_frame_line()
+    assert "First:" not in mon.meter_btn.toolTip()
+
+
 def test_meter_needs_the_guide_and_a_film_base(film_mon):
     mon, usb, light, lm, path = film_mon
     assert not mon.start_frame_meter()

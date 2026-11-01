@@ -2128,7 +2128,13 @@ class LiveCaptureMonitor(QWidget):
         tri = self.scan_type() == "trichrome"
         base = self._film_base()
         if be.exposures_for(base, tri) is None:
-            return "This frame: measure the film base first."
+            kind = "trichrome" if tri else "one exposure"
+            if not base:
+                return (f"This frame: needs a film base measured for {kind} first "
+                        "(Film base → Measure…).")
+            return (f"This frame: “{base['name']}” was measured for "
+                    f"{'one exposure' if tri else 'trichrome'}; Measure Again for {kind} "
+                    "(right-click the film base).")
         shutters = self._exp_choices.get("shutter") or []
         if not shutters:
             return "This frame: needs a USB camera whose shutter speed FreeCCR can set."
@@ -2184,11 +2190,45 @@ class LiveCaptureMonitor(QWidget):
         self._frame_suggestion = sug
         self.frame_note.setText(text)
         busy = self._measure is not None or self.sequence.running
-        self.use_frame_btn.setEnabled(bool(sug is not None and sug.changes and not busy))
+        usable = bool(sug is not None and sug.changes and not busy)
+        self.use_frame_btn.setEnabled(usable)
         self.use_frame_btn.setText("Using for This Frame" if self._frame_exposures
                                    else "Use for This Frame")
+        self.use_frame_btn.setToolTip(
+            self._USE_TIP if usable else
+            "Nothing to use yet: " + (
+                "this frame is within a sixth of a stop of the film base's exposures."
+                if sug is not None else
+                "press Meter, or turn the frame guide on with the film base clicked "
+                "(Negative Preview → Film Base) for the live estimate."))
+        # Meter stays clickable (it says what's missing when pressed); it is
+        # off only while a shot, measuring or another metering is running
         metering = self._measure is not None and self._measure.get("kind") == "frame"
-        self.meter_btn.setEnabled(metering or (not isinstance(ctx, str) and not busy))
+        self.meter_btn.setEnabled(metering or not busy)
+        why = self._meter_blocker(ctx)
+        self.meter_btn.setToolTip(self._METER_TIP + (f"\n\nFirst: {why}" if why else ""))
+
+    _METER_TIP = ("One RAW test shot per colour at the film base's exposures, read "
+                  "inside the frame guide: this frame's exposure exactly. The shots "
+                  "aren't kept.")
+    _USE_TIP = ("The next Shoot uses this frame's exposures (longer for a dense frame), "
+                "then it goes back to the film base's. Only the shutter speed and ISO "
+                "change, so the file records it and conversion follows.")
+
+    def _meter_blocker(self, ctx=None):
+        """What Meter still needs, in words, or "" when it can go."""
+        ctx = self._frame_context() if ctx is None else ctx
+        if isinstance(ctx, str):
+            return ctx.replace("This frame: ", "")
+        if not self.usb.is_open():
+            return "the USB camera open."
+        if self.scan_type() == "trichrome" and not self.light.is_open():
+            return "the Scanlight connected (it lights each colour)."
+        if not self.actions["guide"].isChecked():
+            return "the frame guide on, placed on the frame (toolbar → Frame guide)."
+        if self.magnified():
+            return "Camera zoom back to Whole."
+        return ""
 
     def _on_use_frame(self):
         sug = self._frame_suggestion
