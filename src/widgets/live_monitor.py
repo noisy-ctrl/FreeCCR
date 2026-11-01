@@ -990,6 +990,7 @@ class LiveCaptureMonitor(QWidget):
         c = self.canvas
         c.view_changed.connect(self._push_params)
         c.picked.connect(self._on_picked)
+        c.box_picked.connect(self._on_box_picked)
         c.area_drawn.connect(lambda a: (self._push_params(), self._save_view_state()))
         c.line_placed.connect(lambda x: self._save_view_state())
         c.guide_changed.connect(lambda g: self._save_view_state())
@@ -1755,6 +1756,29 @@ class LiveCaptureMonitor(QWidget):
         self._pick_target = key
         self.canvas.set_mode("pick")
 
+    def _on_box_picked(self, rect):
+        """A box dragged in a box pick (the film base): Measure reads the box;
+        Negative Preview's base is its centre's colour, as for a click."""
+        if self._pick_target != "base":
+            cx = 0.5 * (rect[0] + rect[2])
+            cy = 0.5 * (rect[1] + rect[3])
+            g = self.canvas.geometry_()
+            if g is not None:
+                self._on_picked(cx * g.full_w, cy * g.full_h)
+            return
+        self._base_box = tuple(float(v) for v in rect)
+        full = self.feed.last_full_frame()
+        g = self.canvas.geometry_()
+        if full is not None and getattr(full, "ndim", 0) >= 2:
+            h, w = full.shape[:2]
+        elif g is not None:
+            w, h = g.full_w, g.full_h
+        else:
+            w = h = 1
+        cx = 0.5 * (rect[0] + rect[2])
+        cy = 0.5 * (rect[1] + rect[3])
+        self._on_picked(cx * w, cy * h)
+
     def _on_picked(self, sx, sy):
         target, self._pick_target = self._pick_target, None
         if target is None:
@@ -1767,6 +1791,7 @@ class LiveCaptureMonitor(QWidget):
             if full is not None and getattr(full, "ndim", 0) >= 2:
                 h, w = full.shape[:2]
                 self._neg_base_pos = (sx / max(1, w), sy / max(1, h), w, h)
+                self._base_click_used = False         # a new click: Measure may use it
             if self._pending_measure is not None:
                 name, index = self._pending_measure
                 self._pending_measure = None
@@ -2573,15 +2598,25 @@ class LiveCaptureMonitor(QWidget):
         light round the film, which would expose the base a stop or more
         under, so anything less asks for the click."""
         fresh, self._fresh_base_click = getattr(self, "_fresh_base_click", False), False
+        box, self._base_box = getattr(self, "_base_box", None), None
+        if fresh and box is not None:
+            return tuple(box), "the box you drew"
         if self._neg_base_pos is not None:
             fx, fy, w, h = self._neg_base_pos
             # an older click inside the frame guide is another roll's, or a gap
             # that has since been wound on into a frame (the user, 2026-11-01:
             # a new roll's Measure read the picture there and failed as
-            # uneven): ask again. A click made for this Measure always counts.
-            if fresh or not (self.actions["guide"].isChecked()
-                             and fm.inside_guide(dict(self.canvas.guide), fx, fy, w, h)):
+            # uneven): ask again. A click made for this Measure always counts;
+            # an older one counts once (a Measure that used it, or failed,
+            # asks next time: "if the first measure doesn't work and then I
+            # click measure again, it doesn't allow me to pick").
+            if fresh or not (getattr(self, "_base_click_used", False)
+                             or getattr(self, "_ask_where", False)
+                             or (self.actions["guide"].isChecked()
+                                 and fm.inside_guide(dict(self.canvas.guide), fx, fy, w, h))):
                 return be.patch_around(fx, fy, w, h), "where you clicked"
+        if getattr(self, "_ask_where", False):
+            return None, ""                          # the last Measure failed: ask where
         frame = self.feed.last_full_frame()
         if frame is None:
             return None, ""
@@ -2623,10 +2658,11 @@ class LiveCaptureMonitor(QWidget):
             # revision 5: the pointer carries the patch, so the click shows
             # exactly what will be read
             self.canvas.set_mode("pick", box=be.PATCH_SIDE,
-                                 hint="Click the film base: the box is the patch measured"
-                                      "  ·  Esc cancels")
-            self._note_caption("Click the film base in the picture (the clear border "
-                               "beside the frame): measuring starts after.  Esc cancels.")
+                                 hint="Click the film base, or drag a box over it: the box is "
+                                      "what's measured  ·  Esc cancels")
+            self._note_caption("Click the film base in the picture (the clear border beside "
+                               "the frame), or drag a box over it: a tall thin one fits the "
+                               "gap between frames. Measuring starts after.  Esc cancels.")
             return False
         self._used()
         if tri:
@@ -2717,15 +2753,13 @@ class LiveCaptureMonitor(QWidget):
         rect = m.get("read_arg", m["rect"])
         read = m.get("read") or self._read_patch
 
+        m["last_path"] = path
+
         def work():
             try:
                 out = read(path, rect)
             except Exception as e:
                 out = e
-            try:
-                os.remove(path)
-            except OSError:
-                pass
             self._patch_read.emit(token, out)
 
         import threading
@@ -2742,10 +2776,36 @@ class LiveCaptureMonitor(QWidget):
             cal.cancel()
         else:
             cal.landed(reading)
+        path, m["last_path"] = m.get("last_path"), None
+        if path:
+            if cal.done and cal.error not in (None, "cancelled") and m.get("kind") != "frame":
+                m["kept"] = self._keep_failed_shot(path)      # to look into
+            else:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
         if cal.done:
             self._measure_finish()
         else:
             self._measure_next()
+
+    def _keep_failed_shot(self, path):
+        """Move the test shot of a failed Measure out of the temp folder (it is
+        deleted with it) to `<app data>/measure-failed/`, so what it read can be
+        looked into; its path, or None."""
+        try:
+            from core.catalog import default_catalog_path
+            import shutil
+            d = os.environ.get("FREECCR_MEASURE_KEEP") or os.path.join(
+                os.path.dirname(default_catalog_path()), "measure-failed")
+            os.makedirs(d, exist_ok=True)
+            dest = os.path.join(d, time.strftime("%Y%m%d-%H%M%S-") + os.path.basename(path))
+            shutil.move(path, dest)
+            return dest
+        except Exception as ex:
+            print(f"measure: keeping the failed shot: {ex}")
+            return None
 
     def _measure_stop(self):
         """Stop: at once, or once the shot on its way has landed (a shot is
@@ -2803,7 +2863,12 @@ class LiveCaptureMonitor(QWidget):
             if cal.error == "cancelled":
                 self._note_caption("Measuring stopped; nothing was saved.")
             else:
-                self._warn_caption(cal.error or "Measuring didn't finish.")
+                kept = m.get("kept")
+                self._warn_caption((cal.error or "Measuring didn't finish.")
+                                   + (f" The test shot is kept: {kept}" if kept else ""))
+        if m.get("kind") != "frame":
+            self._base_click_used = True
+            self._ask_where = cal.error not in (None, "cancelled")
         if self._exp_held:
             held, self._exp_held = self._exp_held, {}
             self._send_exposure(held)

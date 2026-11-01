@@ -285,6 +285,37 @@ def test_an_uneven_patch_stops_it():
     assert not cal.done
 
 
+def test_a_part_clipped_patch_goes_shorter_instead_of_failing_as_uneven():
+    """2026-11-01: the first red shot of the base, part clipped, read as
+    "isn't even". A pile on one top value is the clip: back off first."""
+    cal = be.Calibration(["r"], TRI, SPEEDS, ISOS, '1/8')
+    c, levels, exp = cal.next_shot()
+    clipped = be.Reading(levels={"R": 0.90, "G": 0.3, "B": 0.1},
+                         spreads={"R": 0.15, "G": 0.01, "B": 0.01},
+                         piles={"R": 0.30, "G": 0.0, "B": 0.0})
+    cal.landed(clipped)
+    assert not cal.done and cal.error is None
+    assert be.seconds(cal.next_shot()[2]["shutter"]) < be.seconds('1/8')      # shorter
+    # not piled, as uneven: stops, and says by how much
+    cal = be.Calibration(["r"], TRI, SPEEDS, ISOS, '1/8')
+    cal.next_shot()
+    cal.landed(be.Reading(levels={"R": 0.5}, spreads={"R": 0.15}, piles={"R": 0.0}))
+    assert cal.done and "isn't even" in cal.error and "varies 15 %" in cal.error
+
+
+def test_a_reading_counts_a_pile_at_the_top_value():
+    h, w = 32, 32
+    cols = np.tile(np.array([[0, 1], [3, 2]]), (h // 2, w // 2))
+    frac = np.full((h, w), 0.6)
+    frac[:, :12] = 0.97                                     # a third piled at one value
+    m = (1024 + frac * (16383 - 1024)).astype(np.uint16)
+    r = be.reading_from_mosaic(m, cols, "RGBG", [1024] * 4, 16383)
+    assert r.piled("r") == pytest.approx(12 / 32, abs=0.02)
+    even = (1024 + np.random.default_rng(1).normal(0.6, 0.01, (h, w)) * (16383 - 1024)
+            ).astype(np.uint16)
+    assert be.reading_from_mosaic(even, cols, "RGBG", [1024] * 4, 16383).piled("r") < 0.02
+
+
 def test_cancel_and_failure_end_it():
     cal = be.Calibration(be.COLOURS, TRI, SPEEDS, ISOS, '1/8')
     cal.next_shot()

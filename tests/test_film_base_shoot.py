@@ -399,7 +399,8 @@ class FilmCam(FakeUsb):
         if levels.get("w"):
             for c, ch in (("r", "R"), ("g", "G"), ("b", "B")):
                 out[ch] = min(CEILING, K[c] * e * levels["w"] / 255.0)
-        return be.Reading(levels=out, spreads={ch: 0.01 for ch in "RGB"})
+        spread = 0.2 if getattr(self, "uneven", False) else 0.01
+        return be.Reading(levels=out, spreads={ch: spread for ch in "RGB"})
 
 
 @pytest.fixture
@@ -514,7 +515,7 @@ def test_with_no_patch_it_asks_for_a_click_then_measures(film_mon):
     assert mon._measure is None and mon._pending_measure == ("HP5", None)
     assert mon.canvas.mode == "pick" and "Click the film base" in mon.capture_caption.text()
     assert mon.canvas.pick_box == be.PATCH_SIDE                 # revision 5: the box
-    assert "the box is the patch measured" in mon.canvas.pick_hint
+    assert "the box is what's measured" in mon.canvas.pick_hint
     mon.feed.full = np.zeros((480, 640, 3), np.uint8)
     mon.feed.samples["any"] = (200.0, 150.0, 120.0)
     mon._on_picked(320.0, 24.0)
@@ -641,6 +642,58 @@ def test_an_old_click_inside_the_frame_guide_asks_again(film_mon):
     assert _wait(lambda: mon._measure is not None, 5)
     assert mon._measure["rect"] == pytest.approx(be.patch_around(0.55, 230 / 480, 640, 480))
     mon._measure_stop()
+
+
+def test_a_drawn_box_is_measured(film_mon):
+    """2026-11-01: "Would it not help that I draw a sample area box?" A drag
+    in the Measure pick reads the box drawn."""
+    mon, usb, light, lm, path = film_mon
+    import numpy as np
+    mon._ask_film_base_name = lambda default: "Box"
+    mon.feed.full = None
+    mon.measure_btn.click()
+    assert mon.canvas.mode == "pick" and "drag a box" in mon.canvas.pick_hint
+    mon.feed.full = np.zeros((480, 640, 3), np.uint8)
+    mon.feed.samples["any"] = (200.0, 150.0, 120.0)
+    box = (0.48, 0.10, 0.51, 0.80)                          # tall and thin: a frame gap
+    mon.canvas.box_picked.emit(box)
+    assert _wait(lambda: mon._measure is not None, 5)
+    assert mon._measure["rect"] == pytest.approx(box)
+    assert mon.canvas.mark[0] == pytest.approx(box)
+    mon._measure_stop()
+
+
+def test_a_failed_measure_keeps_its_shot_and_asks_where_next_time(film_mon):
+    """2026-11-01: "if the first measure doesn't work and then I click measure
+    again, it doesn't allow me to pick from a new location"."""
+    mon, usb, light, lm, path = film_mon
+    import numpy as np
+    usb.uneven = True
+    mon._ask_film_base_name = lambda default: "Gold"
+    mon._neg_base_pos = (0.5, 0.05, 640, 480)
+    mon.measure_btn.click()
+    assert _wait(lambda: mon._measure is None, 20)
+    caption = mon.capture_caption.text()
+    assert "isn't even" in caption and "The test shot is kept:" in caption
+    kept = caption.split("The test shot is kept: ", 1)[1].strip()
+    assert os.path.isfile(kept) and kept.startswith(os.environ["FREECCR_MEASURE_KEEP"])
+    # Measure again: it asks where (the same old click would fail the same way)
+    usb.uneven = False
+    mon.feed.full = None
+    mon.measure_btn.click()
+    assert mon._measure is None and mon.canvas.mode == "pick"
+    mon.feed.full = np.zeros((480, 640, 3), np.uint8)
+    mon.feed.samples["any"] = (200.0, 150.0, 120.0)
+    mon._on_picked(100.0, 30.0)
+    assert _wait(lambda: mon._measure is not None, 5)
+    assert _wait(lambda: mon._measure is None, 20)
+    assert mon._film_base()["name"].startswith("Gold")
+    # a success used the click: the next Measure asks again too
+    mon.feed.full = None
+    mon.measure_btn.click()
+    assert mon._measure is None and mon.canvas.mode == "pick"
+    mon.canvas.set_mode(None)
+    mon._pending_measure = None
 
 
 def test_trichrome_measures_each_led_from_full_whatever_the_preset(film_mon):

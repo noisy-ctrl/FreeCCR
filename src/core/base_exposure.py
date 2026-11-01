@@ -31,6 +31,8 @@ MAX_SPREAD = 0.08         # IQR / median of the patch: more is not an even base
 SPREAD_FROM = 0.10        # ... judged only from this level up (below, shot noise alone
                           # can spread a dim patch that much)
 PATCH_SIDE = 0.03         # a clicked point's patch: this share of the short side
+PILE_SHARE = 0.02         # this share of a colour's photosites on one top value: clipped
+PILE_FROM = 0.5           # ... when that value is at least this of the range
 CELLS = 4                 # the patch is read in CELLS x CELLS cells ...
 CELLS_MIN = 9             # ... on the largest group of cells that agree, if that is
                           # most of the patch (half and half is still uneven)
@@ -109,6 +111,7 @@ class Reading:
     levels: dict = field(default_factory=dict)     # "R" / "G" / "B" -> median
     spreads: dict = field(default_factory=dict)
     counts: dict = field(default_factory=dict)
+    piles: dict = field(default_factory=dict)      # share at the patch's own top value
 
     def channel(self, colour):
         if colour in CHANNEL:
@@ -120,6 +123,11 @@ class Reading:
 
     def spread(self, colour):
         return float(self.spreads.get(self.channel(colour), 0.0))
+
+    def piled(self, colour):
+        """Share of the colour's photosites sitting on one top value: the
+        sensor's clip, wherever the file's white level says it is."""
+        return float(self.piles.get(self.channel(colour), 0.0))
 
 
 def _pixel_box(rect, w, h):
@@ -160,7 +168,13 @@ def reading_from_mosaic(mosaic, colors, desc, black, white, rect=(0.0, 0.0, 1.0,
         if not sel.any():
             continue
         b = blk[cols[sel]] if blk.size > 1 else np.float32(blk[0] if blk.size else 0.0)
-        f = (m[sel] - b) / np.maximum(float(white) - b, 1.0)
+        raw = m[sel]
+        f = (raw - b) / np.maximum(float(white) - b, 1.0)
+        # a pile on the top value is the clip (2026-11-01: a red-only shot of
+        # the base at the camera's speed, part clipped, read as "uneven")
+        top = float(raw.max())
+        f_top = float(np.max(f))
+        out.piles[name] = (float(np.mean(raw >= top)) if f_top >= PILE_FROM else 0.0)
         f = f[_agreeing_cells(f, cell[sel])]
         med = float(np.median(f))
         p25, p75 = (float(v) for v in np.percentile(f, (25, 75)))
@@ -338,6 +352,7 @@ class Calibration:
         self.shutters = allowed_shutters(shutters, self.rules)
         self.result, self.notes = {}, []
         self.error = None
+        self.uneven = None                   # (level, spread) when the patch failed as uneven
         self.done = False
         self.shots = 0                       # all colours
         self._i = 0
@@ -376,12 +391,18 @@ class Calibration:
         c = self.colours[self._i]
         level = reading.level(c)
         t = seconds(self._shutter)
-        if level >= SPREAD_FROM and reading.spread(c) > MAX_SPREAD:
+        # clipped first: a part-clipped patch is uneven only because of the
+        # clip, and a shorter shot settles it (2026-11-01)
+        clipped = level >= CLIP_TRUST or reading.piled(c) >= PILE_SHARE
+        if not clipped and level >= SPREAD_FROM and reading.spread(c) > MAX_SPREAD:
+            self.uneven = (level, reading.spread(c))
             return self._end(error="The film base patch isn't even (dust, edge print or "
                                    "the picture's edge?): click the film base in Negative "
-                                   "Preview, then Measure again.")
+                                   "Preview, then Measure again. (It varies "
+                                   f"{reading.spread(c) * 100:.0f} % across the patch, at "
+                                   f"{level * 100:.0f} % of the range.)")
         self._tried[self._key()] = level
-        if level >= CLIP_TRUST:
+        if clipped:
             shorter = self._at_or_below(t / BIG_STEP)
             if seconds(shorter) < t:
                 self._shutter = shorter

@@ -276,12 +276,27 @@ def test_the_pick_box_is_the_patch_a_click_reads():
     r = c._frac_rect(g, want)
     assert 10 < r.width() < 30                                # 32 sensor px at half size
     assert _white_ring(c.grab().toImage(), r) > 0.8
-    # a click picks the centre, and the mode (and box) end
+    # a click picks the centre (on release), and the mode (and box) end
     got = []
     c.picked.connect(lambda x, y: got.append((x, y)))
     _press(c, (300, 200))
+    assert not got                                            # a drag may follow
+    _release(c, (301, 200))
     assert got and c.mode is None and c.pick_box is None and c._hover is None
     assert _white_ring(c.grab().toImage(), r) < 0.2
+    # a drag draws the box instead (2026-11-01: a tall thin one fits a frame gap)
+    boxes = []
+    c.box_picked.connect(boxes.append)
+    c.set_mode("pick", box=be.PATCH_SIDE)
+    _press(c, (300, 100))
+    _move(c, (310, 160))
+    assert c._rubber is not None
+    _release(c, (310, 160))
+    a = g.to_sensor(300 * c.dpr(), 100 * c.dpr())
+    b = g.to_sensor(310 * c.dpr(), 160 * c.dpr())
+    want = (a[0] / g.full_w, a[1] / g.full_h, b[0] / g.full_w, b[1] / g.full_h)
+    assert len(boxes) == 1 and boxes[0] == pytest.approx(want)
+    assert len(got) == 1 and c.mode is None
 
 
 def test_the_measured_patch_is_outlined_until_cleared():
