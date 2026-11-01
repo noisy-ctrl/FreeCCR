@@ -3756,6 +3756,29 @@ class LiveCaptureMonitor(QWidget):
             return
         if time.monotonic() - self._last_use < mins * 60:
             return
+        self._go_to_sleep(lit, camera, feed_key, usb_key,
+                          f"after {mins} min without use")
+
+    def sleep_for_quit(self):
+        """The app's Quit? box is up: the light off and the camera let go
+        while it asks (the user, 2026-11-01); True if anything was put to
+        sleep, so `wake_after_quit` can put it back on No."""
+        if self._closing or self._sleeping is not None:
+            return False
+        if self.sequence.running or self._measure is not None:
+            return False                              # a shot in flight finishes first
+        lit = self.light.is_open() and any(self._levels.values())
+        feed_key, usb_key = self._camera_keys()
+        camera = feed_key is not None or usb_key is not None or self.usb.is_open()
+        if not (lit or camera):
+            return False
+        self._go_to_sleep(lit, camera, feed_key, usb_key, "while FreeCCR asked to quit")
+        return True
+
+    def wake_after_quit(self):
+        self._wake()
+
+    def _go_to_sleep(self, lit, camera, feed_key, usb_key, why):
         # Asleep: the light off and the camera let go (spec/live-capture-monitor.md,
         # revision 2026-10-31); Wake puts back exactly this
         self._sleeping = dict(self._levels)
@@ -3772,7 +3795,7 @@ class LiveCaptureMonitor(QWidget):
                 else "The Scanlight turned off" if lit else "The camera was let go")
         back = ("puts them back" if lit and camera
                 else "puts it back at the levels it had" if lit else "reconnects it")
-        self.wake_note.setText(f"{what} after {mins} min without use. Wake {back}.")
+        self.wake_note.setText(f"{what} {why}. Wake {back}.")
         self._place_wake_overlay()
         self.wake_overlay.setVisible(True)
         self._refresh_light_status()

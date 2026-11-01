@@ -746,3 +746,23 @@ Tests: the window from Capture is parented to it and passed to
 `light_dialog`, from the main window it isn't; its palette's Window is
 `LIGHT_TOKENS["window"]`; Capture is raised immediately and once more after
 the event loop.
+
+## Revision 2026-11-01 (6): the light off and the camera let go on close and at Quit?
+The user: "Closing the capture window should shut off the light and connection
+to camera … Closing the program should do the same", then "Turn the light off
+and release the camera when Capture closes and the Quit? box appears."
+- **Closing** already sent OFF and closed the port, but straight after the
+  write: the bytes could be dropped with the port, and the light stayed on.
+  `LightLink.shutdown` now drains (`ser.flush()`, pyserial's tcdrain) and
+  waits `DRAIN_S` (50 ms) before closing. The camera was and is released by
+  the USB worker's stop (`backend.close()` → libgphoto2's exit).
+- **The Quit? box**: `MainWindow.closeEvent` calls
+  `LiveCaptureMonitor.sleep_for_quit()` before asking (`_confirm_quit`, the
+  test seam): the same sleep as idle (`_go_to_sleep`: light OFF, camera
+  closed, the Wake overlay, "… while FreeCCR asked to quit"), skipped while a
+  shot or a Measure is in flight. No → `wake_after_quit()` = Wake; Yes →
+  Capture closes as before.
+Tests: shutdown writes OFF, flushes, then closes (in that order, one drain
+wait); the Quit box sleeps Capture and No wakes it to the same levels and
+camera; the main window's closeEvent calls them in that order and ignores the
+event on No.
