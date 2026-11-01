@@ -133,3 +133,14 @@ magnified.
 - With any frame's exposure unknown, the Convert All roll check scales
   nothing (exactly the old one); with all known it no longer mistakes a frame
   shot longer for light round the film (tested).
+
+## Revision 1 (2026-11-01): Meter says what it needs instead of greying out
+The user: "The per frame meter option is greyed out... How can I use?" Meter
+was disabled whenever the film base wasn't measured for the current scan
+type, with the reason only in the small line above it. Now Meter stays
+clickable (off only while a shot, measuring or another metering runs) and its
+tooltip ends "First: …" with what is missing (`_meter_blocker`: a film base
+for this scan type — naming one measured for the other type — the USB camera,
+the Scanlight for trichrome, the frame guide, Camera zoom back to Whole); a
+press says the same in the caption. Use for This Frame's tooltip says why
+there is nothing to use yet. The line names the scan type it needs.
