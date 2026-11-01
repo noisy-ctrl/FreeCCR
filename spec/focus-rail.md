@@ -236,7 +236,13 @@ There is no focus ring."
   **4** (SFU1204, the usual small ball screw; the comment lists SFU1605 = 5,
   SFU1610 = 10, read off the screw's code): 1/16 microsteps → 3200 steps a
   turn, **800 steps/mm, 1.25 µm a step**, a quarter turn = 800 steps = 1 mm.
-  The lead is to be confirmed by the user when he flashes it.
+  Confirmed by the user the same day: "SFU1204 ballscrew, full length is
+  300mm". `SCREW_LENGTH_MM` 300 is now HOME's give-up distance (it was
+  TRAVEL + 10 mm, which an underestimated TRAVEL could make too short to
+  reach home from the far end), and `TRAVEL_MM`, the soft limit once homed,
+  is 200: roughly the stroke a 300 mm SFU1204 leaves after its end blocks
+  and nut (an estimate; the comment says to measure it). Neither matters
+  until an end stop is fitted (`HOME_MODE` none: no HOME, no limits).
 - The rail reports **`STEPS_PER_REV`** (optional HELLO field;
   `RailCore::Config::stepsPerRev`; `orp.parse_reply` → `steps_per_rev`,
   `RailClient.steps_per_rev()`), so FreeCCR shows distances in his terms:
