@@ -514,7 +514,10 @@ class GraphicsImageView(QGraphicsView):
                             means = np.mean(crop.reshape(-1, 3), axis=0)
                             bgr_tuple = (float(means[0]), float(means[1]), float(means[2]))
                             if mode == "black":
-                                ccr_backend.set_black_point(bgr_tuple)
+                                # with the exposure it was read at, so frames
+                                # shot longer get it scaled (spec/frame-exposure.md §5)
+                                ccr_backend.set_black_point(
+                                    bgr_tuple, ccr_backend.image_exposure(img_obj))
                                 try:
                                     pw.parent().parent().sliders_panel.on_bwpoint_sampled(mode)
                                 except AttributeError:

@@ -2039,6 +2039,7 @@ class MainWindow(QMainWindow):
         # rolls/stocks have different base colour + density, so a previous
         # roll's point must not carry over.
         ccr_backend.black_point_bgr = None
+        ccr_backend.black_point_exposure = None
         ccr_backend.white_point_bgr = None
         # And the film-stock selection resets for the same reason (the combo
         # sync also clears the backend copy).
@@ -2425,10 +2426,17 @@ class MainWindow(QMainWindow):
         bp = encode_bwpoint(ccr_backend.black_point_bgr)
         if bp is not None:
             self._settings.setValue("convert/black_point_bgr", bp)
+            # the exposure it was read at (spec/frame-exposure.md §5)
+            exp = getattr(ccr_backend, "black_point_exposure", None)
+            if exp:
+                self._settings.setValue("convert/black_point_exposure", float(exp))
+            else:
+                self._settings.remove("convert/black_point_exposure")
         elif ccr_backend.black_point_bgr is None:
             # an explicit clear (✕ or Reset Black Point) sticks across a
             # restart (spec/bw-point-menu.md)
             self._settings.remove("convert/black_point_bgr")
+            self._settings.remove("convert/black_point_exposure")
         # A cleared white point must be removed, else it would be restored next
         # session and override the default-slope choice.
         if ccr_backend.white_point_bgr is None:
@@ -2499,6 +2507,7 @@ class MainWindow(QMainWindow):
             self._close_session_for_tether()
         # the roll's own state, as a new batch resets it (in memory only)
         ccr_backend.black_point_bgr = None
+        ccr_backend.black_point_exposure = None
         ccr_backend.white_point_bgr = None
         self.sliders_panel.reset_film_stock_combo()
         # rejected combinations belonged to the roll just closed
@@ -2568,7 +2577,11 @@ class MainWindow(QMainWindow):
             self._settings.value("convert/black_point_bgr", "", type=str))
         self._settings.remove("convert/white_point_bgr")
         if bp is not None:
-            ccr_backend.set_black_point(bp)
+            try:
+                exp = float(self._settings.value("convert/black_point_exposure", 0) or 0)
+            except (TypeError, ValueError):
+                exp = 0.0
+            ccr_backend.set_black_point(bp, exp or None)
 
     # --- Replacing the session ------------------------------------------------
     def _confirm_replace_session(self) -> bool:
