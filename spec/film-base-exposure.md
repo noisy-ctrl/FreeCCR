@@ -514,3 +514,37 @@ sample." Two causes, both fixed:
   base and half off is still uneven. An even patch reads exactly as before.
   Tests: a patch three quarters on the base with a dust speck reads the base
   (to 0.002) and passes the evenness check; half-and-half is still uneven.
+
+## Revision 2026-11-01 (7): clipped before uneven, a drawn box, and asking again
+The user, after revision (6): "The measure is still broken in the same way. I
+sample the film base, it fires one red image and then says the base film
+patch isn't even", "Would it not help that I draw a sample area box?", and
+"if the first measure doesn't work and then I click measure again, it doesn't
+allow me to pick from a new location".
+- **Clipped first.** The first shot is at the camera's speed with the red LED
+  at full; a base partly clipped spreads as much as an uneven one, and the
+  evenness test ran before the clip test. A Reading now records, per colour,
+  the share of photosites on the patch's own top value (`piles`, when that
+  value is ≥ `PILE_FROM` 0.5 of the range: the sensor's clip, wherever the
+  file's white level says it is); `PILE_SHARE` 2 % or more, or a median ≥
+  `CLIP_TRUST`, is clipped and goes 3 stops shorter before any evenness
+  verdict. The uneven message now says by how much and at what level.
+- **A drawn box.** In the Measure pick a click still reads the square under
+  the pointer; a drag (≥ `LiveCanvas.DRAG_MIN_PX` 6 px) draws a box, emitted
+  as `box_picked` (sensor fractions) on release, and Measure reads exactly
+  that box (`_base_box`, "the box you drew"); its centre also sets Negative
+  Preview's base, as a click does. A click is now taken on release (a drag
+  may follow).
+- **Asking again.** A Film Base click counts for one Measure (`_base_click_used`
+  from the end of any Measure; a new click clears it), and after a FAILED
+  Measure the next one always asks where (`_ask_where`), before the border
+  found on the live picture is tried again.
+- **The failed shot is kept** (`_keep_failed_shot`): moved out of the temp
+  folder to `<app data>/measure-failed/` (`FREECCR_MEASURE_KEEP` overrides;
+  the tests point it at a temp folder) and named in the caption, so what it
+  read can be looked at.
+Tests: a part-clipped reading goes shorter, an unclipped uneven one stops
+and gives its spread; a pile is counted; a drawn box is measured; a failed
+Measure keeps its shot, and the next one asks where (so does the one after a
+success); the canvas emits `picked` on a click's release and `box_picked` on
+a drag.

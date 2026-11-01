@@ -29,6 +29,9 @@ import tempfile as _tempfile
 _os.environ.setdefault(
     "FREECCR_CROP_MEMORY",
     _os.path.join(_tempfile.mkdtemp(prefix="freeccr-crop-memory-"), "auto_crop_memory.json"))
+# A failed film-base Measure keeps its test shot (spec/film-base-exposure.md):
+# never in the user's app folder from a test.
+_os.environ.setdefault("FREECCR_MEASURE_KEEP", _tempfile.mkdtemp(prefix="freeccr-measure-kept-"))
 
 
 # Background renders give way while the UI is busy (spec/background-yields.md).

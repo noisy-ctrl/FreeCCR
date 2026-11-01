@@ -29,8 +29,10 @@ remove an entry when it ships.
     `tests/test_auto_frame_guide.py`, unused).
 
 ## To check on the user's machine
-- **Film base Measure on a 35 mm roll** (2026-11-01): fixed an old click
-  inside the frame guide and a patch only mostly on the base (4 × 4 cells). If
-  Measure still fails, the caption's text says which step.
+- **Film base Measure on a 35 mm roll** (2026-11-01): it still failed as
+  "isn't even" after the first red shot. Fixed since: a part-clipped patch goes
+  shorter instead, a box can be drawn, Measure asks again after a failure. If
+  it still fails, the caption gives the spread and level and names the kept
+  test shot (`<app data>/measure-failed/`): ask the user before reading it.
 - **The light at Capture's close / the Quit? box** (2026-11-01): the OFF bytes
   are now drained before the port closes; confirm the Scanlight goes dark.

@@ -59,12 +59,14 @@ def guide_ratio(fmt):
 class LiveCanvas(QWidget):
     view_changed = Signal()            # zoom, pan or size changed
     picked = Signal(float, float)      # sensor pixels (eyedropper)
+    box_picked = Signal(object)        # a box pick dragged: sensor fractions (x0, y0, x1, y1)
     area_drawn = Signal(object)        # sensor fractions (x0, y0, x1, y1)
     line_placed = Signal(float)        # sensor fraction across
     guide_changed = Signal(object)     # the guide dict
     pointer_moved = Signal()           # counts as use (idle dimming)
     meter_clicked = Signal()           # a left click on the sharpness readout
     menu_requested = Signal(object)    # a right click on the picture (global QPoint)
+    DRAG_MIN_PX = 6                    # a box pick moved this far is a drag, not a click
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -130,6 +132,7 @@ class LiveCanvas(QWidget):
         as a share of the frame's short side, as `be.patch_around` takes)."""
         self.mode = mode
         self._rubber = None
+        self._pick_press = None
         self.pick_box = box if mode == "pick" else None
         self.pick_hint = hint if mode else None
         if not self.pick_box:
@@ -365,6 +368,12 @@ class LiveCanvas(QWidget):
         if e.button() != Qt.LeftButton or g is None:
             return super().mousePressEvent(e)
         pos = e.position()
+        if self.mode == "pick" and self.pick_box:
+            # a box pick (the film base): a click reads the square under the
+            # pointer, a drag reads the box drawn (2026-11-01: the user asked
+            # to draw it, e.g. tall and thin in the gap between two frames)
+            self._pick_press = QPointF(pos)
+            return
         if self.mode == "pick":
             sx, sy = self._to_sensor(g, pos)
             self.set_mode(None)
@@ -400,7 +409,13 @@ class LiveCanvas(QWidget):
         pos = e.position()
         if self.mode == "pick" and self.pick_box:
             self._hover = QPointF(pos)
+            press = getattr(self, "_pick_press", None)
+            if press is not None and (abs(pos.x() - press.x()) >= self.DRAG_MIN_PX
+                                      or abs(pos.y() - press.y()) >= self.DRAG_MIN_PX):
+                self._rubber = (press, QPointF(pos))
             self.update()
+            if self._rubber is not None:
+                return
         if self._rubber is not None:
             self._rubber = (self._rubber[0], pos)
             self.update()
@@ -466,6 +481,25 @@ class LiveCanvas(QWidget):
 
     def mouseReleaseEvent(self, e):
         g = self.geometry_()
+        press = getattr(self, "_pick_press", None)
+        if press is not None and self.mode == "pick" and g is not None:
+            self._pick_press = None
+            rubber, self._rubber = self._rubber, None
+            if rubber is not None:
+                ax, ay = self._to_sensor(g, rubber[0])
+                bx, by = self._to_sensor(g, rubber[1])
+                x0, x1 = sorted((ax / g.full_w, bx / g.full_w))
+                y0, y1 = sorted((ay / g.full_h, by / g.full_h))
+                x0, y0, x1, y1 = max(0.0, x0), max(0.0, y0), min(1.0, x1), min(1.0, y1)
+                if (x1 - x0) * g.full_w >= 4 and (y1 - y0) * g.full_h >= 4:
+                    self.set_mode(None)
+                    self.box_picked.emit((x0, y0, x1, y1))
+                    return
+            sx, sy = self._to_sensor(g, press)
+            self.set_mode(None)
+            if 0 <= sx < g.full_w and 0 <= sy < g.full_h:
+                self.picked.emit(sx, sy)
+            return
         if self._rubber is not None and g is not None:
             a, b = self._rubber
             self._rubber = None
@@ -578,7 +612,7 @@ class LiveCanvas(QWidget):
             p.drawRect(zr)
             p.setPen(QPen(QColor(255, 255, 255, 230), 1.5, Qt.DashLine))
             p.drawRect(zr)
-        if self.mode == "pick" and self._hover is not None:
+        if self.mode == "pick" and self._hover is not None and self._rubber is None:
             box = self.box_at(self._hover)
             if box is not None:
                 self._paint_box(p, self._frac_rect(g, box), QColor(255, 255, 255, 235))
