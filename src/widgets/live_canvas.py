@@ -637,9 +637,13 @@ class LiveCanvas(QWidget):
         x = max(4.0, min(r.left(), self.width() - w - 4))
         self._paint_label(p, QPointF(x, max(4.0, y)), text)
 
+    READOUT_BAR_W = 72        # the focus bar: short, beside the number
+
     def _paint_readout(self, p, target, sharp):
-        # One number (the user, 2026-10-31: the bar flickered): Focus N,
-        # N = 100·r^4 of the share of best, shown at most 4 times a second
+        # One steady number, Focus N = 100·r^4 of the share of best, shown at
+        # most 4 times a second, and a short bar filled to N % (revision 2 of
+        # spec/sharpness-meter-v2.md: the bar follows the SHOWN number, so it
+        # can't flicker the way the first bar did)
         import time as _t
         from core.live_feed import focus_closeness
         score, best = sharp
@@ -654,11 +658,27 @@ class LiveCanvas(QWidget):
         note = self.readout_note()
         text = note or f"Focus  {self._focus_shown}"
         fm = QFontMetricsF(f)
-        w = max(fm.horizontalAdvance("Focus  100"), fm.horizontalAdvance(text)) + 20
+        text_w = max(fm.horizontalAdvance("Focus  100"), fm.horizontalAdvance(text))
+        bar_w = 0 if note else self.READOUT_BAR_W
+        w = text_w + 20 + (bar_w + 10 if bar_w else 0)
         box = QRectF(target.left() + 12, target.bottom() - 40, w, fm.height() + 14)
         self._readout_rect = QRectF(box)
         path = QPainterPath()
         path.addRoundedRect(box, theme.RADIUS_MD, theme.RADIUS_MD)
         p.fillPath(path, QColor(20, 20, 20, 210))
         p.setPen(QColor(theme.TEXT))
-        p.drawText(box.adjusted(10, 0, -10, 0), Qt.AlignLeft | Qt.AlignVCenter, text)
+        p.drawText(QRectF(box.left() + 10, box.top(), text_w, box.height()),
+                   Qt.AlignLeft | Qt.AlignVCenter, text)
+        self._readout_bar = None
+        if bar_w:
+            track = QRectF(box.left() + 10 + text_w + 10, box.center().y() - 3, bar_w, 6)
+            fill = track.width() * max(0, min(100, self._focus_shown)) / 100.0
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(255, 255, 255, 40))
+            p.drawRoundedRect(track, 3, 3)
+            if fill > 0:
+                p.setBrush(QColor(theme.SUCCESS_HOVER if self._focus_shown >= 95
+                                  else "#d6d6d6"))
+                p.drawRoundedRect(QRectF(track.left(), track.top(), fill, track.height()),
+                                  3, 3)
+            self._readout_bar = (QRectF(track), fill)
