@@ -24,6 +24,7 @@ from ui import theme
 GUIDE_DEFAULT = {"cx": 0.5, "cy": 0.5, "w": 0.6, "h": 0.6, "angle": 0.0, "format": None}
 HANDLE_PX = 10          # corner grab radius (logical px)
 ROTATE_PX = 30          # beyond a corner, out to here: rotate
+OUTLINE_PX = 8          # a right click this near the guide's outline opens its menu
 ZOOM_STEP = 1.25
 MIN_GUIDE = 0.02        # fraction of the frame
 
@@ -66,6 +67,7 @@ class LiveCanvas(QWidget):
     pointer_moved = Signal()           # counts as use (idle dimming)
     meter_clicked = Signal()           # a left click on the sharpness readout
     menu_requested = Signal(object)    # a right click on the picture (global QPoint)
+    guide_menu_requested = Signal(object)   # a right click on the frame guide's outline
     DRAG_MIN_PX = 6                    # a box pick moved this far is a drag, not a click
 
     def __init__(self, parent=None):
@@ -355,12 +357,30 @@ class LiveCanvas(QWidget):
     # ------------------------------------------------------------------ #
     # mouse
     # ------------------------------------------------------------------ #
+    def on_guide_outline(self, pos):
+        """Is `pos` (logical px) on the frame guide's outline, within
+        OUTLINE_PX of it (inside or out)? Not while magnified or hidden."""
+        g = self.geometry_()
+        if g is None or not self.guide_on or self.magnified:
+            return False
+        lx, ly, w, h = self._local(g, pos)
+        ax, ay = abs(lx), abs(ly)
+        near_x = abs(ax - w / 2) <= OUTLINE_PX and ay <= h / 2 + OUTLINE_PX
+        near_y = abs(ay - h / 2) <= OUTLINE_PX and ax <= w / 2 + OUTLINE_PX
+        return near_x or near_y
+
     def contextMenuEvent(self, e):
-        """Right click: the window's picture menu (camera zoom, ...), except
-        while a pick, line or area is being placed."""
+        """Right click: on the frame guide's outline, the guide's own menu
+        (Follow the Frame, Format, ...: the user, 2026-11-01); elsewhere the
+        window's picture menu (camera zoom, ...); nothing while a pick, line
+        or area is being placed."""
         if self.mode:
             return super().contextMenuEvent(e)
-        self.menu_requested.emit(e.globalPos())
+        pos = e.position() if hasattr(e, "position") else QPointF(e.pos())
+        if self.on_guide_outline(pos):
+            self.guide_menu_requested.emit(e.globalPos())
+        else:
+            self.menu_requested.emit(e.globalPos())
         e.accept()
 
     def mousePressEvent(self, e):

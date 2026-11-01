@@ -488,6 +488,38 @@ def test_the_main_windows_quit_box_sleeps_capture_and_no_wakes_it():
     assert stub._live_monitor.calls == ["sleep", "wake"] and not ev.isAccepted()
 
 
+def test_the_format_list_sets_the_guides_format_and_follows_the_menu():
+    """2026-11-01: "a 'Format' drop down window to the left of the Camera Zoom
+    drop down. There you select format and it changes the frame guide"."""
+    mon, feed, light, dev = _monitor()
+    try:
+        combo = mon.format_combo
+        assert combo.itemText(0) == "Free" and combo.findData("645") > 0
+        bar = [mon.toolbar.widgetForAction(a) for a in mon.toolbar.actions()]
+        fmt_at = bar.index(mon.toolbar.widgetForAction(mon._format_action))
+        assert fmt_at < bar.index(mon.toolbar.widgetForAction(mon._cam_zoom_action))
+        mon.set_guide_auto(False)
+        i = combo.findData("645")
+        combo.activated.emit(i)
+        g = mon.canvas.guide
+        assert g["format"] == "645"
+        geo = mon.canvas.geometry_()
+        if geo is not None:
+            wpx, hpx = g["w"] * geo.full_w, g["h"] * geo.full_h
+            assert max(wpx, hpx) / min(wpx, hpx) == pytest.approx(56 / 41.5, rel=1e-3)
+        mon._set_guide_format("6x6")                    # the guide menu's Format
+        assert combo.currentData() == "6x6"
+        mon._set_guide_format(None)
+        assert combo.currentText() == "Free"
+        # a right click on the outline opens the guide's menu
+        from PySide6.QtCore import QPoint
+        mon.canvas.guide_menu_requested.emit(QPoint(10, 10))
+        assert mon._popup.actions()[0].text() == "Follow the Frame"
+        mon._popup.close()
+    finally:
+        _close(mon)
+
+
 def test_the_panel_fits_its_width():
     mon, feed, light, dev = _monitor()
     try:
