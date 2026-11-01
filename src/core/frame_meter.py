@@ -248,11 +248,13 @@ def find_base_beside(small, blur, guide, frame8):
                       pieces=len(best))
 
 
-def live_estimate(bgr, guide, base_pos=None):
+def live_estimate(bgr, guide, base_pos=None, remembered=None):
     """`bgr` the live frame (8-bit), `guide` the frame guide, `base_pos`
     (fx, fy, frame_w, frame_h) the Film Base click, or None to find the base
-    beside the guide (revision 2). A LiveEstimate (with a `reason` when there
-    is none)."""
+    beside the guide (revision 2); `remembered` (B, G, R) a film base seen
+    earlier under the same light and exposure (spec/auto-frame-guide.md),
+    used when none shows beside the guide. A LiveEstimate (with a `reason`
+    when there is none)."""
     if bgr is None:
         return LiveEstimate(reason="No live picture.")
     if guide is None:
@@ -265,6 +267,15 @@ def live_estimate(bgr, guide, base_pos=None):
             return LiveEstimate(reason="The frame guide is off the picture.")
         found = find_base_beside(small, blur, guide, frame8)
         if not found.ok:
+            if remembered is not None:
+                base8 = np.asarray(remembered, np.float64)
+                frame_l = srgb_linear(np.maximum(frame8, 0.5))
+                if float(np.max(frame_l / np.maximum(srgb_linear(base8), 1e-9))) > BESIDE_SLACK:
+                    return LiveEstimate(reason="The film base seen earlier is darker than this "
+                                               "frame's brightest part: the light or the "
+                                               "camera changed. Wind on to a gap, or click "
+                                               "the base once.")
+                return _ratio(base8, frame8, "remembered")
             return LiveEstimate(reason=found.reason)
         if np.any(found.base8 < BASE_DARK):
             return LiveEstimate(reason="The film base is too dark in the live view to compare.")

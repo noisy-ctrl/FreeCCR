@@ -418,6 +418,7 @@ def test_the_live_line_then_use_for_this_frame_feeds_one_shoot(film_mon):
     mon, usb, light, lm, path = film_mon
     _with_base(mon)
     mon.actions["guide"].setChecked(True)
+    mon.set_guide_auto(False)                    # a guide placed by hand
     mon.canvas.guide = dict(GUIDE)
     mon._neg_base_pos = (0.5, 0.08, 800, 600)
     mon.feed.full = _negative(frame_lin_ratio=0.25)
@@ -447,6 +448,7 @@ def test_the_live_line_needs_no_click_and_meter_is_a_setting(film_mon):
     mon, usb, light, lm, path = film_mon
     _with_base(mon)
     mon.actions["guide"].setChecked(True)
+    mon.set_guide_auto(False)                    # a guide placed by hand
     mon.canvas.guide = dict(GUIDE)
     assert mon._neg_base_pos is None
     mon.feed.full = _noisy(_negative(frame_lin_ratio=0.25))
