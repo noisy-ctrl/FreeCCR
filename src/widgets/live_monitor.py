@@ -288,6 +288,7 @@ class LiveCaptureMonitor(QWidget):
         self._neg_base_pos = None        # the last Film Base click, frame fractions
         self._new_frame_quiet = 0.0      # no "new frame" note before this
         self._cam_zoom = "1"             # the camera's magnifier (spec/live-magnifier.md)
+        self._shoot_when_whole = None    # a Shoot waiting for Camera zoom to be Whole
         self._zoom_whole = None          # the last whole-frame picture before magnifying
         self._zoom_token = 0
         self._zoom_spot = None           # (fx, fy) where it last looked
@@ -1001,6 +1002,7 @@ class LiveCaptureMonitor(QWidget):
         self.shutter_combo.activated.connect(self._on_shutter_chosen)
         self.cam_zoom_combo.activated.connect(
             lambda i: self._set_cam_zoom(self.cam_zoom_combo.itemData(i)))
+        self.canvas.menu_requested.connect(self._canvas_menu)
         if hasattr(self.usb, "zoom_changed"):
             self.usb.zoom_changed.connect(self._on_cam_zoom)
         self._zoom_spot_found.connect(self._on_zoom_spot)
@@ -1905,9 +1907,15 @@ class LiveCaptureMonitor(QWidget):
     # ------------------------------------------------------------------ #
     # capture
     # ------------------------------------------------------------------ #
+    SHOOT_UNZOOM_S = 8.0          # how long Shoot waits for the camera to be Whole again
+
     def shoot(self):
         if self.sequence.running:
             self.sequence.stop()
+            return
+        if self._shoot_when_whole is not None:
+            self._shoot_when_whole = None           # a second press while waiting: cancel
+            self._note_caption("Shoot cancelled.")
             return
         if self._measure is not None:
             return
@@ -1915,6 +1923,17 @@ class LiveCaptureMonitor(QWidget):
             return                       # the light is off while idle: Wake first
         if self._rail_busy():
             self._warn_caption("Not while the focus rail is moving: the shot would blur.")
+            return
+        if self.magnified() and self.usb.is_open():
+            # A magnified camera got stuck shooting (the user, 2026-11-01):
+            # back to Whole first, and shoot once the camera says it is there
+            # (`_on_cam_zoom`), or give up after SHOOT_UNZOOM_S.
+            token = object()
+            self._shoot_when_whole = token
+            self._note_caption("Back to the whole frame before the shot…")
+            self._set_cam_zoom("1")
+            QTimer.singleShot(int(self.SHOOT_UNZOOM_S * 1000),
+                              lambda t=token: self._shoot_unzoom_timeout(t))
             return
         tri = self.scan_type() == "trichrome"
         self._used()
@@ -1950,6 +1969,12 @@ class LiveCaptureMonitor(QWidget):
             note = self._film_base_shoot_note(tri)
             if note:
                 self._note_caption(note)
+
+    def _shoot_unzoom_timeout(self, token):
+        if self._shoot_when_whole is token:
+            self._shoot_when_whole = None
+            self._warn_caption("The camera didn't go back to the whole frame, so nothing "
+                               "was shot. Set Camera zoom to Whole, then Shoot again.")
 
     def _on_step(self, channel, duration_ms):
         self._ring_anim = (channel, time.monotonic(), max(1, duration_ms))
@@ -3003,6 +3028,26 @@ class LiveCaptureMonitor(QWidget):
             self._zoom_whole = self.feed.last_full_frame()   # to find where it looks
         self.usb.set_zoom(level)
 
+    def _canvas_menu(self, pos):
+        """Right click on the picture: the camera's zoom levels (the user,
+        2026-11-01), as the toolbar's Camera zoom list and Z offer them."""
+        m = QMenu(self)
+        levels = [self.cam_zoom_combo.itemData(i) for i in range(self.cam_zoom_combo.count())]
+        if not levels or not self._cam_zoom_action.isVisible():
+            a = m.addAction("Camera zoom: not offered by this camera")
+            a.setEnabled(False)
+        else:
+            head = m.addAction("Camera Zoom")
+            head.setEnabled(False)
+            for lv in levels:
+                a = m.addAction(self.cam_zoom_label(lv))
+                a.setCheckable(True)
+                a.setChecked(str(lv) == str(self._cam_zoom))
+                a.triggered.connect(lambda _c=False, v=lv: self._set_cam_zoom(v))
+        m.popup(pos)
+        self._popup = m
+        return m
+
     def _step_cam_zoom(self):
         n = self.cam_zoom_combo.count()
         if n < 2 or not self._cam_zoom_action.isVisible():
@@ -3015,6 +3060,10 @@ class LiveCaptureMonitor(QWidget):
         level = str(level or "1")
         was = self._cam_zoom
         self._cam_zoom = level
+        if level == "1" and self._shoot_when_whole is not None:
+            # Shoot waited for the whole frame: go on with it now
+            self._shoot_when_whole = None
+            QTimer.singleShot(0, self.shoot)
         i = self.cam_zoom_combo.findData(level)
         if i >= 0:
             self.cam_zoom_combo.blockSignals(True)

@@ -78,3 +78,25 @@ synthetic texture finds a known centre and scale and rejects a mismatch.
   F and double-click switch Fit ↔ 4× (double-click about the pointer); the
   list follows the wheel and shows a custom "5.2×" when between presets
   (`_sync_view_zoom`).
+
+## Revision 2026-11-01: right click for the zoom; Shoot goes back to Whole first
+The user: "Can you have a right click in preview area (in Capture) and be able
+to select camera zoom. And, can clicking shoot first disengage this before
+attempting capture as it currently gets stuck."
+
+- **Right click on the picture** (`LiveCanvas.menu_requested`, from
+  `contextMenuEvent`, not while a pick / line / area is being placed) opens
+  `_canvas_menu`: "Camera Zoom" and the camera's levels as the toolbar list
+  has them (Whole / 2.5× / 4× / 8× / Max), the current one ticked; a pick is
+  `_set_cam_zoom`. A camera with no magnifier: one greyed line saying so.
+- **Shoot while magnified** (USB camera open): Shoot asks for Whole
+  (`_set_cam_zoom("1")`), says "Back to the whole frame before the shot…",
+  and remembers it is waiting (`_shoot_when_whole`). When the camera reports
+  Whole (`_on_cam_zoom("1")`, from its own read-back, so the reconnect that
+  sets it is over) the Shoot goes ahead as if pressed again, with every
+  check done afresh. A second press while waiting cancels it; no Whole within
+  `SHOOT_UNZOOM_S` (8 s) says so and shoots nothing.
+
+Tests: the menu's entries, tick and pick; the canvas asks for it except while
+placing; Shoot magnified sets Whole, fires nothing until Whole is reported,
+then the whole sequence runs; cancel; time-out.

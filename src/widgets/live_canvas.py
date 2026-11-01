@@ -64,6 +64,7 @@ class LiveCanvas(QWidget):
     guide_changed = Signal(object)     # the guide dict
     pointer_moved = Signal()           # counts as use (idle dimming)
     meter_clicked = Signal()           # a left click on the sharpness readout
+    menu_requested = Signal(object)    # a right click on the picture (global QPoint)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -341,6 +342,14 @@ class LiveCanvas(QWidget):
     # ------------------------------------------------------------------ #
     # mouse
     # ------------------------------------------------------------------ #
+    def contextMenuEvent(self, e):
+        """Right click: the window's picture menu (camera zoom, ...), except
+        while a pick, line or area is being placed."""
+        if self.mode:
+            return super().contextMenuEvent(e)
+        self.menu_requested.emit(e.globalPos())
+        e.accept()
+
     def mousePressEvent(self, e):
         g = self.geometry_()
         if e.button() != Qt.LeftButton or g is None:
