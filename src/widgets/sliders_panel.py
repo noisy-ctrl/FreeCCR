@@ -3630,7 +3630,8 @@ class SlidersPanel(QWidget):
                 f"No Black Point set: {res.summary()}. Draw over the clear film base "
                 "with Set Black Point instead.", duration=7000)
             return res
-        ccr_backend.set_black_point(tuple(float(v) for v in res.black_point))
+        ccr_backend.set_black_point(tuple(float(v) for v in res.black_point),
+                                    ccr_backend.image_exposure(img))
         self._persist_bwpoint()
         self._update_bwp_mode_label()
         ip = getattr(self, "image_preview", None)

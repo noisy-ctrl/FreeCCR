@@ -472,6 +472,9 @@ class ViewParams:
     bw: bool = False
     clip: str = ""                      # "black" / "white" while hovered
     reset_best: int = 0                 # bump to reset the sharpness best
+    hist_area: Optional[dict] = None    # the frame guide: the histogram of the whole
+                                        # frame inside it (spec/frame-exposure.md §2)
+    hist_paused: bool = False           # magnified: the histogram holds
 
 
 @dataclass
@@ -572,9 +575,13 @@ class Processor:
             sharp = self._sharp_last[1]
         hist = None
         now = self.clock()
-        if now - self._hist_t >= HIST_EVERY_S:
+        if now - self._hist_t >= HIST_EVERY_S and not p.hist_paused:
             self._hist_t = now
-            hist = histogram_rgb(steady)
+            if p.hist_area is not None:
+                from core.frame_meter import guide_histogram
+                hist = guide_histogram(frame, p.hist_area)
+            else:
+                hist = histogram_rgb(steady)
 
         # the picture
         shown = steady

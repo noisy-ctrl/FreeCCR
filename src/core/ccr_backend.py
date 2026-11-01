@@ -188,6 +188,10 @@ class CCRBackend:
         self.hdr_tint_headroom = None
         self.white_point_bgr = None  # (B, G, R) of dense/exposed area
         self.black_point_bgr = None  # (B, G, R) of transparent/clear area
+        # the exposure (ISO-100 seconds) of the frame the black point was
+        # sampled on: frames shot longer or shorter get it scaled
+        # (spec/frame-exposure.md §5); None = unknown, no scaling
+        self.black_point_exposure = None
         # Selected film-stock preset for the black-point-only conversion:
         # per-channel density slopes (B, G, R), or None → the baked scalar
         # DEFAULT_DENSITY_SLOPE. A sampled white point always overrides it.
@@ -328,6 +332,7 @@ class CCRBackend:
         # (different stocks differ). Only the in-memory fields are cleared — the
         # QSettings copy is intact and still restores at next app start.
         self.black_point_bgr = None
+        self.black_point_exposure = None
         self.white_point_bgr = None
         # Same for the film-stock selection: every new batch starts on the
         # default slope unless the user picks a stock for THIS roll (the
@@ -2735,9 +2740,60 @@ class CCRBackend:
         """Drop the sampled black point (film base). With no black point the
         B/W-point section needs a fresh Set Black Point before converting."""
         self.black_point_bgr = None
+        self.black_point_exposure = None
 
-    def set_black_point(self, bgr_tuple):
+    def set_black_point(self, bgr_tuple, exposure=None):
+        """The roll's black point, and the exposure (ISO-100 seconds) of the
+        frame it was read on, from `image_exposure` (None: unknown)."""
         self.black_point_bgr = bgr_tuple
+        self.black_point_exposure = (float(exposure) if exposure and exposure > 0 else None)
+
+    # --- each frame's exposure (spec/frame-exposure.md §5) --------------------
+    @staticmethod
+    def image_exposure(img):
+        """A frame's exposure in ISO-100 seconds from its file's EXIF: a 3-way
+        merge is normalised to its shortest colour (ccr_merge.exposure_scales),
+        so its exposure is that minimum. None when it can't be read."""
+        from core.ccr_merge import shot_exposure
+        if img is None:
+            return None
+        try:
+            if getattr(img, "is_merged", False) and getattr(img, "merge_sources", None):
+                es = [shot_exposure(p) for p in img.merge_sources]
+                if len(es) != 3 or any(e is None or not e > 0 for e in es):
+                    return None
+                return float(min(es))
+            path = getattr(img, "file_path", None)
+            e = shot_exposure(path) if path else None
+            return float(e) if e and e > 0 else None
+        except Exception:
+            return None
+
+    def exposure_ratio(self, img, ref):
+        """E(img) / ref, or exactly 1.0 when either is unknown."""
+        if not ref or ref <= 0:
+            return 1.0
+        e = self.image_exposure(img)
+        return e / float(ref) if e else 1.0
+
+    def white_point_for(self, img):
+        """The roll's white point in `img`'s exposure, like `black_point_for`."""
+        if self.white_point_bgr is None:
+            return None
+        r = self.exposure_ratio(img, self.black_point_exposure)
+        if r == 1.0:
+            return self.white_point_bgr
+        return tuple(float(v) * r for v in self.white_point_bgr)
+
+    def black_point_for(self, img):
+        """The sampled black point in `img`'s exposure: a frame shot a stop
+        longer reads its base twice as bright."""
+        if self.black_point_bgr is None:
+            return None
+        r = self.exposure_ratio(img, self.black_point_exposure)
+        if r == 1.0:
+            return self.black_point_bgr
+        return tuple(float(v) * r for v in self.black_point_bgr)
 
     def set_film_stock(self, name, slopes_bgr):
         """Select a saved film-stock preset: its per-channel density slopes
@@ -3003,9 +3059,11 @@ class CCRBackend:
                    else (f"{result.confidence} confidence" if result is not None else "not run"))
             summary["notes"].append(f"{name}: {why}")
 
-    def resolve_auto_black_point(self, result, consensus=None, raw=None):
+    def resolve_auto_black_point(self, result, consensus=None, raw=None, img=None):
         """(black_point, source) for one frame: its own measurement when
         confident, else the sampled black point, else the roll consensus.
+        With `img`, the sampled black point is scaled to its exposure (the
+        consensus is passed in already in the frame's exposure).
 
         With the frame's `raw`, a fallback that cannot be this frame's base -
         more than 1 % of its picture is clearer than it, while the frame's own
@@ -3020,7 +3078,7 @@ class CCRBackend:
         if own is not None and result.confidence != LOW:
             return own, "auto"
         if self.black_point_bgr is not None:
-            fallback, source = tuple(self.black_point_bgr), "sampled"
+            fallback, source = tuple(self.black_point_for(img)), "sampled"
         elif consensus is not None:
             fallback, source = tuple(consensus), "roll"
         else:
@@ -3031,12 +3089,50 @@ class CCRBackend:
             return own, "own"
         return fallback, source
 
+    def _roll_consensus(self, results):
+        """roll_check over the frames' own bases taken to ONE exposure (the
+        median of theirs), then a function giving the consensus in a frame's
+        own exposure (spec/frame-exposure.md §5). With any exposure unknown,
+        nothing is scaled: exactly the old roll check."""
+        import numpy as np
+        from core.auto_black_point import roll_check
+        pairs = [(r, img) for r, img in zip(results, self.images) if r is not None]
+        exps = [self.image_exposure(img) for _r, img in pairs]
+        ref = (float(np.median(exps)) if exps and all(exps) and len(set(exps)) > 1
+               else None)
+        ks = [(ref / e) if ref else 1.0 for e in exps]
+        for (r, _img), k in zip(pairs, ks):
+            if k != 1.0 and r.black_point is not None:
+                r.black_point = tuple(float(v) * k for v in r.black_point)
+
+        class _Raws:                     # each frame's raw in the common exposure, on demand
+            def __getitem__(_s, i):
+                raw, k = pairs[i][1].resized_raw, ks[i]
+                if raw is None or k == 1.0:
+                    return raw
+                return np.asarray(raw, np.float32) * np.float32(k)
+        try:
+            consensus = roll_check([r for r, _img in pairs], _Raws())
+        finally:
+            for (r, _img), k in zip(pairs, ks):
+                if k != 1.0 and r.black_point is not None:
+                    r.black_point = tuple(float(v) / k for v in r.black_point)
+
+        def for_img(img):
+            if consensus is None or ref is None:
+                return consensus
+            e = self.image_exposure(img)
+            k = e / ref if e else 1.0
+            return tuple(float(v) * k for v in consensus)
+        return for_img
+
     def recorded_roll_black(self, img, min_frames=2):
         """For Convert Current: the median film base of the OTHER frames that
         were converted with their own measured border, or None. It is the
         roll fallback Convert All gets from roll_check."""
         import numpy as np
         vals = []
+        mine = self.image_exposure(img)
         # A copy: the tether worker calls this off the GUI thread, which may
         # be appending a capture meanwhile.
         for other in list(self.images):
@@ -3045,7 +3141,10 @@ class CCRBackend:
             ci = getattr(other, "conversion_inputs", None) or {}
             if (ci.get("auto_bp") or {}).get("source") == "auto" and ci.get("bw"):
                 if ci["bw"][0] is not None:
-                    vals.append(ci["bw"][0])
+                    # in this frame's exposure (spec/frame-exposure.md §5)
+                    theirs = self.image_exposure(other)
+                    k = mine / theirs if (mine and theirs) else 1.0
+                    vals.append(tuple(float(v) * k for v in ci["bw"][0]))
         if len(vals) < min_frames:
             return None
         return tuple(float(v) for v in np.median(np.array(vals, float), axis=0))
@@ -3418,13 +3517,13 @@ class CCRBackend:
         decides whether the fixed-constant invert is wanted)."""
         if img.converted:
             img.reload_image()
-        black = self.black_point_bgr          # may be None → direct invert
-        white = self.white_point_bgr          # may be None → default slope
+        black = self.black_point_for(img)     # may be None → direct invert
+        white = self.white_point_for(img)     # may be None → default slope
         auto_res = auto_source = None
         if getattr(self, "auto_black_point", False):
             auto_res = self.detect_frame_black_point(img, reload=False)
             black, auto_source = self.resolve_auto_black_point(
-                auto_res, self.recorded_roll_black(img), img.resized_raw)
+                auto_res, self.recorded_roll_black(img), img.resized_raw, img=img)
             white = self.auto_white_point_for(black)
         awp_rec = None
         per_frame_wp = black is not None and self.white_point_bgr is None
@@ -3519,8 +3618,12 @@ class CCRBackend:
                     img.reload_image()
                 rect = (self.frame_picture_rect(img, img.resized_raw)
                         if self.auto_tone else self._known_picture_rect(img))
+                # the roll's anchors in this frame's exposure
+                # (spec/frame-exposure.md §5)
+                black = self.black_point_for(img)
+                white = self.white_point_for(img)
                 processed = ccr_normalize_with_bwpoint(
-                    img, self.black_point_bgr, self.white_point_bgr,
+                    img, black, white,
                     density=self.density_bwpoint, slopes_bgr=slopes
                 )
                 if processed is not None:
@@ -3532,10 +3635,8 @@ class CCRBackend:
                     # no black point either = the no-anchor direct invert. Every
                     # replay site hands this pair straight back to the converter,
                     # so no new mode is needed (spec/no-anchor-convert.md §4).
-                    "bw": (tuple(self.black_point_bgr)
-                           if self.black_point_bgr is not None else None,
-                           tuple(self.white_point_bgr)
-                           if self.white_point_bgr is not None else None),
+                    "bw": (tuple(black) if black is not None else None,
+                           tuple(white) if white is not None else None),
                     "fine_rot": img.fine_rotation_angle,
                     "density": bool(self.density_bwpoint),
                     "slopes": slopes,
@@ -3588,7 +3689,6 @@ class CCRBackend:
         is measured in between, so each frame's white point can be checked
         against the rest of the roll. See spec/auto-black-point.md and
         spec/auto-white-point.md."""
-        from core.auto_black_point import roll_check
         from core.auto_white_point import roll_reference
         total = len(self.images)
         # Every frame's bright areas are measured when it may need a white
@@ -3609,9 +3709,9 @@ class CCRBackend:
                 print(f"Auto black point detection failed for image {i}: {e}")
                 results.append(None)
             step(0, i)                                    # detection
-        kept = [(r, img.resized_raw) for r, img in zip(results, self.images) if r is not None]
-        consensus = roll_check([r for r, _ in kept], [raw for _, raw in kept])
-        resolved = [self.resolve_auto_black_point(res, consensus, img.resized_raw)
+        consensus_for = self._roll_consensus(results)
+        resolved = [self.resolve_auto_black_point(res, consensus_for(img), img.resized_raw,
+                                                  img=img)
                     for res, img in zip(results, self.images)]
         highlights = [None] * total
         rects = [self._FIND] * total

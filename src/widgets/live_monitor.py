@@ -29,6 +29,7 @@ from core import base_exposure as be
 from core import camera_backends as cb
 from core import capture_light as cl
 from core import capture_sequence as cs
+from core import frame_meter as fm
 from core import light_presets as lp
 from core import live_feed as lf
 from core import live_negative as ln
@@ -43,6 +44,8 @@ CHANNEL_COLOURS = {"r": theme.CH_R, "g": theme.CH_G, "b": theme.CH_B,
                    "w": "#e8e8e8", "ir": "#b06a7e"}
 RING_KEYS = (("r", "R", "1"), ("g", "G", "2"), ("b", "B", "3"), ("w", "W", "4"))
 LED_VALUE_W = 52
+FRAME_ESTIMATE_MS = 1000         # the live estimate of this frame's exposure
+FRAME_ESTIMATES = 5              # ... the median of this many
 # The monitor's greys are this % of the main window's, so the two windows
 # can't be mistaken for each other (the user, 2026-11-01: "slightly lighter,
 # like 20 %"). QColor.lighter: value x 1.2, #1e1e1e -> #242424.
@@ -286,6 +289,12 @@ class LiveCaptureMonitor(QWidget):
         self._rail_zeroed = False        # Set Zero pressed since the rail connected
         self._rail_home_id = None
         self._last_frame_t = -1e9
+        # this frame's own exposure (spec/frame-exposure.md)
+        self._frame_est = []             # recent live ratios
+        self._frame_metered = None       # a Meter's Suggestion for the frame in view
+        self._frame_suggestion = None    # what the line shows (metered, else live)
+        self._frame_exposures = None     # armed by Use for This Frame: the next Shoot
+        self._read_frame = fm.read_frame
 
         st = _settings()
         self._toggles = _json_setting("live/toggles", {"denoise": True})
@@ -745,6 +754,24 @@ class LiveCaptureMonitor(QWidget):
         self.film_base_use.setChecked(_settings().value("live/film_base_use", True)
                                       not in (False, "false", "0", 0))
         fb.addWidget(self.film_base_use)
+        # this frame's own exposure, inside the frame guide (spec/frame-exposure.md)
+        self.frame_note = _muted("")
+        fb.addWidget(self.frame_note)
+        r = QHBoxLayout()
+        r.setContentsMargins(0, 0, 0, 0)
+        theme.apply_button_row(r)
+        self.meter_btn = QPushButton("Meter")
+        self.meter_btn.setToolTip(
+            "One RAW test shot per colour at the film base's exposures, read inside the "
+            "frame guide: this frame's exposure exactly. The shots aren't kept.")
+        self.use_frame_btn = QPushButton("Use for This Frame")
+        self.use_frame_btn.setToolTip(
+            "The next Shoot uses this frame's exposures (longer for a dense frame), then "
+            "it goes back to the film base's. Only the shutter speed and ISO change, so "
+            "the file records it and conversion follows.")
+        r.addWidget(self.meter_btn, 1)
+        r.addWidget(self.use_frame_btn, 2)
+        fb.addLayout(r)
         self.film_base_box.setVisible(False)
         lay.addWidget(self.film_base_box)
         self.shoot_btn = QPushButton("Shoot   (S)")
@@ -948,6 +975,13 @@ class LiveCaptureMonitor(QWidget):
             lambda on: (_settings().setValue("live/film_base_use", bool(on)),
                         self._refresh_film_bases()))
         self._patch_read.connect(self._on_patch_read)
+        self.meter_btn.clicked.connect(self._on_meter_clicked)
+        self.use_frame_btn.clicked.connect(self._on_use_frame)
+        self.canvas.guide_changed.connect(lambda g: self._frame_changed())
+        self._frame_timer = QTimer(self)
+        self._frame_timer.setInterval(FRAME_ESTIMATE_MS)
+        self._frame_timer.timeout.connect(self._update_frame_estimate)
+        self._frame_timer.start()
         self.timing_btn.clicked.connect(self._timing_popup)
         self.scan_combo.activated.connect(self._on_scan_type_chosen)
         self.tether_btn.clicked.connect(self._on_tether_button)
@@ -1074,7 +1108,8 @@ class LiveCaptureMonitor(QWidget):
             return
         self._closing = True
         QApplication.instance().removeEventFilter(self)
-        for t in (self._idle_timer, self._status_timer, self._ring_timer, self._af_timer):
+        for t in (self._idle_timer, self._status_timer, self._ring_timer, self._af_timer,
+                  self._frame_timer):
             t.stop()
         if self._af is not None and self._af.running:
             self._af.on_finished = None
@@ -1366,6 +1401,14 @@ class LiveCaptureMonitor(QWidget):
         if self._closing:
             return
         w, h = self.canvas.device_size()
+        # the Live histogram looks inside the frame guide, at the whole frame
+        # (the window's zoom doesn't move it); it holds while magnified
+        # (spec/frame-exposure.md §2)
+        guide_on = self.actions["guide"].isChecked()
+        hist_paused = guide_on and self.magnified()
+        hist_area = dict(self.canvas.guide) if (guide_on and not hist_paused) else None
+        caption = ("Live · paused (magnified)" if hist_paused
+                   else "Live · frame guide" if hist_area else "Live")
         neg = self._neg_tables if (self.actions["negative"].isChecked()
                                    and self.actions["negative"].isEnabled()) else None
         self.feed.set_params(lf.ViewParams(
@@ -1374,7 +1417,9 @@ class LiveCaptureMonitor(QWidget):
             edge=self.actions["edge"].isChecked(), edge_opts=dict(self._edge_opts),
             sharp=self.actions["sharp"].isChecked(), sharp_area=self.canvas.sharp_area,
             false_colour=self.actions["fc"].isChecked(), negative=neg,
-            bw=self.neg_bw.isChecked(), clip=self._clip_kind, reset_best=self._reset_best))
+            bw=self.neg_bw.isChecked(), clip=self._clip_kind, reset_best=self._reset_best,
+            hist_area=hist_area, hist_paused=hist_paused))
+        self.histogram.set_caption(caption)
         self._sync_view_zoom()
 
     def _on_frame(self):
@@ -1386,6 +1431,8 @@ class LiveCaptureMonitor(QWidget):
         if reading is not None and self._af is not None and self._af.running:
             self._af.reading(reading)
         self.canvas.set_result(r)
+        if getattr(r, "new_frame", False):
+            self._frame_changed()                  # a metered reading was the old frame's
         if getattr(r, "new_frame", False) and time.monotonic() >= self._new_frame_quiet:
             # spec/sharpness-meter-v2.md §5 (not right after a magnification
             # change, which is a new picture too and already reset the best)
@@ -1995,7 +2042,12 @@ class LiveCaptureMonitor(QWidget):
         self._refresh_film_bases()
 
     def _shoot_exposures(self, tri):
-        """The film base's exposures for a USB Shoot, or None."""
+        """The film base's exposures for a USB Shoot, or None. Use for This
+        Frame's exposures go first, once (spec/frame-exposure.md §6)."""
+        armed, self._frame_exposures = self._frame_exposures, None
+        if armed:
+            self._refresh_frame_line()
+            return armed
         if not self.film_base_use.isChecked():
             return None
         return be.exposures_for(self._film_base(), tri)
@@ -2013,6 +2065,180 @@ class LiveCaptureMonitor(QWidget):
             return (f"“{base['name']}” wasn't measured for this scan type: shooting at the "
                     "Exposure row's settings.")
         return ""
+
+    # --- this frame's own exposure (spec/frame-exposure.md) ------------------
+    def _frame_changed(self):
+        """The frame in the guide changed (a new frame, the guide moved): a
+        metered reading and an unused Use for This Frame were the old one's."""
+        self._frame_est = []
+        if self._frame_metered is not None or self._frame_exposures is not None:
+            self._frame_metered = None
+            self._frame_exposures = None
+            self._refresh_frame_line()
+
+    def _frame_context(self):
+        """(film base, trichrome, shutters, isos) or a reason string."""
+        tri = self.scan_type() == "trichrome"
+        base = self._film_base()
+        if be.exposures_for(base, tri) is None:
+            return "This frame: measure the film base first."
+        shutters = self._exp_choices.get("shutter") or []
+        if not shutters:
+            return "This frame: needs a USB camera whose shutter speed FreeCCR can set."
+        return base, tri, shutters, self._exp_choices.get("iso") or []
+
+    def _update_frame_estimate(self):
+        """Every second: the live estimate of this frame's exposure."""
+        if self._closing or not self.film_base_box.isVisible():
+            return
+        if self._measure is not None or self.sequence.running:
+            return
+        if self._frame_metered is None:
+            if not self.actions["guide"].isChecked():
+                self._frame_est = []
+            elif self.magnified():
+                pass                                  # paused: the picture is a part
+            else:
+                est = fm.live_estimate(self.feed.last_full_frame(), dict(self.canvas.guide),
+                                       self._neg_base_pos)
+                self._frame_live_reason = est.reason
+                if est.ok:
+                    self._frame_est = (self._frame_est + [est.ratio])[-FRAME_ESTIMATES:]
+                else:
+                    self._frame_est = []
+        self._refresh_frame_line()
+
+    def _refresh_frame_line(self):
+        ctx = self._frame_context()
+        sug = None
+        if isinstance(ctx, str):
+            text = ctx
+        elif self._frame_metered is not None:
+            sug = self._frame_metered
+            text = sug.text()
+        elif not self.actions["guide"].isChecked():
+            text = "This frame: turn the frame guide on and place it on the frame."
+        elif self.magnified():
+            text = "This frame: paused while magnified."
+        elif self._frame_est:
+            import numpy as np
+            base, tri, shutters, isos = ctx
+            ratio = float(np.median(self._frame_est))
+            sug = fm.suggest(base, tri, fm.live_levels(base, tri, ratio), shutters, isos,
+                             live=True)
+            text = sug.text() if sug else "This frame: no estimate."
+        else:
+            text = "This frame: " + (getattr(self, "_frame_live_reason", "") or
+                                     "waiting for the live view…")
+        if sug is not None and sug.notes:
+            text += " (" + "; ".join(sug.notes) + ")"
+        if self._frame_exposures is not None:
+            text += "  ·  the next Shoot uses it"
+        self._frame_suggestion = sug
+        self.frame_note.setText(text)
+        busy = self._measure is not None or self.sequence.running
+        self.use_frame_btn.setEnabled(bool(sug is not None and sug.changes and not busy))
+        self.use_frame_btn.setText("Using for This Frame" if self._frame_exposures
+                                   else "Use for This Frame")
+        metering = self._measure is not None and self._measure.get("kind") == "frame"
+        self.meter_btn.setEnabled(metering or (not isinstance(ctx, str) and not busy))
+
+    def _on_use_frame(self):
+        sug = self._frame_suggestion
+        if self._frame_exposures is not None:
+            self._frame_exposures = None              # a second click: back to the base's
+        elif sug is not None and sug.changes:
+            self._frame_exposures = {k: dict(v) for k, v in sug.exposures.items()}
+            what = ", ".join((f"{k.upper()} " if k != "w" else "")
+                             + f"{be.short_text(v['shutter'])} ISO {v['iso']}"
+                             for k, v in sug.exposures.items())
+            self._note_caption(f"The next Shoot uses this frame's exposures ({what}), "
+                               "then the film base's again.")
+        self._refresh_frame_line()
+
+    def _on_meter_clicked(self):
+        if self._measure is not None:
+            if self._measure.get("kind") == "frame":
+                self._measure_stop()
+            return
+        self.start_frame_meter()
+
+    def start_frame_meter(self):
+        """Meter (spec/frame-exposure.md §4): one RAW test shot per colour at
+        the film base's exposures, read inside the guide."""
+        if self._measure is not None or self.sequence.running:
+            return False
+        if self._sleeping is not None:
+            self._warn_caption("Wake the light first.")
+            return False
+        if self._rail_busy():
+            self._warn_caption("Not while the focus rail is moving.")
+            return False
+        ctx = self._frame_context()
+        if isinstance(ctx, str):
+            self._warn_caption(ctx.replace("This frame: ", "Metering: "))
+            return False
+        base, tri, shutters, isos = ctx
+        if not self.usb.is_open():
+            self._warn_caption("Metering needs the USB camera open.")
+            return False
+        if tri and not self.light.is_open():
+            self._warn_caption("Metering for trichrome needs the Scanlight connected.")
+            return False
+        if not self.actions["guide"].isChecked():
+            self._warn_caption("Metering reads inside the frame guide: turn it on and place "
+                               "it on the frame.")
+            return False
+        if self._refuse_when_magnified("Metering"):
+            return False
+        cal = fm.FrameMetering(base, tri)
+        if cal.done:
+            self._warn_caption(cal.error or "Nothing to meter.")
+            return False
+        import tempfile
+        self._used()
+        self._measure_token += 1
+        guide = dict(self.canvas.guide)
+        self._measure = {
+            "kind": "frame", "cal": cal, "name": "", "index": None,
+            "rect": None, "where": "inside the frame guide",
+            "read": self._read_frame, "read_arg": guide,
+            "base": base, "tri": tri, "shutters": list(shutters), "isos": list(isos),
+            "temp": tempfile.mkdtemp(prefix="freeccr-frame-meter-"),
+            "levels": dict(self._levels),
+            "exposure": {f: self._exposure.get(f) for f in ("shutter", "iso")
+                         if self._exposure.get(f)},
+            "in_flight": False, "stopping": False, "token": self._measure_token,
+        }
+        self._hold_live(True)
+        self.usb.set_dest(self._measure["temp"])
+        self.meter_btn.setText("Stop Metering")
+        self._refresh_film_bases()
+        self._refresh_frame_line()
+        self._refresh_shoot_enabled()
+        self._measure_next()
+        return True
+
+    def _frame_meter_finish(self, m, cal):
+        self.meter_btn.setText("Meter")
+        self._refresh_film_bases()
+        if cal.error is None and cal.result:
+            sug = fm.suggest(m["base"], m["tri"], cal.result, m["shutters"], m["isos"])
+            if sug is None:
+                self._warn_caption("Metering: the film base changed meanwhile.")
+            else:
+                if cal.clipped:
+                    sug.notes.append("clipped in " + ", ".join(
+                        be.NAMES.get(c, c) for c in cal.clipped) + ": meter again")
+                self._frame_metered = sug
+                self._frame_exposures = None
+                self._note_caption(sug.text() + (" (" + "; ".join(sug.notes) + ")"
+                                                 if sug.notes else ""))
+        elif cal.error == "cancelled":
+            self._note_caption("Metering stopped.")
+        else:
+            self._warn_caption(cal.error or "Metering didn't finish.")
+        self._refresh_frame_line()
 
     def _on_measure_clicked(self):
         if self._measure is not None:
@@ -2128,7 +2354,10 @@ class LiveCaptureMonitor(QWidget):
         if levels is not None and self.light.is_open():
             self.set_levels(levels)
         what = be.NAMES.get(colour, colour) if colour in be.COLOURS else "the film base"
-        self._note_caption(f"Measuring {what} ({m['where']}): shot {cal.shots + 1} at "
+        if m.get("kind") == "frame":
+            what = (be.NAMES.get(colour, colour) if colour in be.COLOURS else "the frame")
+        verb = "Metering" if m.get("kind") == "frame" else "Measuring"
+        self._note_caption(f"{verb} {what} ({m['where']}): shot {cal.shots + 1} at "
                            f"{be.short_text(exp['shutter'])}, ISO {exp['iso']}…  Esc stops.")
         token = m["token"]
         QTimer.singleShot(cs.settle_ms(self._timing), lambda: self._measure_fire(token, exp))
@@ -2160,8 +2389,8 @@ class LiveCaptureMonitor(QWidget):
             return                               # not ours (a late file)
         m["in_flight"] = False
         token = m["token"]
-        rect = m["rect"]
-        read = self._read_patch
+        rect = m.get("read_arg", m["rect"])
+        read = m.get("read") or self._read_patch
 
         def work():
             try:
@@ -2229,7 +2458,9 @@ class LiveCaptureMonitor(QWidget):
         import shutil
         shutil.rmtree(m["temp"], ignore_errors=True)
         self.measure_btn.setText("Measure…")
-        if cal.error is None and cal.result:
+        if m.get("kind") == "frame":
+            self._frame_meter_finish(m, cal)
+        elif cal.error is None and cal.result:
             camera = self._usb_model or ""
             if m["index"] is not None:
                 self._bases = be.replace(self._bases, m["index"], cal.result, camera, cal.notes)
