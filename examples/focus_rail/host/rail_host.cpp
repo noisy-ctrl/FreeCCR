@@ -95,6 +95,7 @@ int main(int argc, char** argv) {
   orp::Config cfg;
   cfg.name = "Host Rail (simulated)";
   cfg.stepsPerMm = 400;
+  cfg.stepsPerRev = 3200;
   cfg.hasLimits = true;
   cfg.minPos = 0;
   cfg.maxPos = 40000;

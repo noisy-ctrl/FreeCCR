@@ -429,6 +429,9 @@ class RailClient(QObject):
     def steps_per_mm(self):
         return float(self.info.get("steps_per_mm") or 0.0)
 
+    def steps_per_rev(self):
+        return int(self.info.get("steps_per_rev") or 0)
+
     def next_id(self):
         self._ids = self._ids % 1_000_000 + 1
         return self._ids
