@@ -259,6 +259,11 @@ def live_estimate(bgr, guide, base_pos=None, remembered=None):
         return LiveEstimate(reason="No live picture.")
     if guide is None:
         return LiveEstimate(reason="Turn the frame guide on and place it on the frame.")
+    if base_pos is not None and inside_guide(guide, float(base_pos[0]), float(base_pos[1]),
+                                             bgr.shape[1], bgr.shape[0]):
+        # a click inside the guide is an old one (another roll, or a gap
+        # that has since become a frame): look beside the guide instead
+        base_pos = None
     if base_pos is None:
         small = _reduce(bgr, LIVE_MAX_SIDE)
         blur = cv2.blur(small, (3, 3))
@@ -281,10 +286,6 @@ def live_estimate(bgr, guide, base_pos=None, remembered=None):
             return LiveEstimate(reason="The film base is too dark in the live view to compare.")
         return _ratio(found.base8, frame8, "beside")
     fx, fy = float(base_pos[0]), float(base_pos[1])
-    H0, W0 = bgr.shape[:2]
-    if inside_guide(guide, fx, fy, W0, H0):
-        return LiveEstimate(reason="The film base click is inside the frame guide: click "
-                                   "the border beside the frame.")
     small = _reduce(bgr, LIVE_MAX_SIDE)
     h, w = small.shape[:2]
     inner = inset_guide(guide)

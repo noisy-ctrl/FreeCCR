@@ -495,3 +495,22 @@ device's picture.
   runs to a saved, selected film base and puts the light, exposure, folder
   and live view back; cancel puts them back too; Shoot hands the exposures
   to the sequence; rename / delete / measure again.
+
+## Revision 2026-11-01 (6): a new roll's Measure, and a patch half on the base
+The user: "When I try and sample the film border of a new roll, it can't
+sample." Two causes, both fixed:
+- **An old click.** Measure used the last Film Base click wherever it was;
+  on a new roll it lay in the picture and the reading failed as uneven. A
+  click INSIDE the frame guide (with the guide on) is now asked for again,
+  with the patch box on the pointer; a click made for this Measure counts
+  wherever it is, since the gap between two frames can sit inside the guide
+  (`_fresh_base_click`).
+- **A patch only mostly on the base.** In the narrow gap between two 35 mm
+  frames, or beside a sprocket hole, the 3 % patch takes in some picture edge
+  or bare light, and the whole patch's IQR failed it. The patch is now read in
+  4 × 4 cells (`CELLS`), on the largest group whose medians lie within
+  `MAX_SPREAD / 2` of one cell's (ties: brighter), if that is most of the
+  patch (`CELLS_MIN` 9 of 16); otherwise all of it, so a patch half on the
+  base and half off is still uneven. An even patch reads exactly as before.
+  Tests: a patch three quarters on the base with a dust speck reads the base
+  (to 0.002) and passes the evenness check; half-and-half is still uneven.

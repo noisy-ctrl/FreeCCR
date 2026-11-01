@@ -123,7 +123,12 @@ def test_a_frame_a_stop_under_the_base_reads_a_stop_longer():
 
 def test_the_live_estimate_says_why_it_has_none():
     img = _negative()
-    assert "inside the frame guide" in fm.live_estimate(img, GUIDE, (0.5, 0.5, 800, 600)).reason
+    # an old click inside the guide (another roll; a gap since wound on) is
+    # ignored: the base is looked for beside the guide (2026-11-01)
+    inside = fm.live_estimate(img, GUIDE, (0.5, 0.5, 800, 600))
+    beside = fm.live_estimate(img, GUIDE)
+    assert inside.source == beside.source and inside.ok == beside.ok
+    assert inside.reason == beside.reason
     assert "clipped" in fm.live_estimate(_negative(base8=255), GUIDE,
                                          (0.5, 0.08, 800, 600)).reason
     assert "too dark" in fm.live_estimate(_negative(base8=8, frame_lin_ratio=0.9), GUIDE,
@@ -461,7 +466,8 @@ def test_the_live_line_needs_no_click_and_meter_is_a_setting(film_mon):
     img[fm.guide_mask(GUIDE, 800, 600) == 0] = 20             # holder, no base beside
     mon.feed.full = _noisy(img)
     mon._update_frame_estimate()
-    assert "Couldn't find the film base beside the frame" in mon.frame_note.text()
+    # (no warning on the line: the user, 2026-11-01; the button's tooltip says why)
+    assert mon.frame_note.text() == "" and not mon.frame_note.isVisibleTo(mon)
     assert "Couldn't find the film base" in mon.use_frame_btn.toolTip()
     assert not mon.meter_btn.isVisibleTo(mon)
     lm._settings().setValue("live/frame_meter", True)
@@ -545,8 +551,8 @@ def test_meter_stays_clickable_and_says_what_it_needs(film_mon):
     mon._refresh_frame_line()
     assert mon.meter_btn.isEnabled()                       # not greyed: it explains
     assert "First: needs a film base measured for trichrome" in mon.meter_btn.toolTip()
-    assert mon.frame_note.text().startswith("This frame: needs a film base measured for "
-                                            "trichrome first")
+    assert mon.frame_note.text() == ""                      # no warning on the line
+    assert "needs a film base measured for trichrome first" in mon.use_frame_btn.toolTip()
     assert not mon.use_frame_btn.isEnabled()
     assert "Nothing to use yet" in mon.use_frame_btn.toolTip()
     # a film base measured for the other scan type says so
@@ -556,7 +562,7 @@ def test_meter_stays_clickable_and_says_what_it_needs(film_mon):
     mon._refresh_film_bases()
     mon._refresh_frame_line()
     assert "“Ektar W” was measured for one exposure; Measure Again for trichrome" in \
-        mon.frame_note.text()
+        mon.use_frame_btn.toolTip()
     _with_base(mon)
     mon.actions["guide"].setChecked(False)
     mon._refresh_frame_line()
