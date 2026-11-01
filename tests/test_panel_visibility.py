@@ -34,7 +34,7 @@ def _shown(widget):
 
 def test_every_section_listed_and_present(panel):
     ids = [sid for sid, _l, _a in panel.HIDEABLE_SECTIONS]
-    assert ids == ["layers", "printer_lights", "crosstalk", "lab_finish", "levels",
+    assert ids == ["look_top", "layers", "printer_lights", "crosstalk", "lab_finish", "levels",
                    "balance", "curves", "bands", "noise", "details"]
     for _sid, _label, attr in panel.HIDEABLE_SECTIONS:
         assert getattr(panel, attr) is not None

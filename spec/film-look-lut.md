@@ -146,3 +146,18 @@ path + mtime.
 - Fitter: synthetic pairs from a known look + per-frame corrections are
   recovered (fit core only, small sizes); a synthetically warped/mirrored image
   registers back.
+
+## Revision 2026-11-01: its own fold above the histogram
+The user: "the LUT input section should be its own single drop down box,
+above the histogram as well as being in channel levels … no master gain up in
+the new top drop down", and, asked, just the list. `SlidersPanel` gets
+`look_top_section` (a `CollapsibleSection` "Film Look", outside the scroll
+area, above the histogram; open by default, `panel/look_top_open`) holding
+`look_combo_top` only. Both lists are `_look_combos`: filled together
+(`_populate_look_combo`, the same entries in the same order), selected
+together (`_select_look_in_combo`), enabled together (global layer only), and
+either one's `activated` goes to `_on_look_activated(index, combo)` → `set_look`,
+so the two can never disagree. Nothing new is stored. Hideable in Settings →
+Panel (`look_top`, first in the list). Tests: above the histogram, the list
+alone (no slider), same entries, a pick in either sets the look and shows in
+both.

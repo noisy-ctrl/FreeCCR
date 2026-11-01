@@ -284,6 +284,37 @@ def test_combo_lists_library(panel):
     assert texts[-1].startswith("Import")
 
 
+def test_the_look_has_its_own_fold_above_the_histogram(panel, monkeypatch):
+    """2026-11-01: a second Film Look list, alone in a fold above the
+    histogram, in step with Channel Levels' list."""
+    lay = panel.layout()
+    items = [lay.itemAt(i) for i in range(lay.count())]
+    order = []
+    for it in items:
+        sub = it.layout()
+        w = sub.itemAt(0).widget() if sub is not None and sub.count() else it.widget()
+        order.append(w)
+    assert order.index(panel.look_top_section) < order.index(panel.histogram)
+    top = panel.look_combo_top
+    assert [top.itemText(i) for i in range(top.count())] == \
+        [panel.look_combo.itemText(i) for i in range(panel.look_combo.count())]
+    # the section holds the list only (no Master Gain, no sliders)
+    from PySide6.QtWidgets import QSlider, QComboBox
+    assert not panel.look_top_section.findChildren(QSlider)
+    assert panel.look_top_section.findChildren(QComboBox) == [top]
+    # picking in either list sets the look and both show it
+    picked = []
+    monkeypatch.setattr(panel, "set_look", lambda name: (picked.append(name),
+                                                        panel._select_look_in_combo(name)))
+    i = top.findData("Noritsu Test.cube")
+    top.activated.emit(i)
+    assert picked == ["Noritsu Test.cube"]
+    assert panel.look_combo.currentData() == "Noritsu Test.cube"
+    panel.look_combo.activated.emit(panel.look_combo.findData(""))
+    assert picked[-1] == "" and top.currentData() == ""
+    assert "look_top" in {sid for sid, _l, _a in panel.HIDEABLE_SECTIONS}
+
+
 def test_look_is_a_channel_levels_flag():
     from widgets.sliders_panel import SYNC_GROUPS, GLOBAL_FLAG_KEYS, SlidersPanel
     groups = {gid: keys for gid, _l, keys in SYNC_GROUPS}

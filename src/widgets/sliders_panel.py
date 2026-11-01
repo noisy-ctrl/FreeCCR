@@ -873,6 +873,27 @@ class SlidersPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(theme.GAP_ROW)
 
+        # --- Film Look — its own fold above the histogram (the user,
+        # 2026-11-01: "its own single drop down box, above the histogram as
+        # well as being in channel levels"). Only the look's list: a second
+        # view of the same choice as Channel Levels' Film Look, kept in step
+        # (`_look_combos`). spec/film-look-lut.md, revision 2026-11-01.
+        self.look_top_section = CollapsibleSection("Film Look")
+        self.look_combo_top = QComboBox()
+        self.look_combo_top.setToolTip(self.LOOK_TOOLTIP)
+        self.look_top_section.add_widget(self.look_combo_top)
+        look_st = QSettings("FreeCCR", "FreeCCR")      # (self._settings comes later)
+        look_open = look_st.value(self.LOOK_TOP_OPEN_KEY, True, type=bool)
+        self.look_top_section._toggle_btn.setChecked(bool(look_open))
+        self.look_top_section._on_toggle(bool(look_open))
+        self.look_top_section._toggle_btn.toggled.connect(
+            lambda on: QSettings("FreeCCR", "FreeCCR").setValue(self.LOOK_TOP_OPEN_KEY,
+                                                                bool(on)))
+        look_top_row = QHBoxLayout()
+        look_top_row.setContentsMargins(theme.GAP_PANEL, 0, theme.GAP_PANEL, 0)
+        look_top_row.addWidget(self.look_top_section)
+        layout.addLayout(look_top_row)
+
         # --- Histogram — fixed at top, outside scroll area ---
         # Self-painting widget (paints its own rounded background + curves at the
         # widget's real resolution). See widgets/histogram_widget.py.
@@ -1530,7 +1551,10 @@ class SlidersPanel(QWidget):
         look_label.setToolTip(self.LOOK_TOOLTIP)
         self.look_combo = QComboBox()
         self.look_combo.setToolTip(self.LOOK_TOOLTIP)
-        self.look_combo.activated.connect(self._on_look_activated)
+        self._look_combos = (self.look_combo, self.look_combo_top)
+        for combo in self._look_combos:
+            combo.activated.connect(
+                lambda index, c=combo: self._on_look_activated(index, c))
         look_row.addWidget(look_label)
         look_row.addWidget(self.look_combo, 1)
         self.od_section.add_layout(look_row)
@@ -1942,7 +1966,8 @@ class SlidersPanel(QWidget):
         # One decode at a time: a look takes Cineon's slot.
         self.cineon_checkbox.setEnabled(global_layer and not look_name)
         self._select_look_in_combo(look_name)
-        self.look_combo.setEnabled(global_layer)
+        for combo in self._look_combos:
+            combo.setEnabled(global_layer)
         # Crosstalk is a base-level correction: whole image only.
         for i, key in enumerate(self.adjustment_keys):
             if key.startswith("xt_") and i < len(self.sliders):
@@ -2344,7 +2369,9 @@ class SlidersPanel(QWidget):
 
     # --- Settings -> Panel: show / hide sections (spec/panel-visibility.md) ----
     BWP_OPEN_KEY = "panel/bwp_open"     # the Film B/W Point section left open?
-    HIDEABLE_SECTIONS = (("layers", "Layers (shown anyway on a frame that has areas)",
+    LOOK_TOP_OPEN_KEY = "panel/look_top_open"   # the Film Look fold above the histogram
+    HIDEABLE_SECTIONS = (("look_top", "Film Look (above the histogram)", "look_top_section"),
+                         ("layers", "Layers (shown anyway on a frame that has areas)",
                           "layers_container"),
                          ("printer_lights", "Printer Lights", "printer_section"),
                          ("crosstalk", "Crosstalk Correction", "crosstalk_section"),
@@ -2921,35 +2948,38 @@ class SlidersPanel(QWidget):
 
     # --- Film Look (spec/film-look-lut.md) -----------------------------------
     def _populate_look_combo(self, select=None):
+        """Both Film Look lists (Channel Levels' and the one above the
+        histogram) from the library, the same entries in the same order."""
         from core.look_lut import list_looks
-        combo = self.look_combo
-        current = select if select is not None else (combo.currentData() or "")
-        combo.blockSignals(True)
-        combo.clear()
-        combo.addItem("None", "")
-        for name in list_looks():
-            combo.addItem(_look_display_name(name), name)
-        combo.insertSeparator(combo.count())
-        combo.addItem("Import…", self.LOOK_IMPORT)
-        combo.blockSignals(False)
+        current = select if select is not None else (self.look_combo.currentData() or "")
+        names = list_looks()
+        for combo in self._look_combos:
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItem("None", "")
+            for name in names:
+                combo.addItem(_look_display_name(name), name)
+            combo.insertSeparator(combo.count())
+            combo.addItem("Import…", self.LOOK_IMPORT)
+            combo.blockSignals(False)
         self._select_look_in_combo(current)
 
     def _select_look_in_combo(self, name):
-        combo = self.look_combo
-        i = combo.findData(name or "")
-        if i < 0 and name:
-            # Set on this image but not in the library (moved / another
-            # machine): show it anyway so the user can see why it is ignored.
+        for combo in self._look_combos:
+            i = combo.findData(name or "")
+            if i < 0 and name:
+                # Set on this image but not in the library (moved / another
+                # machine): show it anyway so the user can see why it is ignored.
+                combo.blockSignals(True)
+                combo.insertItem(1, f"{_look_display_name(name)} (missing)", name)
+                combo.blockSignals(False)
+                i = 1
             combo.blockSignals(True)
-            combo.insertItem(1, f"{_look_display_name(name)} (missing)", name)
+            combo.setCurrentIndex(max(i, 0))
             combo.blockSignals(False)
-            i = 1
-        combo.blockSignals(True)
-        combo.setCurrentIndex(max(i, 0))
-        combo.blockSignals(False)
 
-    def _on_look_activated(self, index):
-        data = self.look_combo.itemData(index)
+    def _on_look_activated(self, index, combo=None):
+        data = (combo or self.look_combo).itemData(index)
         if data == self.LOOK_IMPORT:
             from PySide6.QtWidgets import QFileDialog
             from core.look_lut import import_look, CubeError
