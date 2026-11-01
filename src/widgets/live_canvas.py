@@ -72,6 +72,7 @@ class LiveCanvas(QWidget):
         self.setFocusPolicy(Qt.ClickFocus)
         self.setAttribute(Qt.WA_OpaquePaintEvent, True)
         self.surround = QColor(theme.CANVAS)     # behind the picture (the monitor lightens it)
+        self.message_colour = QColor(theme.TEXT_MUTED)   # the message on the surround
         self.result = None
         self.message = "Looking for a camera…"
         self.scale = None                 # None = fit; else device px per sensor px
@@ -514,7 +515,7 @@ class LiveCanvas(QWidget):
         r = self.result
         if r is None:
             if self.message:
-                p.setPen(QColor(theme.TEXT_MUTED))
+                p.setPen(self.message_colour)
                 p.drawText(self.rect().adjusted(24, 24, -24, -24),
                            Qt.AlignCenter | Qt.TextWordWrap, self.message)
             p.end()

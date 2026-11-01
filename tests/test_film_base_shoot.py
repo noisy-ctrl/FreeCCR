@@ -673,8 +673,10 @@ def test_the_edit_window_lists_the_cameras_values_and_estimates():
 
 
 def theme_warn(label):
+    """Warning amber: the monitor's light one, or the app's in a dialog it opens."""
     from ui import theme
-    return theme.WARN_TEXT in label.styleSheet()
+    qss = label.styleSheet()
+    return theme.light_colour(theme.WARN_TEXT) in qss or theme.WARN_TEXT in qss
 
 
 def test_edit_save_overwrites_and_save_as_new_adds(film_mon):

@@ -661,3 +661,52 @@ The window carries `theme.shaded_qss(shade)` (the app's stylesheet re-made
 with shaded greys; it cascades over the app's, so the combo arrow still comes
 from there), its palette, the control panel's own palette, and the section
 headers' own stylesheets re-coloured. Text keeps its colours.
+
+## Revision 2026-11-01 (3): light grey with black text
+The user: "I wonder if we should go brighter with the UI. Basically go the
+inverse of the main view. Light grey with black text in the live view
+capture." The 20 % grey (revision 2) is replaced by a light look, so the two
+windows can't be mistaken for each other at a glance.
+
+**Tokens** (`theme.LIGHT_TOKENS`, the same roles as the app's): window
+#d4d4d4, panel #dcdcdc, controls #ececec (hover #f6f6f6, pressed / checked
+#bcbcbc), borders #a8a8a8 / strong #8c8c8c, text #111111, muted #555555,
+disabled #999999, accent #6e6e6e, selection #bcbcbc with black text. Raised
+is lighter, as in the dark theme, so a control still stands out from what is
+behind it. Colours that carry meaning keep their hue: the green focus bar,
+red danger, the LED colours; the amber warning text goes dark amber
+(#7a5800) to read on light grey, the green "connected" dot a deeper green.
+
+**What stays dark or neutral.** The picture's surround is a neutral MID grey
+(#808080, its message text #111111): a light frame round a negative makes it
+look denser than it is, and the main window's near-black would be the odd one
+out here. The histogram stays a dark scope. Everything drawn over the picture
+(readout, badges, guides) is unchanged. Dialogs the monitor opens (Edit film
+base, Settings) are their own windows and follow the app.
+
+**How.** `theme.light_qss()` is the app's stylesheet template filled with the
+light tokens, set on the window (it cascades over the app's, so the combo
+arrow still comes from there). Inline stylesheets are recoloured with
+`theme.light_qss_text(qss)`: every colour in it whose value is one of the
+dark tokens (`LIGHT_MAP`, also `rgb()/rgba()` with the alpha kept) becomes its
+light counterpart; anything else is left alone. That map is IDEMPOTENT: no
+light value is a dark key, so recolouring twice changes nothing, which lets
+the monitor recolour every descendant's stylesheet once after building
+(widgets from other modules: section headers, separators, the primary
+buttons) without tracking which were already light. In `live_monitor.py`,
+the module name `theme` is a thin proxy over `ui.theme` (`_LightTheme`) that
+returns colour constants through `light_colour`, so the monitor's own
+stylesheets and painting (the solo rings, the status dots, captions set at
+run time) are light wherever they are made; sizes and functions pass
+through. Two values share a dark token (#3c3c3c is both a hover and a
+border): inline stylesheets take the border; the window's stylesheet uses the
+tokens by role. `SHADE_ADD` / `shade()` / `theme.shaded_qss` are removed.
+
+Palette: Window, Base, Button, AlternateBase, WindowText, Text, ButtonText,
+PlaceholderText (and the panel's own Window) from the light tokens.
+
+Tests: tokens and map (no light value is a dark key; recolouring twice =
+once; rgba keeps alpha; unknown colours untouched); the window's palette and
+stylesheet are light; a caption set at run time (warning, note) is light; a
+section header is light; the surround is mid grey; a screenshot reads light
+with dark text (the panel's median level ≥ 200, some text darker than 60).

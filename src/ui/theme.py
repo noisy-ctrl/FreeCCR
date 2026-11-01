@@ -328,29 +328,90 @@ QLabel[caption="true"] { color: %(text_muted)s; font-size: %(fs_caption)dpx; }
 """
 
 
-# The greys a window may lift together (the Live Capture Monitor does, so it
-# can't be mistaken for the main window): surfaces, borders, disabled text.
-SHADE_TOKENS = ("window", "canvas", "panel", "surface", "surface_hover",
-                "surface_active", "border", "border_strong", "text_disabled",
-                "accent", "selection_bg")
+# The Live Capture Monitor's light look (spec/live-capture-monitor.md, revision
+# 2026-11-01 (3): "the inverse of the main view: light grey with black text").
+# Raised is lighter, as in the dark theme, so a control still stands out.
+LIGHT_TOKENS = {
+    "window": "#d4d4d4", "canvas": "#808080", "panel": "#dcdcdc",
+    "surface": "#ececec", "surface_hover": "#f6f6f6", "surface_active": "#bcbcbc",
+    "border": "#a8a8a8", "border_strong": "#8c8c8c",
+    "text": "#111111", "text_muted": "#555555", "text_disabled": "#999999",
+    "accent": "#6e6e6e", "selection_bg": "#bcbcbc", "selection_text": "#000000",
+}
+
+# A dark token's VALUE -> its light counterpart, for stylesheets made with the
+# dark values (`light_qss_text`). No light value is a key, so recolouring is
+# idempotent. #3c3c3c is both SURFACE_HOVER and BORDER: inline it is a border.
+LIGHT_MAP = {
+    CANVAS: LIGHT_TOKENS["canvas"], WINDOW: LIGHT_TOKENS["window"],
+    PANEL: LIGHT_TOKENS["panel"], SURFACE: LIGHT_TOKENS["surface"],
+    BORDER: LIGHT_TOKENS["border"], SURFACE_ACTIVE: LIGHT_TOKENS["surface_active"],
+    "#505050": "#b2b2b2",                      # a primary button's hover
+    BORDER_STRONG: LIGHT_TOKENS["border_strong"],
+    TEXT: LIGHT_TOKENS["text"], TEXT_MUTED: LIGHT_TOKENS["text_muted"],
+    TEXT_DISABLED: LIGHT_TOKENS["text_disabled"],
+    WARN_BG: "#f1e2b2", WARN_BORDER: "#c9a74b",
+    WARN_TEXT: "#7a5800", WARN_TEXT_MUTED: "#8f6f1c",
+    SUCCESS_HOVER: "#2f8a50",                  # "connected": deeper to read on light
+}
+LIGHT_MAP = {k.lower(): v.lower() for k, v in LIGHT_MAP.items()}
+
+_COLOUR_RE = None
 
 
-def shaded_qss(shade) -> str:
-    """The central stylesheet with every grey in SHADE_TOKENS passed through
-    `shade` (a colour string -> a colour string); text and the rest stay.
-    For a window's own stylesheet: it cascades over the app's, so rules it
-    leaves out (the combo's arrow image) still come from there."""
-    tokens = {
-        "window": WINDOW, "canvas": CANVAS, "panel": PANEL, "surface": SURFACE,
-        "surface_hover": SURFACE_HOVER, "surface_active": SURFACE_ACTIVE,
-        "border": BORDER, "border_strong": BORDER_STRONG,
-        "text": TEXT, "text_muted": TEXT_MUTED, "text_disabled": TEXT_DISABLED,
-        "accent": ACCENT, "selection_bg": SELECTION_BG, "selection_text": SELECTION_TEXT,
-        "r_sm": RADIUS_SM, "r_md": RADIUS_MD, "fs_caption": FS_CAPTION,
-    }
-    for k in SHADE_TOKENS:
-        tokens[k] = shade(tokens[k])
-    return _QSS_TEMPLATE % tokens
+def light_colour(value):
+    """A colour string as the light look shows it: a dark token's value
+    becomes its light counterpart; anything else (other colours, non-colour
+    strings) is returned unchanged."""
+    if not isinstance(value, str):
+        return value
+    return LIGHT_MAP.get(value.strip().lower(), value)
+
+
+def light_qss_text(qss):
+    """`qss` with every dark token colour in it (#rrggbb, #rgb, rgb(), rgba()
+    with its alpha kept) recoloured for the light look. Idempotent."""
+    global _COLOUR_RE
+    if not qss:
+        return qss
+    import re
+    if _COLOUR_RE is None:
+        _COLOUR_RE = re.compile(
+            r"#[0-9a-fA-F]{6}\b|#[0-9a-fA-F]{3}\b"
+            r"|rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*([\d.]+)\s*)?\)")
+
+    def sub(m):
+        text = m.group(0)
+        if text.startswith("#"):
+            h = text.lower()
+            if len(h) == 4:
+                h = "#" + "".join(c * 2 for c in h[1:])
+            return LIGHT_MAP.get(h, text)
+        r, g, b = (int(m.group(i)) for i in (1, 2, 3))
+        light = LIGHT_MAP.get(f"#{r:02x}{g:02x}{b:02x}")
+        if light is None:
+            return text
+        lr, lg, lb = (int(light[i:i + 2], 16) for i in (1, 3, 5))
+        if m.group(4) is not None:
+            return f"rgba({lr}, {lg}, {lb}, {m.group(4)})"
+        return f"rgb({lr}, {lg}, {lb})"
+    return _COLOUR_RE.sub(sub, qss)
+
+
+def light_qss() -> str:
+    """The central stylesheet filled with the light tokens: for a window's
+    own stylesheet (it cascades over the app's, so rules it leaves out, the
+    combo's arrow image, still come from there)."""
+    tokens = dict(LIGHT_TOKENS, r_sm=RADIUS_SM, r_md=RADIUS_MD, fs_caption=FS_CAPTION)
+    # Plain labels and check boxes take their text colour from the palette,
+    # and under a stylesheet that is the APP's palette (light text), not the
+    # window's: name it here. A widget's own stylesheet still wins.
+    return (_QSS_TEMPLATE % tokens) + (
+        "\nQLabel, QCheckBox, QRadioButton { color: %(text)s; }"
+        "\nQLabel:disabled, QCheckBox:disabled, QRadioButton:disabled"
+        " { color: %(text_disabled)s; }"
+        "\nQToolBar::separator { background-color: %(border_strong)s; width: 1px;"
+        " margin: 4px 6px; }\n" % tokens)
 
 
 def global_qss(chevron_path=None) -> str:

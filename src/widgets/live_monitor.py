@@ -35,32 +35,37 @@ from core import live_feed as lf
 from core import live_negative as ln
 from core import orp
 from core import rail_autofocus as raf
-from ui import theme
+from ui import theme as _theme
 from widgets.histogram_widget import HistogramWidget
 from widgets.live_canvas import LiveCanvas, clean_guide, GUIDE_DEFAULT
 from widgets.sliders_panel import CollapsibleSection, GradientSlider
 
+
+class _LightTheme:
+    """`ui.theme` as this window shows it: light grey with black text
+    (spec/live-capture-monitor.md, revision 2026-11-01 (3)). Colour constants
+    come back as their light counterparts (`theme.light_colour`); sizes,
+    tuples and functions pass through. So every stylesheet and painter in
+    this module that names `theme.TEXT_MUTED` and the like is light wherever
+    and whenever it is made."""
+
+    def __getattr__(self, name):
+        value = getattr(_theme, name)
+        if name.isupper() and isinstance(value, str):
+            return _theme.light_colour(value)
+        return value
+
+
+theme = _LightTheme()
+
 CHANNEL_COLOURS = {"r": theme.CH_R, "g": theme.CH_G, "b": theme.CH_B,
-                   "w": "#e8e8e8", "ir": "#b06a7e"}
+                   "w": "#8a8a8a", "ir": "#b06a7e"}    # white: a grey ring on light
+LED_GROOVE_LOW = "#c4c4c4"       # an LED slider's groove at 0 (light look)
+LED_GROOVE_W = "#ffffff"         # ... and White's at full
 RING_KEYS = (("r", "R", "1"), ("g", "G", "2"), ("b", "B", "3"), ("w", "W", "4"))
 LED_VALUE_W = 52
 FRAME_ESTIMATE_MS = 1000         # the live estimate of this frame's exposure
 FRAME_ESTIMATES = 5              # ... the median of this many
-# The monitor's greys are all lifted by this many levels, so the two windows
-# can't be mistaken for each other: the background goes from #1e1e1e to
-# #333333, a 20 % grey (the user, 2026-11-01: "still too close to main";
-# the first try, 20 % lighter, made it #242424). Adding the same to every grey
-# keeps each control's contrast with what's behind it.
-SHADE_ADD = 21
-
-
-def shade(colour):
-    """A theme grey as the monitor shows it: SHADE_ADD levels lighter."""
-    c = QColor(colour)
-    return QColor(min(255, c.red() + SHADE_ADD), min(255, c.green() + SHADE_ADD),
-                  min(255, c.blue() + SHADE_ADD))
-
-
 LED_ROW_H = 20                   # the LED sliders: compact rows (the user, 2026-11-01)
 LED_ROW_GAP = 1
 # the focus rail's jog steps, µm (spec/focus-rail.md §5)
@@ -224,7 +229,7 @@ class SoloRing(QPushButton):
         p.setPen(QColor(theme.TEXT_MUTED))
         p.drawText(QRectF(0, 0, 64, 14), Qt.AlignHCenter, self.key)
         if self.progress is not None:
-            pen = QPen(QColor(255, 255, 255), 4)
+            pen = QPen(QColor(theme.TEXT), 4)
             pen.setCapStyle(Qt.RoundCap)
             p.setPen(pen)
             tip = 90 - self.progress * 360
@@ -335,7 +340,7 @@ class LiveCaptureMonitor(QWidget):
         self._usb_shutter = _UsbShutter(self)
 
         self._build()
-        self._apply_shade()
+        self._apply_light()
         self._load_view_state()
         self._wire()
         self._apply_toggles()
@@ -382,35 +387,49 @@ class LiveCaptureMonitor(QWidget):
         root.addWidget(self.scroll)
         self._build_wake_overlay()
 
-    def _apply_shade(self):
-        """Every grey of the window lifted by SHADE_ADD: the background, the
-        toolbar, the controls (the app's stylesheet re-made with shaded greys,
-        so they keep their contrast), the section headers and the picture's
-        surround. Text keeps its colours."""
-        win = shade(theme.WINDOW)
+    def _apply_light(self):
+        """Light grey with black text (revision 2026-11-01 (3)): the window's
+        own stylesheet and palette from the light tokens, the control panel's
+        own palette (it fills its background inside the scroll area, out of
+        the window palette's reach), every descendant's inline stylesheet
+        recoloured (idempotent, so ones already made light are unchanged),
+        and a neutral mid-grey surround for the picture."""
+        t = _theme.LIGHT_TOKENS
         pal = self.palette()
-        for role, token in ((QPalette.Window, theme.WINDOW), (QPalette.Base, theme.SURFACE),
-                            (QPalette.Button, theme.SURFACE),
-                            (QPalette.AlternateBase, theme.PANEL)):
-            pal.setColor(role, shade(token))
+        for role, key in ((QPalette.Window, "window"), (QPalette.Base, "surface"),
+                          (QPalette.Button, "surface"), (QPalette.AlternateBase, "panel"),
+                          (QPalette.WindowText, "text"), (QPalette.Text, "text"),
+                          (QPalette.ButtonText, "text"), (QPalette.PlaceholderText, "text_muted"),
+                          (QPalette.Highlight, "selection_bg"),
+                          (QPalette.HighlightedText, "selection_text")):
+            pal.setColor(role, QColor(t[key]))
+        for role in (QPalette.WindowText, QPalette.Text, QPalette.ButtonText):
+            pal.setColor(QPalette.Disabled, role, QColor(t["text_disabled"]))
         self.setPalette(pal)
         self.setAutoFillBackground(True)
-        self.setStyleSheet(theme.shaded_qss(lambda c: shade(c).name()))
-        # the control panel fills its own background inside the scroll area
-        # (QScrollArea.setWidget turns that on), and the stylesheet's
-        # transparent scroll area stops the window's palette reaching it
+        self.setStyleSheet(_theme.light_qss())
         ppal = self.panel.palette()
-        ppal.setColor(QPalette.Window, win)
+        ppal.setColor(QPalette.Window, QColor(t["window"]))
         self.panel.setPalette(ppal)
-        self.canvas.surround = shade(theme.CANVAS)
-        # a collapsible section's header carries its own stylesheet
-        for sec in self.findChildren(CollapsibleSection):
-            btn = sec._toggle_btn
-            qss = btn.styleSheet()
-            for token in (theme.SURFACE_ACTIVE, theme.SURFACE):
-                qss = qss.replace(token, shade(token).name())
-            btn.setStyleSheet(qss)
-        self._shade_window = win
+        self.canvas.surround = QColor(t["canvas"])
+        self.canvas.message_colour = QColor(t["text"])
+        for w in self.findChildren(QWidget):
+            qss = w.styleSheet()
+            if qss:
+                light = _theme.light_qss_text(qss)
+                if light != qss:
+                    w.setStyleSheet(light)
+        # a check box's box is drawn from its own palette's Base / Text (the
+        # stylesheet names no indicator, and under a stylesheet a child gets
+        # the app's dark palette, not the window's)
+        for cb_ in self.findChildren(QCheckBox):
+            cpal = cb_.palette()
+            cpal.setColor(QPalette.Base, QColor(t["surface"]))
+            cpal.setColor(QPalette.Text, QColor(t["text"]))
+            cpal.setColor(QPalette.Window, QColor(t["window"]))
+            cpal.setColor(QPalette.Disabled, QPalette.Base, QColor(t["panel"]))
+            cpal.setColor(QPalette.Disabled, QPalette.Text, QColor(t["text_disabled"]))
+            cb_.setPalette(cpal)
 
     def _build_wake_overlay(self):
         """Covers the whole control panel while the light is off for being
@@ -621,7 +640,8 @@ class LiveCaptureMonitor(QWidget):
             lab.setFixedWidth(theme.LABEL_COL_W)
             lab.setFixedHeight(LED_ROW_H)
             lab.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            s = GradientSlider(("#262626", CHANNEL_COLOURS[k]), Qt.Horizontal)
+            s = GradientSlider((LED_GROOVE_LOW, LED_GROOVE_W if k == "w"
+                                else CHANNEL_COLOURS[k]), Qt.Horizontal)
             s.setRange(0, 255)
             s.reset_value = 0
             s.setFixedHeight(LED_ROW_H)
