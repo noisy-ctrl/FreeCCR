@@ -38,7 +38,11 @@
 #define LEAD_MM 4.0f                // mm per screw turn. A ball screw's code ends in
                                     // it: SFU1204 = 4, SFU1605 = 5, SFU1610 = 10
                                     // (a T8x8 lead screw = 8, T8x2 = 2)
-#define TRAVEL_MM 100.0f            // soft limit from home (applies once homed)
+#define SCREW_LENGTH_MM 300.0f      // the screw's whole length: HOME gives up after this
+#define TRAVEL_MM 200.0f            // soft limit from home (applies once homed). A 300 mm
+                                    // SFU1204 leaves roughly 200 mm of stroke once its end
+                                    // blocks and the nut are on: measure yours and set it
+                                    // a little short of the far end
 #define RUN_CURRENT_MA 600          // RMS; a small NEMA 17 is happy at 400-800
 #define HOLD_FRACTION 0.5f          // current while standing still
 #define INVERT_DIR false            // true if HOME runs away from the end
@@ -122,7 +126,7 @@ static orp::Config makeConfig() {
   c.homeFastSps = (uint32_t)(HOME_FAST_MM_S * STEPS_PER_MM);
   c.homeSlowSps = (uint32_t)(HOME_SLOW_MM_S * STEPS_PER_MM);
   c.homeBackoff = (int32_t)(HOME_BACKOFF_MM * STEPS_PER_MM);
-  c.homeMaxTravel = (int32_t)((TRAVEL_MM + 10.0f) * STEPS_PER_MM);
+  c.homeMaxTravel = (int32_t)(SCREW_LENGTH_MM * STEPS_PER_MM);   // from anywhere on it
   c.homeIgnoreSteps = (int32_t)(0.5f * STEPS_PER_MM);   // the stall flag while it starts
   c.maxSps = (uint32_t)(20.0f * STEPS_PER_MM);
   c.maxAccel = (uint32_t)(500.0f * STEPS_PER_MM);
