@@ -225,3 +225,74 @@ def test_camera_zoom_sits_by_the_view_zoom_and_the_view_list_follows(film_mon):
     mon.canvas.zoom("fit")
     mon._sync_view_zoom()
     assert combo.currentText() == "Fit" and combo.findData("custom") < 0
+
+
+# --- 2026-11-01: right click for the camera zoom; Shoot unzooms first -------
+def test_right_click_on_the_picture_offers_the_camera_zoom(film_mon):
+    mon, usb, light, lm, path = film_mon
+    from PySide6.QtCore import QPoint
+    m = mon._canvas_menu(QPoint(10, 10))
+    assert not m.actions()[0].isEnabled() and "not offered" in m.actions()[0].text()
+    m.close()
+    mon._on_zoom_levels(["1", "2.5", "4", "8", "16"])
+    mon._on_cam_zoom("4")
+    m = mon._canvas_menu(QPoint(10, 10))
+    texts = [a.text() for a in m.actions()]
+    assert texts == ["Camera Zoom", "Whole", "2.5×", "4×", "8×", "Max"]
+    assert [a.text() for a in m.actions() if a.isChecked()] == ["4×"]
+    next(a for a in m.actions() if a.text() == "8×").trigger()
+    assert usb.log[-1] == ("zoom", "8")
+    m.close()
+    # the canvas asks for it on a right click, not while placing something
+    got = []
+    mon.canvas.menu_requested.connect(got.append)
+    from PySide6.QtGui import QContextMenuEvent
+    ev = QContextMenuEvent(QContextMenuEvent.Mouse, QPoint(5, 5), QPoint(50, 50))
+    mon.canvas.contextMenuEvent(ev)
+    assert got == [QPoint(50, 50)]
+    mon.canvas.set_mode("area")
+    mon.canvas.contextMenuEvent(ev)
+    assert got == [QPoint(50, 50)]
+    mon.canvas.set_mode(None)
+
+
+def test_shoot_goes_back_to_whole_first_then_shoots(film_mon):
+    mon, usb, light, lm, path = film_mon
+    mon._on_zoom_levels(["1", "2.5", "4", "8", "16"])
+    mon._on_cam_zoom("8")
+    mon._shutter_is_usb = lambda: True
+    mon._ensure_hot_folder = lambda: True
+    usb.dest = usb.dest or mon._usb_dest
+    usb.fires.clear()
+    mon.shoot()
+    assert usb.log[-1] == ("zoom", "1") and not mon.sequence.running
+    assert "whole frame before the shot" in mon.capture_caption.text()
+    assert usb.fires == []
+    mon._on_cam_zoom("1")                         # the camera says it is Whole
+    from test_capture_routes import _wait
+    assert _wait(lambda: mon.sequence.running or usb.fires, 5)
+    assert _wait(lambda: not mon.sequence.running, 20)
+    assert len(usb.fires) == 3                    # the trichrome shot went ahead
+
+
+def test_shoot_waiting_for_whole_can_be_cancelled_and_times_out(film_mon, monkeypatch):
+    mon, usb, light, lm, path = film_mon
+    mon._on_zoom_levels(["1", "2.5", "4", "8", "16"])
+    mon._on_cam_zoom("8")
+    mon._shutter_is_usb = lambda: True
+    mon._ensure_hot_folder = lambda: True
+    usb.fires.clear()
+    mon.shoot()
+    mon.shoot()                                   # a second press cancels
+    assert mon._shoot_when_whole is None and "cancelled" in mon.capture_caption.text()
+    mon._on_cam_zoom("1")
+    _app.processEvents()
+    assert not mon.sequence.running and usb.fires == []
+    # the camera never comes back: it says so and shoots nothing
+    mon._on_cam_zoom("8")
+    monkeypatch.setattr(type(mon), "SHOOT_UNZOOM_S", 0.2)
+    mon.shoot()
+    from test_capture_routes import _wait
+    assert _wait(lambda: mon._shoot_when_whole is None, 3)
+    assert "didn't go back to the whole frame" in mon.capture_caption.text()
+    assert usb.fires == []
