@@ -59,3 +59,29 @@ rows of the panel (after Details), behind their own separator. The separator
 that stood below Lab Finish (`_lab_finish_sep_below`) is gone: the next
 section's own separator draws that line, so hiding Lab Finish never leaves a
 double line.
+
+## Revision 2026-11-01: hide a section from its header
+The user: "Can we be able to right click different section headers in the main
+window to hide -> Dialogue (Are you sure you want to hide? Sections can be
+unhidden in the settings".
+
+- **Where**: the header of every section in `HIDEABLE_SECTIONS` that has one:
+  each `CollapsibleSection`'s toggle button (Printer Lights, Crosstalk
+  Correction, Lab Finish, Channel Levels, Channel Balance, Curves,
+  Subtractive Saturations, Chroma Noise Reduction, Details) and the Layers
+  title. The Film Look list above the histogram has no header (its own
+  right-click is the combo's), so it stays Settings-only.
+- **What**: right-click → a menu with one entry, **Hide “<name>”…** → a
+  question: "Are you sure you want to hide “<name>”? Sections can be unhidden
+  in Settings → Panel." (Hide / Cancel, Cancel the default). Hide adds the id
+  to `panel/hidden_sections` through `set_hidden_sections`, exactly as
+  Settings does, so Settings shows it unticked.
+- **Layers**: hidden from its title like the others, and still shown anyway on
+  a frame that has area layers (the rule above).
+- `CollapsibleSection.set_header_menu(fn)`: `fn(menu)` fills the menu for a
+  right-click on the header; no fn, no menu (other collapsibles unchanged).
+  `SlidersPanel._confirm_hide_section(name)` is the test seam.
+
+Tests: a right-click on a hideable header offers the entry; Hide hides the
+section and its separator and stores it; Cancel changes nothing; a
+non-hideable collapsible (Film B/W Point) has no menu; Layers' title has it.

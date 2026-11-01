@@ -141,3 +141,32 @@ def test_layers_hide_but_show_on_a_frame_with_areas(panel, monkeypatch):
     assert not _shown(panel.layers_container)
     panel.set_hidden_sections(set())
     assert _shown(panel.layers_container) and _shown(panel._layers_sep_below)
+
+
+def test_a_sections_header_hides_it_after_asking(panel):
+    """2026-11-01: right-click a section header → Hide …, after a question;
+    the same stored choice Settings shows (spec/panel-visibility.md)."""
+    asked = []
+    answer = {"hide": False}
+    panel._confirm_hide_section = lambda name: (asked.append(name), answer["hide"])[1]
+    menu = panel.curves_section.header_menu()
+    assert [a.text() for a in menu.actions()] == ["Hide “Curves”…"]
+    menu.actions()[0].trigger()                       # Cancel: nothing changes
+    assert asked == ["Curves"] and _shown(panel.curves_section)
+    assert "curves" not in panel.hidden_sections()
+    answer["hide"] = True
+    panel.curves_section.header_menu().actions()[0].trigger()
+    assert not _shown(panel.curves_section)
+    assert not _shown(panel._section_separators["curves"])
+    assert "curves" in panel.hidden_sections()
+    # every collapsible in the list has it; one that isn't hideable doesn't
+    from widgets.sliders_panel import CollapsibleSection
+    for sid, _label, attr in panel.HIDEABLE_SECTIONS:
+        w = getattr(panel, attr)
+        if isinstance(w, CollapsibleSection):
+            assert w.header_menu() is not None, sid
+    assert panel.bwp_section.header_menu() is None
+    # Layers' title (a label) offers it too
+    from PySide6.QtCore import Qt
+    assert panel._layers_title.contextMenuPolicy() == Qt.CustomContextMenu
+    assert panel.hide_section_asked("layers") and "layers" in panel.hidden_sections()
