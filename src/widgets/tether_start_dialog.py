@@ -67,7 +67,7 @@ class TetherStartDialog(QDialog):
         lay.addWidget(self.close_box)
         self.import_box = QCheckBox("")
         lay.addWidget(self.import_box)
-        self.dont_ask_box = QCheckBox("Don't ask when the monitor opens")
+        self.dont_ask_box = QCheckBox("Don't ask when Capture opens")
         self.dont_ask_box.setVisible(bool(from_monitor))
         lay.addWidget(self.dont_ask_box)
 

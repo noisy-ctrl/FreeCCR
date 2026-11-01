@@ -710,3 +710,10 @@ once; rgba keeps alpha; unknown colours untouched); the window's palette and
 stylesheet are light; a caption set at run time (warning, note) is light; a
 section header is light; the surround is mid grey; a screenshot reads light
 with dark text (the panel's median level ≥ 200, some text darker than 60).
+
+## Revision 2026-11-01 (4): it is called Capture
+The user: "Can we rename Live capture… to simply 'Capture'." File → **Capture…**
+(was Live Capture Monitor…), the window's title, Settings' group (was "Live
+capture"), and the texts that named it ("Don't ask when Capture opens", the
+tether banner's tooltip). Code identifiers (`live_monitor`, `live/*` settings
+keys, `LiveCaptureMonitor`) stay, so stored settings carry over.

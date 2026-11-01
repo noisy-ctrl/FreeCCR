@@ -551,9 +551,9 @@ def test_file_menu_opens_one_monitor(monkeypatch):
         return m
     monkeypatch.setattr(lm, "LiveCaptureMonitor", make)
     w = MainWindow()
-    assert w.live_monitor_action.text() == "Live Capture Monitor…"
+    assert w.live_monitor_action.text() == "Capture…"
     acts = [a.text() for a in w.menuBar().actions()[0].menu().actions()]
-    assert acts.index("Live Capture Monitor…") == acts.index("Hot Folder Tether…") + 1
+    assert acts.index("Capture…") == acts.index("Hot Folder Tether…") + 1
     w.live_monitor_action.trigger()
     w.live_monitor_action.trigger()
     assert len(made) == 1 and w._live_monitor is made[0]

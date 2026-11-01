@@ -394,7 +394,7 @@ class SettingsDialog(QDialog):
         lay.addWidget(grp_keys)
 
         # File -> Live Capture Monitor (spec/live-capture-monitor.md §3.7)
-        grp_live = QGroupBox("Live capture")
+        grp_live = QGroupBox("Capture")
         gl = QVBoxLayout(grp_live)
         gl.setSpacing(theme.GAP_ROW)
         row = QHBoxLayout()
@@ -415,7 +415,7 @@ class SettingsDialog(QDialog):
         row.addWidget(self._combo_live_format, 1)
         gl.addLayout(row)
         self._cb_live_ask_tether = QCheckBox(
-            "Ask about Hot Folder Tether when the monitor opens")
+            "Ask about Hot Folder Tether when Capture opens")
         gl.addWidget(self._cb_live_ask_tether)
         self._cb_live_light_on_camera = QCheckBox(
             "Turn the light on (white, 100 %) when a camera connects")
@@ -431,7 +431,7 @@ class SettingsDialog(QDialog):
         gl.addWidget(self._cb_live_frame_meter)
         gl.addWidget(self._muted(
             "Dimming: the lit channels breathe low while nothing is used, and come "
-            "back when you move the pointer over the monitor, press a key, or the "
+            "back when you move the pointer over Capture, press a key, or the "
             "picture changes. The video format applies from the next camera "
             "opened; MJPEG's compression can hide or fake fine detail while "
             "focusing."))
