@@ -234,7 +234,7 @@ def _stuck_worker(tmp_path, monkeypatch):
     return fake, usb
 
 
-def test_live_view_that_doesnt_come_back_after_a_hold_is_restarted_once(tmp_path, monkeypatch):
+def test_live_view_that_doesnt_come_back_after_a_hold_is_restarted(tmp_path, monkeypatch):
     fake, usb = _stuck_worker(tmp_path, monkeypatch)
     try:
         usb.pause_live(True)
@@ -257,22 +257,67 @@ def test_live_view_that_doesnt_come_back_after_a_hold_is_restarted_once(tmp_path
         usb.wait(3000)
 
 
-def test_a_stall_with_nothing_held_restarts_live_view_once(tmp_path, monkeypatch):
+def test_a_stall_with_nothing_held_restarts_live_view(tmp_path, monkeypatch):
     fake, usb = _stuck_worker(tmp_path, monkeypatch)
     try:
         fake.stall = fake.stuck = True                  # busy, no shot to collect
         assert _wait(lambda: fake.restarts == 1, 3)
         n = fake.frames
         assert _wait(lambda: fake.frames > n)
-        # stuck again and not recovering: no reconnect loop until a frame comes
-        fake.stuck = True
-        restart = fake.restart_live
+    finally:
+        usb.stop()
+        usb.wait(3000)
+
+
+def test_live_view_that_stays_stopped_is_tried_again_then_given_up(tmp_path, monkeypatch):
+    """Revision 7 (the user, 2026-11-01): one reconnect, made while the camera
+    was still busy, left live view stopped for good. Each try now gets its gap,
+    then the next; after the last, `live_not_back` and no reconnect loop."""
+    import core.usb_camera as uc
+    monkeypatch.setattr(uc, "RESTART_GAPS_S", (0.3, 0.5))
+    fake, usb = _stuck_worker(tmp_path, monkeypatch)
+    tries, gone = [], []
+    usb.live_restarting.connect(lambda n, of: tries.append((n, of)))
+    usb.live_not_back.connect(lambda: gone.append(True))
+    try:
         fake.restart_live = lambda: (setattr(fake, "restarts", fake.restarts + 1), True)[1]
-        fake.stall = True
+        fake.stall = fake.stuck = True                  # a reconnect doesn't help
+        assert _wait(lambda: fake.restarts == 1, 3)
+        time.sleep(0.15)
+        assert fake.restarts == 1                       # its gap first
         assert _wait(lambda: fake.restarts == 2, 3)
+        assert _wait(lambda: gone == [True], 3)
+        time.sleep(0.6)
+        assert fake.restarts == 2 and gone == [True]    # given up: no loop
+        _app.processEvents()
+        assert tries == [(1, 2), (2, 2)]
+        # a picture starts the count over: the next stop gets its tries again
+        paused = []
+        usb.live_paused.connect(paused.append)
+        fake.stall = False
+        fake.stuck = False
+        assert _wait(lambda: False in paused, 3)
+        fake.stall = fake.stuck = True
+        assert _wait(lambda: fake.restarts == 3, 3)
+    finally:
+        usb.stop()
+        usb.wait(3000)
+
+
+def test_a_hold_ending_starts_the_tries_over(tmp_path, monkeypatch):
+    import core.usb_camera as uc
+    monkeypatch.setattr(uc, "RESTART_GAPS_S", (0.2,))
+    fake, usb = _stuck_worker(tmp_path, monkeypatch)
+    try:
+        fake.restart_live = lambda: (setattr(fake, "restarts", fake.restarts + 1), True)[1]
+        fake.stall = fake.stuck = True
+        assert _wait(lambda: fake.restarts == 1, 3)
         time.sleep(0.5)
-        assert fake.restarts == 2
-        fake.restart_live = restart
+        assert fake.restarts == 1                       # given up
+        usb.pause_live(True)
+        time.sleep(0.1)
+        usb.pause_live(False)                           # e.g. the next Measure
+        assert _wait(lambda: fake.restarts == 2, 3)
     finally:
         usb.stop()
         usb.wait(3000)

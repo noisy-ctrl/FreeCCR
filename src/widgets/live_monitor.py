@@ -293,6 +293,7 @@ class LiveCaptureMonitor(QWidget):
         self._rail_zeroed = False        # Set Zero pressed since the rail connected
         self._rail_home_id = None
         self._last_frame_t = -1e9
+        self._live_trouble = None        # USB live view stopped: see _on_live_paused
         self._camera_up = False          # a camera connected (the feed's or a USB one)
         # this frame's own exposure (spec/frame-exposure.md)
         self._frame_est = []             # recent live ratios
@@ -963,6 +964,10 @@ class LiveCaptureMonitor(QWidget):
             self.usb.addons_found.connect(self._on_addons)
         if hasattr(self.usb, "live_paused"):
             self.usb.live_paused.connect(self._on_live_paused)
+        if hasattr(self.usb, "live_restarting"):
+            self.usb.live_restarting.connect(self._on_live_restarting)
+        if hasattr(self.usb, "live_not_back"):
+            self.usb.live_not_back.connect(self._on_live_not_back)
         self.usb.fire_failed.connect(self._on_fire_failed)
         if hasattr(self.usb, "exposure_choices"):
             self.usb.exposure_choices.connect(self._on_exposure_choices)
@@ -1449,6 +1454,7 @@ class LiveCaptureMonitor(QWidget):
         if r is None or self._closing:
             return
         self._last_frame_t = time.monotonic()
+        self._live_trouble = None                  # a picture: live view is back
         reading = getattr(r, "reading", None)
         if reading is not None and self._af is not None and self._af.running:
             self._af.reading(reading)
@@ -2675,6 +2681,8 @@ class LiveCaptureMonitor(QWidget):
         # that (or nothing we can name) holds it, never for another program
         self.release_btn.setVisible(kind == "busy" and sys.platform == "darwin"
                                     and not others)
+        if kind in ("opening", "open", "lost", "closed"):
+            self._live_trouble = None           # a fresh connection's live view
         if kind == "open":
             self._on_camera_connected()
             self._usb_model = text
@@ -2742,13 +2750,34 @@ class LiveCaptureMonitor(QWidget):
         if not start():
             self._warn_caption("Capture the film lead first, with the light on.")
 
-    def _on_live_paused(self, paused):
-        # The next frame clears the message (the canvas drops it on a result).
+    # Live view over USB that stopped (spec/film-base-exposure.md revision 7).
+    # The next frame clears the message (the canvas drops it on a result) and
+    # `_live_trouble` (None, "stopped", "restarting" or "gone").
+    def _usb_is_the_picture(self):
         key = getattr(self.usb, "key", None)
-        if paused and key and self.camera_combo.currentData() == key:
-            self.canvas.set_message(
-                "Live view is paused: the camera is still holding the last shot.\n"
-                "Switching the camera off and on brings live view back.")
+        return bool(key) and self.camera_combo.currentData() == key
+
+    def _on_live_paused(self, paused):
+        if not paused or not self._usb_is_the_picture():
+            return
+        if getattr(self, "_live_trouble", None) is None:
+            self._live_trouble = "stopped"
+            self.canvas.set_message("Live view stopped.\nChecking the camera…")
+
+    def _on_live_restarting(self, attempt, tries):
+        if not self._usb_is_the_picture():
+            return
+        self._live_trouble = "restarting"
+        self.canvas.set_message("Live view stopped.\nReconnecting the camera to restart "
+                                f"it (try {attempt} of {tries})…")
+
+    def _on_live_not_back(self):
+        if not self._usb_is_the_picture():
+            return
+        self._live_trouble = "gone"
+        self.canvas.set_message(
+            "Live view has stopped on the camera, and reconnecting didn't restart it.\n"
+            "Unplug the camera's USB cable and plug it back in, then Find Cameras.")
 
     def _on_usb_file(self, path):
         if self._measure is not None:

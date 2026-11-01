@@ -416,6 +416,46 @@ once after the grace and streams again; one that comes back by itself is
 not touched; a stall with nothing held restarts once and never loops; no
 restart while a shot is pending, one as soon as it isn't.
 
+## Revision 7: a stopped live view, said plainly (2026-11-01)
+The user, after Measure and Meter: the picture said "Live view is paused:
+the camera is still holding the last shot", though nothing was held;
+reconnecting (Find Cameras) brought back a picture that **never changed**;
+only unplugging the USB cable and plugging it in again restarted live view.
+
+- **A picture sent again byte for byte is no picture.** A live view's noise
+  changes every frame, so the same JPEG for seconds is a stopped live view
+  whose last picture is still served. `Gphoto2Backend.preview` returns None
+  for a repeat (`_last_frame`), and a run of repeats (`_same_since`) counts
+  towards `live_stalled` exactly like a run of busy answers (`LIVE_STALL_S`,
+  5 s). A repeat clears neither run; only a new picture does. `_reconnect`
+  keeps the last picture (the same one after it is still stopped) but starts
+  the clock again; `open` forgets it. Brief repeats (fetching faster than the
+  camera refreshes) never reach 5 s.
+- **More than one try, then the truth.** The single reconnect became tries
+  with a gap each (`RESTART_GAPS_S` = 3 s, 8 s): a try, its gap for a
+  picture, the next; after the last gap, `UsbCamera.live_not_back` and no
+  further reconnects until a picture arrives, a hold ends or the camera is
+  opened afresh (each resets the count). `live_restarting(try, of)` reports
+  each try. Two tries, not more: the user's own reconnect didn't help, so
+  more would only delay the advice.
+- **The messages** (`_live_trouble`, cleared by a picture or a fresh
+  connection): stalled → "Live view stopped. Checking the camera…"; a try →
+  "Reconnecting the camera to restart it (try n of N)…" (a stall reported
+  again between tries leaves it); given up → "Live view has stopped on the
+  camera, and reconnecting didn't restart it. Unplug the camera's USB cable
+  and plug it back in, then Find Cameras." Nothing claims a held shot any
+  more (`collect_held` still brings one in when there is one).
+- Not done (yet): a software USB reset (libgphoto2's port reset) as a last
+  try. It may act like replugging, but it can re-enumerate the camera on a
+  new address and hand it to macOS's camera service; it waits for a log of
+  the failure.
+
+Tests: repeats return None, stall after 5 s, a reconnect serving the same
+picture is still stopped on a fresh clock, brief repeats never stall; tries
+with gaps, given up with no loop, a picture or a hold's end starts the count
+over; the monitor's three messages, kept between tries, none for a capture
+device's picture.
+
 ## Code
 - `core/base_exposure.py` (new, Qt-free): `seconds`, `iso_number`,
   `exposure_of`, `Reading` + `reading_from_mosaic` + `read_patch`, `Plan` +

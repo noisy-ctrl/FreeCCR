@@ -61,6 +61,11 @@ CONFIRM_POLL_MS = 200
 HELD_EXTS = RAW_EXTS | {".jpg", ".jpeg", ".heif", ".hif", ".tif", ".tiff"}
 # Live view that has given frames and then answers busy this long is
 # reported as paused (`live_stalled`): a body holding a shot it couldn't clear.
+# So is one that keeps sending the SAME picture byte for byte this long: a real
+# live view's noise changes every frame, so an unchanged JPEG for seconds is
+# a camera whose live view has stopped while its last picture is still served
+# (the user, 2026-11-01: after Measure / Meter and a reconnect, a picture that
+# never changed). A repeat isn't a new picture: `preview` returns None for it.
 LIVE_STALL_S = 5.0
 LOST_AFTER_ERRORS = 3      # consecutive I/O failures before the camera counts as gone
 DCC_PORT = 5513
@@ -305,6 +310,8 @@ class Gphoto2Backend:
         self._busy_since = None      # first "busy" of the current run of them
         self._busy_until = 0.0       # don't ask again before this
         self._preview_frames = 0
+        self._last_frame = None      # the last picture's bytes (a repeat is no picture)
+        self._same_since = None      # first repeat of the current run of them
         self._reset_shot_state()
 
     def _reset_shot_state(self):
@@ -373,6 +380,8 @@ class Gphoto2Backend:
         self._busy_since = None
         self._busy_until = 0.0
         self._preview_frames = 0
+        self._last_frame = None
+        self._same_since = None
         self._reset_shot_state()
         return self.reported_model() or self._models.get(ident, "")
 
@@ -469,6 +478,14 @@ class Gphoto2Backend:
             self._failed(e)
             return None
         self._errors = 0
+        if data == self._last_frame:
+            # the same picture again: not a new frame, and not live view
+            # coming back (a stopped live view still serves its last picture)
+            if self._same_since is None:
+                self._same_since = now
+            return None
+        self._last_frame = data
+        self._same_since = None
         self._busy_since = None
         self._busy_until = 0.0
         self._preview_frames += 1
@@ -697,9 +714,13 @@ class Gphoto2Backend:
             return False
 
     def live_stalled(self):
-        """Live view gave frames, then has answered busy for LIVE_STALL_S."""
-        return bool(self._preview_frames and self._busy_since is not None
-                    and self.clock() - self._busy_since >= LIVE_STALL_S)
+        """Live view gave frames, then has answered busy, or sent only the
+        same picture again, for LIVE_STALL_S."""
+        if not self._preview_frames:
+            return False
+        now = self.clock()
+        return any(t is not None and now - t >= LIVE_STALL_S
+                   for t in (self._busy_since, self._same_since))
 
     def _download(self, folder, name):
         gp = self.gp
@@ -898,6 +919,9 @@ class Gphoto2Backend:
         self._last_preview = None
         self._busy_since = None
         self._busy_until = 0.0
+        # the picture before the reconnect is kept: the same one served after
+        # it is still a stopped live view; its clock starts again
+        self._same_since = None
 
     def restart_live(self):
         """Live view that didn't come back (after a hold, or stuck busy with no
