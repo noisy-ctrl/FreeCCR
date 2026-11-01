@@ -18,7 +18,8 @@ import sys
 import time
 
 from PySide6.QtCore import Qt, QTimer, Signal, QSettings, QEvent, QPointF, QRectF
-from PySide6.QtGui import QAction, QKeySequence, QShortcut, QPainter, QPen, QColor, QFont
+from PySide6.QtGui import (QAction, QKeySequence, QShortcut, QPainter, QPen, QColor, QFont,
+                           QPalette)
 from PySide6.QtWidgets import (QWidget, QFrame, QHBoxLayout, QVBoxLayout, QLabel,
                                QPushButton, QComboBox, QToolBar, QCheckBox, QSizePolicy,
                                QScrollArea, QSlider, QMenu, QInputDialog, QMessageBox,
@@ -42,6 +43,17 @@ CHANNEL_COLOURS = {"r": theme.CH_R, "g": theme.CH_G, "b": theme.CH_B,
                    "w": "#e8e8e8", "ir": "#b06a7e"}
 RING_KEYS = (("r", "R", "1"), ("g", "G", "2"), ("b", "B", "3"), ("w", "W", "4"))
 LED_VALUE_W = 52
+# The monitor's greys are this % of the main window's, so the two windows
+# can't be mistaken for each other (the user, 2026-11-01: "slightly lighter,
+# like 20 %"). QColor.lighter: value x 1.2, #1e1e1e -> #242424.
+SHADE_LIGHTER = 120
+
+
+def shade(colour):
+    """A theme colour as the monitor shows it: 8-bit, SHADE_LIGHTER % lighter."""
+    return QColor(QColor(colour).lighter(SHADE_LIGHTER).name())
+
+
 LED_ROW_H = 20                   # the LED sliders: compact rows (the user, 2026-11-01)
 LED_ROW_GAP = 1
 # the focus rail's jog steps, µm (spec/focus-rail.md §5)
@@ -308,6 +320,7 @@ class LiveCaptureMonitor(QWidget):
         self._usb_shutter = _UsbShutter(self)
 
         self._build()
+        self._apply_shade()
         self._load_view_state()
         self._wire()
         self._apply_toggles()
@@ -353,6 +366,19 @@ class LiveCaptureMonitor(QWidget):
         self.scroll.setFixedWidth(theme.PANEL_W + 14)
         root.addWidget(self.scroll)
         self._build_wake_overlay()
+
+    def _apply_shade(self):
+        """The window, toolbar, scroll bars and the picture's surround 20 %
+        lighter than the main window's; controls keep their colours."""
+        win = shade(theme.WINDOW)
+        pal = self.palette()
+        pal.setColor(QPalette.Window, win)
+        self.setPalette(pal)
+        self.setAutoFillBackground(True)
+        self.setStyleSheet(
+            f"QToolBar {{ background-color: {win.name()}; }}"
+            f"QScrollBar:vertical, QScrollBar:horizontal {{ background-color: {win.name()}; }}")
+        self.canvas.surround = shade(theme.CANVAS)
 
     def _build_wake_overlay(self):
         """Covers the whole control panel while the light is off for being

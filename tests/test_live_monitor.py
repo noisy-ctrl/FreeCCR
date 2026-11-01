@@ -348,6 +348,21 @@ def test_frames_histogram_and_the_negative_preview():
         _close(mon)
 
 
+def test_the_monitor_is_a_lighter_grey_than_the_main_window():
+    mon, feed, light, dev = _monitor()
+    try:
+        from PySide6.QtGui import QPalette, QColor
+        want = lm.shade(lm.theme.WINDOW)
+        assert want.name() == "#242424"                    # #1e1e1e, 20 % lighter
+        assert mon.palette().color(QPalette.Window).name() == want.name()
+        assert mon.canvas.surround.name() == lm.shade(lm.theme.CANVAS).name()
+        assert want.name() in mon.styleSheet()
+        img = mon.canvas.grab().toImage()                 # no picture yet: all surround
+        assert img.pixelColor(5, 5).name() == mon.canvas.surround.name()
+    finally:
+        _close(mon)
+
+
 def test_negative_preview_is_named_so_and_its_right_click_picks_colour_or_bw():
     mon, feed, light, dev = _monitor()
     try:

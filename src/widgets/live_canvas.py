@@ -71,6 +71,7 @@ class LiveCanvas(QWidget):
         self.setMinimumSize(480, 270)
         self.setFocusPolicy(Qt.ClickFocus)
         self.setAttribute(Qt.WA_OpaquePaintEvent, True)
+        self.surround = QColor(theme.CANVAS)     # behind the picture (the monitor lightens it)
         self.result = None
         self.message = "Looking for a camera…"
         self.scale = None                 # None = fit; else device px per sensor px
@@ -508,7 +509,7 @@ class LiveCanvas(QWidget):
 
     def paintEvent(self, e):
         p = QPainter(self)
-        p.fillRect(self.rect(), QColor(theme.CANVAS))
+        p.fillRect(self.rect(), self.surround)
         self._readout_rect = None
         r = self.result
         if r is None:
