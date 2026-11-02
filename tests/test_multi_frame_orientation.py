@@ -5,6 +5,7 @@ See spec/multi-frame-orientation.md."""
 import os
 import sys
 
+import numpy as np
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -132,9 +133,30 @@ def _never_ask(ip, monkeypatch):
 
 def test_next_orientation_rotations_wrap():
     assert next_orientation("left", 0, False, False) == (270, False, False)
-    assert next_orientation("left", 90, True, False) == (0, True, False)
-    assert next_orientation("right", 270, False, True) == (0, False, True)
     assert next_orientation("right", 0, False, False) == (90, False, False)
+    assert next_orientation("left", 90, True, True) == (0, True, True)
+    assert next_orientation("right", 270, True, True) == (0, True, True)
+
+
+def test_next_orientation_reverses_the_stored_turn_under_one_mirror():
+    # one mirror reverses the sense of the rotation stored before it
+    assert next_orientation("left", 90, True, False) == (180, True, False)
+    assert next_orientation("right", 270, False, True) == (180, False, True)
+    assert next_orientation("right", 0, True, False) == (270, True, False)
+
+
+@pytest.mark.parametrize("kind", ["left", "right"])
+@pytest.mark.parametrize("rot", [0, 90, 180, 270])
+@pytest.mark.parametrize("h,v", [(False, False), (True, False), (False, True), (True, True)])
+def test_rotate_turns_the_picture_on_screen_the_way_the_button_says(kind, rot, h, v):
+    from core.ccr_processor import apply_orientation
+    img = np.arange(4 * 6 * 3, dtype=np.float32).reshape(4, 6, 3)   # no symmetry
+    before = apply_orientation(img, rot, 0.0, h, v)
+    r2, h2, v2 = next_orientation(kind, rot, h, v)
+    after = apply_orientation(img, r2, 0.0, h2, v2)
+    # np.rot90 k=1 turns anticlockwise (left), k=3 clockwise (right)
+    want = np.rot90(before, k=1 if kind == "left" else 3)
+    np.testing.assert_array_equal(after, want)
 
 
 def test_next_orientation_flips_touch_only_their_own_flag():
