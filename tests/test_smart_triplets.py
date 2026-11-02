@@ -102,6 +102,74 @@ def test_colour_of():
     assert tp.colour_of(None) == "?"
 
 
+# --------------------------------------------------------------------------- #
+# one picture per set (revision 2026-11-02)
+# --------------------------------------------------------------------------- #
+WEAK = {"g": (0.20, 0.47, 0.33), "b": (0.12, 0.36, 0.52 - 0.04)}    # below 0.51
+
+
+def _pic(shot, n=40):
+    """Shot n's picture: its own unit vector (shots are orthogonal)."""
+    import numpy as np
+    from core import scan_type as st
+    v = np.zeros((n, 1), np.float32)
+    v[shot] = 1.0
+    return st.Picture(v, 1.0)
+
+
+def _plan_pics(seq, quality=None, pictures=True):
+    """seq: tokens like "R1" (red, shot 1), "g1" (a weak green of shot 1),
+    "W2" (white light, shot 2)."""
+    from core import scan_type as st
+    paths = [f"/roll/F{i:03d}_{t}.RAF" for i, t in enumerate(seq)]
+    tok = dict(zip(paths, seq))
+
+    def read(p):
+        t = tok[p]
+        sh = WEAK.get(t[0]) or SHARES[t[0]]
+        return st.LightReading(sh, _pic(int(t[1:])) if pictures else None)
+    plan = tp.plan_triplets(paths, shares_fn=read,
+                            quality=quality or (lambda p, c: (1.0, 0.0)), workers=1)
+    sets = [" ".join(tok[p] for p in t) for t in plan.sets]
+    notes = [(n["short"], [tok[p] for p in n["paths"]]) for n in plan.notes]
+    return sets, notes
+
+
+def test_a_set_never_spans_two_shots():
+    """The user's Open, 2026-11-02: a weak frame read as "not one colour" and
+    the walk then took one shot's blue with the next shot's red and green, or
+    a red retake from the next shot. With the picture each set is one shot."""
+    seq = ["R1", "G1", "W1", "R2", "G2", "B2", "R3", "W3", "B3", "R4", "G4", "B4"]
+    sets, notes = _plan_pics(seq)
+    assert sets == ["R2 G2 B2", "R4 G4 B4"]
+    assert ("Frames missing", ["R1", "G1"]) in notes and ("Frames missing", ["R3", "B3"]) in notes
+    for s in sets:
+        assert len({t[1:] for t in s.split()}) == 1
+    # what made the overlapping frames: with shot 1's green and blue not read
+    # as colours, shot 2's red was a "retake" of shot 1's, and the sharper
+    # one (shot 1's) was merged with shot 2's green and blue
+    seq = ["R1", "W1", "W1", "R2", "G2", "B2"]
+    sharper_r1 = lambda p, c: (2.0 if p.endswith("_R1.RAF") else 1.0, 0.0)  # noqa: E731
+    assert _plan_pics(seq, sharper_r1, pictures=False)[0] == ["R1 G2 B2"]   # as it was
+    sets, notes = _plan_pics(seq, sharper_r1)
+    assert sets == ["R2 G2 B2"] and ("Frames missing", ["R1"]) in notes
+
+
+def test_a_weak_frame_completes_its_own_shot():
+    sets, notes = _plan_pics(["R1", "g1", "B1", "R2", "G2", "b2", "R3", "g3", "b3"])
+    assert sets == ["R1 g1 B1", "R2 G2 b2", "R3 g3 b3"] and notes == []
+    # ...but not without its picture, nor across shots
+    sets, notes = _plan_pics(["R1", "g1", "B1"], pictures=False)
+    assert sets == [] and ("Not one colour", ["g1"]) in notes
+    sets, notes = _plan_pics(["R1", "B1", "g2", "R3", "G3", "B3"])
+    assert sets == ["R3 G3 B3"] and ("Not one colour", ["g2"]) in notes
+
+
+def test_white_light_is_never_taken_as_a_colour():
+    sets, notes = _plan_pics(["R1", "W1", "B1"])
+    assert sets == [] and ("Not one colour", ["W1"]) in notes
+
+
 def test_the_backend_merges_sets_and_reports_the_rest(tmp_path, monkeypatch):
     """Open with 3-way merge on: no refusal for 4 files; one set merges and
     the fourth comes back as an attention entry with thumbnails."""
@@ -114,7 +182,7 @@ def test_the_backend_merges_sets_and_reports_the_rest(tmp_path, monkeypatch):
         p.write_bytes(b"x")
         paths.append(str(p))
     lit = {p: SHARES[p[-5]] for p in paths}
-    monkeypatch.setattr(st, "light_shares", lambda p: lit[p])
+    monkeypatch.setattr(st, "read_light", lambda p: st.LightReading(lit[p]))
     monkeypatch.setattr(st, "thumb_bgr", lambda p, height=44: None)
     made = []
 
@@ -153,6 +221,20 @@ def test_on_the_users_raws():
     plan = tp.plan_triplets(REAL[:4] + REAL[5:])
     assert len(plan.sets) == 4
     assert [n["short"] for n in plan.notes] == ["Frames missing"]
+
+
+PORTRA = sorted(p for p in glob.glob("/mnt/user-data/uploads/DSCF00*.raf")
+                if int(os.path.basename(p)[4:8]) in set(range(1, 10)) | set(range(38, 80)))
+
+
+@pytest.mark.skipif(len(PORTRA) < 51, reason="the user's Portra 400 RAFs aren't here")
+def test_on_the_users_portra_triplets():
+    """17 R, G, B shots of dense Portra 400 (2026-11-02): 7 of the 51 frames
+    were "not one colour" under the old 0.60; now 17 sets, no notes, each one
+    shot."""
+    plan = tp.plan_triplets(PORTRA)
+    assert len(plan.sets) == 17 and plan.notes == []
+    assert [tuple(PORTRA[i:i + 3]) for i in range(0, 51, 3)] == list(plan.sets)
 
 
 def test_the_window_shows_them_greyed_out_after_the_load_without_a_warning(monkeypatch):

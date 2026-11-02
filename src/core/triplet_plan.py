@@ -6,7 +6,9 @@ time, and refuse a count that wasn't a multiple of 3. Here each RAW's light
 colour is read off its mosaic (`scan_type.light_shares`), the files are walked
 in name order and every complete set is merged; a colour shot twice in one set
 keeps the sharper, unclipped frame (the other becomes an "unused retake");
-whatever can't make a set is reported, nothing guessed.
+whatever can't make a set is reported, nothing guessed. A set never spans two
+shots: each RAW's picture is compared too (`scan_type.read_light`), and a
+frame showing another picture starts a new shot (revision 2026-11-02).
 """
 import os
 from concurrent.futures import ThreadPoolExecutor
@@ -93,19 +95,64 @@ def pick_best(paths, colour, quality=frame_quality):
     return use, why
 
 
+def _reading(r):
+    """(shares, picture) from what a reader returned: a `LightReading`, or
+    plain shares (a test's reader, or anything that only knows the light)."""
+    if isinstance(r, st.LightReading):
+        return r.shares, r.picture
+    return r, None
+
+
+def rescue_weak_frames(colours, shares, pictures, reach=2):
+    """Rule 3 (spec/smart-triplets.md revision 2026-11-02): a frame that read
+    "white or mixed" is taken as colour c when its largest share is c (at
+    least RESCUE_SHARE_MIN) and it and the frames within `reach` either side
+    that show the SAME picture (known, not "can't tell") are exactly one red,
+    one green and one blue (counting another weak frame by its largest share).
+    Returns the new colour list and the indices rescued."""
+    def lead(j):
+        """A frame's colour: read, or (weak but rescuable) its largest share."""
+        if colours[j] in COLOURS:
+            return colours[j]
+        if colours[j] is None and shares[j] is not None:
+            k = int(np.argmax(shares[j]))
+            if st.rescuable(shares[j], k):
+                return COLOURS[k]
+        return None
+
+    out = list(colours)
+    rescued = []
+    for i, c in enumerate(colours):
+        if c is not None or pictures[i] is None or lead(i) is None:
+            continue
+        # this frame and its neighbours that show the same picture; two weak
+        # frames of one shot are taken together when the three leads are R, G, B
+        shot = [i] + [j for j in range(max(0, i - reach), min(len(colours), i + reach + 1))
+                      if j != i and lead(j) is not None
+                      and st.same_picture(pictures[i], pictures[j]) is True]
+        if sorted(lead(j) for j in shot) == sorted(COLOURS):
+            out[i] = lead(i)
+            rescued.append(i)
+    return out, rescued
+
+
 def plan_triplets(paths, shares_fn=None, quality=frame_quality, workers=None):
-    """Plan the merge of `paths` (any order, any count)."""
-    shares_fn = shares_fn or st.light_shares
+    """Plan the merge of `paths` (any order, any count). `shares_fn(path)`
+    returns a `scan_type.LightReading` (the default, `read_light`) or plain
+    shares."""
+    shares_fn = shares_fn or st.read_light
     ordered = sorted(paths, key=lambda p: (os.path.basename(p).lower(), os.path.normcase(p)))
     # Four readers at most: each holds a whole RAW while it reads (~100 MB for
     # 50 MP), and on a 2-core machine more threads were slower (measured).
     workers = workers or max(1, min(4, os.cpu_count() or 1))
     if workers > 1 and len(ordered) > 1:
         with ThreadPoolExecutor(max_workers=workers) as ex:
-            shares = list(ex.map(shares_fn, ordered))
+            readings = list(ex.map(shares_fn, ordered))
     else:
-        shares = [shares_fn(p) for p in ordered]
+        readings = [shares_fn(p) for p in ordered]
+    shares, pictures = zip(*(_reading(r) for r in readings)) if readings else ((), ())
     colours = [colour_of(sh) for sh in shares]
+    colours, _rescued = rescue_weak_frames(colours, list(shares), list(pictures))
     plan = Plan()
     seen = {}
     raw_quality = quality
@@ -132,16 +179,18 @@ def plan_triplets(paths, shares_fn=None, quality=frame_quality, workers=None):
     # notes; red first on a tie).
     best = None
     for start in COLOURS:
-        cand = _walk(ordered, colours, start, quality)
+        cand = _walk(ordered, colours, start, quality, pictures)
         key = (len(cand.sets), -len(cand.notes))
         if best is None or key > best[0]:
             best = (key, cand)
     return best[1]
 
 
-def _walk(ordered, colours, start, quality):
+def _walk(ordered, colours, start, quality, pictures=None):
     plan = Plan()
     cur = {}                                   # colour -> [paths, in name order]
+    pictures = list(pictures) if pictures is not None else [None] * len(ordered)
+    shown = []                                 # pictures of the shot being collected
 
     def close():
         if not cur:
@@ -174,17 +223,26 @@ def _walk(ordered, colours, start, quality):
                                     f"only {have} for this shot: no full red, green, "
                                     "blue set"))
         cur.clear()
+        shown.clear()
 
-    for path, c in zip(ordered, colours):
+    for path, c, pic in zip(ordered, colours, pictures):
         if c not in COLOURS:
             why = ("its light couldn't be read" if c == "?"
                    else "it looks lit by white or mixed light, not one colour")
             plan.notes.append(_note([path], "Not one colour", f"{os.path.basename(path)}: {why}"))
             continue
+        # one picture per set: a frame known to show another picture than
+        # the shot being collected starts a new one, whatever its colour
+        # (spec/smart-triplets.md revision 2026-11-02, rule 2)
+        if cur and any(st.same_picture(pic, q) is False for q in shown) \
+                and not any(st.same_picture(pic, q) is True for q in shown):
+            close()
         complete = all(k in cur for k in COLOURS)
         if c == start and cur and (complete or any(k != start for k in cur)):
             close()                              # a new shot starts
         cur.setdefault(c, []).append(path)
+        if pic is not None:
+            shown.append(pic)
     close()
     return plan
 

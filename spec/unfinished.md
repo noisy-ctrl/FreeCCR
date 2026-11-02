@@ -5,14 +5,6 @@ A running list of what is started but not done, or waiting on something
 remove an entry when it ships.
 
 ## Waiting on the user
-- **The light-colour check rejects some of the user's trichrome frames**
-  (found 2026-11-02 on the Portra scans): `LIGHT_SHARE_MIN` 0.60 is the share
-  a frame's own channel must reach. His green frames read 0.54–0.63 and blue
-  0.55–0.64 (Bayer crosstalk), so 7 of 51 frames would be "not one colour"
-  in Open's 3-way merge (`triplet_plan`) and the tethered trichrome check
-  (`judge_triplet`); every one is plainly R, G or B in order. A fix (largest
-  channel by a margin over the next, measured on these files) is offered,
-  not made.
 - **Portra 400 Lab look: the second lab's frames** (148684250): 2 of its 3
   usable frames agree with the look (CIEDE2000 median 0.66, 1.00 with their
   own Channel Levels), the third doesn't (2.16, it needs −0.5 density). Not
@@ -36,6 +28,13 @@ remove an entry when it ships.
     `tests/test_auto_frame_guide.py`, unused).
 
 ## Known, not yet fixed
+- **Hot Folder Tether: one missed or extra frame shifts every following
+  triplet** (2026-11-02): it takes new RAWs three at a time in name order, so
+  after a missed frame each triplet is R2 G2 R3, … and is held as "Not red,
+  green, blue" (now also "a different picture") until the 30 s stall flushes
+  the queue. Open's 3-way merge doesn't have this (it walks by colour and
+  picture). A fix: when a triplet fails, hold only the frames before the
+  first one that can start a new shot, and keep that one queued.
 - **6 tests fail in the full suite** (first full run since 2026-11-01,
   2026-11-02; all 6 fail on 1e767c0 too, so they came with earlier work, not
   the Portra look or Organics): `test_merge_catalog` ×3 and `test_merge_replace`
