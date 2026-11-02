@@ -164,3 +164,28 @@ def test_the_tool_writes_headroom_by_default(tmp_path, capsys):
     out2 = tmp_path / "plain.cube"                    # no flat shoulder, no headroom:
     assert tool.main([str(src), "--out", str(out2), "--no-headroom"]) == 0
     assert not out2.exists()                           # nothing to change
+
+
+# --------------------------------------------------------------------------- #
+# no channel falls at the top (revision 5)
+# --------------------------------------------------------------------------- #
+def test_hold_top_stops_a_channel_falling_and_moves_nothing_before_its_peak():
+    """Portra 400 Lab: red peaked at density 1.11 and fell 4 levels by 1.25
+    (extrapolated from few samples), so the densest highlights lost red."""
+    t = _smooth_table() * 0.98                        # whites short of white
+    fall = np.clip((X - 1.1) * 0.25, 0, None)          # red falls past 1.1
+    t[..., 0] = t[..., 0] - fall[None, None, :]
+    new, info = ls.hold_top(t, LO, HI)
+    assert info is not None and set(info["fell"]) == {"R"}
+    g = ls.grey_axis(new)
+    assert np.all(np.diff(g, axis=0) >= -1e-12)       # no channel falls
+    assert np.all(new >= t - 1e-12)                   # never darker
+    peak = int(np.argmax(ls.grey_axis(t)[:, 0]))
+    np.testing.assert_array_equal(new[:, :, :peak + 1], t[:, :, :peak + 1])   # red input before the peak
+    np.testing.assert_array_equal(new[..., 1:], t[..., 1:])                    # green, blue untouched
+
+
+def test_hold_top_leaves_a_rising_look_alone():
+    t = _smooth_table()
+    new, info = ls.hold_top(t, LO, HI)
+    assert info is None and np.array_equal(new, t)

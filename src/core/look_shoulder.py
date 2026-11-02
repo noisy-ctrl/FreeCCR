@@ -146,6 +146,37 @@ def reshape(table, lo, hi, detail=0.0):
     return out, info               # nodes not moved are returned exactly
 
 
+def hold_top(table, lo, hi):
+    """(new table, info): no output channel falls as its own density rises
+    along the grey axis (spec/film-look-lut.md revision 5). A fitted look's
+    densest nodes are extrapolated from few samples, and one whose whites stop
+    short of white can turn back there (Portra 400 Lab: red fell 4 levels from
+    density 1.11 to 1.25), so the densest highlights lose a channel. From a
+    channel's peak on, the shortfall to that peak is ADDED to the channel at
+    its own input density (red by red, as `headroom` does): nodes before the
+    peak are returned exactly and nothing is darker. (copy, None) when no
+    channel falls."""
+    table = np.asarray(table, np.float64)
+    n = table.shape[0]
+    x = np.linspace(float(lo), float(hi), n)
+    grey = grey_axis(table)
+    out = table.copy()
+    axis_of = {0: 2, 1: 1, 2: 0}
+    fell = {}
+    for c in range(3):
+        cur = grey[:, c]
+        d = np.maximum.accumulate(cur) - cur
+        if float(d.max()) <= 0.0:
+            continue
+        fell["RGB"[c]] = (float(x[int(np.argmax(cur))]), float(d.max()))
+        shape = [1, 1, 1]
+        shape[axis_of[c]] = n
+        out[..., c] = table[..., c] + np.broadcast_to(d.reshape(shape), table.shape[:3])
+    if not fell:
+        return table.copy(), None
+    return out, {"fell": fell}
+
+
 KNEE_Y = 0.97           # headroom: a channel's last steady stretch starts here (0.95
                         # moved near-white saturated colours up to 4 levels as rendered)
 TOP_MIN = 1.0 - 2.0 / 255   # ... for a look whose whites reach white; one whose top
