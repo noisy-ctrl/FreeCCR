@@ -223,3 +223,167 @@ per-colour Subtractive Saturations section covers it. Its key left
 it, so a value stored by an older edit is dropped (chosen over keeping it
 hidden). The processor stage stays, at 0.
 
+
+## Revision 2026-11-02: measured on lab scans
+
+The user sent RGB-light trichrome scans of Portra 400 negatives together with
+the lab scans of the same frames, from two labs (12 lab scans + 9 usable
+pairs from one lab, 7 + 3 from the other). Measured with them, the four
+guessed families turned out to point the wrong way in several places, so the
+families are replaced by the measured hue curve.
+
+### What was measured
+
+For every pair: our scan decoded and registered to the lab scan
+(`core/look_fit`: the merge, the base as Convert finds it, SIFT + RANSAC over
+the four flips, 6×6 block samples at ¼ lab size, flat and unclipped). Each
+frame rendered through FreeCCR's own default render of a black-point
+conversion (`adjust_image` on the windowed density base, negative brightness
+baseline) after fitting that frame's six Channel Levels numbers (offset and
+contrast per channel) to the lab scan, so exposure and colour balance are
+the lab's and only hue rendering is left. Then the lab's HSV hue minus ours,
+on samples coloured in both (HSV saturation > 0.15 ours, > 0.10 lab's),
+weighted by the smaller saturation, binned by our hue.
+
+Mid and bright tones (HSV value ≥ 0.35), both labs:
+
+| our hue | lab 1 | lab 2 | old Organics, shown 50 |
+|---|---|---|---|
+| red-orange 0–30° | +5° | +7° | +5° |
+| orange, skin 30–60° | +3° | +7° | −4° |
+| yellow 60–90° | +1° | 0° | +3° |
+| yellow-green, green 90–150° | +1° | +1 to +3° | −3 to −4° |
+| cyan, sky 180–210° | 0° | 0° | +3° |
+| blue 210–240° | −6° | −11° | −2° |
+| magenta-red 330–360° | +13° | +27° | +5° |
+
+- The labs turn reds towards orange, oranges and skin a little yellower,
+  leave yellows, greens and sky where they are and pull blues back towards
+  sky. Nothing in these frames is blue-violet, violet or magenta (240–330°):
+  no measurement there.
+- The old families (warm 25°, foliage 100°, sky 200°, blue-violet 265°)
+  pulled skin towards red, greens towards yellow-green and sky towards blue.
+  Hue error against the labs (RMS over 10° bins): identity 2.9° / 4.8° per
+  lab, old Organics at shown 50 4.95° / 6.3° — worse than off.
+- A curve fitted on one lab predicts the other better than identity
+  (4.8° → 3.0°, 2.9° → 2.2°), so it carries across labs. The best the old
+  engine could do with free anchors (3 anchors at 70°, 140°, 180°) was 2.3°
+  in sample against the curve's 1.9°, and it still couldn't turn the reds.
+- Dark tones (value < 0.35): dark greens and blues go 10–35° more olive in
+  the lab, but differently per lab and frame (~20° RMS either way, a curve
+  neither helps nor harms there), so the curve does not depend on lightness:
+  a hue × lightness table did no better across labs (5.0 vs 5.2, 3.6 vs 3.3).
+  That tone-dependent part belongs to a fitted Film Look (or Channel
+  Balance), not to a hue warp.
+- Against the Cineon decode the per-lab curves disagree (fitted on one lab:
+  4.0° on the other against 4.0° for identity), and the default render
+  matches the labs' tones better (per-frame error 0.012–0.033 against
+  0.017–0.076), so the default render is the reference.
+
+### Goals / non-goals
+
+- The slider applies the measured curve: stored 100 (shown 50) is the labs'
+  measured amount, stored 200 (shown 100) twice it. Units unchanged
+  (`HalfShownSlider`, `ORGANICS_AMOUNT_MAX` 200).
+- No change to luma, chroma or saturation; greys untouched (same gate); no
+  clipping (same gamut fit); never reorders hues.
+- Not lightness dependent; no move where nothing was measured.
+- Not a substitute for a Film Look: with a fitted look on, keep Organics at 0
+  (the look already holds the lab's hue rendering).
+- Old edits: the amount renders the new curve (the user's choice: "whatever
+  is most accurate"); an old families shape (on/off, nudge, reach) is ignored.
+
+### Data
+
+`core/organics_measured.py`, written by `tools/fit_organics.py`:
+`HUE_STEP` 10, `TABLE` = 36 knots (degrees of hue move at stored 100, knot k
+at hue 10·k), plus the fit's provenance in comments. A Python module, not a
+data file, so the build scripts need nothing new.
+
+The fit: 10° hue bins × value bands (0.35–0.55, 0.55–0.75, ≥ 0.75) of the
+weighted median move (≥ 25 samples, weight √n capped at 30), fitted with the
+same periodic Catmull-Rom basis the render uses, a second-difference penalty
+round the circle and a pull to 0 (so a hue with no data gets 0). Both labs,
+the smoothing chosen by the cross-lab check above.
+
+### Maths
+
+Per pixel on display values (unchanged steps marked =):
+
+1. = HSV hue `h`, saturation `s`, grey gate `g = smoothstep(0.06, 0.20, s)`.
+2. Move `Δ(h)` = the periodic Catmull-Rom curve through the EFFECTIVE knots
+   `T_k = a · m(10k) · TABLE_k`, with `a` = stored amount / 100 and `m(h)`
+   the region amounts (below). Catmull-Rom is C¹ and passes through the
+   knots, so stored 100 with default regions reproduces the measured knots.
+3. `h' = h + g · Δ(h)`. Monotone: the slope along the circle is
+   `1 + g·Δ'(h) ≥ min(1, 1 + min Δ')`; the knots are scaled down, if needed,
+   so `1 + min Δ' ≥ ORGANICS_MIN_CENTRE_SLOPE` (0.10), measured on a 0.1° grid
+   in float64 (cached per amount and regions). At stored 200 with default
+   regions it does not bind.
+4. = realised at the same Rec.601 luma and chroma, `grey + |d|·u(h')/|u(h')|`,
+   then fitted into gamut towards the grey.
+
+**Regions** (`organics_shape`, right-click popup): Reds and oranges
+(330–60°), Yellows and greens (60–165°), Cyans and blues (165–250°), each
+0–200 % (default 100), crossfaded with raised cosines 30° wide centred on the
+borders; 250–330° (violets and magentas) has no measurement and no control.
+`m(h) = Σ k_r w_r(h)`, the weights summing to 1 everywhere.
+
+### Pipeline / integration
+
+Same place and plumbing as before (`colour_organics`, `organics_shape`
+appended at the END of `adjust_image` / `adjust_image_opencl`; area layers,
+sync group "sat", paste row, copy, undo per popup visit). Kernel:
+`params[27]` the stored amount (> 0 enables), `params[28]` 1 when the curve is
+active, `params[29..64]` the 36 effective knots; the anchor/reach slots go.
+Removed: `ORGANICS_FAMILIES`, the anchored warp (`organics_hue_map`),
+`organics_pull` / `organics_strength` and the reach machinery. New:
+`organics_knots(amount, shape)`, `organics_delta(hue, knots)`,
+`ORGANICS_REGIONS`.
+
+### UX
+
+- Tooltip: what it does ("Turns hues the way lab scans do: reds towards
+  orange, skin a little warmer, blues back towards sky. Measured on lab scans
+  of colour negatives; 50 is their own amount.") No brand or product named.
+- Right-click popup: "Colour Organics by region", a line saying 100 % is as
+  measured, three rows (swatch, name, slider 0–200 % in 5 % steps, value),
+  a muted line "Violets and magentas: not measured yet, left as they are",
+  Reset. The label is underlined and its tooltip lists the regions changed.
+
+### Quality (spec rule list)
+
+No-op at 0 (not called); pixels the gate skips are returned exactly; float32
+inside; C¹ curve; monotone (step 3); luma and chroma kept, no clipping; the
+hue stretch is the curve's slope, max reported in tests and in the tool's
+report; resolution independent; CPU == GPU within 3 codes. Grain: a hue
+stretch above 1 widens colour grain in hue by that factor; the measured
+curve's steepest rise at stored 100 is reported (it was 1.26 at the old 100).
+
+### Tests
+
+`tests/test_colour_organics.py` (rewritten): 0 is the identity; greys
+untouched, luma kept, in range; at stored 100 the knots are the table; reds
+(355°) and skin (40°) move up, blues (220°) down, sky (195°) and green (120°)
+within 2°; nothing moves at 250–330°; monotone round the circle for every
+amount and random region settings, slope ≥ 0.10; a region at 0 % leaves its
+hues alone and doesn't touch the others' centres; the pixel lands on the
+mapped hue; numpy == OpenCL; slider, tooltip, sync group. Popup tests
+rewritten for regions (default None, clamping, old-format shapes ignored,
+writes the shape with one undo, Reset, paste/copy/sync). The fitter's pure
+part (`fit_curve` on cells) recovers a known curve and gives 0 where there is
+no data.
+
+### Refinement (before implementing)
+
+- **Which tones feed the fit**: value ≥ 0.35 only (the dark cells disagree
+  between labs; including them made the cross-lab check worse than identity).
+- **Region borders** sit in the measured curve's quiet places (60°, 165°,
+  250°, 330° are all within 2° of zero), so a region at 0 % leaves the
+  others' measured moves intact and the crossfade never cuts a big move in
+  half.
+- **Cap**: computed on the effective knots, so a region pushed to 200 % can
+  only ever reduce the whole curve's scale, never reorder hues.
+- **Old shapes**: `normalize_organics_shape` keeps only the three region
+  keys; a dict with none of them is the default (None), so old catalogues
+  load without warnings and paste rows don't show stale families.
