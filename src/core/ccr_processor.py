@@ -1857,6 +1857,11 @@ def _apply_working_space_recovery(img16: np.ndarray, exposure: float,
     d = img16.astype(np.float32)
     d -= np.float32(WS_B)
     d *= np.float32(_WS_INV_WIDTH)
+    # A Film Look sees the density it was fitted on whatever white point the
+    # frame was converted with - so ahead of Channel Levels, which then grades
+    # in that density too (spec/film-look-lut.md revision 6).
+    if look_lut is not None:
+        d = _look_input(d, look_lut)
     # Channel Levels - the FIRST adjustment stage, un-clamped so a shift moves the
     # whole histogram: sub-black content (film base) rises into the window instead
     # of being unreachable, and content pushed out the bottom lands in the shadow
@@ -3926,6 +3931,8 @@ def adjust_image(
     _mden = _master_gain_divisor(ch_master_gain)
     if _levels_on or _balance_on or _mden != 1.0 or cineon_log or look_lut is not None:
         img /= np.float32(65535.0)
+        if look_lut is not None:
+            img = _look_input(img, look_lut)      # before Levels (revision 6)
         if _levels_on:
             _apply_channel_levels(img, ch_input_gain, ch_master_shift, ch_master_gain,
                                   ch_r_shift, ch_r_gain, ch_r_blackpoint,
@@ -4454,6 +4461,8 @@ def adjust_image_opencl(
             or look_lut is not None):
         img16 = img16.astype(np.float32)
         img16 /= np.float32(65535.0)
+        if look_lut is not None:
+            img16 = _look_input(img16, look_lut)  # before Levels (revision 6)
         # Channel Levels runs BEFORE Balance (adjust_image's order, and the
         # windowed pre-stage's). The KERNEL applies Levels internally, which
         # would land it AFTER this numpy block and break CPU/GPU parity — so
@@ -5053,6 +5062,16 @@ def _apply_look(d: np.ndarray, lut) -> np.ndarray:
     is imported lazily and the call sites read like the Cineon ones."""
     from core.look_lut import apply_look
     return apply_look(d, lut)
+
+
+def _look_input(d: np.ndarray, lut) -> np.ndarray:
+    """The Film Look's input map (spec/film-look-lut.md revision 6): a frame
+    converted with a white point (or film-stock slopes, or the legacy linear
+    stretch) is put back into the black-point density the look was fitted
+    on. Runs on the de-windowed value BEFORE Channel Levels; a plain LookLUT
+    (black-point-only conversion) has no map and `d` is returned as is."""
+    m = getattr(lut, "map_input", None) if lut is not None else None
+    return d if m is None else m(d)
 
 
 def apply_cineon_to_workspace(d: np.ndarray) -> np.ndarray:

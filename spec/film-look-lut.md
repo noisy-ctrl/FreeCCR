@@ -324,3 +324,65 @@ the shortfall to the peak is added to that channel at its own input density,
 as headroom adds its line: nodes before the peak are returned exactly and
 nothing is darker. Tests: a red that falls past 1.1 is held, green and blue
 and everything before the peak untouched; a rising look is left alone.
+
+## Revision 2026-11-02 (6): the look's input, whatever white point Convert used
+
+**Problem.** The user: "Does the Portra LUT assume a purple starting point? I
+noticed it skews everything very green." It doesn't: the merge's purple base
+is divided out by the per-channel black point before the look sees anything.
+What did skew it is the **auto white point** (on by default). With a white
+point, Convert's density conversion divides each channel by its own
+`Dmax_c = log10(base_c/white_c)`, so the look was handed
+`d_look · 1/(0.8·Dmax_c)` instead of the black-point density
+`d_look = 0.8·log10(base/x)` it was fitted on: a different per-channel gain on
+every frame (DSCF0050: R ×1.14, G ×1.11, B ×0.94).
+
+**Measured** on the nine lab-A frames (registered samples, sliders at 0,
+`Portra 400 Lab.cube`): black point only, mean Δa* +0.73, Δb* −0.03 against
+the lab (neutral on average; each frame still needs its own Channel Levels,
+median ΔE 7.85); with the white point Convert chose, mean Δa* −1.13 and
+**Δb* +11.25** (yellow-green), median ΔE 13.27. With each frame's best
+Channel Levels both reach the same 0.74, since the white point is only a
+per-channel gain before the look; it moved where the sliders had to be.
+
+**Change.** A look now sees the black-point density whatever the frame was
+converted with. `look_lut.look_input_map(conversion_inputs)` gives, per
+channel:
+
+| conversion | map |
+| --- | --- |
+| black point only, default slope | none (what the look was fitted on) |
+| black point + film-stock slopes | `d · 0.8/slope_c` |
+| two-point, density (auto or sampled white) | `d · 0.8·log10(base_c/white_c)` |
+| two-point, legacy linear | `−0.8·log10(1 − d·(1 − white_c/base_c))` |
+| no anchor, reference frame, Positive | none (not the look's base; as before) |
+
+`look_lut.for_frame(lut, conversion_inputs)` returns the LookLUT itself when
+there is no map, else a `FrameLook` that reads like it (attributes delegate)
+and carries `map_input`. `CCRImage.apply_adjustments` resolves the look
+through it, and the pipeline applies the map on the de-windowed value
+**before Channel Levels** (`ccr_processor._look_input`), in all three places a
+look runs: the windowed pre-stage, the non-windowed normalised pass and the
+OpenCL numpy pre-stage. Before Levels, not at the look's slot: the fitter's
+per-frame Channel Levels (and so the report's slider values) were measured on
+the black-point density, so Levels must grade that density too.
+
+So with a look the white point no longer changes the render (DSCF0050 through
+the app's own Convert, middle of the frame: R/G/B 168.8/206.3/224.8 with the
+auto white point, 168.8/206.2/224.8 without). Frames converted without a white
+point render exactly as before; a catalog with a look on a white-point
+conversion renders differently (correctly) from now on.
+
+**Precision.** A windowed base holds 1024 codes per display unit, so a mapped
+two-point base agrees with a black-point base to about a code of input; the
+legacy linear base stores transmittance, so its dense end is coarser (about 3
+codes of density by 1.0).
+
+**Tests** (`tests/test_film_look.py::TestLookInput` and
+`test_apply_adjustments_hands_the_look_its_frame_map`): the map for each
+conversion; for_frame passes a plain look through and its wrapper copies;
+the map recovers the black-point density from a density and a linear
+two-point base; through `adjust_image` (windowed and not, with Channel Levels
+set) a white-point conversion with the map renders as the black-point one,
+and without it differs (the cast fixed); film-stock slopes map back; OpenCL
+parity with the map; `apply_adjustments` hands the look its frame's map.

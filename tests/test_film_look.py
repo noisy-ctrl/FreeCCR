@@ -237,6 +237,131 @@ class TestPipeline:
 
 
 # --------------------------------------------------------------------------- #
+# the look's input whatever the conversion (revision 6, 2026-11-02): with the
+# auto white point on, Convert normalised each channel by log10(base/white),
+# so the look got a per-channel scaled density and Portra came out yellow-green
+# with the sliders at 0
+# --------------------------------------------------------------------------- #
+
+BASE = np.array([52000.0, 36400.0, 58100.0])         # film base (scan units)
+WHITE = np.array([4140.0, 2720.0, 2690.0])           # a dense point
+
+
+def _scan(seed=0, shape=(6, 7, 3), top=1.4):
+    """A linear scan of a negative: base down to past the dense point."""
+    dens = np.random.default_rng(seed).uniform(-0.05, top, shape)
+    return (BASE * 10 ** (-dens)).astype(np.float32)
+
+
+def _converted(x, white, density=True, slopes=None):
+    from core.ccr_processor import _default_slope_invert, _twopoint_invert
+    if white is None:
+        return _default_slope_invert(x, BASE, slopes)
+    return _twopoint_invert(x, BASE, white, density)
+
+
+def _ci(white, density=True, slopes=None):
+    return {"mode": "bw", "bw": (tuple(BASE), None if white is None else tuple(WHITE)),
+            "density": density, "slopes": slopes}
+
+
+class TestLookInput:
+    def test_map_kinds(self):
+        assert ll.look_input_map(_ci(None)) is None                  # what it was fitted on
+        assert ll.look_input_map({"mode": "ref"}) is None
+        assert ll.look_input_map({"mode": "bw", "bw": (None, None)}) is None   # no anchor
+        assert ll.look_input_map(None) is None
+        kind, k = ll.look_input_map(_ci(WHITE))
+        assert kind == "scale"
+        np.testing.assert_allclose(k, 0.8 * np.log10(BASE / WHITE), rtol=1e-6)
+        kind, k = ll.look_input_map(_ci(None, slopes=(0.9, 0.8, 0.7)))
+        np.testing.assert_allclose(k, (0.8 / 0.9, 1.0, 0.8 / 0.7), rtol=1e-6)
+        kind, r = ll.look_input_map(_ci(WHITE, density=False))
+        assert kind == "linear"
+        np.testing.assert_allclose(r, 1 - WHITE / BASE, rtol=1e-6)
+
+    def test_plain_look_passes_through_for_frame(self):
+        lut = _lut()
+        assert ll.for_frame(lut, _ci(None)) is lut
+        assert ll.for_frame(None, _ci(WHITE)) is None
+        fl = ll.for_frame(lut, _ci(WHITE))
+        assert fl.size == lut.size and fl.headroom == lut.headroom
+        import copy
+        copy.deepcopy(fl)                                             # no recursion
+
+    @pytest.mark.parametrize("density", [True, False])
+    @pytest.mark.parametrize("ws", [True, False])
+    def test_white_point_no_longer_changes_the_look(self, density, ws, monkeypatch):
+        monkeypatch.setenv("FREECCR_WORKING_SPACE", "1" if ws else "0")
+        lut = _lut()
+        # the legacy linear base keeps 1024 codes per unit of TRANSMITTANCE,
+        # so its dense end is coarse: compare it up to density 1.0
+        x = _scan(top=1.4 if density else 1.0)
+        kw = dict(ch_r_shift=12, ch_g_gain=-6, ch_master_shift=-4, ws_windowed=ws)
+        want = adjust_image(_converted(x, None), look_lut=lut, **kw).astype(np.int64)
+        got = adjust_image(_converted(x, WHITE, density), look_lut=ll.for_frame(
+            lut, _ci(WHITE, density)), **kw).astype(np.int64)
+        if not ws:                     # clipped bases: compare where neither clipped
+            ok = ((_converted(x, None) < 65535).all(-1)
+                  & (_converted(x, WHITE, density) < 65535).all(-1))
+            want, got = want[ok], got[ok]
+        # a windowed base holds 1024 codes per display unit, so the two bases
+        # differ by up to a code of input before the look's slope amplifies it
+        np.testing.assert_allclose(got, want, atol=(90 if density else 200) if ws else 4)
+        # ...and before the fix it did change (the cast this fixes)
+        old = adjust_image(_converted(x, WHITE, density), look_lut=lut, **kw)
+        assert np.abs(old.astype(np.int64) - adjust_image(
+            _converted(x, None), look_lut=lut, **kw).astype(np.int64)).max() > 500
+
+    @pytest.mark.parametrize("density", [True, False])
+    def test_map_recovers_the_black_point_density(self, density):
+        x = _scan(3, top=1.4 if density else 1.0)
+        bp = _decode_window(_converted(x, None))
+        fl = ll.for_frame(_lut(), _ci(WHITE, density))
+        got = fl.map_input(_decode_window(_converted(x, WHITE, density)))
+        np.testing.assert_allclose(got, bp, atol=(1.5 if density else 3.0) / 1024)
+
+    def test_film_stock_slopes_map_back_to_the_default(self):
+        lut = _lut()
+        x = _scan(1)
+        slopes = (0.9, 0.75, 0.7)
+        want = adjust_image(_converted(x, None), look_lut=lut, ws_windowed=True)
+        got = adjust_image(_converted(x, None, slopes=slopes), ws_windowed=True,
+                           look_lut=ll.for_frame(lut, _ci(None, slopes=slopes)))
+        np.testing.assert_allclose(got.astype(np.int64), want.astype(np.int64), atol=90)
+
+    @pytest.mark.parametrize("ws", [True, False])
+    def test_opencl_parity_with_the_map(self, ws, monkeypatch):
+        monkeypatch.setenv("FREECCR_WORKING_SPACE", "1" if ws else "0")
+        look = ll.for_frame(_lut(), _ci(WHITE))
+        img = _converted(_scan(2), WHITE)
+        kw = dict(ws_windowed=ws, ch_g_shift=9, ch_b_gain=7, balance_r=20,
+                  contrast=15, saturation=10, look_lut=look)
+        cpu = adjust_image(img, **kw)
+        gpu = adjust_image_opencl(img, **kw)
+        np.testing.assert_allclose(cpu.astype(np.int64), gpu.astype(np.int64), atol=3)
+
+
+def test_apply_adjustments_hands_the_look_its_frame_map(monkeypatch):
+    lut = _lut()
+    from core.ccr_backend import ccr_backend
+    from core.ccr_image import CCRImage
+    import core.ccr_image as mod
+    seen = {}
+    monkeypatch.setattr(mod, "adjust_image_opencl",
+                        lambda image, *a, **kw: seen.update(kw) or image)
+    monkeypatch.setattr(ccr_backend, "auto_gain", True, raising=False)
+    monkeypatch.setattr(ll, "resolve_look", lambda name: lut)
+    stub = _StubImage({"look_lut": "x.cube"})
+    stub.conversion_inputs = _ci(WHITE)
+    CCRImage.apply_adjustments(stub, _base(np.full((8, 8, 3), 0.35, np.float32)))
+    assert isinstance(seen["look_lut"], ll.FrameLook) and seen["look_lut"].lut is lut
+    stub.conversion_inputs = _ci(None)
+    CCRImage.apply_adjustments(stub, _base(np.full((8, 8, 3), 0.35, np.float32)))
+    assert seen["look_lut"] is lut
+
+
+# --------------------------------------------------------------------------- #
 # apply_adjustments: name resolution and Auto Gain suppression
 # --------------------------------------------------------------------------- #
 
