@@ -93,6 +93,53 @@ def test_rebate_black_point_picks_the_clear_band():
     assert m[450, 600] and not m[70, 600] and not m[5, 5]
 
 
+LIGHT = np.array((0.82, 0.66, 1.0), np.float32)     # bare light: the clip
+
+
+def _strip_35mm(base, seed=0):
+    """A 35 mm frame as the merge decodes it: black holder above and below
+    the strip, sprocket holes of bare (clipped) light in the rebates, a
+    narrow strip of film base at each frame gap, a denser picture."""
+    rng = np.random.default_rng(seed)
+    h, w = 930, 1240
+    v = np.zeros((h, w, 3), np.float32)
+    v[25:905] = base                                   # the film
+    for x in range(40, w - 60, 140):                   # sprocket holes
+        v[35:95, x:x + 60] = LIGHT
+        v[835:895, x:x + 60] = LIGHT
+    v[:, :60] = v[:, 1180:] = 0.0                      # holder past the gaps
+    v[25:905, 60:66] = v[25:905, 1174:1180] = base     # frame gaps: base
+    pic = 0.10 + 0.35 * rng.random((710, 1108, 1)).astype(np.float32)
+    v[110:820, 66:1174] = pic * np.array(base) / base.max()
+    return v
+
+
+def test_frame_black_point_reads_the_film_not_the_sprocket_holes():
+    base = np.array((0.60, 0.40, 0.70), np.float32)
+    v = _strip_35mm(base)
+    bp, where, bands = lf.frame_black_point(v)
+    np.testing.assert_allclose(bp, base, rtol=0.01)
+    assert where.endswith("edge")
+    m = lf.image_area_mask(v, bands)
+    assert m[465, 620]
+
+
+def test_frame_black_point_refuses_a_clipped_base():
+    v = _strip_35mm(LIGHT.copy())                      # base exposed into the clip
+    bp, why, _bands = lf.frame_black_point(v)
+    assert bp is None and "clipped" in why
+
+
+def test_frame_black_point_falls_back_to_the_brightest_band():
+    h, w = 900, 1200
+    v = np.zeros((h, w, 3), np.float32)
+    v[60:840, 80:1120] = (0.40, 0.33, 0.36)            # rebate out of the finder's reach
+    v[110:790, 130:1070] = (0.15, 0.12, 0.10)
+    bp, where, _bands = lf.frame_black_point(v)
+    np.testing.assert_allclose(bp, (0.40, 0.33, 0.36), atol=1e-6)
+    assert "edge band" in where
+
+
 def _texture(h=600, w=800, seed=0):
     rng = np.random.default_rng(seed)
     img = cv2.GaussianBlur(rng.random((h, w)).astype(np.float32), (0, 0), 3)
