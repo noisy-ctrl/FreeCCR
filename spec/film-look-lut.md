@@ -314,3 +314,13 @@ past the top) and skipped.
 the rebates, base at the frame gaps) gives the base; a base at the clip gives
 None and "clipped"; a frame whose clear film is out of the finder's reach
 falls back to the brightest band.
+
+**No channel falls at the top** (`look_shoulder.hold_top`, applied by
+`fit_look.py` after the shoulder and before headroom). The Portra 400 Lab fit
+peaked in red at density 1.11 and fell 4 levels by 1.25 (its densest nodes are
+extrapolated from few samples; its whites stop at ~251, so headroom, which
+needs whites that reach white, does not apply). From each channel's peak on,
+the shortfall to the peak is added to that channel at its own input density,
+as headroom adds its line: nodes before the peak are returned exactly and
+nothing is darker. Tests: a red that falls past 1.1 is held, green and blue
+and everything before the peak untouched; a rising look is left alone.

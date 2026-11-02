@@ -194,6 +194,13 @@ def main(argv=None):
         log(f"shoulder rebuilt from density {sh['knee']:.2f} (white at "
             f"{sh['white']:.2f}, was {sh['white_before']:.2f}; highlight detail "
             f"{a.highlight_detail:g})")
+    # revision 5: no channel may fall as its density rises (the densest nodes
+    # are extrapolated from few samples)
+    table, held = look_shoulder.hold_top(table, lf.DOMAIN[0], lf.DOMAIN[1])
+    if held is not None:
+        log("held the top of " + ", ".join(
+            f"{c} (from density {at:.2f}, it fell {d * 255:.1f} levels)"
+            for c, (at, d) in held["fell"].items()))
     room = None
     if a.headroom:
         # spec/film-look-lut.md revision 4: on past white, so Master Gain
