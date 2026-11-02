@@ -357,10 +357,44 @@ def _edge_bands(v, depth=260, half=300):
 
 def rebate_black_point(v):
     """Per-frame black point from the clear film between the image and the
-    holder: the brightest of the four edge bands. Returns (bp, side, bands)."""
+    holder: the brightest of the four edge bands. Returns (bp, side, bands).
+    The fallback of `frame_black_point`: on 35 mm the brightest band runs
+    through the sprocket holes (bare light), so it reads the light, not the
+    film."""
     bands = _edge_bands(v)
     side = max(bands, key=lambda k: float(bands[k][1].sum()))
     return np.asarray(bands[side][1], float), side, bands
+
+
+PREVIEW_LONG_SIDE = 1080        # the preview Convert measures the base on
+
+
+def frame_black_point(v):
+    """The frame's film base as FreeCCR's Convert measures it
+    (`core.auto_black_point.find_rebate`: an even strip, unclipped, a step
+    brighter than the picture; sprocket holes and bare light fail those
+    tests), so the look is fitted on the same density the app converts to.
+    Returns (bp, where, bands): `bp` None when the base is clipped (it can't
+    be measured, so the frame can't be placed in density), `where` the edge
+    used or why there is none. When the finder sees no usable edge for
+    another reason, the brightest edge band is used, as before."""
+    from core.auto_black_point import find_rebate, LOW
+    v = np.asarray(v, np.float32)
+    bands = _edge_bands(v)
+    # Convert reads the 1080 px preview (CCRImage.resize_image_to_max_pixel):
+    # at full size the base's grain reaches the ceiling and reads as clipped.
+    h, w = v.shape[:2]
+    s = PREVIEW_LONG_SIDE / max(h, w)
+    small = (cv2.resize(v, (int(w * s), int(h * s)), interpolation=cv2.INTER_AREA)
+             if s < 1 else v)
+    # find_rebate floors the frame's maximum at 1.0, so give it 16-bit units
+    r = find_rebate(small * np.float32(65535.0))
+    if r.black_point is not None and r.confidence != LOW:
+        return np.asarray(r.black_point, float) / 65535.0, f"{r.side} edge", bands
+    if "clipped" in r.reason:
+        return None, r.reason, bands
+    bp, side, bands = rebate_black_point(v)
+    return bp, f"{side} edge band", bands
 
 
 def image_area_mask(v, bands, margin=25, erode=31):

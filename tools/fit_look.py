@@ -118,7 +118,10 @@ def main(argv=None):
         names = ", ".join(os.path.basename(p) for p in paths)
         log(f"decoding {names}")
         v = decode(paths)
-        bp, side, bands = lf.rebate_black_point(v)
+        bp, side, bands = lf.frame_black_point(v)
+        if bp is None:
+            log(f"  film base not measurable ({side}) - skipped")
+            continue
         mask = lf.image_area_mask(v, bands)
         vmax = float(v.max())
         clipped = float((v[mask] >= vmax - 0.002).mean()) if vmax > 0.9 else 0.0
@@ -136,7 +139,7 @@ def main(argv=None):
         warped, mw = lf.warp_to_lab(reg, lab_small)
         dS, tS = lf.sample_blocks(warped, mw, lab_small)
         log(f"  -> {lab_name} ({reg['orient']}, {reg['inliers']} matches, "
-            f"{reg['reproj_px']:.2f} px), black point from {side} rebate "
+            f"{reg['reproj_px']:.2f} px), black point from the {side} "
             f"{np.round(bp, 3).tolist()}, {len(dS)} samples")
         if clipped > 0.005:
             log(f"  warning: {clipped:.1%} of the image is clipped in at least "
