@@ -263,12 +263,20 @@ Mid and bright tones (HSV value ≥ 0.35), both labs:
   no measurement there.
 - The old families (warm 25°, foliage 100°, sky 200°, blue-violet 265°)
   pulled skin towards red, greens towards yellow-green and sky towards blue.
-  Hue error against the labs (RMS over 10° bins): identity 2.9° / 4.8° per
-  lab, old Organics at shown 50 4.95° / 6.3° — worse than off.
-- A curve fitted on one lab predicts the other better than identity
-  (4.8° → 3.0°, 2.9° → 2.2°), so it carries across labs. The best the old
-  engine could do with free anchors (3 anchors at 70°, 140°, 180°) was 2.3°
-  in sample against the curve's 1.9°, and it still couldn't turn the reds.
+- Hue error against the labs, RMS over 10° × value-band cells weighted by the
+  area of picture they cover (every cell alike in brackets):
+
+  | | lab 060940 | lab 148684250 |
+  |---|---|---|
+  | no Organics | 2.69° (4.57°) | 4.30° (8.14°) |
+  | old Organics, shown 50 | 5.08° (5.23°) | 5.77° (9.94°) |
+  | old Organics, shown 100 | 8.05° (8.12°) | 7.95° (12.46°) |
+  | the curve, fitted on the OTHER lab | **2.14° (3.10°)** | **3.34° (6.74°)** |
+
+  The old families were worse than off; a curve fitted on one lab predicts
+  the other better than off on every measure, so it carries across labs.
+- The best the old engine could do with free anchors (3 anchors at 70°,
+  140°, 180°) still couldn't follow the reds or keep the sky still.
 - Dark tones (value < 0.35): dark greens and blues go 10–35° more olive in
   the lab, but differently per lab and frame (~20° RMS either way, a curve
   neither helps nor harms there), so the curve does not depend on lightness:
@@ -301,10 +309,21 @@ at hue 10·k), plus the fit's provenance in comments. A Python module, not a
 data file, so the build scripts need nothing new.
 
 The fit: 10° hue bins × value bands (0.35–0.55, 0.55–0.75, ≥ 0.75) of the
-weighted median move (≥ 25 samples, weight √n capped at 30), fitted with the
-same periodic Catmull-Rom basis the render uses, a second-difference penalty
-round the circle and a pull to 0 (so a hue with no data gets 0). Both labs,
-the smoothing chosen by the cross-lab check above.
+weighted median move (≥ 25 samples), each cell weighted by its sample count
+(the area of picture it covers), fitted with the same periodic Catmull-Rom
+basis the render uses, a second-difference penalty round the circle
+(smoothness 1) and a pull to 0 (so a hue with no data gets 0). Both labs.
+Weighting cells alike (√n, capped) was tried first: it moved bright skies
+2.4° that both labs leave alone and predicted lab 060940 from the other
+WORSE than no curve by area (4.15° against 2.69°); by count every check
+beats no curve. Smoothness 0.3–10 changed the cross-lab figures by < 3 %.
+
+The measured table at stored 100 (degrees, every 10° from 0°): reds +1.8 to
++2.8, oranges and skin (20–60°) +3.1 to +4.1, yellows to greens +0.3 to +1.0,
+sky (190°) +0.5, blues (200–230°) −1.3 to −2.5, violets and magentas ~0.
+The reds measured +12° in few samples (350–0°, two cells); with so little
+data the pull to 0 holds them near +2°: the Reds and oranges region can take
+them further. Slope round the circle 0.79–1.10 at stored 100.
 
 ### Maths
 
@@ -358,7 +377,12 @@ inside; C¹ curve; monotone (step 3); luma and chroma kept, no clipping; the
 hue stretch is the curve's slope, max reported in tests and in the tool's
 report; resolution independent; CPU == GPU within 3 codes. Grain: a hue
 stretch above 1 widens colour grain in hue by that factor; the measured
-curve's steepest rise at stored 100 is reported (it was 1.26 at the old 100).
+curve's steepest rise at stored 100 is 1.10 (1.20 at 200; the old warp was
+1.26 at its old 100 and 1.66 at shown 100). Measured on four real renders
+(OKLab a/b high-pass, 16 px blocks, as revision 2026-10-23): colour grain
+median ×1.00–1.01 and p99 ×1.02–1.06 at stored 100, median ×1.00–1.02 and
+p99 ×1.04–1.12 at 200 (the old warp: p99 up to ×1.22 at its 100 and ×1.39 at
+shown 100). Mean move 0.3–1.2 levels of 255 at stored 100.
 
 ### Tests
 
@@ -378,10 +402,10 @@ no data.
 
 - **Which tones feed the fit**: value ≥ 0.35 only (the dark cells disagree
   between labs; including them made the cross-lab check worse than identity).
-- **Region borders** sit in the measured curve's quiet places (60°, 165°,
-  250°, 330° are all within 2° of zero), so a region at 0 % leaves the
-  others' measured moves intact and the crossfade never cuts a big move in
-  half.
+- **Region borders** sit where the measured curve is small (165°: +0.6°,
+  250°: −0.2°, 330°: 0°) except 60° (+3.2°, the warm move fading into the
+  yellows); the 30° crossfade keeps that join smooth (the curve is
+  multiplied by a C¹ weight), and the cap keeps it monotone.
 - **Cap**: computed on the effective knots, so a region pushed to 200 % can
   only ever reduce the whole curve's scale, never reorder hues.
 - **Old shapes**: `normalize_organics_shape` keeps only the three region

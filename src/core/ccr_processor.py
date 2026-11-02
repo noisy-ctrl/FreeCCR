@@ -218,9 +218,9 @@ def _initialize_opencl_locked():
             float vibrance        = params[25];
             float sat_rolloff     = params[26];   // spec/saturation-rolloff.md
             float colour_organics = params[27];   // spec/colour-organics.md
-            // Colour Organics families (right-click popup): params[28] = number
-            // of anchors, params[29..33] = anchors + the first one + 360,
-            // params[34] = reach (the warp's width).
+            // Colour Organics' measured hue curve: params[28] = 1 when it moves
+            // anything, params[29..64] = its 36 effective knots (degrees, one
+            // every 10 degrees), a periodic Catmull-Rom spline.
             int org_n = (int)params[28];
 
             int idx = gid * 3;
@@ -578,10 +578,10 @@ def _initialize_opencl_locked():
                 b = sb * 65535.0f;
             }
 
-            // Colour Organics (spec/colour-organics.md): draw hues into a few
-            // print families. Monotone warp of the HSV hue between anchors
-            // (never reorders hues), realised at the same luma and chroma,
-            // then fitted into gamut towards the grey. Mirrors
+            // Colour Organics (spec/colour-organics.md): turn hues the way lab
+            // scans do, by the measured curve (a periodic Catmull-Rom spline
+            // through 36 knots), realised at the same luma and chroma, then
+            // fitted into gamut towards the grey. Mirrors
             // _apply_colour_organics exactly.
             if (colour_organics > 0.0f && org_n > 0) {
                 float o_r = clamp(r / 65535.0f, 0.0f, 1.0f);
@@ -598,22 +598,18 @@ def _initialize_opencl_locked():
                     if (omx == o_r)      hue = 60.0f * fmod((o_g - o_b) / oc + 6.0f, 6.0f);
                     else if (omx == o_g) hue = 60.0f * ((o_b - o_r) / oc + 2.0f);
                     else                 hue = 60.0f * ((o_r - o_g) / oc + 4.0f);
-                    float hh = (hue < params[29]) ? hue + 360.0f : hue;
-                    int oi = 0;
-                    for (int k = 1; k < org_n; k++) {
-                        if (hh >= params[29 + k]) oi = k;
-                    }
-                    float a0 = params[29 + oi];
-                    float span = params[29 + oi + 1] - a0;
-                    float t = (hh - a0) / span;
-                    float w = params[34];
-                    float m1 = fmin(t, w);
-                    float m2 = fmin(1.0f - t, w);
-                    float e1 = 0.5f * (m1 + (w / M_PI_F) * sin(M_PI_F * m1 / w));
-                    float e2 = 0.5f * (m2 + (w / M_PI_F) * sin(M_PI_F * m2 / w));
-                    float bb = e1 + 0.5f * w - e2;
-                    float oa = (colour_organics / 100.0f) * ORG_STRENGTH * ogate;
-                    float h2 = fmod(a0 + (t + oa * (w * t - bb)) * span, 360.0f);
+                    float ou = fmod(hue, 360.0f) / 10.0f;
+                    float ofi = floor(ou);
+                    float of = ou - ofi;
+                    int oi = ((int)ofi) % 36;
+                    float p0 = params[29 + (oi + 35) % 36];
+                    float p1 = params[29 + oi];
+                    float p2 = params[29 + (oi + 1) % 36];
+                    float p3 = params[29 + (oi + 2) % 36];
+                    float odel = 0.5f * (2.0f * p1 + (p2 - p0) * of
+                                         + (2.0f * p0 - 5.0f * p1 + 4.0f * p2 - p3) * of * of
+                                         + (3.0f * (p1 - p2) + p3 - p0) * of * of * of);
+                    float h2 = fmod(hue + ogate * odel + 360.0f, 360.0f);
                     // the fully saturated colour of hue h2
                     float hp = h2 / 60.0f;
                     float xx = 1.0f - fabs(fmod(hp, 2.0f) - 1.0f);
@@ -795,8 +791,7 @@ def _initialize_opencl_locked():
                        .replace("VIBRANCE_SKIN_PROTECT", f"{VIBRANCE_SKIN_PROTECT:.6f}f")
                        .replace("ROLLOFF_KNEE_DROP", f"{ROLLOFF_KNEE_DROP:.6f}f")
                        .replace("ROLLOFF_CEIL_DROP", f"{ROLLOFF_CEIL_DROP:.6f}f")
-                       .replace("ROLLOFF_GAMMA", f"{ROLLOFF_GAMMA:.6f}f")
-                       .replace("ORG_STRENGTH", f"{ORGANICS_STRENGTH:.6f}f"))
+                       .replace("ROLLOFF_GAMMA", f"{ROLLOFF_GAMMA:.6f}f"))
 
         # Compile the program
         program = cl.Program(ctx, kernel_code).build()
@@ -3544,233 +3539,180 @@ def _apply_sat_rolloff(img_norm: np.ndarray, amount: float) -> np.ndarray:
 
 
 # --- Colour Organics (spec/colour-organics.md) ---
-# Draws hues into a few print families, the way a lab scanner's rendering
-# does: hue differences shrink near each anchor and open up between them.
-# The warp is monotone (hues are never reordered, so gradients can't band)
-# and realised at the same luma and chroma. The anchors are an informed guess
-# at print families; replace them with measured Noritsu anchors when scan
-# pairs exist. The OpenCL kernel
-# substitutes these constants (and the anchor table) textually.
-# The families: (key, name, what they hold, default HSV hue). Each can be
-# switched off or nudged by +-ORGANICS_SHIFT_MAX degrees in the right-click
-# popup; the ranges can't overlap, so the anchors always stay in order.
-ORGANICS_FAMILIES = (
-    ("warm", "Warm", "skin, wood, brick", 25.0),
-    ("foliage", "Foliage", "leaves, grass", 100.0),
-    ("sky", "Sky and water", "sky, sea", 200.0),
-    ("violet", "Blue-violet", "deep blue, purple", 265.0),
-)
-ORGANICS_ANCHORS = tuple(h for *_rest, h in ORGANICS_FAMILIES)
-ORGANICS_STRENGTH = 0.85       # slope at an anchor at full: 1 - 0.85 (1 - w) = 0.40
-ORGANICS_WIDTH = 0.3           # each anchor's pull reaches 30 % into its spans
-ORGANICS_SHIFT_MAX = 20        # popup: hue nudge per family, degrees
-# Popup: reach, percent. Up to 80 since the depth is held constant to 60 % and
-# firmed beyond it (see organics_strength_scale); with the old fixed strength
-# anything past ~45 made the pull WEAKER (and it vanished at 100), because a
-# wider window thinned it.
-ORGANICS_REACH_MIN, ORGANICS_REACH_MAX = 10, 80
-# Past ORGANICS_REACH_FIRM the families' windows already cover most of their
-# spans, so holding the depth alone would make the pull FALL again; from there
-# the centre's slope is lowered linearly to ORGANICS_FIRM_SLOPE at the maximum
-# reach, so the top of the slider still adds pull (about 13 % more at 80 %).
-ORGANICS_REACH_FIRM = 0.60
-ORGANICS_FIRM_SLOPE = 0.26
-# The main slider runs to 150 (revision 2026-10-22). Past 100 the pull
-# deepens; the centre's slope is never allowed below ORGANICS_MIN_CENTRE_SLOPE,
-# which keeps the warp monotone (hues never swap order, so no banding). That
-# floor only binds at long reach above ~130; up to 100 nothing is capped.
-ORGANICS_AMOUNT_MAX = 200
-ORGANICS_MIN_CENTRE_SLOPE = 0.10
-# Revision 2026-10-23: the slider SHOWS 0..100 and stores twice that (old
-# units, so every edit renders as before; shown 50 = the old 100), and the
-# shown 100 is twice the old 100's pull. Depth alone tops out at the slope
-# floor (about 1.5x), so past it the pull WIDENS (organics_pull).
-ORGANICS_SHOWN_PER_AMOUNT = 0.5
-_ORG_GATE_LO, _ORG_GATE_HI = 0.06, 0.20     # the colour bands' grey gate
+# Turns hues the way lab scans do, by a curve MEASURED on lab scans of colour
+# negatives against FreeCCR's own render of the same frames (revision
+# 2026-11-02; the four guessed families it replaced pointed the wrong way in
+# several places). The curve is a periodic Catmull-Rom spline through 36 knots,
+# one every 10 degrees of HSV hue (`core/organics_measured.py`, written by
+# tools/fit_organics.py), in degrees of hue move at the stored amount 100.
+# The move is realised at the same luma and chroma, never reorders hues (the
+# knots are scaled down if the curve would fold) and is gated off for greys.
+# The OpenCL kernel takes the effective knots in params[29..64].
+from core.organics_measured import TABLE as ORGANICS_TABLE  # noqa: E402
 
-ORGANICS_SHAPE_DEFAULT = {"reach": int(round(ORGANICS_WIDTH * 100))}
-for _key, *_rest in ORGANICS_FAMILIES:
-    ORGANICS_SHAPE_DEFAULT[f"{_key}_on"] = True
-    ORGANICS_SHAPE_DEFAULT[f"{_key}_shift"] = 0
+ORGANICS_KNOTS = len(ORGANICS_TABLE)
+ORGANICS_HUE_STEP = 360.0 / ORGANICS_KNOTS
+# The stored amount runs 0..200 and the slider SHOWS half (revision 2026-10-23,
+# units kept): stored 100 (shown 50) = the labs' measured amount, 200 twice it.
+ORGANICS_AMOUNT_MAX = 200
+ORGANICS_SHOWN_PER_AMOUNT = 0.5
+# Never let the hue map's slope round the circle fall below this: the map stays
+# monotone (hues never swap order, so gradients can't band).
+ORGANICS_MIN_CENTRE_SLOPE = 0.10
+_ORG_GATE_LO, _ORG_GATE_HI = 0.06, 0.20     # the colour bands' grey gate
+# Regions of the right-click popup: (key, name, what they hold, start, end,
+# swatch hue), HSV degrees. Each scales the measured move inside it, 0..200 %;
+# neighbours crossfade over ORGANICS_REGION_FADE degrees centred on the border.
+# 250..330 (violets, magentas) was not measured: no move, no control.
+ORGANICS_REGIONS = (
+    ("warm", "Reds and oranges", "red, skin, orange", 330.0, 60.0, 20.0),
+    ("green", "Yellows and greens", "yellow, foliage", 60.0, 165.0, 105.0),
+    ("blue", "Cyans and blues", "sky, water, blue", 165.0, 250.0, 205.0),
+)
+ORGANICS_REGION_FADE = 30.0
+ORGANICS_REGION_MAX = 200
+ORGANICS_SHAPE_DEFAULT = {key: 100 for key, *_rest in ORGANICS_REGIONS}
 
 
 def normalize_organics_shape(shape):
-    """A clean Colour Organics shape dict, or None when absent / not a dict /
-    all default (None means: the default families, byte-identical)."""
+    """A clean Colour Organics shape dict (region -> percent), or None when
+    absent / not a dict / all default. Keys of the old families shape
+    (on/off, nudge, reach; before 2026-11-02) are ignored, so such a dict is
+    the default."""
     if not isinstance(shape, dict):
         return None
     out = {}
     for k, dflt in ORGANICS_SHAPE_DEFAULT.items():
-        v = shape.get(k, dflt)
-        if isinstance(dflt, bool):
-            out[k] = bool(v)
-            continue
-        lo, hi = ((ORGANICS_REACH_MIN, ORGANICS_REACH_MAX) if k == "reach"
-                  else (-ORGANICS_SHIFT_MAX, ORGANICS_SHIFT_MAX))
         try:
-            out[k] = int(round(float(np.clip(float(v), lo, hi))))
+            v = float(shape.get(k, dflt))
+            out[k] = int(round(float(np.clip(v, 0, ORGANICS_REGION_MAX))))
         except (TypeError, ValueError):
             out[k] = dflt
     return None if out == ORGANICS_SHAPE_DEFAULT else out
 
 
-def organics_anchors(shape=None):
-    """The switched-on families' hues (ascending) for a shape (None = default)."""
+def _organics_ramp(h, border):
+    """0 well before `border`, 1 well after it (degrees round the circle), a
+    raised cosine over ORGANICS_REGION_FADE centred on the border."""
+    half = ORGANICS_REGION_FADE / 2.0
+    d = np.mod(np.asarray(h, np.float64) - border + 180.0, 360.0) - 180.0
+    t = np.clip((d + half) / (2.0 * half), 0.0, 1.0)
+    return 0.5 - 0.5 * np.cos(np.pi * t)
+
+
+def organics_region_scale(hue_deg, shape=None):
+    """The popup's region amounts as a factor of hue (1 everywhere for the
+    default shape). The region weights sum to 1 round the circle."""
     shape = normalize_organics_shape(shape) or ORGANICS_SHAPE_DEFAULT
-    return [h + shape[f"{k}_shift"] for k, _n, _w, h in ORGANICS_FAMILIES
-            if shape[f"{k}_on"]]
+    h = np.asarray(hue_deg, np.float64)
+    total = np.zeros_like(h)
+    rest = np.ones_like(h)
+    for key, _name, _what, start, end, _sw in ORGANICS_REGIONS:
+        w = _organics_ramp(h, start) * (1.0 - _organics_ramp(h, end))
+        total += w * (shape[key] / 100.0)
+        rest -= w
+    return total + rest            # the unmeasured stretch keeps factor 1
 
 
-def organics_width(shape=None):
-    shape = normalize_organics_shape(shape) or ORGANICS_SHAPE_DEFAULT
-    return shape["reach"] / 100.0
+def organics_cr_weights(hue_deg):
+    """Indices (N, 4) and weights (N, 4) of the periodic Catmull-Rom curve
+    through the knots (one every ORGANICS_HUE_STEP degrees) at `hue_deg`.
+    The same weights in the same order as the kernel."""
+    h = np.mod(np.asarray(hue_deg, np.float64).ravel(), 360.0)
+    u = h / ORGANICS_HUE_STEP
+    i = np.floor(u)
+    f = u - i
+    i = i.astype(np.int64) % ORGANICS_KNOTS
+    f2, f3 = f * f, f * f * f
+    w = np.stack([0.5 * (-f + 2.0 * f2 - f3),
+                  0.5 * (2.0 - 5.0 * f2 + 3.0 * f3),
+                  0.5 * (f + 4.0 * f2 - 3.0 * f3),
+                  0.5 * (-f2 + f3)], 1)
+    idx = np.stack([(i - 1) % ORGANICS_KNOTS, i, (i + 1) % ORGANICS_KNOTS,
+                    (i + 2) % ORGANICS_KNOTS], 1)
+    return idx, w
 
 
-def organics_strength_scale(shape=None) -> float:
-    """Reach widens each family's pull without thinning it. The warp's slope
-    at an anchor is 1 - s (1 - w): with a fixed strength s a wider reach w
-    made the pull shallower, so past ~45 % more reach meant LESS effect. The
-    strength is scaled by (1 - W0) / (1 - w), holding the depth at its value
-    for the default reach W0, so more reach is always wider AND stronger
-    (spec/colour-organics.md, revision 2026-10-21). Exactly 1.0 at the
-    default, so default renders are unchanged; the warp stays monotone (the
-    minimum slope is that same anchor slope, 0.40 at full) for any w < 1."""
-    w = np.float32(organics_width(shape))
-    w0 = np.float32(ORGANICS_WIDTH)
-    if w == w0:
-        return 1.0
-    if w <= np.float32(ORGANICS_REACH_FIRM):
-        return float((np.float32(1.0) - w0) / (np.float32(1.0) - w))
-    # Past ORGANICS_REACH_FIRM: the centre's slope falls linearly from the
-    # held depth to ORGANICS_FIRM_SLOPE at the maximum reach (revision
-    # 2026-10-22), continuous with the held-depth branch at the joint.
-    held = 1.0 - ORGANICS_STRENGTH * (1.0 - ORGANICS_WIDTH)
-    top = ORGANICS_REACH_MAX / 100.0
-    f = (float(w) - ORGANICS_REACH_FIRM) / (top - ORGANICS_REACH_FIRM)
-    slope = held - f * (held - ORGANICS_FIRM_SLOPE)
-    return float((1.0 - slope) / (1.0 - float(w)) / ORGANICS_STRENGTH)
-
-
-def organics_strength(amount, shape=None) -> float:
-    """The warp strength for slider `amount` (0..ORGANICS_AMOUNT_MAX) and a
-    shape: amount/100 x ORGANICS_STRENGTH x the reach's scale, capped so the
-    centre's slope 1 - s (1 - w) stays at least ORGANICS_MIN_CENTRE_SLOPE.
-    The cap never binds at 100 or below, so those renders are unchanged."""
-    s = float(amount) / 100.0 * ORGANICS_STRENGTH * organics_strength_scale(shape)
-    cap = (1.0 - ORGANICS_MIN_CENTRE_SLOPE) / (1.0 - organics_width(shape))
-    return cap if s > cap else s
-
-
-_ORG_M_HUES = np.arange(0.0, 360.0, 0.5, dtype=np.float32)
-
-
-def _organics_mean_pull(strength, width):
-    """Mean hue pull |h' - h| (degrees) over the hue circle, default
-    families: what "how strong" Colour Organics is means here."""
-    hp = organics_hue_map(_ORG_M_HUES, np.float32(strength), ORGANICS_ANCHORS, width)
-    d = np.mod(hp - _ORG_M_HUES + 180.0, 360.0) - 180.0
-    return float(np.abs(d).mean())
-
-
-def _floor_strength(w):
-    """Strength that puts the centre's slope 1 - s (1 - w) on the floor."""
-    return (1.0 - ORGANICS_MIN_CENTRE_SLOPE) / (1.0 - w)
-
-
-@lru_cache(maxsize=1)
-def _organics_peak_width():
-    """The reach of the largest monotone pull (centre slope on the floor):
-    wider than this the families' windows overlap and the mean pull falls."""
-    ws = np.arange(0.30, 0.80001, 0.005)
-    ms = [_organics_mean_pull(_floor_strength(w), float(w)) for w in ws]
-    return float(ws[int(np.argmax(ms))])
-
-
-@lru_cache(maxsize=512)
-def _organics_pull_cached(amount, w0, scale):
-    s_lin = amount / 100.0 * ORGANICS_STRENGTH * scale
-    cap = _floor_strength(w0)
-    if s_lin <= cap:
-        return s_lin, w0
-    w_peak = _organics_peak_width()
-    if w0 >= w_peak:
-        return cap, w0                 # nothing wider pulls more
-    a_c = 100.0 * cap / (ORGANICS_STRENGTH * scale)       # where depth ran out
-    top = float(ORGANICS_AMOUNT_MAX)
-    m_c = _organics_mean_pull(cap, w0)
-    m_top = min(m_c * top / a_c, _organics_mean_pull(_floor_strength(w_peak), w_peak))
-    target = m_c + (min(amount, top) - a_c) / (top - a_c) * (m_top - m_c)
-    lo, hi = w0, w_peak
-    for _ in range(30):                 # mean pull rises with w up to w_peak
-        mid = 0.5 * (lo + hi)
-        if _organics_mean_pull(_floor_strength(mid), mid) < target:
-            lo = mid
-        else:
-            hi = mid
-    w = 0.5 * (lo + hi)
-    return _floor_strength(w), w
-
-
-def organics_pull(amount, shape=None):
-    """(strength, reach) of the warp for the stored `amount` (0..200, old
-    units; the slider shows half) and a shape. Up to where the centre slope
-    reaches its floor this is exactly (organics_strength, organics_width), so
-    every earlier edit renders unchanged; past it the depth stays on the
-    floor and the reach widens until the mean pull is twice the old 100's at
-    200 (shown 100), or the most a monotone warp can pull if that is less.
-    See spec/colour-organics.md, revision 2026-10-23."""
-    return _organics_pull_cached(float(amount), float(organics_width(shape)),
-                                 float(organics_strength_scale(shape)))
-
-
-def _organics_table(anchors):
-    return np.array(list(anchors) + [anchors[0] + 360.0], np.float32)
-
-
-def _organics_params(shape, width=None):
-    """Kernel params[28..34]: anchor count, anchors + wrap padded to 5, reach
-    (the effective reach from organics_pull when given)."""
-    anchors = organics_anchors(shape)
-    table = list(_organics_table(anchors)) if anchors else []
-    table += [0.0] * (5 - len(table))
-    w = organics_width(shape) if width is None else width
-    return [float(len(anchors))] + [float(v) for v in table] + [float(w)]
-
-
-def organics_hue_map(hue_deg, strength, anchors=None, width=None):
-    """New HSV hue (degrees) for `hue_deg` at warp strength `strength`
-    (0 = identity, ORGANICS_STRENGTH = full; scalar or per-pixel array).
-    `anchors` (ascending HSV degrees) and `width` default to the standard
-    families; no anchors = identity."""
-    anchors = ORGANICS_ANCHORS if anchors is None else anchors
+def organics_delta(hue_deg, knots):
+    """The hue move (degrees) at `hue_deg` for effective `knots` (float32,
+    evaluated exactly as the kernel does)."""
     h = np.asarray(hue_deg, np.float32)
-    if len(anchors) == 0:
-        return h
-    A = _organics_table(anchors)
-    hh = np.where(h < A[0], h + np.float32(360.0), h)
-    i = np.clip(np.searchsorted(A, hh, side="right") - 1, 0, len(A) - 2)
-    a0 = A[i]
-    span = A[i + 1] - a0
-    t = (hh - a0) / span
-    w = np.float32(ORGANICS_WIDTH if width is None else width)
+    k = np.asarray(knots, np.float32)
+    u = np.mod(h, np.float32(360.0)) / np.float32(ORGANICS_HUE_STEP)
+    i = np.floor(u)
+    f = (u - i).astype(np.float32)
+    i = i.astype(np.int64) % ORGANICS_KNOTS
+    p0 = k[(i - 1) % ORGANICS_KNOTS]
+    p1 = k[i]
+    p2 = k[(i + 1) % ORGANICS_KNOTS]
+    p3 = k[(i + 2) % ORGANICS_KNOTS]
+    half = np.float32(0.5)
+    return (half * (np.float32(2.0) * p1 + (p2 - p0) * f
+                    + (np.float32(2.0) * p0 - np.float32(5.0) * p1
+                       + np.float32(4.0) * p2 - p3) * f * f
+                    + (np.float32(3.0) * (p1 - p2) + p3 - p0) * f * f * f)
+            ).astype(np.float32)
 
-    def _e(u):
-        m = np.minimum(u, w)
-        return np.float32(0.5) * (m + (w / np.float32(np.pi)) * np.sin(np.float32(np.pi) * m / w))
 
-    bb = _e(t) + np.float32(0.5) * w - _e(np.float32(1.0) - t)
-    t2 = t + np.asarray(strength, np.float32) * (w * t - bb)
-    return np.mod(a0 + t2 * span, np.float32(360.0)).astype(np.float32)
+_ORG_FINE = np.arange(0.0, 360.0, 0.1)
+
+
+def organics_min_slope(knots):
+    """The smallest slope of the curve round the circle (float64, 0.1° grid)."""
+    idx, w = organics_cr_weights(_ORG_FINE)
+    k = np.asarray(knots, np.float64)
+    d = (w * k[idx]).sum(1)
+    return float(np.min((np.roll(d, -1) - d) / 0.1))
+
+
+def organics_max_slope(knots):
+    idx, w = organics_cr_weights(_ORG_FINE)
+    k = np.asarray(knots, np.float64)
+    d = (w * k[idx]).sum(1)
+    return float(np.max((np.roll(d, -1) - d) / 0.1))
+
+
+@lru_cache(maxsize=256)
+def _organics_knots_cached(amount, shape_items):
+    shape = dict(shape_items) if shape_items else None
+    hk = np.arange(ORGANICS_KNOTS) * ORGANICS_HUE_STEP
+    k = (float(amount) / 100.0) * organics_region_scale(hk, shape) * np.asarray(
+        ORGANICS_TABLE, np.float64)
+    lo = organics_min_slope(k)
+    if 1.0 + lo < ORGANICS_MIN_CENTRE_SLOPE:      # would fold: scale it down
+        k *= (1.0 - ORGANICS_MIN_CENTRE_SLOPE) / (-lo)
+    out = k.astype(np.float32)
+    out.setflags(write=False)
+    return out
+
+
+def organics_knots(amount, shape=None):
+    """The 36 effective knots (degrees, float32) for the stored `amount`
+    (0..200) and region shape: the measured table x amount/100 x the region
+    amounts, scaled down only if the hue map would otherwise fold."""
+    shape = normalize_organics_shape(shape)
+    items = tuple(sorted(shape.items())) if shape else None
+    return _organics_knots_cached(float(amount), items)
+
+
+def organics_hue_map(hue_deg, amount, shape=None, gate=1.0):
+    """New HSV hue (degrees) for `hue_deg` at the stored `amount`, the region
+    `shape` and the grey gate (1 = a fully coloured pixel)."""
+    h = np.asarray(hue_deg, np.float32)
+    d = organics_delta(h, organics_knots(amount, shape))
+    return np.mod(h + np.asarray(gate, np.float32) * d, np.float32(360.0)).astype(np.float32)
 
 
 def _apply_colour_organics(img_norm: np.ndarray, amount: float,
                            shape=None) -> np.ndarray:
-    """Colour Organics on a normalised [0,1] float RGB image, with the
-    families in `shape` (None = default). Returns a new float32 array in
+    """Colour Organics on a normalised [0,1] float RGB image, with the region
+    amounts in `shape` (None = default). Returns a new float32 array in
     [0,1]. Mirrors the OpenCL kernel block exactly."""
     x = np.clip(img_norm, 0.0, 1.0).astype(np.float32)
-    anchors = organics_anchors(shape)
-    if not amount or amount <= 0 or not anchors:
+    if not amount or amount <= 0:
+        return x
+    knots = organics_knots(amount, shape)
+    if not np.any(knots):
         return x
     mx = x.max(axis=-1)
     mn = x.min(axis=-1)
@@ -3787,8 +3729,8 @@ def _apply_colour_organics(img_norm: np.ndarray, amount: float,
     hue = np.where(ms == r, 60.0 * np.mod((g - b) / cs + 6.0, 6.0),
           np.where(ms == g, 60.0 * ((b - r) / cs + 2.0),
                             60.0 * ((r - g) / cs + 4.0))).astype(np.float32)
-    strength, width = organics_pull(amount, shape)
-    h2 = organics_hue_map(hue, np.float32(strength) * gate[sel], anchors, width)
+    h2 = np.mod(hue + gate[sel] * organics_delta(hue, knots),
+                np.float32(360.0)).astype(np.float32)
     # the fully saturated colour of hue h2
     hp = h2 / np.float32(60.0)
     xx = np.float32(1.0) - np.abs(np.mod(hp, np.float32(2.0)) - np.float32(1.0))
@@ -4681,9 +4623,11 @@ def adjust_image_opencl(
         # params[11..22] channel levels, params[23] subtractive saturation,
         # params[24] per-color-band enable flag, params[25] vibrance — kept
         # after the band flag so no existing index moves — params[26]
-        # Saturation Roll-off, params[27] Colour Organics, params[28..34] its
-        # families: count, anchors + wrap (5 slots), reach)
-        _org_pull = organics_pull(colour_organics or 0.0, organics_shape)
+        # Saturation Roll-off, params[27] Colour Organics, params[28] its curve
+        # on/off and params[29..64] the curve's 36 effective knots)
+        _org_knots = (organics_knots(colour_organics, organics_shape)
+                      if colour_organics and colour_organics > 0
+                      else np.zeros(ORGANICS_KNOTS, np.float32))
         params = np.array([
             kelvin_shift, tint_shift, exposure, brightness,
             blackpoint, whitepoint, contrast, saturation, balance_factor,
@@ -4696,13 +4640,11 @@ def adjust_image_opencl(
             band_active,
             vibrance,
             sat_rolloff,
-            # The amount carries the reach's scale and the centre-slope cap
-            # (both exact no-ops at the default reach and <= 100), matching
-            # _apply_colour_organics: the kernel multiplies it back by
-            # ORGANICS_STRENGTH / 100. Past the slope floor organics_pull
-            # also widens the reach, passed in params[34].
-            (_org_pull[0] / ORGANICS_STRENGTH * 100.0 if colour_organics else 0.0),
-            *_organics_params(organics_shape, _org_pull[1]),
+            # The amount, the region amounts and the no-fold cap are all in
+            # the knots (organics_knots, as _apply_colour_organics).
+            float(colour_organics or 0.0),
+            1.0 if np.any(_org_knots) else 0.0,
+            *[float(v) for v in _org_knots],
         ], dtype=np.float32)
 
         params_buf = cl_array.to_device(queue, params)

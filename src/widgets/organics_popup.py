@@ -1,24 +1,21 @@
-"""Right-click popup for the Colour Organics slider: switch each hue family
-on or off, nudge where its centre sits, and set how far the families reach.
-See spec/colour-organics.md (popup revision)."""
+"""Right-click popup for the Colour Organics slider: how much of the labs'
+measured hue move each colour region gets. See spec/colour-organics.md
+(revision 2026-11-02)."""
 
 import colorsys
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import (QFrame, QVBoxLayout, QHBoxLayout, QGridLayout,
-                               QLabel, QCheckBox, QSlider, QPushButton)
+from PySide6.QtWidgets import (QFrame, QVBoxLayout, QGridLayout, QLabel,
+                               QSlider, QPushButton)
 
-from core.ccr_processor import (ORGANICS_FAMILIES, ORGANICS_SHAPE_DEFAULT,
-                                ORGANICS_SHIFT_MAX, ORGANICS_REACH_MIN,
-                                ORGANICS_REACH_MAX, normalize_organics_shape)
+from core.ccr_processor import (ORGANICS_REGIONS, ORGANICS_SHAPE_DEFAULT,
+                                ORGANICS_REGION_MAX, normalize_organics_shape)
 from ui import theme
 
-INTRO = ("Hues near each family are drawn together. Switch a family off to "
-         "leave its colours alone, or nudge where its centre sits.")
-REACH_TIP = ("How far each family's pull reaches towards its neighbours. "
-             "Further gathers more colours into each family, just as firmly "
-             "at its centre (firmer still past 60 %), so the effect grows "
-             "all the way to 80 %.")
+INTRO = ("How much of the labs' measured hue move each region gets. "
+         "100 % is as measured.")
+UNMEASURED = "Violets and magentas: not measured yet, left as they are."
+STEP = 5
 
 
 def describe_organics(shape):
@@ -26,22 +23,14 @@ def describe_organics(shape):
     shape = normalize_organics_shape(shape)
     if shape is None:
         return "default"
-    parts = []
-    for key, name, _what, _hue in ORGANICS_FAMILIES:
-        if not shape[f"{key}_on"]:
-            parts.append(f"{name} off")
-        elif shape[f"{key}_shift"]:
-            parts.append(f"{name} {shape[f'{key}_shift']:+d}°")
-    if shape["reach"] != ORGANICS_SHAPE_DEFAULT["reach"]:
-        parts.append(f"reach {shape['reach']}%")
+    parts = [f"{name} {shape[key]} %" for key, name, *_rest in ORGANICS_REGIONS
+             if shape[key] != ORGANICS_SHAPE_DEFAULT[key]]
     return "; ".join(parts) if parts else "default"
 
 
-def _swatch_style(hue_deg, enabled=True):
+def _swatch_style(hue_deg):
     r, g, b = colorsys.hsv_to_rgb((hue_deg % 360) / 360.0, 0.65, 0.85)
     col = f"rgb({int(r * 255)}, {int(g * 255)}, {int(b * 255)})"
-    if not enabled:
-        col = theme.SURFACE
     return (f"background: {col}; border: 1px solid {theme.BORDER_STRONG}; "
             f"border-radius: 3px;")
 
@@ -64,7 +53,7 @@ class OrganicsPopup(QFrame):
         lay.setContentsMargins(12, 10, 12, 10)
         lay.setSpacing(6)
 
-        title = QLabel("Colour Organics families")
+        title = QLabel("Colour Organics by region")
         f = title.font()
         f.setBold(True)
         title.setFont(f)
@@ -78,84 +67,60 @@ class OrganicsPopup(QFrame):
         grid = QGridLayout()
         grid.setHorizontalSpacing(8)
         grid.setVerticalSpacing(4)
-        self.checks, self.shifts, self.swatches, self.shift_labels = {}, {}, {}, {}
-        for row, (key, name, what, _hue) in enumerate(ORGANICS_FAMILIES):
-            cb = QCheckBox(name)
-            cb.setToolTip(f"{name}: {what}")
-            cb.setChecked(shape[f"{key}_on"])
-            cb.toggled.connect(self._emit)
+        self.sliders, self.values_shown = {}, {}
+        for row, (key, name, what, _start, _end, swatch) in enumerate(ORGANICS_REGIONS):
             sw = QLabel()
             sw.setFixedSize(18, 14)
+            sw.setStyleSheet(_swatch_style(swatch))
+            lbl = QLabel(name)
+            lbl.setToolTip(f"{name}: {what}")
             sl = QSlider(Qt.Horizontal)
-            sl.setRange(-ORGANICS_SHIFT_MAX, ORGANICS_SHIFT_MAX)
-            sl.setValue(shape[f"{key}_shift"])
-            sl.setToolTip(f"Nudge where the {name.lower()} family's centre sits "
-                          f"(±{ORGANICS_SHIFT_MAX}° of hue). Double-click the "
-                          "number to centre it.")
+            sl.setRange(0, ORGANICS_REGION_MAX // STEP)
+            sl.setValue(int(round(shape[key] / STEP)))
+            sl.setToolTip(f"How much of the measured move {name.lower()} get "
+                          "(0 leaves them alone, 100 % as measured). "
+                          "Double-click the number for 100 %.")
             sl.setMinimumWidth(120)
             sl.valueChanged.connect(self._emit)
             val = QLabel()
-            val.setFixedWidth(34)
+            val.setFixedWidth(42)
             val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            val.mouseDoubleClickEvent = lambda _e, s=sl: s.setValue(0)
-            grid.addWidget(cb, row, 0)
-            grid.addWidget(sw, row, 1)
+            val.mouseDoubleClickEvent = (
+                lambda _e, s=sl, k=key: s.setValue(ORGANICS_SHAPE_DEFAULT[k] // STEP))
+            grid.addWidget(sw, row, 0)
+            grid.addWidget(lbl, row, 1)
             grid.addWidget(sl, row, 2)
             grid.addWidget(val, row, 3)
-            self.checks[key], self.shifts[key] = cb, sl
-            self.swatches[key], self.shift_labels[key] = sw, val
+            self.sliders[key], self.values_shown[key] = sl, val
         lay.addLayout(grid)
-
-        row = QHBoxLayout()
-        lbl = QLabel("Reach")
-        lbl.setToolTip(REACH_TIP)
-        self.reach_slider = QSlider(Qt.Horizontal)
-        self.reach_slider.setRange(ORGANICS_REACH_MIN, ORGANICS_REACH_MAX)
-        self.reach_slider.setValue(shape["reach"])
-        self.reach_slider.setToolTip(REACH_TIP)
-        self.reach_slider.valueChanged.connect(self._emit)
-        self.reach_value = QLabel()
-        self.reach_value.setFixedWidth(34)
-        self.reach_value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        row.addWidget(lbl)
-        row.addWidget(self.reach_slider, 1)
-        row.addWidget(self.reach_value)
-        lay.addLayout(row)
+        note = QLabel(UNMEASURED)
+        note.setWordWrap(True)
+        note.setFixedWidth(300)
+        note.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 11px;")
+        lay.addWidget(note)
 
         self.reset_btn = QPushButton("Reset")
-        self.reset_btn.setToolTip("Back to the standard four families")
+        self.reset_btn.setToolTip("Every region back to 100 %, as measured")
         self.reset_btn.clicked.connect(self.reset)
         lay.addWidget(self.reset_btn)
         self._refresh()
 
     # -- state -------------------------------------------------------------
     def values(self):
-        out = {"reach": self.reach_slider.value()}
-        for key, *_rest in ORGANICS_FAMILIES:
-            out[f"{key}_on"] = self.checks[key].isChecked()
-            out[f"{key}_shift"] = self.shifts[key].value()
-        return out
+        return {key: self.sliders[key].value() * STEP for key in self.sliders}
 
     def reset(self):
-        widgets = list(self.checks.values()) + list(self.shifts.values()) + [self.reach_slider]
-        for w in widgets:
-            w.blockSignals(True)
-        for key, *_rest in ORGANICS_FAMILIES:
-            self.checks[key].setChecked(ORGANICS_SHAPE_DEFAULT[f"{key}_on"])
-            self.shifts[key].setValue(ORGANICS_SHAPE_DEFAULT[f"{key}_shift"])
-        self.reach_slider.setValue(ORGANICS_SHAPE_DEFAULT["reach"])
-        for w in widgets:
-            w.blockSignals(False)
+        for sl in self.sliders.values():
+            sl.blockSignals(True)
+        for key, sl in self.sliders.items():
+            sl.setValue(ORGANICS_SHAPE_DEFAULT[key] // STEP)
+        for sl in self.sliders.values():
+            sl.blockSignals(False)
         self._emit()
 
     def _refresh(self):
-        for key, _name, _what, hue in ORGANICS_FAMILIES:
-            on = self.checks[key].isChecked()
-            shift = self.shifts[key].value()
-            self.swatches[key].setStyleSheet(_swatch_style(hue + shift, on))
-            self.shifts[key].setEnabled(on)
-            self.shift_labels[key].setText(f"{shift:+d}°" if shift else "0°")
-        self.reach_value.setText(f"{self.reach_slider.value()}%")
+        for key, sl in self.sliders.items():
+            self.values_shown[key].setText(f"{sl.value() * STEP} %")
 
     def _emit(self, *_):
         self._refresh()
