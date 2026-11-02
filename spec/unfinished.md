@@ -36,6 +36,17 @@ remove an entry when it ships.
     `tests/test_auto_frame_guide.py`, unused).
 
 ## Known, not yet fixed
+- **6 tests fail in the full suite** (first full run since 2026-11-01,
+  2026-11-02; all 6 fail on 1e767c0 too, so they came with earlier work, not
+  the Portra look or Organics): `test_merge_catalog` ×3 and `test_merge_replace`
+  ×1 expect a catalogue entry's settings to be exactly what was set, but the
+  Details defaults are now written down with them (`detail_defaults.written_down`);
+  `test_capture_routes::test_monitor_busy_camera_offers_release_on_a_mac`
+  finds the Camera zoom list hidden (the toolbar overflows at the test's width
+  since the Format list joined it); `test_export_naming::TestUniquifyInBatch::
+  test_case_insensitive` expects "photo-1.jpg" beside "Photo.jpg" on a
+  case-sensitive (Linux) disk. Also: one 2,907-test run stopped at 79 % with
+  no error (the rest passed when run on their own) — likely memory.
 - **Live view doesn't come back after Measure** (GFX 50S II, 2026-11-01: 0.0
   fps, the last frame held). Waiting on the user's `usb camera:` Terminal
   lines and a `FREECCR_GPHOTO2_LOG` log of one Measure.
