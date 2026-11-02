@@ -5,12 +5,19 @@ A running list of what is started but not done, or waiting on something
 remove an entry when it ships.
 
 ## Waiting on the user
-- **Colour Organics overhaul**: waiting for the FreeCCR scans the user will
-  send. After it, run the FULL test suite once (the user asked for no full
-  runs until then, to save usage; only the touched test files run meanwhile).
-- **A Portra Film Look**: to fit with `tools/fit_look.py` from the user's
-  FreeCCR scans + lab scans when they arrive; it gets headroom by default
-  (`spec/film-look-lut.md` revision 4).
+- **The light-colour check rejects some of the user's trichrome frames**
+  (found 2026-11-02 on the Portra scans): `LIGHT_SHARE_MIN` 0.60 is the share
+  a frame's own channel must reach. His green frames read 0.54–0.63 and blue
+  0.55–0.64 (Bayer crosstalk), so 7 of 51 frames would be "not one colour"
+  in Open's 3-way merge (`triplet_plan`) and the tethered trichrome check
+  (`judge_triplet`); every one is plainly R, G or B in order. A fix (largest
+  channel by a margin over the next, measured on these files) is offered,
+  not made.
+- **Portra 400 Lab look: the second lab's frames** (148684250): 2 of its 3
+  usable frames agree with the look (CIEDE2000 median 0.66, 1.00 with their
+  own Channel Levels), the third doesn't (2.16, it needs −0.5 density). Not
+  added to the fit (one lab's rendering per look); add them if the user
+  wants a both-labs look.
 
 ## Parked
 - **Follow the Frame, revision 2** (`spec/auto-frame-guide.md`, branch
@@ -36,6 +43,13 @@ remove an entry when it ships.
   where the Shutter row shows the model the camera reports ("GFX50S II").
 
 ## To check on the user's machine
+- **Film base clipped on 5 of 17 Portra triplets** (2026-11-02; DSCF0001,
+  0007, 0062, 0068, 0074: the longer exposures): the rebate sits at the clip
+  in every channel, so neither Convert nor the look fitter can read that
+  frame's own base (Convert falls back to the sampled black point scaled by
+  exposure). 9 more frames have 0.5–1.6 % of the picture clipped in a channel.
+  Ask whether those were "Expose each frame for itself" shots.
+- **The Portra 400 Lab look and the new Colour Organics** on his Mac.
 - **Film base Measure on a 35 mm roll** (2026-11-01): the cause was the base's
   grain (9 % photosite to photosite at 1:1, measured on the user's kept shots);
   evenness is now judged on 16-px block means (2.6–3.2 % on those shots).
