@@ -43,7 +43,12 @@ orientation controls asks first:
   selected frame.
 - **No**, Esc or closing the box **cancels**: nothing changes, not even the
   frame on screen (the user's choice).
-- A rotation turns each frame 90° from where it is now.
+- A rotation turns each frame 90° from where it is now, the way the button
+  says, as seen on screen. (Revision 2026-11-02: the stored rotation is
+  applied before the mirrors, and one mirror reverses the sense of a turn
+  made before it, so on a frame mirrored one way, not both, the stored
+  angle now moves the other way. Before this, Rotate Right turned a
+  mirrored frame left on screen, and in the export.)
 - A flip **toggles each frame on its own** by default (the user's choice).
 
 #### Mixed flips: a third button

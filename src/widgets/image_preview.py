@@ -752,15 +752,22 @@ _ORIENTATION_QUESTIONS = {
 
 def next_orientation(kind, rotation, hflip, vflip, mode="each"):
     """The (rotation, hflip, vflip) a frame ends up with after one orientation
-    control. Rotations turn 90 degrees from where the frame is. A flip toggles
-    its own flag (mode "each"), or with mode "rest" sets it, so a frame
-    already flipped that way stays as it is."""
+    control. Rotations turn the picture on screen 90 degrees from where it is.
+    A flip toggles its own flag (mode "each"), or with mode "rest" sets it,
+    so a frame already flipped that way stays as it is.
+
+    The stored rotation is applied BEFORE the mirrors (canvas and export
+    alike: ``apply_orientation``), and a single mirror reverses the sense of
+    a turn made before it. So on a frame mirrored one way (not both: two
+    mirrors are a half turn and keep the sense) the stored angle moves the
+    other way, and the picture still turns the way the button says."""
     rotation = int(rotation or 0) % 360
     hflip, vflip = bool(hflip), bool(vflip)
+    step = -90 if hflip != vflip else 90
     if kind == "left":
-        rotation = (rotation - 90) % 360
+        rotation = (rotation - step) % 360
     elif kind == "right":
-        rotation = (rotation + 90) % 360
+        rotation = (rotation + step) % 360
     elif kind == "hflip":
         hflip = True if mode == "rest" else not hflip
     elif kind == "vflip":
