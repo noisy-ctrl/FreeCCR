@@ -5,9 +5,11 @@
   green and blue exposures merged into one frame), "bw" (one exposure of a
   black-and-white negative, under whatever light: white or a single channel).
 - `TripletGrouper`: new RAW files in name order, three at a time.
-- The light check: each frame of a triplet should be lit by its own colour.
-  Read from the RAW mosaic's channel means; a frame that isn't red, green or
-  blue where it should be stops the triplet from merging blindly.
+- The light check: each frame of a triplet should be lit by its own colour,
+  and all three should show one picture. Read from the RAW mosaic's channel
+  means and a small gradient signature of it; a frame that isn't red, green
+  or blue where it should be, or shows another shot, stops the triplet from
+  merging blindly.
 """
 import os
 import time
@@ -22,11 +24,24 @@ SHORT = {"colour": "colour", "trichrome": "trichrome", "bw": "B&W"}
 DEFAULT = "colour"
 
 # A frame lit by one LED colour puts most of its signal in that channel.
-# Measured on 30 real trichrome RAFs (Bayer, 2026-10-26): red frames 0.85,
-# green 0.70-0.74, blue 0.68-0.70. The three frames of a shot summed (light
-# with all three LEDs in it) peak at 0.33-0.44, and white light through an
-# orange negative leads in red at about 0.45-0.5, so 0.60 sits between.
-LIGHT_SHARE_MIN = 0.60
+# Measured on every RAF the user has sent (2026-11-02, spec/smart-triplets.md
+# revision): red frames 0.77-0.85, green 0.54-0.74, blue 0.55-0.70 (dense
+# Portra frames are the low ones: a dense dye eats the middle of the LED's
+# band); white light through a negative leads at 0.42-0.49 (39 frames, two
+# cameras). 0.51 sits halfway. (It was 0.60, from the first 30 RAFs, and
+# flagged 7 of 51 dense Portra frames.)
+LIGHT_SHARE_MIN = 0.51
+# A frame below LIGHT_SHARE_MIN is still taken as the one colour its shot
+# lacks when its largest share is that colour, at least this, and its picture
+# matches the shot's other two frames (spec/smart-triplets.md, rule 3).
+RESCUE_SHARE_MIN = 0.40
+
+# One picture per set (spec/smart-triplets.md, rule 2): a gradient signature
+# of the frame's middle, from the same subsampled mosaic the shares come from.
+PICTURE_SIZE = 160        # long side of the thumbnail the signature is taken on
+PICTURE_INNER = 0.6       # the middle compared (rebates, holes, holder left out)
+PICTURE_SAME = 0.35       # same shot 0.45-0.99, different shots <= 0.24 (measured)
+PICTURE_RELIABLE = 0.5    # the frame's two halves must agree (measured 0.84-0.997)
 STALL_S = 30.0
 NAMES = ("red", "green", "blue")
 
@@ -105,41 +120,180 @@ def describe(shares):
     return f"lit {NAMES[k]}"
 
 
-def judge_triplet(shares_list, names=None):
+def rescuable(shares, colour_index):
+    """Rule 3's own part: largest in `colour_index` and at least
+    RESCUE_SHARE_MIN (the picture part is the caller's)."""
+    return (shares is not None and int(np.argmax(shares)) == colour_index
+            and shares[colour_index] >= RESCUE_SHARE_MIN)
+
+
+def judge_triplet(shares_list, names=None, pictures=None):
     """(ok, index of the first out-of-place frame or None, reason). A frame
     whose shares are None (a monochrome sensor, an unreadable file) is not
-    judged: there is nothing to tell its light by."""
+    judged: there is nothing to tell its light by. With `pictures` (one
+    `Picture` or None per frame), no two frames may be known to show
+    different pictures, and a weak frame whose picture matches the other two
+    is taken as its slot's colour (spec/smart-triplets.md, rules 2 and 3)."""
+    pictures = list(pictures) if pictures is not None else [None] * len(shares_list)
+    who = (lambda k: f" ({names[k]})") if names else (lambda k: "")
     for k, sh in enumerate(shares_list):
         if sh is None:
             continue
-        if int(np.argmax(sh)) != k or sh[k] < LIGHT_SHARE_MIN:
-            who = f" ({names[k]})" if names else ""
-            return False, k, (f"frame {k + 1}{who} should be lit {NAMES[k]} "
-                              f"but looks {describe(sh)}")
+        if int(np.argmax(sh)) == k and sh[k] >= LIGHT_SHARE_MIN:
+            continue
+        others = [j for j in range(len(shares_list)) if j != k]
+        if rescuable(sh, k) and all(same_picture(pictures[k], pictures[j]) is True
+                                     for j in others):
+            continue
+        return False, k, (f"frame {k + 1}{who(k)} should be lit {NAMES[k]} "
+                          f"but looks {describe(sh)}")
+    n = len(shares_list)
+    same = {(i, j): same_picture(pictures[i], pictures[j])
+            for i in range(n) for j in range(i + 1, n)}
+    if any(v is False for v in same.values()):
+        for k in range(n):
+            mine = [v for (i, j), v in same.items() if k in (i, j)]
+            rest = [v for (i, j), v in same.items() if k not in (i, j)]
+            if all(v is False for v in mine) and not any(v is False for v in rest):
+                others = " and ".join(str(j + 1) for j in range(n) if j != k)
+                return False, k, (f"frame {k + 1}{who(k)} shows a different picture "
+                                  f"from frames {others}")
+        i, j = next(key for key, v in same.items() if v is False)
+        return False, j, (f"frames {i + 1} and {j + 1} show different pictures "
+                          "(not one shot)")
     return True, None, ""
 
 
-def light_shares(path):
-    """(R, G, B) shares of the RAW mosaic's black-subtracted channel means,
-    or None for a monochrome sensor or a file that can't be read. Every
-    fifth photosite each way (5 is coprime with the 2x2 and 6x6 patterns,
-    so every colour is sampled)."""
+# --------------------------------------------------------------------------- #
+# the picture: is it one shot?
+# --------------------------------------------------------------------------- #
+class Picture:
+    """A frame's picture signature: `sig` (zero-mean, unit-norm gradient
+    energy of the middle) and `reliability` (its two halves' agreement)."""
+
+    __slots__ = ("sig", "reliability")
+
+    def __init__(self, sig, reliability):
+        self.sig = sig
+        self.reliability = float(reliability)
+
+
+def _signature(mono, shape=None):
+    import cv2
+    m = np.maximum(np.asarray(mono, np.float32), np.float32(1e-4))
+    h, w = m.shape
+    if shape is None:
+        s = PICTURE_SIZE / max(h, w)
+        shape = (max(8, round(w * s)), max(8, round(h * s)))
+    m = cv2.resize(m, shape, interpolation=cv2.INTER_AREA)
+    lg = np.log(m)
+    h, w = lg.shape
+    dy, dx = int(round(h * (1 - PICTURE_INNER) / 2)), int(round(w * (1 - PICTURE_INNER) / 2))
+    lg = lg[dy:h - dy, dx:w - dx]
+    gx = cv2.Sobel(lg, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(lg, cv2.CV_32F, 0, 1, ksize=3)
+    g = np.sqrt(gx * gx + gy * gy)
+    g -= g.mean()
+    n = float(np.sqrt((g * g).sum()))
+    return (g / n if n > 1e-12 else None), shape
+
+
+def _mono(v, colors):
+    """Each photosite over its colour's mean: under one LED the mosaic is
+    then a single picture, whatever the colour."""
+    out = np.empty(v.shape, np.float32)
+    for c in np.unique(colors):
+        sel = colors == c
+        mean = float(v[sel].mean())
+        if mean <= 0:
+            return None
+        out[sel] = v[sel] / mean
+    return out
+
+
+def picture_from_mosaic(mosaic, colors, black=None):
+    """The `Picture` of a (subsampled) mosaic, or None when it can't be made
+    (too small, a colour with no signal)."""
+    try:
+        v = np.asarray(mosaic, np.float32)
+        colors = np.asarray(colors)
+        if v.ndim != 2 or min(v.shape) < 16:
+            return None
+        if black:
+            bl = np.zeros(int(colors.max()) + 1, np.float32)
+            for i in range(min(len(black), bl.size)):
+                bl[i] = float(black[i])
+            v = v - bl[colors]
+        full = _mono(v, colors)
+        a, b = _mono(v[0::2], colors[0::2]), _mono(v[1::2], colors[1::2])
+        if full is None or a is None or b is None:
+            return None
+        sig, shape = _signature(full)
+        sa, _ = _signature(a, shape)
+        sb, _ = _signature(b, shape)
+        if sig is None or sa is None or sb is None:
+            return Picture(sig, 0.0) if sig is not None else None
+        return Picture(sig, float((sa * sb).sum()))
+    except Exception:
+        return None
+
+
+def picture_match(a, b):
+    """Correlation of two pictures' signatures, or None when they can't be
+    compared (missing, unreliable, made at different sizes)."""
+    if a is None or b is None or a.sig is None or b.sig is None:
+        return None
+    if min(a.reliability, b.reliability) < PICTURE_RELIABLE or a.sig.shape != b.sig.shape:
+        return None
+    return float((a.sig * b.sig).sum())
+
+
+def same_picture(a, b):
+    """True / False when the two frames are known to show the same picture
+    or not; None when it can't be told."""
+    c = picture_match(a, b)
+    return None if c is None else c >= PICTURE_SAME
+
+
+class LightReading:
+    """What one read of a RAW tells: its light `shares` and its `picture`
+    (either may be None)."""
+
+    __slots__ = ("shares", "picture")
+
+    def __init__(self, shares, picture=None):
+        self.shares = shares
+        self.picture = picture
+
+
+def read_light(path):
+    """`LightReading` of a RAW: the shares of the mosaic's black-subtracted
+    channel means (None for a monochrome sensor or a file that can't be
+    read) and its picture signature, from one read. Every fifth photosite
+    each way (5 is coprime with the 2x2 and 6x6 patterns, so every colour is
+    sampled)."""
     try:
         import rawpy
         from core.ccr_merge import is_monochrome_sensor
         with rawpy.imread(path) as raw:
             if is_monochrome_sensor(raw.num_colors, raw.color_desc,
                                     getattr(raw, "raw_pattern", None)):
-                return None
+                return LightReading(None, None)
             # copies: these are views into LibRaw's buffer, which is freed
             # when the file closes (reading a view after that segfaults)
             mosaic = np.array(raw.raw_image_visible[::5, ::5], copy=True)
             colors = np.array(raw.raw_colors_visible[::5, ::5], copy=True)
             black = list(raw.black_level_per_channel)
             desc = bytes(raw.color_desc).decode("ascii", "ignore").upper()
-        return shares_from_mosaic(mosaic, colors, desc, black)
+        return LightReading(shares_from_mosaic(mosaic, colors, desc, black),
+                            picture_from_mosaic(mosaic, colors, black))
     except Exception:
-        return None
+        return LightReading(None, None)
+
+
+def light_shares(path):
+    """(R, G, B) shares of the RAW mosaic (see `read_light`), or None."""
+    return read_light(path).shares
 
 
 def shares_from_mosaic(mosaic, colors, desc, black=None):

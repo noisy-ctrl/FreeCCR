@@ -118,6 +118,14 @@ light with all three LEDs on, peak at 0.33-0.44 and fail. So 0.60 has about
 filters overlap more would lower the single-LED shares; the threshold is one
 constant (`LIGHT_SHARE_MIN`) if another setup needs it.
 
+**Revision 2026-11-02** (spec/smart-triplets.md, same date): on the user's
+dense Portra 400 frames green and blue read 0.54–0.60, and 7 of 51 were
+held. `LIGHT_SHARE_MIN` is now **0.51** (white light measured at 0.42–0.49 on
+39 frames, two cameras), the three frames must not be known to show
+different pictures (a gradient signature from the same mosaic read), and a
+weaker frame (largest share its slot's colour, ≥ 0.40) passes when its
+picture matches the other two.
+
 The check copies the mosaic out of the RAW before the file closes: rawpy's
 `raw_image_visible` is a view into LibRaw's buffer, and reading it after the
 file closed crashed the app on the first real RAF.

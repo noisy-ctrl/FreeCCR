@@ -97,15 +97,133 @@ def test_judge_a_triplet():
 
 
 def test_measured_triplets_pass_and_their_white_sum_fails():
-    """Shares measured on the user's 30 trichrome RAFs (Bayer, 2026-10-26):
-    the weakest single-LED frame (blue) reads 0.68, and the three frames of a
-    shot summed (light containing all three LEDs) peak at 0.44, so 0.60 sits
-    between them with room either side."""
+    """Shares measured on the user's first 30 trichrome RAFs (Bayer,
+    2026-10-26): single-LED frames 0.68 and up; the three frames of a shot
+    summed (light containing all three LEDs) peak at 0.44."""
     red, green, blue = (0.85, 0.11, 0.04), (0.08, 0.70, 0.21), (0.04, 0.27, 0.68)
     assert st.judge_triplet([red, green, blue])[0]
     for summed in ((0.33, 0.35, 0.32), (0.20, 0.40, 0.40), (0.23, 0.33, 0.44)):
         assert st.describe(summed) == "lit by white or mixed light"
         assert not st.judge_triplet([red, summed, blue])[0]
+
+
+def test_dense_portra_frames_pass_and_white_light_does_not():
+    """2026-11-02, every RAF the user has sent: dense Portra green and blue
+    frames read 0.54-0.60 (flagged "Not red, green, blue" under the old 0.60);
+    white light through a negative leads at 0.42-0.49 (spec/smart-triplets.md
+    revision)."""
+    red = (0.768, 0.172, 0.060)                                  # DSCF0007
+    for green, blue in (((0.177, 0.547, 0.276), (0.112, 0.337, 0.552)),   # 0008/0009
+                        ((0.172, 0.540, 0.288), (0.096, 0.336, 0.568))):  # 0078/0079
+        assert st.judge_triplet([red, green, blue])[0]
+    for white in ((0.271, 0.453, 0.276), (0.193, 0.487, 0.320),     # Capture One
+                  (0.451, 0.382, 0.166), (0.265, 0.449, 0.286)):    # another camera
+        assert st.describe(white) == "lit by white or mixed light"
+        assert not st.judge_triplet([red, white, (0.04, 0.28, 0.68)])[0]
+
+
+# --------------------------------------------------------------------------- #
+# one picture per set
+# --------------------------------------------------------------------------- #
+LEDS = {0: (1.0, 0.13, 0.05), 1: (0.13, 1.0, 0.30), 2: (0.06, 0.40, 1.0)}   # R, G, B
+
+
+def _scene(seed, h=400, w=600):
+    """A negative's frame: blobs and edges, plus a dark holder border and
+    'sprocket holes' that are the same on every shot."""
+    rng = np.random.default_rng(seed)
+    img = cv2.GaussianBlur(rng.random((h, w)).astype(np.float32), (0, 0), 4) * 0.4 + 0.3
+    for _ in range(30):
+        cv2.circle(img, (int(rng.integers(0, w)), int(rng.integers(0, h))),
+                   int(rng.integers(10, 60)), float(rng.uniform(0.1, 0.9)), -1)
+    img[:40] = img[-40:] = 0.02
+    for x in range(20, w, 70):
+        img[8:30, x:x + 30] = img[-30:-8, x:x + 30] = 1.0
+    return img
+
+
+def _shot(scene, led, gamma=1.0, black=512, seed=0):
+    """The scene under one LED as an RGGB mosaic: each dye layer renders the
+    scene with its own tone (gamma), each photosite colour sees the LED by
+    its own sensitivity."""
+    h, w = scene.shape
+    colors = np.zeros((h, w), np.uint8)
+    colors[0::2, 1::2] = 1
+    colors[1::2, 0::2] = 3
+    colors[1::2, 1::2] = 2
+    sens = np.array(LEDS[led] + (LEDS[led][1],))[colors]
+    rng = np.random.default_rng(seed)
+    mosaic = 12000 * sens * scene ** gamma + rng.normal(0, 30, (h, w)) + black
+    return mosaic, colors
+
+
+def _picture(scene, led, gamma=1.0, seed=0):
+    m, c = _shot(scene, led, gamma, seed=seed)
+    return st.picture_from_mosaic(m, c, [512] * 4)
+
+
+def test_one_shot_under_three_leds_is_one_picture():
+    sc = _scene(1)
+    r, g, b = _picture(sc, 0, 1.0, 1), _picture(sc, 1, 0.7, 2), _picture(sc, 2, 1.4, 3)
+    assert min(p.reliability for p in (r, g, b)) > 0.9
+    assert st.same_picture(r, g) and st.same_picture(r, b) and st.same_picture(g, b)
+    other = _picture(_scene(2), 2)
+    assert st.same_picture(r, other) is False
+    assert st.picture_match(r, other) < 0.25          # the shared border/holes left out
+
+
+def test_a_featureless_frame_cant_be_told():
+    m = np.full((400, 600), 4000.0) + np.random.default_rng(0).normal(0, 30, (400, 600))
+    c = _shot(_scene(1), 0)[1]
+    flat = st.picture_from_mosaic(m, c, [512] * 4)
+    assert flat is None or flat.reliability < st.PICTURE_RELIABLE
+    assert st.same_picture(flat, _picture(_scene(1), 0)) is None
+    assert st.same_picture(None, _picture(_scene(1), 0)) is None
+
+
+def test_the_tether_refuses_two_shots_and_rescues_a_dense_frame():
+    one, two = _scene(1), _scene(2)
+    red, green, blue = (0.80, 0.15, 0.05), (0.15, 0.62, 0.23), (0.08, 0.30, 0.62)
+    pics = [_picture(one, 0), _picture(one, 1, 0.7), _picture(two, 2, 1.4)]
+    ok, k, why = st.judge_triplet([red, green, blue], ["a", "b", "c"], pics)
+    assert not ok and k == 2 and "different picture" in why and "frames 1 and 2" in why
+    pics[2] = _picture(one, 2, 1.4)
+    assert st.judge_triplet([red, green, blue], None, pics)[0]
+    weak = (0.22, 0.46, 0.32)                     # denser than any frame measured
+    assert not st.judge_triplet([red, weak, blue])[0]           # no pictures: the share rule
+    assert st.judge_triplet([red, weak, blue], None, pics)[0]   # one picture: taken as green
+    pics[2] = _picture(two, 2, 1.4)
+    assert not st.judge_triplet([red, weak, blue], None, pics)[0]
+
+
+def test_read_light_gives_shares_and_picture_from_one_read(monkeypatch):
+    import types
+    m, c = _shot(_scene(3), 1)
+    mosaic = np.zeros((m.shape[0] * 5, m.shape[1] * 5), np.uint16)
+    colors = np.zeros(mosaic.shape, np.uint8)
+    mosaic[::5, ::5], colors[::5, ::5] = m.astype(np.uint16), c
+    reads = []
+
+    class FakeRaw:
+        num_colors = 3
+        color_desc = b"RGBG"
+        raw_pattern = np.array([[0, 1], [3, 2]])
+        black_level_per_channel = [512] * 4
+        raw_image_visible = mosaic
+        raw_colors_visible = colors
+
+        def __enter__(self):
+            reads.append(1)
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setitem(sys.modules, "rawpy", types.SimpleNamespace(imread=lambda p: FakeRaw()))
+    r = st.read_light("frame.RAF")
+    assert len(reads) == 1 and st.describe(r.shares) == "lit green"
+    assert r.picture is not None and r.picture.reliability > 0.9
+    assert st.same_picture(r.picture, _picture(_scene(3), 0))
 
 
 def test_light_shares_reads_the_mosaic_before_the_file_closes(monkeypatch):
@@ -152,7 +270,8 @@ def test_worker_merges_a_good_triplet_and_holds_a_bad_one(tmp_path, monkeypatch)
     import core.catalog as catalog
     shares = {"r": (0.85, 0.1, 0.05), "g": (0.15, 0.7, 0.15), "b": (0.05, 0.2, 0.75),
               "w": (0.46, 0.32, 0.22)}
-    monkeypatch.setattr(st, "light_shares", lambda p: shares[os.path.basename(p)[0]])
+    monkeypatch.setattr(st, "read_light",
+                        lambda p: st.LightReading(shares[os.path.basename(p)[0]]))
     monkeypatch.setattr(st, "thumb_bgr", lambda p: np.zeros((10, 12, 3), np.uint8))
     made = []
 
@@ -173,6 +292,12 @@ def test_worker_merges_a_good_triplet_and_holds_a_bad_one(tmp_path, monkeypatch)
     assert "frame 2" in held[0]["reason"] and len(held[0]["thumbs"]) == 3
     w.process_triplet({"paths": ["/x/r2.RAF", "/x/w2.RAF", "/x/b2.RAF"], "check": False})
     assert len(got) == 2                                   # Merge Anyway
+    # one shot's red and green with the next shot's blue: held, not merged
+    pic = {"1": _picture(_scene(1), 0), "2": _picture(_scene(2), 2)}
+    monkeypatch.setattr(st, "read_light", lambda p: st.LightReading(
+        shares[os.path.basename(p)[0]], pic[os.path.basename(p)[1]]))
+    w.process_triplet({"paths": ["/x/r1.RAF", "/x/g1.RAF", "/x/b2.RAF"], "check": True})
+    assert len(got) == 2 and "different picture" in held[-1]["reason"]
 
 
 # --------------------------------------------------------------------------- #

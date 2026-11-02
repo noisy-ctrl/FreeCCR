@@ -274,9 +274,12 @@ class TetherWatchWorker(QObject):
             return
         from core import scan_type as st
         if job.get("check", True):
-            shares = [st.light_shares(p) for p in paths]
+            # the light AND the picture, from one read of each RAW: a set
+            # must be one shot (spec/smart-triplets.md revision 2026-11-02)
+            reads = [st.read_light(p) for p in paths]
             ok, _k, reason = st.judge_triplet(
-                shares, [os.path.basename(p) for p in paths])
+                [r.shares for r in reads], [os.path.basename(p) for p in paths],
+                [r.picture for r in reads])
             if not ok:
                 self.needsAttention.emit({
                     "paths": paths, "reason": reason,
