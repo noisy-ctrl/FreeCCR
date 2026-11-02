@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Colour Organics families and reach, set from a right-click popup on the
-slider's label (spec/colour-organics.md, popup revision)."""
+"""Colour Organics' region amounts, set from a right-click popup on the
+slider's label (spec/colour-organics.md, revisions 2026-10-16 and 2026-11-02:
+the families popup became per-region amounts of the measured curve)."""
 
 import os
 import sys
@@ -15,58 +16,46 @@ sys.path.insert(0, os.path.join(HERE, '..', 'src'))
 sys.path.insert(0, HERE)
 
 from core.ccr_processor import (adjust_image, adjust_image_opencl,  # noqa: E402
-                                normalize_organics_shape, organics_anchors,
-                                organics_width, organics_hue_map,
-                                ORGANICS_SHAPE_DEFAULT, ORGANICS_STRENGTH)
+                                normalize_organics_shape, organics_hue_map,
+                                organics_region_scale, ORGANICS_REGIONS,
+                                ORGANICS_SHAPE_DEFAULT)
 from test_x_tones import _Img, _wire, _Stub, _img  # noqa: E402
 
-FULL = ORGANICS_STRENGTH
-SHAPE = {"warm_shift": -12, "sky_on": False, "reach": 40}
+SHAPE = {"warm": 150, "blue": 0}
 
 
 # --- the shape ---------------------------------------------------------------------
 
-@pytest.mark.parametrize("shape", [None, {}, dict(ORGANICS_SHAPE_DEFAULT), "junk"])
+@pytest.mark.parametrize("shape", [None, {}, dict(ORGANICS_SHAPE_DEFAULT), "junk",
+                                   {"warm_on": True, "sky_shift": 5, "reach": 40}])
 def test_default_shape_is_none(shape):
+    """An old families shape (before 2026-11-02) has none of the region keys."""
     assert normalize_organics_shape(shape) is None
 
 
 def test_normalize_clamps_and_fills():
-    s = normalize_organics_shape({"warm_shift": 99, "reach": 3, "foliage_on": 0,
-                                  "violet_shift": "x"})
-    assert s["warm_shift"] == 20 and s["reach"] == 10
-    assert s["foliage_on"] is False and s["violet_shift"] == 0
-    assert s["sky_on"] is True
+    out = normalize_organics_shape({"warm": 999, "green": -5, "blue": "x", "reach": 40})
+    assert out == {"warm": 200, "green": 0, "blue": 100}
 
 
-def test_anchors_follow_the_families():
-    assert organics_anchors(None) == [25.0, 100.0, 200.0, 265.0]
-    assert organics_anchors(SHAPE) == [13.0, 100.0, 265.0]
-    assert organics_width(SHAPE) == pytest.approx(0.40)
-    every = {"warm_shift": 20, "foliage_shift": -20, "sky_shift": 20, "violet_shift": -20}
-    a = organics_anchors(every)
-    assert a == sorted(a)                         # nudges can never reorder them
+def test_region_weights_sum_to_one_and_put_each_region_where_it_belongs():
+    h = np.arange(0.0, 360.0, 0.5)
+    one = {k: 100 for k, *_r in ORGANICS_REGIONS}
+    np.testing.assert_allclose(organics_region_scale(h, one), 1.0)
+    for key, _n, _w, start, end, swatch in ORGANICS_REGIONS:
+        double = dict(one, **{key: 200})
+        sc = organics_region_scale(h, double)
+        assert sc[int(swatch * 2)] == pytest.approx(2.0)        # inside: the region's own
+        assert sc.min() >= 1.0 - 1e-12 and sc.max() <= 2.0 + 1e-12
+        far = (swatch + 180.0) % 360.0
+        assert sc[int(far * 2)] == pytest.approx(1.0)           # opposite: untouched
 
 
-def test_a_nudged_family_moves_its_centre():
-    a, w = organics_anchors(SHAPE), organics_width(SHAPE)
-    assert float(organics_hue_map(13.0, FULL, a, w)) == pytest.approx(13.0, abs=1e-3)
-    assert float(organics_hue_map(25.0, FULL, a, w)) < 25.0      # drawn to 13 now
-
-
-def test_all_families_off_is_the_identity():
-    off = {f"{k}_on": False for k in ("warm", "foliage", "sky", "violet")}
-    img = _img(4)
-    assert np.array_equal(adjust_image(img, colour_organics=100, organics_shape=off), img)
-
-
-def test_one_family_works_round_the_whole_circle():
-    a = organics_anchors({f"{k}_on": False for k in ("warm", "sky", "violet")})
-    h = np.linspace(0, 360, 3601)[:-1].astype(np.float32)
-    m = organics_hue_map(h, FULL, a, 0.3)
-    d = (np.roll(m, -1) - m) % 360
-    assert d[:-1].min() > 0                       # still monotone
-    assert float(organics_hue_map(100.0, FULL, a, 0.3)) == pytest.approx(100.0, abs=1e-3)
+def test_a_region_at_zero_leaves_its_hues_alone():
+    h = np.float32([15.0, 40.0])                       # reds and oranges
+    assert np.allclose(organics_hue_map(h, 100, {"warm": 0}), h, atol=1e-4)
+    moved = organics_hue_map(np.float32([205.0]), 100, {"warm": 0})
+    assert moved == pytest.approx(organics_hue_map(np.float32([205.0]), 100), abs=1e-4)
 
 
 def test_the_shape_reaches_the_render_and_gpu_matches():
@@ -110,7 +99,8 @@ def test_label_offers_a_context_menu(panel):
     lbl = panel._organics_label
     assert lbl.text() == "Colour Organics"
     assert lbl.contextMenuPolicy() == Qt.CustomContextMenu
-    assert "Right-click" in lbl.toolTip() and "lab scanners" in lbl.toolTip()
+    tip = lbl.toolTip()
+    assert "Right-click" in tip and "lab scans" in tip and "region" in tip
 
 
 def test_popup_edits_write_the_shape_and_survive_a_slider_move(panel, monkeypatch):
@@ -118,18 +108,18 @@ def test_popup_edits_write_the_shape_and_survive_a_slider_move(panel, monkeypatc
     _wire(panel, monkeypatch, img)
     panel._open_organics_popup(panel.mapToGlobal(panel.rect().center()))
     pop = panel._organics_popup
-    pop.checks["sky"].setChecked(False)
-    assert not pop.shifts["sky"].isEnabled()      # an off family can't be nudged
-    pop.shifts["warm"].setValue(-12)
-    pop.reach_slider.setValue(40)
+    assert set(pop.sliders) == {k for k, *_r in ORGANICS_REGIONS}
+    pop.sliders["warm"].setValue(150 // 5)
+    pop.sliders["blue"].setValue(0)
+    assert pop.values_shown["warm"].text() == "150 %"
     assert normalize_organics_shape(img.adjustment_settings["organics_shape"]) == \
         normalize_organics_shape(SHAPE)
     assert panel._organics_label.font().underline()
-    assert "Sky and water off" in panel._organics_label.toolTip()
+    assert "Reds and oranges 150 %" in panel._organics_label.toolTip()
     pop.close()
     assert img.undo == 1                          # the whole popup visit is one undo
     panel.sliders[panel.adjustment_keys.index("contrast")].setValue(12)
-    assert img.adjustment_settings["organics_shape"]["sky_on"] is False
+    assert img.adjustment_settings["organics_shape"]["blue"] == 0
     panel._open_organics_popup(panel.mapToGlobal(panel.rect().center()))
     panel._organics_popup.reset()
     assert "organics_shape" not in img.adjustment_settings
@@ -152,7 +142,7 @@ def test_paste_row_copy_and_apply(panel, monkeypatch):
     from widgets.sliders_panel import paste_options
     clip = {"adjustments": {}, "organics_shape": normalize_organics_shape(SHAPE)}
     row = [r for r in paste_options(clip, lambda k: 0) if r[1] == "organics_shape"]
-    assert row and "Sky and water off" in row[0][2] and "reach 40%" in row[0][2]
+    assert row and "regions" in row[0][2] and "Cyans and blues 0 %" in row[0][2]
     img = _Img({"contrast": 5})
     _wire(panel, monkeypatch, img)
     panel.current_idx = 1
@@ -160,13 +150,13 @@ def test_paste_row_copy_and_apply(panel, monkeypatch):
                            tone_shape=None, flags={}, profile="color", crop=(None, 0.0),
                            rotation=0, flip_h=False, flip_v=False, fine_rotation=0)
     panel._apply_paste(0, {"organics_shape"})
-    assert img.adjustment_settings["organics_shape"]["warm_shift"] == -12
+    assert img.adjustment_settings["organics_shape"]["warm"] == 150
     assert img.adjustment_settings["contrast"] == 5
     src = _Img({"colour_organics": 10, "organics_shape": dict(SHAPE)})
     _wire(panel, monkeypatch, src)
     panel.current_idx = 5
     panel.copy_settings_from_index(0)
-    assert panel.clipboard["organics_shape"]["sky_on"] is False
+    assert panel.clipboard["organics_shape"]["blue"] == 0
 
 
 def _sync(panel, monkeypatch, src, dst, sat):
@@ -189,7 +179,7 @@ def test_sync_with_the_saturation_group_carries_the_shape(panel, monkeypatch):
     src = _Img({"colour_organics": 50, "organics_shape": dict(SHAPE)})
     dst = _Img({"colour_organics": 50})
     _sync(panel, monkeypatch, src, dst, sat=True)
-    assert dst.adjustment_settings["organics_shape"]["warm_shift"] == -12
+    assert dst.adjustment_settings["organics_shape"]["warm"] == 150
 
 
 def test_sync_without_it_keeps_the_target_shape(panel, monkeypatch):
@@ -197,7 +187,7 @@ def test_sync_without_it_keeps_the_target_shape(panel, monkeypatch):
     dst = _Img({"contrast": 0, "organics_shape": dict(SHAPE)})
     _sync(panel, monkeypatch, src, dst, sat=False)
     assert dst.adjustment_settings["contrast"] == 20
-    assert dst.adjustment_settings["organics_shape"]["sky_on"] is False
+    assert dst.adjustment_settings["organics_shape"]["blue"] == 0
 
 
 def test_sync_removes_the_shape_when_the_source_has_none(panel, monkeypatch):
@@ -207,74 +197,7 @@ def test_sync_removes_the_shape_when_the_source_has_none(panel, monkeypatch):
     assert "organics_shape" not in dst.adjustment_settings
 
 
-# --- Reach to 60 % with the depth held (revision 2026-10-21) -------------------
-
-def _hdiff2(a, b):
-    return (np.asarray(a, np.float64) - np.asarray(b, np.float64) + 180.0) % 360.0 - 180.0
-
-
-def test_reach_range_is_10_to_80():
-    from core.ccr_processor import ORGANICS_REACH_MIN, ORGANICS_REACH_MAX
-    assert (ORGANICS_REACH_MIN, ORGANICS_REACH_MAX) == (10, 80)
-    assert normalize_organics_shape({"reach": 99})["reach"] == 80
-
-
-def test_strength_scale_is_exactly_one_at_the_default():
-    from core.ccr_processor import organics_strength_scale
-    assert organics_strength_scale(None) == 1.0
-    assert organics_strength_scale({"reach": 30}) == 1.0
-    assert organics_strength_scale({"reach": 45}) > 1.0
-    assert organics_strength_scale({"reach": 10}) < 1.0
-
-
-def test_more_reach_is_wider_and_stronger_and_stays_monotone():
-    from core.ccr_processor import (organics_anchors, organics_hue_map,
-                                    organics_strength_scale, organics_width)
-    h = np.linspace(0, 360, 36001)[:-1].astype(np.float32)
-    from core.ccr_processor import ORGANICS_FIRM_SLOPE
-    held = 1 - ORGANICS_STRENGTH * (1 - 0.3)
-    pulls = []
-    for reach, centre in ((10, held), (30, held), (45, held), (60, held),
-                          (70, (held + ORGANICS_FIRM_SLOPE) / 2),
-                          (80, ORGANICS_FIRM_SLOPE)):
-        shape = {"reach": reach}
-        s = ORGANICS_STRENGTH * organics_strength_scale(shape)
-        m = organics_hue_map(h, s, organics_anchors(shape), organics_width(shape))
-        step = _hdiff2(np.roll(m, -1), m)[:-1] / 0.01
-        assert step.min() > 0                                  # never reorders hues
-        assert step.min() == pytest.approx(centre, abs=0.02), reach
-        pulls.append(np.abs(_hdiff2(m, h)).mean())
-    assert pulls == sorted(pulls)                              # more reach, more pull
-    assert pulls[3] > 1.3 * pulls[1]                           # 60 % vs the default
-    assert pulls[5] > 1.08 * pulls[3]                          # 80 % vs 60 %
-
-
-def test_the_firming_joins_smoothly_at_60():
-    from core.ccr_processor import organics_strength_scale
-    a = organics_strength_scale({"reach": 60})
-    b = organics_strength_scale({"reach": 61})
-    assert b > a and (b - a) / a < 0.1
-
-
-@pytest.mark.parametrize("reach", [60, 80])
-def test_long_reach_gpu_matches_cpu(reach):
-    img = _img(5)
-    shape = {"reach": reach}
-    cpu = adjust_image(img, colour_organics=100, organics_shape=shape)
-    gpu = adjust_image_opencl(img, colour_organics=100, organics_shape=shape)
-    np.testing.assert_allclose(cpu.astype(np.int64), gpu.astype(np.int64), atol=3)
-
-
-def test_default_reach_renders_exactly_as_before():
-    """The depth-holding scale is exactly 1 at the default reach, so the
-    amount reaching the warp is the same float as before."""
-    img = _img(5)
-    a = adjust_image(img, colour_organics=70)
-    b = adjust_image(img, colour_organics=70, organics_shape={"reach": 30})
-    assert np.array_equal(a, b)
-
-
-# --- The main slider to 150 (revision 2026-10-22) -------------------------------
+# --- the slider: shows 0..100, stores 0..200 (revision 2026-10-23) ---------------
 
 def test_slider_stores_to_200(panel):
     from core.ccr_processor import ORGANICS_AMOUNT_MAX
@@ -282,101 +205,6 @@ def test_slider_stores_to_200(panel):
     i = panel.adjustment_keys.index("colour_organics")
     assert panel.sliders[i].value_range() == (0, 200)
 
-
-def test_up_to_100_nothing_changes():
-    from core.ccr_processor import organics_strength, organics_strength_scale
-    for reach in (10, 30, 45, 60, 70, 80):
-        shape = {"reach": reach}
-        for amount in (0, 25, 70, 100):
-            assert organics_strength(amount, shape) == (
-                amount / 100.0 * ORGANICS_STRENGTH * organics_strength_scale(shape))
-
-
-@pytest.mark.parametrize("reach", [10, 30, 60, 80])
-def test_150_deepens_and_never_reorders_hues(reach):
-    from core.ccr_processor import (ORGANICS_MIN_CENTRE_SLOPE, organics_anchors,
-                                    organics_hue_map, organics_strength,
-                                    organics_width)
-    shape = {"reach": reach}
-    h = np.linspace(0, 360, 36001)[:-1].astype(np.float32)
-    pulls = []
-    for amount in (100, 150):
-        m = organics_hue_map(h, organics_strength(amount, shape),
-                             organics_anchors(shape), organics_width(shape))
-        step = _hdiff2(np.roll(m, -1), m)[:-1] / 0.01
-        assert step.min() > ORGANICS_MIN_CENTRE_SLOPE - 0.02     # monotone
-        pulls.append(np.abs(_hdiff2(m, h)).mean())
-    assert pulls[1] > 1.15 * pulls[0]                            # 150 pulls harder
-
-
-def test_the_cap_binds_only_at_long_reach():
-    from core.ccr_processor import organics_strength, organics_width
-    for reach, capped in ((30, False), (60, False), (80, True)):
-        shape = {"reach": reach}
-        s = organics_strength(150, shape)
-        centre = 1 - s * (1 - organics_width(shape))
-        assert (abs(centre - 0.10) < 1e-9) == capped, reach
-
-
-@pytest.mark.parametrize("reach", [30, 80])
-def test_150_gpu_matches_cpu(reach):
-    img = _img(5)
-    shape = {"reach": reach}
-    cpu = adjust_image(img, colour_organics=150, organics_shape=shape)
-    gpu = adjust_image_opencl(img, colour_organics=150, organics_shape=shape)
-    np.testing.assert_allclose(cpu.astype(np.int64), gpu.astype(np.int64), atol=3)
-
-
-# --- Shown 0..100, 100 twice the old 100 (revision 2026-10-23) ----------------
-
-def _pull(amount, shape):
-    from core.ccr_processor import organics_pull, _organics_mean_pull
-    return _organics_mean_pull(*organics_pull(amount, shape))
-
-
-@pytest.mark.parametrize("reach", [10, 30, 45, 60, 70, 80])
-def test_every_earlier_edit_renders_unchanged(reach):
-    """Up to the old top (150) the pull is exactly what it was."""
-    from core.ccr_processor import organics_pull, organics_strength, organics_width
-    shape = {"reach": reach}
-    for amount in list(range(0, 151, 5)) + [37, 99, 101, 149]:
-        assert organics_pull(amount, shape) == (organics_strength(amount, shape),
-                                                organics_width(shape)), amount
-
-
-@pytest.mark.parametrize("reach", [10, 30])
-def test_shown_100_pulls_twice_the_old_100(reach):
-    shape = {"reach": reach}
-    assert _pull(200, shape) == pytest.approx(2.0 * _pull(100, shape), rel=0.01)
-
-
-@pytest.mark.parametrize("reach", [10, 30, 45, 60, 70, 80])
-def test_the_top_never_reorders_hues_and_never_weakens(reach):
-    from core.ccr_processor import (ORGANICS_MIN_CENTRE_SLOPE, organics_anchors,
-                                    organics_hue_map, organics_pull)
-    shape = {"reach": reach}
-    h = np.linspace(0, 360, 36001)[:-1].astype(np.float32)
-    last = 0.0
-    for amount in range(100, 201, 10):
-        s, w = organics_pull(amount, shape)
-        m = organics_hue_map(h, np.float32(s), organics_anchors(shape), w)
-        step = _hdiff2(np.roll(m, -1), m)[:-1] / 0.01
-        assert step.min() > ORGANICS_MIN_CENTRE_SLOPE - 0.02        # monotone
-        p = _pull(amount, shape)
-        assert p >= last - 1e-6                                     # never weaker
-        last = p
-    # wide reach is already near the most a monotone warp can pull: the top
-    # still adds, or holds, never takes away
-    assert _pull(200, shape) >= _pull(150, shape) - 1e-6
-
-
-@pytest.mark.parametrize("reach", [30, 45])
-def test_200_gpu_matches_cpu(reach):
-    img = _img(5)
-    shape = {"reach": reach}
-    cpu = adjust_image(img, colour_organics=200, organics_shape=shape).astype(np.int64)
-    gpu = adjust_image_opencl(img, colour_organics=200, organics_shape=shape).astype(np.int64)
-    assert np.abs(cpu - gpu).max() <= 2
 
 
 def test_slider_shows_half_and_keeps_odd_old_values(panel, monkeypatch):

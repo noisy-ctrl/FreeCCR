@@ -296,7 +296,7 @@ def paste_options(clip, default_for):
                      + describe_glow(clip["glow_shape"]) + ")"))
     if normalize_organics_shape(clip.get("organics_shape")):
         from widgets.organics_popup import describe_organics
-        rows.append(("Adjustments", "organics_shape", "Colour Organics families  ("
+        rows.append(("Adjustments", "organics_shape", "Colour Organics regions  ("
                      + describe_organics(clip["organics_shape"]) + ")"))
     xt = [(k, adj.get(k, 0)) for k in _XT_KEYS if adj.get(k, 0)]
     if xt:
@@ -848,8 +848,10 @@ class SlidersPanel(QWidget):
         if self.current_idx is not None:
             self.set_current_idx(self.current_idx)
 
-    COLOUR_ORGANICS_HINT = ("Constrains colours for print, the way lab scanners "
-                            "do. The result is often more natural.")
+    COLOUR_ORGANICS_HINT = ("Turns hues the way lab scans do: reds towards orange, "
+                            "skin a little warmer, blues back towards sky. Measured "
+                            "on lab scans of colour negatives; 50 is their own "
+                            "amount, 100 twice it.")
 
     # Color Profile combo: row index -> CCRImage.color_profile value.
     COLOR_PROFILES = ("color", "bw")
@@ -1344,9 +1346,9 @@ class SlidersPanel(QWidget):
         # Vibrance: saturation weighted towards muted colours, skin tones partly
         # protected. Created right after Saturation (ADJUSTMENT_KEYS zip).
         self.vibrance_slider_layout = self.create_slider("Vibrance")
-        # Colour Organics: hues drawn into print families, shown 0..100 and
-        # stored 0..200 (shown 50 = the old 100; past where the depth would
-        # make hues swap order the pull widens instead). Its
+        # Colour Organics: hues turned the way lab scans do (a measured curve,
+        # spec/colour-organics.md revision 2026-11-02), shown 0..100 and stored
+        # 0..200 (shown 50 = the labs' measured amount, 100 twice it). Its
         # explanation is the label's tooltip (no line in the panel).
         # Created after Glow (ADJUSTMENT_KEYS zip); shown directly under
         # Vibrance.
@@ -1406,7 +1408,7 @@ class SlidersPanel(QWidget):
         self.colour_organics_slider_layout = self.create_slider(
             "Colour Organics", min_value=0, max_value=ORGANICS_AMOUNT_MAX,
             half_shown=True)
-        # Right-click the label for the families and their reach
+        # Right-click the label for the amount per colour region
         # (spec/colour-organics.md, popup revision).
         self._organics_shape = None      # active layer's shape (None = default)
         self._organics_popup = None
@@ -2343,7 +2345,7 @@ class SlidersPanel(QWidget):
         # setting like the curves; they ride every slider -> dict rebuild.
         if getattr(self, "_xtone_shape", None):
             adjustment["xtone_shape"] = dict(self._xtone_shape)
-        # Colour Organics families: nested and non-slider in the same way.
+        # Colour Organics regions: nested and non-slider in the same way.
         if getattr(self, "_organics_shape", None):
             adjustment["organics_shape"] = dict(self._organics_shape)
         # ... and the Golden Highlights options.
@@ -2981,8 +2983,8 @@ class SlidersPanel(QWidget):
             self._on_glow_show_mask(False)     # the map is only for adjusting
             self.end_undo_burst()
 
-    # --- Colour Organics families (spec/colour-organics.md) -------------------
-    ORGANICS_LABEL_TIP = "Right-click: families and reach"
+    # --- Colour Organics regions (spec/colour-organics.md) --------------------
+    ORGANICS_LABEL_TIP = "Right-click: amount per colour region"
 
     def _update_organics_label(self):
         lbl = getattr(self, "_organics_label", None)
@@ -2995,7 +2997,7 @@ class SlidersPanel(QWidget):
         lbl.setFont(f)
         lines = [self.COLOUR_ORGANICS_HINT]
         if custom:
-            lines.append("Families: " + describe_organics(self._organics_shape))
+            lines.append("Regions: " + describe_organics(self._organics_shape))
         lines.append(self.ORGANICS_LABEL_TIP)
         lbl.setToolTip("\n".join(lines))
 
@@ -3233,7 +3235,7 @@ class SlidersPanel(QWidget):
         # is the curve-only path). set_curves does not emit, so it won't start a
         # competing undo burst here.
         self.curve_editor.set_curves(None)
-        # ... and the Colour Organics families go back to the standard four,
+        # ... and the Colour Organics regions go back to 100 %,
         # the Highlights ⅃ / Shadows L / Contrast L ⅃ options to their defaults.
         self._organics_shape = None
         self._update_organics_label()
@@ -3350,7 +3352,7 @@ class SlidersPanel(QWidget):
         sync_curves = bool(selection.get("curves"))
         sync_orientation = bool(selection.get("orientation"))
         # The Highlights ⅃ / Shadows L / Contrast L ⅃ options ride the Tone group (their
-        # sliders); the Colour Organics families ride the Saturation group.
+        # sliders); the Colour Organics regions ride the Saturation group.
         sync_tone_shape = bool(selection.get("tone"))
         sync_org_shape = bool(selection.get("sat"))
         # Sync always copies the SOURCE image's GLOBAL (whole-image) layer, not
