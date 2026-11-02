@@ -71,8 +71,10 @@ remainder, so exposure and colour read separately.
 1. **Decode** each scan through FreeCCR itself (`ccr_merge.merge_raw_channels`
    for a triplet — the same merge the app uses — or rawpy for a single RAW;
    camera profile None, half-size decode).
-2. **Black point per frame** from the clear rebate: the brightest horizontal
-   band in the top strip, centre columns, median. Per frame, not per roll,
+2. **Black point per frame** from the clear film, found the way Convert finds
+   it (`core.auto_black_point.find_rebate` on the 1080 px preview; revision 5
+   below — it was the brightest edge band, which on 35 mm runs through the
+   sprocket holes). Per frame, not per roll,
    because a light can drift between triplets (measured: one channel's level
    changed ~1.8× between triplets at an identical shutter speed); a per-frame
    base cancels any per-channel light scaling exactly.
@@ -278,3 +280,37 @@ round-trips through write/read; `apply_look` extrapolates with the marker
 and clamps without; through `adjust_image` (windowed), a textured
 "petal" patch at density 1.05–1.20 has no texture with the old look and
 Master Gain down, and keeps it with headroom.
+
+## Revision 2026-11-02 (5): the base Convert measures (35 mm)
+
+**Problem.** On the user's Portra 400 35 mm triplets the fitter's black point
+(the brightest edge band, its median) ran through the sprocket holes, which
+are bare light at the clip: it read B = 1.0 (the clip) on most frames where
+the film base was 0.88–0.90, and R/G partly too. A per-frame offset absorbs a
+black-point error, but the gauge (mean offset 0) does not, so the look sat
+off the density Convert produces for the same frame.
+
+**Change.** `look_fit.frame_black_point(v)` runs FreeCCR's own film-base
+finder, `auto_black_point.find_rebate`, on the 1080 px preview (INTER_AREA,
+as `CCRImage.resize_image_to_max_pixel`; in 16-bit units, since the finder
+floors the frame's maximum at 1.0):
+
+- high / medium confidence: its base (on these scans the gap between frames,
+  right or left);
+- a clipped base: no black point; `fit_look.py` skips the frame and says why
+  ("film base not measurable (border clipped in …)");
+- no usable edge for another reason: the old brightest band, named
+  "… edge band".
+
+The preview size matters: at full size the base's grain reaches the ceiling
+and the finder calls it clipped (DSCF0050: "border clipped in B" at full size,
+medium at 1080).
+
+**Measured** on the 17 triplets: 12 bases found, within 1–2 % of a base patch
+read by hand; 5 clipped in every channel (longer exposures that put the base
+past the top) and skipped.
+
+**Tests** (`tests/test_look_fit.py`): a 35 mm frame (holes at the clip in
+the rebates, base at the frame gaps) gives the base; a base at the clip gives
+None and "clipped"; a frame whose clear film is out of the finder's reach
+falls back to the brightest band.
