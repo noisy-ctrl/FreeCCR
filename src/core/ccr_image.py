@@ -2064,8 +2064,11 @@ class CCRImage:
         # exposure with a look is Master Shift (a density offset).
         look = None
         if s.get("look_lut"):
-            from core.look_lut import resolve_look
-            look = resolve_look(s.get("look_lut"))
+            from core.look_lut import for_frame, resolve_look
+            # for_frame: with a white point (or film-stock slopes) the look is
+            # handed the black-point density it was fitted on (revision 6)
+            look = for_frame(resolve_look(s.get("look_lut")),
+                             getattr(self, "conversion_inputs", None))
         auto_on = (getattr(ccr_backend, "auto_gain", True) and self.converted
                    and look is None)
         clip_ag = None if look is not None else clip_gain_offset(self, None, ws)

@@ -180,6 +180,89 @@ def apply_look(d: np.ndarray, lut: LookLUT) -> np.ndarray:
 
 
 # --------------------------------------------------------------------------- #
+# The look's input, whatever the frame's conversion (spec revision 6)
+# --------------------------------------------------------------------------- #
+
+# The density the fitter measures on: LOOK_DENSITY_SLOPE * log10(film base /
+# scan), i.e. the black-point-only conversion at the default slope.
+LOOK_DENSITY_SLOPE = 0.8
+
+
+def look_input_map(conversion_inputs):
+    """How to turn a frame's converted value into the density a look was
+    fitted on, per channel, or None when it already is that density.
+
+    ("scale", k):  d_look = k * d  - a two-point density conversion (the auto
+                   or a sampled white point divides by log10(base/white) per
+                   channel; k puts it back), or film-stock slopes.
+    ("linear", r): d_look = -0.8 * log10(1 - r * d) - the legacy linear
+                   two-point stretch, r = 1 - white/base.
+
+    None for the default black-point-only conversion (what the look was
+    fitted on), and for bases the look isn't meant for: a reference-frame or
+    Positive conversion, and the no-anchor invert (no film base to measure
+    from; Channel Levels places it by hand)."""
+    ci = conversion_inputs or {}
+    if ci.get("mode") != "bw":
+        return None
+    black, white = tuple(ci.get("bw") or (None, None))
+    if black is None:
+        return None
+    base = np.maximum(np.asarray(black, np.float64), 1.0)
+    if white is None:
+        slopes = ci.get("slopes")
+        if slopes is None:
+            return None
+        k = LOOK_DENSITY_SLOPE / np.maximum(np.asarray(slopes, np.float64), 1e-6)
+        return ("scale", k.astype(np.float32))
+    dense = np.maximum(np.asarray(white, np.float64), 1.0)
+    if ci.get("density", False):
+        dmax = np.where(base > dense, np.log10(base / np.minimum(dense, base)), 0.0)
+        return ("scale", (LOOK_DENSITY_SLOPE * dmax).astype(np.float32))
+    return ("linear", (1.0 - dense / base).astype(np.float32))
+
+
+class FrameLook:
+    """A look plus the map that puts ONE frame's conversion into the look's
+    own input density. It reads like the LookLUT it wraps (apply_look needs
+    nothing else); the pipeline calls `map_input` on the de-windowed value
+    BEFORE Channel Levels, so Levels works in the density the look - and the
+    fitter's per-frame Channel Levels - were measured in."""
+
+    def __init__(self, lut, kind, coef):
+        self.lut = lut
+        self.input_kind = kind
+        self.input_coef = np.asarray(coef, np.float32).reshape(3)
+
+    def __getattr__(self, name):
+        # only reached for names the wrapper lacks; never for its own (a copy
+        # or unpickle calls this before __init__ has set them)
+        if name.startswith("__") or name in ("lut", "input_kind", "input_coef"):
+            raise AttributeError(name)
+        return getattr(self.lut, name)
+
+    def map_input(self, d):
+        d = np.asarray(d, np.float32)
+        if self.input_kind == "scale":
+            return d * self.input_coef
+        # legacy linear two-point: d = 1 - (x - white)/(base - white), so
+        # x/base = 1 - r*d and the look's density is -0.8*log10(x/base)
+        t = np.maximum(1.0 - d * self.input_coef, np.float32(1e-5))
+        return np.float32(-LOOK_DENSITY_SLOPE) * np.log10(t)
+
+
+def for_frame(lut, conversion_inputs):
+    """`lut` as it should see this frame: itself when the frame's conversion
+    is already the look's input, else a FrameLook carrying the map."""
+    if lut is None:
+        return None
+    m = look_input_map(conversion_inputs)
+    if m is None:
+        return lut
+    return FrameLook(lut, *m)
+
+
+# --------------------------------------------------------------------------- #
 # Library (<app data>/looks, next to camera_profiles)
 # --------------------------------------------------------------------------- #
 
