@@ -394,6 +394,8 @@ class MainWindow(QMainWindow):
         # below, which is what decides whether they are created enabled.
         ccr_backend.balance_hotkeys = self._settings.value(
             "adjust/balance_hotkeys", False, type=bool)
+        ccr_backend.look_auto_balance = self._settings.value(
+            "look/auto_balance", False, type=bool)
         # The Details (sharpening) defaults (spec/details-defaults.md).
         from core import detail_defaults
         saved = detail_defaults.decode(
@@ -1217,6 +1219,17 @@ class MainWindow(QMainWindow):
             "Auto gain on — highlights auto-placed at the top of the window."
             if checked else
             "Auto gain off — Master Gain alone controls exposure.")
+
+    def on_look_auto_balance_toggled(self, checked: bool):
+        """Film Look auto balance per frame, experimental
+        (spec/film-look-auto-balance.md): a hidden offset like Auto Gain, so
+        this only re-renders."""
+        ccr_backend.look_auto_balance = bool(checked)
+        self._settings.setValue("look/auto_balance", bool(checked))
+        self._rerender_all_for_global_mode(
+            "Film Look auto balance on (experimental) — each frame's colour "
+            "balanced the way the lab's scanner did." if checked else
+            "Film Look auto balance off — the looks as fitted.")
 
     def on_auto_tone_toggled(self, checked: bool):
         """Auto tone on / off (spec/auto-tone.md). Each converted frame keeps

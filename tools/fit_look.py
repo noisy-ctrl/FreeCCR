@@ -185,6 +185,20 @@ def main(argv=None):
             p["held_out"] = (float(np.median(e)), float(np.percentile(e, 90)))
             p["render_q"], p["render_look"] = qj, lj
 
+    # the lab's per-frame colour balance, for Film Look auto balance
+    # (spec/film-look-auto-balance.md): T and alpha from every frame
+    from core.look_balance import fit_balance
+    balance = None
+    means = [lf.picture_mean_density(p["warped"], p["mask"]) for p in P]
+    if all(m is not None for m in means) and len(P) >= 3:
+        offs = [lf.fit_offsets(look, p["d"], p["t"]) for p in P]
+        balance = fit_balance(means, offs)
+        log(f"lab colour balance: T {np.round(balance[0], 3).tolist()}, "
+            f"alpha {balance[1]:.2f}")
+        (wa, wb), (na, nb) = lf.balance_check(means, offs, look, frames)
+        log(f"  auto balance, each frame held out (brightness set): mean |da*| "
+            f"{na:.2f} -> {wa:.2f}, |db*| {nb:.2f} -> {wb:.2f}")
+
     cube = os.path.join(out, f"{a.name}.cube")
     from core import look_shoulder
     detail = max(0.0, min(100.0, a.highlight_detail)) / 100.0
@@ -210,7 +224,7 @@ def main(argv=None):
             log(f"headroom past white from density {room['knee']:.2f}")
     look_lut.write_cube(
         cube, table, (lf.DOMAIN[0],) * 3, (lf.DOMAIN[1],) * 3,
-        title=a.name, headroom=room is not None,
+        title=a.name, headroom=room is not None, balance=balance,
         comments=[f"FreeCCR Film Look '{a.name}' - fitted by tools/fit_look.py",
                   f"Shoulder: core/look_shoulder.py, highlight detail {a.highlight_detail:g}",
                   "Input: FreeCCR density base after Channel Levels "
@@ -223,7 +237,9 @@ def main(argv=None):
              "Accuracy is CIEDE2000 against the lab scan (1 = just noticeable side",
              "by side). 'Held out' = the look fitted WITHOUT that frame, then only",
              "that frame's Channel Levels set - what you get on a new frame.", ""]
-    report = {"name": a.name, "cube": os.path.basename(cube), "frames": []}
+    report = {"name": a.name, "cube": os.path.basename(cube), "frames": [],
+              "balance": (None if balance is None else
+                          {"T": [float(x) for x in balance[0]], "alpha": balance[1]})}
     for p in P:
         cl = {k: int(round(v)) for k, v in lf.channel_levels_for(p["q"]).items()}
         ho = p.get("held_out")

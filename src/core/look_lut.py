@@ -21,7 +21,8 @@ class LookLUT:
     (red varies fastest in the file, as the Adobe .cube spec requires)."""
 
     def __init__(self, table, domain_min=(0.0, 0.0, 0.0),
-                 domain_max=(1.0, 1.0, 1.0), title="", path=None, headroom=False):
+                 domain_max=(1.0, 1.0, 1.0), title="", path=None, headroom=False,
+                 balance=None):
         table = np.ascontiguousarray(table, dtype=np.float32)
         if table.ndim != 4 or table.shape[3] != 3 or len(set(table.shape[:3])) != 1:
             raise CubeError(f"bad LUT table shape {table.shape}")
@@ -33,6 +34,9 @@ class LookLUT:
             raise CubeError("DOMAIN_MAX must exceed DOMAIN_MIN")
         self.title = title
         self.path = path
+        # auto balance data (spec/film-look-auto-balance.md): (T (3,), alpha)
+        # measured by the fitter from its own pairs, or None
+        self.balance = _clean_balance(balance)
         self._flat = table.reshape(-1, 3)
         # headroom (spec/film-look-lut.md revision 4): past DOMAIN_MAX each
         # output channel carries on at its grey-axis end slope instead of
@@ -50,6 +54,32 @@ class LookLUT:
 # --------------------------------------------------------------------------- #
 
 HEADROOM_MARK = "FREECCR_HEADROOM"   # a comment line: continue past DOMAIN_MAX
+# a comment line "FREECCR_BALANCE T_r T_g T_b alpha": the lab's per-frame colour
+# balance, measured by the fitter (spec/film-look-auto-balance.md)
+BALANCE_MARK = "FREECCR_BALANCE"
+ALPHA_MIN, ALPHA_MAX = 0.2, 1.0
+
+
+def _clean_balance(balance):
+    if balance is None:
+        return None
+    t, a = balance
+    t = np.asarray(t, np.float64).reshape(3)
+    if not np.all(np.isfinite(t)) or not np.isfinite(a):
+        return None
+    return (t.astype(np.float32), float(min(max(a, ALPHA_MIN), ALPHA_MAX)))
+
+
+def _parse_balance(text):
+    """The numbers after BALANCE_MARK, or None for anything else."""
+    parts = text.split()
+    if len(parts) != 5 or parts[0] != BALANCE_MARK:
+        return None
+    try:
+        v = [float(x) for x in parts[1:]]
+    except ValueError:
+        return None
+    return _clean_balance((v[:3], v[3]))
 
 
 def read_cube(path) -> LookLUT:
@@ -58,12 +88,15 @@ def read_cube(path) -> LookLUT:
     title = ""
     rows = []
     headroom = False
+    balance = None
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as fh:
             for raw in fh:
                 line = raw.strip()
                 if line.startswith("#") and line.lstrip("# ").strip() == HEADROOM_MARK:
                     headroom = True
+                if line.startswith("#") and BALANCE_MARK in line:
+                    balance = _parse_balance(line.lstrip("# ").strip()) or balance
                 if not line or line.startswith("#"):
                     continue
                 head = line.split(None, 1)[0].upper()
@@ -99,19 +132,25 @@ def read_cube(path) -> LookLUT:
         raise CubeError(f"expected {size ** 3} entries for LUT_3D_SIZE {size}, "
                         f"found {len(rows)}")
     table = np.asarray(rows, dtype=np.float32).reshape(size, size, size, 3)
-    return LookLUT(table, dmin, dmax, title=title, path=path, headroom=headroom)
+    return LookLUT(table, dmin, dmax, title=title, path=path, headroom=headroom,
+                   balance=balance)
 
 
 def write_cube(path, table, domain_min=(0.0, 0.0, 0.0), domain_max=(1.0, 1.0, 1.0),
-               title="", comments=(), headroom=False):
+               title="", comments=(), headroom=False, balance=None):
     table = np.asarray(table, dtype=np.float64)
     n = table.shape[0]
+    balance = _clean_balance(balance)
     with open(path, "w", encoding="utf-8", newline="\n") as fh:
         for c in comments:
-            if str(c).strip() != HEADROOM_MARK:
+            c = str(c).strip()
+            if c != HEADROOM_MARK and not c.startswith(BALANCE_MARK):
                 fh.write(f"# {c}\n")
         if headroom:
             fh.write(f"# {HEADROOM_MARK}\n")
+        if balance is not None:
+            t, a = balance
+            fh.write(f"# {BALANCE_MARK} {t[0]:.6f} {t[1]:.6f} {t[2]:.6f} {a:.4f}\n")
         if title:
             fh.write(f'TITLE "{title}"\n')
         fh.write(f"LUT_3D_SIZE {n}\n")
@@ -223,26 +262,33 @@ def look_input_map(conversion_inputs):
 
 
 class FrameLook:
-    """A look plus the map that puts ONE frame's conversion into the look's
-    own input density. It reads like the LookLUT it wraps (apply_look needs
-    nothing else); the pipeline calls `map_input` on the de-windowed value
-    BEFORE Channel Levels, so Levels works in the density the look - and the
-    fitter's per-frame Channel Levels - were measured in."""
+    """A look as ONE frame sees it: the map that puts the frame's conversion
+    into the look's own input density (`input_kind` "scale" / "linear", or
+    None when the conversion already is it) and whether it is the look's
+    colour-only version. It reads like the LookLUT it wraps (apply_look
+    needs nothing else); the pipeline calls `map_input` on the de-windowed
+    value BEFORE Channel Levels, so Levels works in the density the look -
+    and the fitter's per-frame Channel Levels - were measured in."""
 
-    def __init__(self, lut, kind, coef):
+    _OWN = ("lut", "input_kind", "input_coef", "colour_only")
+
+    def __init__(self, lut, kind=None, coef=(1.0, 1.0, 1.0), colour_only=False):
         self.lut = lut
         self.input_kind = kind
         self.input_coef = np.asarray(coef, np.float32).reshape(3)
+        self.colour_only = bool(colour_only)
 
     def __getattr__(self, name):
         # only reached for names the wrapper lacks; never for its own (a copy
         # or unpickle calls this before __init__ has set them)
-        if name.startswith("__") or name in ("lut", "input_kind", "input_coef"):
+        if name.startswith("__") or name in self._OWN:
             raise AttributeError(name)
         return getattr(self.lut, name)
 
     def map_input(self, d):
         d = np.asarray(d, np.float32)
+        if self.input_kind is None:
+            return d
         if self.input_kind == "scale":
             return d * self.input_coef
         # legacy linear two-point: d = 1 - (x - white)/(base - white), so
@@ -250,16 +296,94 @@ class FrameLook:
         t = np.maximum(1.0 - d * self.input_coef, np.float32(1e-5))
         return np.float32(-LOOK_DENSITY_SLOPE) * np.log10(t)
 
+    def unmap_input(self, d):
+        """The inverse of `map_input`: the value FreeCCR's own render would
+        have had (a colour-only look takes its luminance from it)."""
+        d = np.asarray(d, np.float32)
+        if self.input_kind is None:
+            return d
+        if self.input_kind == "scale":
+            k = self.input_coef
+            return np.where(k > 1e-6, d / np.maximum(k, np.float32(1e-6)), 0.0).astype(
+                np.float32)
+        r = np.maximum(self.input_coef, np.float32(1e-6))
+        return ((1.0 - np.power(np.float32(10.0), -d / np.float32(LOOK_DENSITY_SLOPE)))
+                / r).astype(np.float32)
 
-def for_frame(lut, conversion_inputs):
+
+def for_frame(lut, conversion_inputs, colour_only=False):
     """`lut` as it should see this frame: itself when the frame's conversion
-    is already the look's input, else a FrameLook carrying the map."""
+    is already the look's input and it is the full look, else a FrameLook
+    carrying the map and/or the colour-only flag."""
     if lut is None:
         return None
     m = look_input_map(conversion_inputs)
-    if m is None:
+    if m is None and not colour_only:
         return lut
-    return FrameLook(lut, *m)
+    kind, coef = m if m is not None else (None, (1.0, 1.0, 1.0))
+    return FrameLook(lut, kind, coef, colour_only=colour_only)
+
+
+# --------------------------------------------------------------------------- #
+# Colour-only looks (spec/film-look-auto-balance.md part 2)
+# --------------------------------------------------------------------------- #
+
+COLOUR_SUFFIX = "|colour"          # look_lut value of a look's colour-only version
+_Y709 = np.array([0.2126, 0.7152, 0.0722], np.float32)
+
+
+def split_look_name(value):
+    """'Portra.cube|colour' -> ('Portra.cube', True); 'Portra.cube' -> (.., False)."""
+    value = str(value or "")
+    if value.endswith(COLOUR_SUFFIX):
+        return value[:-len(COLOUR_SUFFIX)], True
+    return value, False
+
+
+def colour_only_name(name):
+    return split_look_name(name)[0] + COLOUR_SUFFIX if name else ""
+
+
+def is_colour_only(value):
+    return split_look_name(value)[1]
+
+
+def is_full_look(value):
+    """A look is set and it is the full one (it owns the tone: Auto Gain and
+    the default brightness are off). Not a colour-only look."""
+    return bool(value) and not is_colour_only(value)
+
+
+def _decode(v):
+    """sRGB to linear, the linear toe carried on below 0 (the shadow margin)."""
+    v = np.asarray(v, np.float32)
+    return np.where(v <= 0.04045, v / np.float32(12.92),
+                    np.power((np.maximum(v, 0.04045) + np.float32(0.055)) / np.float32(1.055),
+                             np.float32(2.4))).astype(np.float32)
+
+
+def _encode(x):
+    x = np.asarray(x, np.float32)
+    return np.where(x <= 0.0031308, x * np.float32(12.92),
+                    np.float32(1.055) * np.power(np.maximum(x, 0.0031308),
+                                                 np.float32(1 / 2.4)) - np.float32(0.055)
+                    ).astype(np.float32)
+
+
+def keep_luminance(look_out, ref):
+    """The look's colour (chromaticity, linear light) at `ref`'s luminance
+    (Rec.709). Both are display values (sRGB-encoded, un-clamped); so is the
+    result. Where the look has no light to give a colour (Y <= 1e-6) or ref is
+    at or below black, the pixel is ref's grey at ref's luminance."""
+    lo = _decode(look_out)
+    lr = _decode(ref)
+    yo = lo @ _Y709
+    yr = lr @ _Y709
+    ok = (yo > np.float32(1e-6)) & (yr > 0)
+    s = np.where(ok, yr / np.maximum(yo, np.float32(1e-6)), 0.0).astype(np.float32)
+    lin = lo * s[..., None]
+    lin = np.where(ok[..., None], lin, yr[..., None]).astype(np.float32)
+    return _encode(lin)
 
 
 # --------------------------------------------------------------------------- #
@@ -300,7 +424,10 @@ _warned = set()
 
 def resolve_look(name):
     """The LookLUT for a library file name, or None (no look / missing file /
-    unreadable — logged once per name, and the render proceeds without it)."""
+    unreadable — logged once per name, and the render proceeds without it).
+    A colour-only value resolves to its look (the flag is the caller's:
+    `split_look_name`)."""
+    name = split_look_name(name)[0]
     if not name:
         return None
     path = name if os.path.isabs(name) else os.path.join(looks_dir(), name)

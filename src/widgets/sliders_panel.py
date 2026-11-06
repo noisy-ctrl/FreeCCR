@@ -212,9 +212,12 @@ PASTE_SECTIONS = ("Adjustments", "Channel Levels", "Channel Balance",
 
 
 def _look_display_name(name):
-    """'Noritsu Lomo 800.cube' -> 'Noritsu Lomo 800'."""
-    name = str(name or "")
-    return name[:-5] if name.lower().endswith(".cube") else name
+    """'Noritsu Lomo 800.cube' -> 'Noritsu Lomo 800'; its colour-only value
+    'Noritsu Lomo 800.cube|colour' -> 'Noritsu Lomo 800 (colour only)'."""
+    from core.look_lut import split_look_name
+    name, colour = split_look_name(name)
+    name = name[:-5] if name.lower().endswith(".cube") else name
+    return f"{name} (colour only)" if colour else name
 
 
 def adjustment_label(key):
@@ -817,7 +820,10 @@ class SlidersPanel(QWidget):
         "you have also scanned yourself. It takes Cineon's place (one decode at "
         "a time). While a look is set, Auto Gain is off for this image: set "
         "exposure with Master Shift and colour with R/G/B Shift (and Gain for "
-        "contrast per channel), exactly as the fitter's report lists them.")
+        "contrast per channel), exactly as the fitter's report lists them.\n\n"
+        "Each look also has a \"(colour only)\" version: the look's colour with "
+        "FreeCCR's own brightness and contrast, so Auto Gain, Cineon and the "
+        "tone sliders work as without a look.")
     LOOK_IMPORT = "__import__"
 
     def _update_crosstalk_hint(self, img):
@@ -1991,8 +1997,10 @@ class SlidersPanel(QWidget):
         global_layer = img is not None and img.active_area_id is None
         look_name = (img.adjustment_settings.get("look_lut")
                      if img is not None else None) or ""
-        # One decode at a time: a look takes Cineon's slot.
-        self.cineon_checkbox.setEnabled(global_layer and not look_name)
+        # One decode at a time: a full look takes Cineon's slot (a colour-only
+        # look takes its brightness from Cineon when it is ticked).
+        from core.look_lut import is_full_look
+        self.cineon_checkbox.setEnabled(global_layer and not is_full_look(look_name))
         self._select_look_in_combo(look_name)
         for combo in self._look_combos:
             combo.setEnabled(global_layer)
@@ -3033,7 +3041,7 @@ class SlidersPanel(QWidget):
     def _populate_look_combo(self, select=None):
         """Both Film Look lists (Channel Levels' and the one above the
         histogram) from the library, the same entries in the same order."""
-        from core.look_lut import list_looks
+        from core.look_lut import colour_only_name, list_looks
         current = select if select is not None else (self.look_combo.currentData() or "")
         names = list_looks()
         for combo in self._look_combos:
@@ -3042,6 +3050,9 @@ class SlidersPanel(QWidget):
             combo.addItem(self.LOOK_NONE, "")
             for name in names:
                 combo.addItem(_look_display_name(name), name)
+                # the same look, colour only (spec/film-look-auto-balance.md)
+                combo.addItem(_look_display_name(colour_only_name(name)),
+                              colour_only_name(name))
             combo.insertSeparator(combo.count())
             combo.addItem("Import…", self.LOOK_IMPORT)
             combo.blockSignals(False)
@@ -3095,15 +3106,20 @@ class SlidersPanel(QWidget):
             return
         self.end_undo_burst()
         img.push_undo_state()
+        from core.look_lut import is_full_look
         if name:
             img.adjustment_settings["look_lut"] = name
-            self.set_temporary_hint(
-                f"Film Look '{_look_display_name(name)}': Auto Gain is off for this "
-                "image — set exposure with Master Shift, colour with R/G/B Shift.",
-                duration=6000)
+            if is_full_look(name):
+                hint = (f"Film Look '{_look_display_name(name)}': Auto Gain is off for "
+                        "this image — set exposure with Master Shift, colour with "
+                        "R/G/B Shift.")
+            else:
+                hint = (f"Film Look '{_look_display_name(name)}': the look's colour "
+                        "with FreeCCR's own brightness and contrast.")
+            self.set_temporary_hint(hint, duration=6000)
         else:
             img.adjustment_settings.pop("look_lut", None)
-        self.cineon_checkbox.setEnabled(not name)
+        self.cineon_checkbox.setEnabled(not is_full_look(name))
         self._select_look_in_combo(name)
         self._update_crosstalk_hint(img)
         self._cancel_live()

@@ -409,6 +409,40 @@ def image_area_mask(v, bands, margin=25, erode=31):
     return cv2.erode(m, np.ones((erode, erode), np.uint8)).astype(bool)
 
 
+def picture_mean_density(d_w, m_w, erode=25):
+    """A registered frame's mean density per channel over its picture (the
+    lab scan's own frame, eroded), inside the LUT's domain: the statistic the
+    lab's colour balance follows (spec/film-look-auto-balance.md)."""
+    m = cv2.erode(np.asarray(m_w, np.uint8), np.ones((erode, erode), np.uint8)) > 0
+    d = np.asarray(d_w, np.float64)[m]
+    keep = np.all((d >= DOMAIN[0]) & (d <= DOMAIN[1]), axis=1)
+    return d[keep].mean(axis=0) if keep.sum() >= 16 else None
+
+
+def fit_offsets(model, d, t, iters=30):
+    """The three per-channel offsets (no gains) that best match the lab."""
+    return lm(lambda o: (model(d + o) - t).ravel(), np.zeros(3), iters=iters)
+
+
+def balance_check(means, offsets, model, frames):
+    """Leave-one-out of the auto balance: for each frame, (T, alpha) from the
+    others, the predicted colour offsets plus the frame's OWN exposure (the
+    mean of its offsets: brightness is the user's), and the mean |da*|,
+    |db*| against the lab with it and with no colour correction. Returns
+    (with (da, db), without (da, db))."""
+    from core.look_balance import balance_offsets, fit_balance
+    w, wo = [], []
+    for j, (d, t) in enumerate(frames):
+        tr = [k for k in range(len(frames)) if k != j]
+        bal = fit_balance([means[k] for k in tr], [offsets[k] for k in tr])
+        expo = float(np.mean(offsets[j]))
+        lt = srgb_to_lab(t)
+        for o, out in ((balance_offsets(means[j], bal) + expo, w), (np.full(3, expo), wo)):
+            lp = srgb_to_lab(np.clip(model(d + o), 0, 1))
+            out.append(np.abs((lp - lt).mean(0))[1:])
+    return tuple(np.mean(w, 0)), tuple(np.mean(wo, 0))
+
+
 def _gray_u8(img, valid=None):
     vals = img[valid] if valid is not None else img
     a, b = np.percentile(vals, [1, 99])

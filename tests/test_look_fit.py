@@ -175,3 +175,32 @@ def test_de2000_reference_pair():
     a = np.array([[50.0, 2.6772, -79.7751]])
     b = np.array([[50.0, 0.0, -82.7485]])
     assert lf.de2000(a, b)[0] == pytest.approx(2.0425, abs=1e-3)
+
+
+def test_the_fitter_measures_the_labs_colour_balance():
+    """spec/film-look-auto-balance.md: frames whose lab balance follows the
+    model give back its T and alpha, and holding each out the prediction
+    beats no colour correction."""
+    from core import look_balance as lb
+    rng = np.random.default_rng(5)
+    p = _true_prior()
+    model = lambda x: lf.Prior.eval(p, x)          # noqa: E731
+    T, a = np.array([-0.04, -0.02, 0.06]), 0.55
+    frames, means, offs = [], [], []
+    for k in range(6):
+        h, w = 60, 80
+        cast = rng.normal(0, 0.06, 3)
+        dW = (rng.uniform(0.2, 0.7, (h, w, 1)) + cast).astype(np.float32) * np.ones(3, np.float32)
+        mw = np.ones((h, w), bool)
+        m = lf.picture_mean_density(dW, mw, erode=5)
+        o = lb.balance_offsets(m, (T, a)) + rng.normal(0, 0.03)     # + the lab's exposure
+        d = dW.reshape(-1, 3)[::7].astype(np.float64)
+        t = np.clip(model(d + o), 0, 1)
+        frames.append((d, t))
+        means.append(m)
+        offs.append(lf.fit_offsets(model, d, t))
+    bal = lb.fit_balance(means, offs)
+    np.testing.assert_allclose(bal[0], T, atol=5e-3)
+    assert bal[1] == pytest.approx(a, abs=0.03)
+    (wa, wb), (na, nb) = lf.balance_check(means, offs, model, frames)
+    assert wa + wb < 0.5 * (na + nb)
