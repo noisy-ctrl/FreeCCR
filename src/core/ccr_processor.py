@@ -1887,7 +1887,7 @@ def _apply_working_space_recovery(img16: np.ndarray, exposure: float,
     # instead of fixed; it takes the slot and Cineon steps aside.
     # See spec/film-look-lut.md.
     if look_lut is not None:
-        d = _apply_look(d, look_lut)
+        d = _look_stage(d, look_lut, cineon_log)
     elif cineon_log:
         d = apply_cineon_to_workspace(d)
     # Channel Balance - the tone-WEIGHTED per-channel control, right after the
@@ -3943,7 +3943,7 @@ def adjust_image(
         # Levels grades in log, everything after the decode grades
         # display-referred data.
         if look_lut is not None:
-            img = _apply_look(img, look_lut)
+            img = _look_stage(img, look_lut, cineon_log)
             look_lut = None
             cineon_log = False
         elif cineon_log:
@@ -4486,7 +4486,7 @@ def adjust_image_opencl(
         # and before the kernel sees anything, so the decode cannot land after
         # a stage that is supposed to grade its result.
         if look_lut is not None:
-            img16 = _apply_look(img16, look_lut)
+            img16 = _look_stage(img16, look_lut, cineon_log)
             look_lut = None
             cineon_log = False
         elif cineon_log:
@@ -5062,6 +5062,22 @@ def _apply_look(d: np.ndarray, lut) -> np.ndarray:
     is imported lazily and the call sites read like the Cineon ones."""
     from core.look_lut import apply_look
     return apply_look(d, lut)
+
+
+def _look_stage(d: np.ndarray, lut, cineon_log: bool = False) -> np.ndarray:
+    """The Film Look in its slot. A full look is the decode (Cineon steps
+    aside). A colour-only look (spec/film-look-auto-balance.md part 2) keeps
+    the look's colour at the luminance FreeCCR's own render would have:
+    the value with the input map undone, through Cineon when that is ticked."""
+    out = _apply_look(d, lut)
+    if not getattr(lut, "colour_only", False):
+        return out
+    from core.look_lut import keep_luminance
+    unmap = getattr(lut, "unmap_input", None)
+    ref = unmap(d) if unmap is not None else np.asarray(d, np.float32)
+    if cineon_log:
+        ref = apply_cineon_to_workspace(ref)
+    return keep_luminance(out, ref)
 
 
 def _look_input(d: np.ndarray, lut) -> np.ndarray:

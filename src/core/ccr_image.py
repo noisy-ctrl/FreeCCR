@@ -230,6 +230,36 @@ def _to_uint16_full_range(img: np.ndarray) -> np.ndarray:
     return np.clip(img.astype(np.float64) * scale, 0, 65535).astype(np.uint16)
 
 
+def look_balance_shift(img, look):
+    """Film Look auto balance per frame (spec/film-look-auto-balance.md):
+    the (R, G, B) Shift offsets in slider units for `img` with `look` (a
+    LookLUT or FrameLook from look_lut.for_frame), or None when it doesn't
+    apply - the setting off, no balance data in the cube, not a converted
+    black-point (density) frame. Measured on the frame's PREVIEW base, so
+    the preview, zoom, slices and export all get the same offsets."""
+    from core.ccr_backend import ccr_backend
+    if not getattr(ccr_backend, "look_auto_balance", False):
+        return None
+    balance = getattr(look, "balance", None)
+    if balance is None or not getattr(img, "converted", False):
+        return None
+    ci = getattr(img, "conversion_inputs", None) or {}
+    bw = ci.get("bw")
+    if ci.get("mode") != "bw" or not bw or bw[0] is None:
+        return None
+    base = getattr(img, "resized_raw", None)
+    if base is None:
+        return None
+    from core import look_balance as lb
+    from core.ccr_processor import CH_SLIDER_DIV
+    mean = lb.picture_mean_density(base, lb.picture_rect(img), look,
+                                   windowed=bool(getattr(img, "_ws_windowed", False)))
+    off = lb.balance_offsets(mean, balance)
+    if off is None:
+        return None
+    return tuple(float(v) * CH_SLIDER_DIV for v in off)
+
+
 def _glow_area_of(img):
     """Glow's crop for this image's renders: (crop rect, angle), or None. The
     render is of the whole frame (the crop comes after), so Glow is told
@@ -1594,9 +1624,9 @@ class CCRImage:
         ws = (bool(getattr(self, "_ws_windowed", False)) if snap is None
               else snap["ws_windowed"])
         if s.get("look_lut"):
-            from core.look_lut import resolve_look
-            if resolve_look(s.get("look_lut")) is not None:
-                return 0.0       # ignored by apply_adjustments with a look
+            from core.look_lut import is_full_look, resolve_look
+            if is_full_look(s.get("look_lut")) and resolve_look(s.get("look_lut")) is not None:
+                return 0.0       # ignored by apply_adjustments with a full look
         cg = self._clip_gain_offset(converted, ws)
         if cg is not None:
             return cg
@@ -2064,15 +2094,24 @@ class CCRImage:
         # exposure with a look is Master Shift (a density offset).
         look = None
         if s.get("look_lut"):
-            from core.look_lut import for_frame, resolve_look
+            from core.look_lut import for_frame, is_colour_only, resolve_look
             # for_frame: with a white point (or film-stock slopes) the look is
-            # handed the black-point density it was fitted on (revision 6)
+            # handed the black-point density it was fitted on (revision 6); a
+            # "|colour" value is the look's colour-only version
+            # (spec/film-look-auto-balance.md part 2)
             look = for_frame(resolve_look(s.get("look_lut")),
-                             getattr(self, "conversion_inputs", None))
+                             getattr(self, "conversion_inputs", None),
+                             colour_only=is_colour_only(s.get("look_lut")))
+        # A FULL look owns the tone; a colour-only one leaves it to FreeCCR's
+        # own render, so everything below behaves as with no look.
+        full_look = look is not None and not getattr(look, "colour_only", False)
+        # Auto balance per frame (experimental): the lab's colour balance as
+        # hidden R/G/B Shift offsets, added to the user's values.
+        look_bal = look_balance_shift(self, look) if look is not None else None
         auto_on = (getattr(ccr_backend, "auto_gain", True) and self.converted
-                   and look is None)
-        clip_ag = None if look is not None else clip_gain_offset(self, None, ws)
-        if auto_gain_override is not None and look is None:
+                   and not full_look)
+        clip_ag = None if full_look else clip_gain_offset(self, None, ws)
+        if auto_gain_override is not None and not full_look:
             ag = float(auto_gain_override)     # measured once from the full base
         elif clip_ag is not None:
             ag = clip_ag                       # this frame's own gain (brightest point)
@@ -2085,15 +2124,15 @@ class CCRImage:
             # Same value, measured once per base (spec/slider-speed.md §5).
             ag = _cached_auto_gain(self, base_in, ws, s if xt_on else None,
                                    processed=image)
-        eb_eff = 0.0 if (auto_on or look is not None) else eb   # no double-apply
+        eb_eff = 0.0 if (auto_on or full_look) else eb   # no double-apply
         # Auto tone (spec/auto-tone.md): the toe/shoulder measured for this
         # frame at conversion, applied in the windowed pre-stage. A look owns
         # its own tone, like Auto Gain.
         at = None
         if (getattr(ccr_backend, "auto_tone", True) and ws and self.converted
-                and look is None):
+                and not full_look):
             at = (getattr(self, "conversion_inputs", None) or {}).get("auto_tone")
-        if look is not None:
+        if full_look:
             # The negative-look brightness baseline (bb = -8, a darkening power
             # curve) is part of the DEFAULT render; the look already is the
             # render, fitted with every slider at 0, so it must not be bent.
@@ -2136,13 +2175,13 @@ class CCRImage:
                      # the slider still reads what the user set while the render
                      # carries the automatic normalization on top.
                      ch_master_gain=s.get('ch_master_gain', 0) + ag,
-                     ch_r_shift=s.get('ch_r_shift', 0),
+                     ch_r_shift=s.get('ch_r_shift', 0) + (look_bal[0] if look_bal is not None else 0.0),
                      ch_r_gain=s.get('ch_r_gain', 0),
                      ch_r_blackpoint=s.get('ch_r_blackpoint', 0),
-                     ch_g_shift=s.get('ch_g_shift', 0),
+                     ch_g_shift=s.get('ch_g_shift', 0) + (look_bal[1] if look_bal is not None else 0.0),
                      ch_g_gain=s.get('ch_g_gain', 0),
                      ch_g_blackpoint=s.get('ch_g_blackpoint', 0),
-                     ch_b_shift=s.get('ch_b_shift', 0),
+                     ch_b_shift=s.get('ch_b_shift', 0) + (look_bal[2] if look_bal is not None else 0.0),
                      ch_b_gain=s.get('ch_b_gain', 0),
                      ch_b_blackpoint=s.get('ch_b_blackpoint', 0),
                      vibrance=s.get('vibrance', 0),

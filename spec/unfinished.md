@@ -53,6 +53,12 @@ remove an entry when it ships.
   where the Shutter row shows the model the camera reports ("GFX50S II").
 
 ## To check on the user's machine
+- **Film Look auto balance (experimental) and the colour-only looks**
+  (2026-11-04, `spec/film-look-auto-balance.md`): measured on one lab's nine
+  Portra frames only. Needs the re-issued "Portra 400 Lab.cube" (same table,
+  plus its `FREECCR_BALANCE` line) in the looks library; a cube without the
+  line gets no auto balance. Worth checking on frames the look was NOT fitted
+  on, and on the second lab's frames.
 - **Film base clipped on 5 of 17 Portra triplets** (2026-11-02; DSCF0001,
   0007, 0062, 0068, 0074: the longer exposures): the rebate sits at the clip
   in every channel, so neither Convert nor the look fitter can read that

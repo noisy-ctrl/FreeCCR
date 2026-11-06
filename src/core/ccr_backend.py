@@ -15,6 +15,13 @@ import uuid
 import copy
 
 
+def _full_look(img) -> bool:
+    """A full Film Look is set on `img` (it owns the tone; a colour-only look
+    leaves it to FreeCCR, spec/film-look-auto-balance.md)."""
+    from core.look_lut import is_full_look
+    return is_full_look((getattr(img, "adjustment_settings", None) or {}).get("look_lut"))
+
+
 def _new_slice_group() -> str:
     """A globally-unique id shared by all slices of one slicing operation.
     Used to identify a slice round for 'Reset Slice' without relying on
@@ -176,6 +183,11 @@ class CCRBackend:
         # while it is off the keys are not consumed at all. Global, persisted by
         # MainWindow. See spec/white-balance-restore.md.
         self.balance_hotkeys: bool = False
+        # Film Look auto balance per frame (EXPERIMENTAL, default off): the
+        # lab's per-frame colour balance as hidden R/G/B Shift offsets, for
+        # looks whose cube carries FREECCR_BALANCE. Persisted by MainWindow
+        # (look/auto_balance). See spec/film-look-auto-balance.md.
+        self.look_auto_balance: bool = False
         # Reversal-look sprocket-hole mask: when True, clear-film regions (sprocket
         # holes / rebate, brighter than the sampled black point) are painted white
         # as the LAST render step for B/W-point conversions, on preview and export.
@@ -3284,7 +3296,7 @@ class CCRBackend:
         if (mode == "legacy" or not self.auto_tone or ci.get("mode") != "bw"
                 or not bw or bw[0] is None or not getattr(img, "converted", False)
                 or not getattr(img, "_ws_windowed", False)
-                or (img.adjustment_settings or {}).get("look_lut")):
+                or _full_look(img)):
             return None
         if rect is None:
             rect = (tuple(ci["picture"]) if ci.get("picture")
