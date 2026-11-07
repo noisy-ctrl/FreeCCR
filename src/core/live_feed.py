@@ -322,9 +322,57 @@ def _ncc(a, b):
     return float((a * b).sum()) / d if d > 1e-6 else 1.0
 
 
+NEW_FRAME_VIEW_W = 320      # the new-frame check keeps whole pictures this wide
+NEW_FRAME_GUIDE = 0.8       # it looks at the frame guide's inner 80 % ...
+NEW_FRAME_MIDDLE = 0.6      # ... or, with no guide, the middle 60 % of the view
+
+
+def new_frame_view(frame):
+    """The whole live picture, grey, NEW_FRAME_VIEW_W wide (float32): what
+    NewFrameDetector keeps, so the area it looks at can move."""
+    g = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
+    h, w = g.shape[:2]
+    if w > NEW_FRAME_VIEW_W:
+        size = (NEW_FRAME_VIEW_W, max(1, int(round(NEW_FRAME_VIEW_W * h / float(w)))))
+        g = cv2.resize(g, size, interpolation=cv2.INTER_AREA)
+    return g.astype(np.float32)
+
+
+def new_frame_box(w, h, guide=None):
+    """Where a new frame is looked for, in pixels of a w x h view
+    (spec/sharpness-meter-v2.md revision 3): the frame guide's inner 80 %,
+    else the middle 60 %. On 35 mm the whole view is mostly sprocket rows,
+    rebate and the carrier's mask, which every frame shares (two frames
+    correlated 0.87 across the whole view, 0.24 inside the guide). The
+    guide's turn is left out: a box 80 % of its size sits inside it."""
+    box = None
+    if guide:
+        try:
+            cx, cy = float(guide["cx"]) * w, float(guide["cy"]) * h
+            bw = float(guide["w"]) * w * NEW_FRAME_GUIDE
+            bh = float(guide["h"]) * h * NEW_FRAME_GUIDE
+            box = (int(round(max(0.0, cx - bw / 2))), int(round(max(0.0, cy - bh / 2))),
+                   int(round(min(float(w), cx + bw / 2))), int(round(min(float(h), cy + bh / 2))))
+        except (KeyError, TypeError, ValueError):
+            box = None
+        if box is not None and (box[2] - box[0] < 8 or box[3] - box[1] < 8):
+            box = None                       # off the picture, or too small to say
+    if box is None:
+        m = (1.0 - NEW_FRAME_MIDDLE) / 2
+        box = (int(round(w * m)), int(round(h * m)),
+               int(round(w * (1 - m))), int(round(h * (1 - m))))
+    return box
+
+
 class NewFrameDetector:
     """Says once when the picture became a different one and settled (the
-    film advanced): spec/sharpness-meter-v2.md §5."""
+    film advanced): spec/sharpness-meter-v2.md §5 and revision 3.
+
+    It keeps the reference and the previous picture WHOLE and cuts the same
+    box from both for every comparison, so the box can move (the guide
+    following the frame, a snap, your hand) without that ever looking like a
+    new picture, and a snap while the film is still settling can't swallow
+    the change it follows."""
     DIFFERENT = 0.4
     STEADY = 0.95
     SETTLE_S = 0.8
@@ -333,31 +381,44 @@ class NewFrameDetector:
         self.clock = clock
         self.reset()
 
-    def reset(self, thumb=None):
-        self.ref = thumb
-        self.last = thumb
+    def reset(self, view=None):
+        self.ref = view
+        self.last = view
         self.changing = False
         self.steady_since = None
 
-    def update(self, thumb):
-        if self.ref is None or self.ref.shape != thumb.shape:
-            self.reset(thumb)
+    @staticmethod
+    def _look(view, box):
+        """The 64x36 thumbnail of `box` (pixels of `view`; None = all of it)."""
+        if box is not None:
+            x0, y0, x1, y1 = box
+            view = view[y0:y1, x0:x1]
+        if view.shape[:2] == (36, 64):
+            return view.astype(np.float32)
+        return cv2.resize(view, (64, 36), interpolation=cv2.INTER_AREA).astype(np.float32)
+
+    def update(self, view, box=None):
+        """`view`: the picture (`new_frame_view`; a 64x36 thumbnail works as
+        is). `box`: where in it to look."""
+        if self.ref is None or self.ref.shape != view.shape:
+            self.reset(view)
             return False
         now = self.clock()
+        cur = self._look(view, box)
         if not self.changing:
-            if _ncc(self.ref, thumb) < self.DIFFERENT:
+            if _ncc(self._look(self.ref, box), cur) < self.DIFFERENT:
                 self.changing, self.steady_since = True, None
-            self.last = thumb
+            self.last = view
             return False
-        if _ncc(self.last, thumb) >= self.STEADY:
+        if _ncc(self._look(self.last, box), cur) >= self.STEADY:
             if self.steady_since is None:
                 self.steady_since = now
         else:
             self.steady_since = None
-        self.last = thumb
+        self.last = view
         if self.steady_since is not None and now - self.steady_since >= self.SETTLE_S:
-            if _ncc(self.ref, thumb) < self.DIFFERENT:
-                self.reset(thumb)
+            if _ncc(self._look(self.ref, box), cur) < self.DIFFERENT:
+                self.reset(view)
                 return True
             self.changing, self.steady_since = False, None    # came back
         return False
@@ -475,6 +536,8 @@ class ViewParams:
     hist_area: Optional[dict] = None    # the frame guide: the histogram of the whole
                                         # frame inside it (spec/frame-exposure.md §2)
     hist_paused: bool = False           # magnified: the histogram holds
+    frame_area: Optional[dict] = None   # the frame guide: where a new frame is looked
+                                        # for (spec/sharpness-meter-v2.md revision 3)
 
 
 @dataclass
@@ -547,14 +610,15 @@ class Processor:
             reset = p.reset_best != self._reset_best
             if reset:
                 self._reset_best = p.reset_best
-            th = _thumb(frame)
-            if self.newframe.update(th) and not reset:
+            view = new_frame_view(frame)
+            box = new_frame_box(view.shape[1], view.shape[0], p.frame_area)
+            if self.newframe.update(view, box) and not reset:
                 new_frame = True
             if reset or new_frame or self._sharp_last is None or self._sharp_last[0] != key:
                 self.meter.reset()
                 self.tracker.reset()
                 if reset:
-                    self.newframe.reset(th)
+                    self.newframe.reset(view)
                 self._sharp_last = None
             now_s = self.clock()
             if self._sharp_last is None or now_s - self._sharp_t >= SHARP_EVERY_S:

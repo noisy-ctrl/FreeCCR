@@ -91,3 +91,45 @@ visually showing percentage. Doesn't have to be mega long though."
   box, so a click on it starts a new best as before.
 - Test: the bar's fill is N % of its width, follows the number, and gives way
   to the note (`LiveCanvas._readout_bar`).
+
+## Revision 3 (2026-11-07): look inside the frame, not at the carrier
+The user's 35 mm recording: "New frame: best reset" never came, so the best
+was never reset between frames. The detector looked at the whole view, which
+on 35 mm is mostly sprocket rows, rebate and the carrier's mask: the same in
+every frame. Measured on the recording (64 × 36 thumbnails, correlation):
+
+| where it looks | frame 1 vs frame 2 | one frame while focusing (lowest) |
+|---|---|---|
+| the whole view (before) | 0.87 | 0.89 |
+| the middle 60 % of the view | 0.11 | 0.84 |
+| inside the frame guide | 0.30 | 0.85 |
+| the guide's inner 80 % | 0.24 | 0.86 |
+
+On his 120 recordings (focusing and magnifying one picture) the lowest was
+0.77 whole / 0.63 middle / 0.78 guide, so `DIFFERENT` stays 0.4.
+- It looks at the frame guide's inner 80 % while the guide is shown and the
+  camera isn't magnified (`ViewParams.frame_area`, the same guide the Live
+  histogram uses), else the middle 60 % of the view
+  (`live_feed.new_frame_box`). The guide's turn is left out: a box 80 % of
+  its size sits inside it.
+- It keeps the reference and the previous picture WHOLE (grey, 320 px wide,
+  `new_frame_view`) and cuts the same box from both for each comparison. So
+  the guide moving (following the frame, a snap, your hand) is never a new
+  picture, and the guide snapping onto the new frame while it settles can't
+  swallow the change it follows. No reset on an area change is needed.
+- The monitor now sends the guide to the feed whenever it moves (a drag,
+  Size / Position / Format, following, a snap). Before, the Live histogram
+  kept looking where the guide had been until something else changed.
+- Replayed through the detector at the recordings' 4 pictures a second: the
+  35 mm recording, said once (before: never); a 120 recording of three
+  frames, said three times (before: twice; on the third the whole view still
+  correlated 0.55); the 120 recording of one frame, never (before: never).
+
+Tests (`tests/test_live_feed.py`): the box (guide inner 80 %, middle 60 %,
+a bad or off-picture guide falls back to the middle); on a synthetic 35 mm
+strip, winding on is said once inside the guide and not across the whole
+view (two frames there correlate 0.92), and still once when the guide snaps
+5 px while the frame settles; focusing (3 % larger and blurred) and dragging
+the guide a fifth of the view on a still picture are not said; the Processor
+uses `frame_area`. `tests/test_frame_exposure.py`: the monitor sends the
+guide as `frame_area`, follows its moves and sends none while magnified.

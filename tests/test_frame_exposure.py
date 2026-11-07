@@ -409,10 +409,18 @@ def test_the_histogram_looks_inside_the_guide_and_pauses_magnified(film_mon):
     assert mon.panel.minimumSizeHint().width() <= lm.theme.PANEL_W
     mon.actions["guide"].setChecked(True)
     assert mon.feed.params.hist_area == mon.canvas.guide
+    assert mon.feed.params.frame_area == mon.canvas.guide      # a new frame is looked for there
     assert mon.histogram._caption == "Live · frame guide"
+    # moving the guide moves both (spec/sharpness-meter-v2.md revision 3)
+    mon._set_guide(dict(mon.canvas.guide, cx=0.4))
+    assert mon.feed.params.hist_area["cx"] == pytest.approx(0.4)
+    mon.canvas.guide = dict(mon.canvas.guide, cx=0.45)         # a drag ends
+    mon.canvas.guide_changed.emit(dict(mon.canvas.guide))
+    assert mon.feed.params.frame_area["cx"] == pytest.approx(0.45)
     mon._cam_zoom = "5"
     mon._push_params()
     assert mon.feed.params.hist_paused and mon.feed.params.hist_area is None
+    assert mon.feed.params.frame_area is None
     assert "paused" in mon.histogram._caption
     mon._cam_zoom = "1"
     mon.actions["guide"].setChecked(False)

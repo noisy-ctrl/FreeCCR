@@ -1084,6 +1084,7 @@ class LiveCaptureMonitor(QWidget):
         self.frame_auto.toggled.connect(self._on_frame_auto)
         self.canvas.guide_changed.connect(lambda g: self._frame_changed())
         self.canvas.guide_changed.connect(lambda g: self._guide_placed_by_hand())
+        self.canvas.guide_changed.connect(lambda g: self._push_params())
         # your guide, kept on the frame (spec/guide-follow-and-crop.md §1-2)
         self._tracker = guide_tracker.GuideTracker()
         self._settle = guide_tracker.SettleWatch()   # moved, then still: snap onto the frame
@@ -1504,6 +1505,7 @@ class LiveCaptureMonitor(QWidget):
         self.canvas.set_guide(g)
         self._sync_format_combo()
         self._save_view_state()
+        self._push_params()                      # the histogram looks where it is now
         if by_hand:
             self._guide_placed_by_hand()
 
@@ -1551,6 +1553,7 @@ class LiveCaptureMonitor(QWidget):
             return False
         self.canvas.set_guide(dict(g, format=self.canvas.guide.get("format")))
         self.canvas.set_guide_waiting(None)
+        self._push_params()
         self._note_caption("The frame guide moved onto the new frame.")
         return True
 
@@ -1595,6 +1598,7 @@ class LiveCaptureMonitor(QWidget):
         g = self._tracker.update(guide_tracker.find_opening(frame))
         if g is not None:
             self.canvas.set_guide(dict(g, format=self.canvas.guide.get("format")))
+            self._push_params()                  # the histogram follows it too
         self.canvas.set_guide_waiting(self._tracker.reason or None)
         if self._settle.update(frame):
             self._snap_guide()                   # the picture moved and settled
@@ -1672,7 +1676,8 @@ class LiveCaptureMonitor(QWidget):
             sharp=self.actions["sharp"].isChecked(), sharp_area=self.canvas.sharp_area,
             false_colour=self.actions["fc"].isChecked(), negative=neg,
             bw=self.neg_bw.isChecked(), clip=self._clip_kind, reset_best=self._reset_best,
-            hist_area=hist_area, hist_paused=hist_paused))
+            hist_area=hist_area, hist_paused=hist_paused,
+            frame_area=hist_area))           # a new frame is looked for there too
         self.histogram.set_caption(caption)
         self._sync_view_zoom()
 
