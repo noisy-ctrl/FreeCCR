@@ -23,14 +23,16 @@ Order as the user listed them, names from `scan_type.TILE_NAMES`:
 
 | tile | type | picture |
 |---|---|---|
-| **RGB** | `trichrome` | an orange-based colour negative over a light panel in three bands, red, green and blue; its sprocket holes show the three colours |
-| **White light** | `colour` | the same negative over one white panel; holes show white |
+| **RGB** | `trichrome` | an orange-based colour negative over a light panel in three bands, red, green and blue |
+| **White light** | `colour` | the same negative over one white panel |
 | **B&W** | `bw` | a grey negative over a white panel |
 
 Each negative is drawn the way a negative looks: the sky (bright in the
 scene) dense, the hills thin, the sun densest. The light panel glows up
-behind the film in its colour. The tooltip is the full label
-(`scan_type.LABELS`) with a line on what it means.
+behind the film in its colour. The sprocket holes are white on every tile
+(the user asked, 2026-11-07; they were red, green and blue on the RGB tile).
+The tooltip is the full label (`scan_type.LABELS`) with a line on what it
+means.
 
 - `ScanTypeTiles(QWidget)`: `currentData()`, `setCurrentData(t)` (unknown →
   the default, as `scan_type.clean`), signal `changed(str)` (only on a real

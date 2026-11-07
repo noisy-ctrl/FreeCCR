@@ -72,17 +72,18 @@ def paint_picture(p, rect, kind):
     p.setBrush(Qt.NoBrush)
     p.drawPath(path)
 
-    # the strip of film, its sprocket holes showing the light
+    # the strip of film; its sprocket holes are white on every tile (the
+    # user asked, 2026-11-07)
     film = QRectF(6, 4, PICTURE_W - 12, 36)
     p.setPen(QPen(outline, 1))
     p.setBrush(base)
     p.drawRoundedRect(film, 2, 2)
     p.setPen(Qt.NoPen)
+    p.setBrush(QColor(LIGHT_W))
     n_holes = 9
     step = (film.width() - 8) / n_holes
     for row_y in (film.top() + 2.5, film.bottom() - 6):
         for i in range(n_holes):
-            p.setBrush(QColor(lights[i % len(lights)]))
             p.drawRoundedRect(QRectF(film.left() + 4 + i * step + (step - 5) / 2,
                                      row_y, 5, 3.5), 1, 1)
 
