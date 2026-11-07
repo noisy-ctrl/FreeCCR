@@ -234,7 +234,8 @@ def test_on_the_users_portra_triplets():
     shot."""
     plan = tp.plan_triplets(PORTRA)
     assert len(plan.sets) == 17 and plan.notes == []
-    assert [tuple(PORTRA[i:i + 3]) for i in range(0, 51, 3)] == list(plan.sets)
+    # the same shots, now listed in the order they were shot
+    assert sorted(tuple(PORTRA[i:i + 3]) for i in range(0, 51, 3)) == sorted(plan.sets)
 
 
 def test_the_window_shows_them_greyed_out_after_the_load_without_a_warning(monkeypatch):
@@ -261,3 +262,103 @@ def test_the_window_shows_them_greyed_out_after_the_load_without_a_warning(monke
     assert [tl.attention_list.item(i).text() for i in range(2)] == ["Frames missing", "Unused retake"]
     w._tether_attention = []
     tl.set_attention([])
+
+
+# --------------------------------------------------------------------------- #
+# shooting order (revision 2026-11-07)
+# --------------------------------------------------------------------------- #
+
+def test_natural_names():
+    names = ["DSCF0002_10.raf", "DSCF0002_2.raf", "DSCF0002.raf", "dscf0001_1.RAF"]
+    assert [os.path.basename(p) for p in sorted(names, key=tp.natural_key)] == \
+        ["dscf0001_1.RAF", "DSCF0002.raf", "DSCF0002_2.raf", "DSCF0002_10.raf"]
+
+
+def test_capture_order_uses_the_time_shot_and_falls_back_to_names():
+    when = {"a_2.raf": ("2026:10:31 13:10:00", "000000"),
+            "a_10.raf": ("2026:10:30 14:00:00", "000000"),
+            "b.raf": ("2026:10:30 14:00:00", "000000")}
+    assert tp.capture_order(list(when), time_fn=when.get) == ["a_10.raf", "b.raf", "a_2.raf"]
+    missing = dict(when, **{"c.raf": None})
+    assert tp.capture_order(list(missing), time_fn=missing.get) == \
+        ["a_2.raf", "a_10.raf", "b.raf", "c.raf"]
+
+
+def _two_sessions():
+    """Two sessions of three shots; the camera's counter restarted, so the
+    second session's files are DSCF0001_1 … (the user's 'tether test')."""
+    from core import scan_type as st
+    files, when, reading = [], {}, {}
+    for s, (suffix, hour) in enumerate((("", 13), ("_1", 14))):
+        for k in range(9):
+            name = f"/t/DSCF{k + 1:04d}{suffix}.raf"
+            shot = s * 3 + k // 3
+            files.append(name)
+            when[name] = (f"2026:10:30 {hour}:{k // 3:02d}:{(k % 3) * 5:02d}", "000000")
+            reading[name] = st.LightReading(SHARES["RGB"[k % 3]], _pic(shot))
+    return files, when, reading
+
+
+def test_sessions_with_the_same_numbers_merge_in_shooting_order():
+    files, when, reading = _two_sessions()
+    plan = tp.plan_triplets(files, shares_fn=reading.get, quality=lambda p, c: (1.0, 0.0),
+                            workers=1, time_fn=when.get)
+    assert len(plan.sets) == 6 and plan.notes == []
+    for s in plan.sets:                          # each set one session, one shot
+        assert len({when[p][0][:16] for p in s}) == 1
+    # as it was, by name: DSCF0001, DSCF0001_1, DSCF0002, … interleaved
+    old = tp.plan_triplets(files, shares_fn=reading.get, quality=lambda p, c: (1.0, 0.0),
+                           workers=1, time_fn=lambda p: None)
+    assert len(old.sets) < 6
+
+
+def _fake_raf(path, when="2026:10:30 14:05:04", subsec="123"):
+    """A RAF container holding a preview JPEG whose EXIF has the capture time."""
+    import struct
+    be = ">"
+    when_b = when.encode() + b"\0"                                  # 20 bytes
+    # TIFF: header, IFD0 (ExifIFD pointer), Exif IFD (DateTimeOriginal, SubSec)
+    ifd0_off = 8
+    exif_off = ifd0_off + 2 + 12 + 4
+    data_off = exif_off + 2 + 2 * 12 + 4
+    tiff = b"MM\0*" + struct.pack(be + "I", ifd0_off)
+    tiff += struct.pack(be + "H", 1) + struct.pack(be + "HHII", 0x8769, 4, 1, exif_off)
+    tiff += struct.pack(be + "I", 0)
+    sub = subsec.encode() + b"\0" * (4 - len(subsec))
+    tiff += struct.pack(be + "H", 2)
+    tiff += struct.pack(be + "HHII", 0x9003, 2, len(when_b), data_off)
+    tiff += struct.pack(be + "HHI", 0x9291, 2, len(subsec) + 1) + sub
+    tiff += struct.pack(be + "I", 0) + when_b
+    app1 = b"Exif\0\0" + tiff
+    jpeg = b"\xff\xd8" + b"\xff\xe1" + struct.pack(be + "H", len(app1) + 2) + app1 + b"\xff\xd9"
+    head = b"FUJIFILMCCD-RAW " + b"\0" * (84 - 16) + struct.pack(be + "II", 100, len(jpeg))
+    head += b"\0" * (100 - len(head))
+    with open(path, "wb") as f:
+        f.write(head + jpeg)
+
+
+def test_capture_time_reads_a_raf_preview(tmp_path):
+    from core import scan_type as st
+    p = tmp_path / "DSCF0001.RAF"
+    _fake_raf(str(p))
+    assert st.capture_time(str(p)) == ("2026:10:30 14:05:04", "123000")
+    q = tmp_path / "x.RAF"
+    q.write_bytes(b"not a raw")
+    assert st.capture_time(str(q)) is None
+    assert st.capture_time(str(tmp_path / "missing.RAF")) is None
+
+
+def test_hot_folder_import_is_planned_like_open(monkeypatch):
+    from core import tether_watcher as tw
+    import core.triplet_plan as tpm
+    plan = tpm.Plan()
+    plan.sets = [("a", "b", "c")]
+    plan.notes = [tpm._note(["d"], "Not one colour", "d: white light")]
+    monkeypatch.setattr(tpm, "plan_triplets", lambda paths: plan)
+    w = tw.TetherWatchWorker()
+    got = []
+    monkeypatch.setattr(w, "process_triplet", lambda job: got.append(("set", job)))
+    monkeypatch.setattr(w, "describe_leftover", lambda job: got.append(("note", job)))
+    w.plan_existing({"paths": ["a", "b", "c", "d"]})
+    assert got == [("set", {"paths": ["a", "b", "c"], "check": True}),
+                   ("note", {"paths": ["d"], "reason": "d: white light"})]

@@ -154,3 +154,34 @@ light fails); the signature on synthetic mosaics (same scene under three
 tell"); a set is never formed across a picture change, even when one frame is
 weak; Rule 3 in the planner and the tether; on the user's RAFs when present:
 17 sets from the 51 frames, no notes.
+
+## Revision 2026-11-07: shooting order, not name order
+
+**Problem** (the user): Open and drag-and-drop rejected sets that Hot Folder
+Tether had merged as they arrived. His "tether test" folder (253 RAFs, read
+on his Mac with his permission) holds several sessions in which the camera's
+counter restarted, so the tether saved them as `DSCF0001.raf`,
+`DSCF0001_1.raf`, … `DSCF0001_9.raf`, `DSCF0002.raf`, … (its "_1 on a name
+clash"). Name order put every session's DSCF0001 together, then every
+DSCF0002: no three neighbours were one shot. (`DSCF0002_10` also came before
+`DSCF0002_2`.) The tether never saw this because it takes files as they
+arrive.
+
+**Change.** `triplet_plan.capture_order(paths, time_fn)`: by each file's EXIF
+capture time (`scan_type.capture_time`: DateTimeOriginal + SubSecTimeOriginal,
+read from a RAF's embedded preview JPEG as `read_shot_exposure` does) when
+EVERY file has one, the name read naturally (`natural_key`: `_2` before `_10`)
+breaking ties; otherwise natural name order. `plan_triplets` walks in that
+order (`time_fn` injectable; tests' fake paths have no time and keep name
+order). Hot Folder Tether's "Import the N files already in the folder" no
+longer takes them three at a time in name order: `TetherWatchWorker.
+plan_existing` runs `plan_triplets` on the worker thread, sends each set
+through `process_triplet` (checked as a capture) and each note to Needs
+attention.
+
+**Measured** on his folder (the real planner, his RAFs' light and picture):
+name order 9 sets, 219 frames "Frames missing"; shooting order 82 sets, 7
+frames in notes (three white-light frames, two weak single frames, one
+incomplete shot), no set spanning more than 12 s. EXIF capture time and the
+files' modification times gave the same order; no two frames shared a
+second.

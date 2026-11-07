@@ -177,6 +177,7 @@ class MainWindow(QMainWindow):
     # Queued to the Hot Folder Tether worker (it lives on its own thread).
     _tether_triplet_req = Signal(object)
     _tether_leftover_req = Signal(object)
+    _tether_plan_req = Signal(object)
 
     def __init__(self):
         super().__init__()
@@ -2076,6 +2077,7 @@ class MainWindow(QMainWindow):
         self._tether_worker.needsAttention.connect(self._on_needs_attention)
         self._tether_triplet_req.connect(self._tether_worker.process_triplet)
         self._tether_leftover_req.connect(self._tether_worker.describe_leftover)
+        self._tether_plan_req.connect(self._tether_worker.plan_existing)
         self._tether_thread.start()
         from core.scan_type import TripletGrouper
         self._tether_grouper = TripletGrouper()
@@ -2146,14 +2148,11 @@ class MainWindow(QMainWindow):
         for p in paths:
             if p not in raws:
                 self._dispatch_to_worker(p)
-        trips, left = st.group_existing(raws)
-        for trip in trips:
-            self._emit_triplet({"paths": list(trip), "check": True})
-        if left:
-            self._tether_leftover_req.emit({
-                "paths": left,
-                "reason": f"{len(left)} file(s) in the folder don't make a full red, "
-                          "green, blue shot"})
+        if raws:
+            # planned like Open's 3-way merge, on the worker (it reads every
+            # RAW's light and picture): in shooting order, each set one shot
+            self._hand_template()
+            self._tether_plan_req.emit({"paths": raws})
 
     def _refresh_tether_banner(self):
         if not self._tether_active:

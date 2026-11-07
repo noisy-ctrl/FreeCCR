@@ -301,6 +301,26 @@ class TetherWatchWorker(QObject):
                 "thumbs": [st.thumb_bgr(p) for p in paths]})
 
     @Slot(object)
+    def plan_existing(self, job):
+        """Files already in the folder when the tether starts (trichrome):
+        planned exactly like Open's 3-way merge (`triplet_plan.plan_triplets`:
+        shooting order, light and picture), each set then checked and merged
+        as a captured triplet, everything else shown in Needs attention.
+        Taking them three at a time in name order mixed sessions whose
+        camera counter had restarted (spec/smart-triplets.md, 2026-11-07)."""
+        if self._cancelled:
+            return
+        from core.triplet_plan import plan_triplets
+        plan = plan_triplets(list(job.get("paths") or []))
+        for s in plan.sets:
+            if self._cancelled:
+                return
+            self.process_triplet({"paths": list(s), "check": True})
+        for n in plan.notes:
+            self.describe_leftover({"paths": n["paths"],
+                                    "reason": n.get("reason") or n.get("short", "")})
+
+    @Slot(object)
     def describe_leftover(self, job):
         """Files that can't make a triplet (a missed shot, a stop part-way):
         shown greyed out with their thumbnails, nothing guessed."""
