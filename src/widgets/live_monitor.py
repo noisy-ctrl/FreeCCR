@@ -1751,6 +1751,7 @@ class LiveCaptureMonitor(QWidget):
 
     def _on_usb_cameras(self, found):
         self._usb_found = list(found)
+        self._relocate_usb_keys()                # a re-plugged camera has a new port
         self._rebuild_camera_combo()
         self._rebuild_shutter_combo()
         keys = [k for k, _l in self._usb_found]
@@ -1766,6 +1767,31 @@ class LiveCaptureMonitor(QWidget):
                 self.feed.open_camera(int(self._cv_found[0][0]), self._video_format())
             elif not self._cv_found:
                 self._on_feed_status("none", "")
+
+    def _relocate_usb_keys(self):
+        """The remembered camera (and shutter) under the port it has now:
+        libgphoto2's port changes on every re-plug (`cb.relocate_key`)."""
+        s = _settings()
+        found = self._usb_found
+        old_cam = self._want_key
+        new_cam = None
+        if old_cam is not None and cb.split_key(old_cam) is not None:
+            new_cam = cb.relocate_key(old_cam, found,
+                                      str(s.value("live/camera_label", "") or ""))
+            if new_cam and new_cam != old_cam:
+                print(f"usb camera: {dict(found).get(new_cam, new_cam)} is at {new_cam} "
+                      f"now (was {old_cam})")
+                self._want_key = new_cam
+                s.setValue("live/camera_key", new_cam)
+        shutter = str(s.value("live/shutter", "") or "")
+        if shutter.startswith("usb:") and cb.split_key(shutter) is not None:
+            if shutter == old_cam and new_cam:
+                new_sh = new_cam
+            else:
+                new_sh = cb.relocate_key(shutter, found,
+                                         str(s.value("live/shutter_label", "") or ""))
+            if new_sh and new_sh != shutter:
+                s.setValue("live/shutter", new_sh)
 
     def _rebuild_camera_combo(self):
         self.camera_combo.clear()
@@ -1786,8 +1812,11 @@ class LiveCaptureMonitor(QWidget):
         if key is None:
             return
         if isinstance(key, str):
+            label = dict(self._usb_found).get(key, "")
             _settings().setValue("live/camera_key", key)
+            _settings().setValue("live/camera_label", label)
             _settings().setValue("live/shutter", key)      # its own shutter too
+            _settings().setValue("live/shutter_label", label)
             self._want_key = key
             self.feed.open_camera(key, self._video_format())
             return
@@ -1803,6 +1832,9 @@ class LiveCaptureMonitor(QWidget):
         elif kind == "open":
             if cb.split_key(text) is not None:
                 _settings().setValue("live/camera_key", text)
+                label = dict(self._usb_found).get(text, "")
+                if label:                          # known again after a re-plug
+                    _settings().setValue("live/camera_label", label)
             else:
                 try:
                     _settings().setValue("live/camera_index", int(text))
@@ -1811,6 +1843,9 @@ class LiveCaptureMonitor(QWidget):
                     pass
             self.canvas.set_message("Waiting for the first frame…")
             self._on_camera_connected()
+        elif kind == "none" and self._usb_found:
+            self.canvas.set_message(
+                "No camera open.\nPick yours in the Camera list below.")
         elif kind == "none":
             self.canvas.set_message(
                 "No camera found.\nCheck the capture device is plugged in and the camera "
@@ -3291,6 +3326,7 @@ class LiveCaptureMonitor(QWidget):
     def _on_shutter_chosen(self, i):
         key = self.shutter_combo.itemData(i)
         _settings().setValue("live/shutter", key)
+        _settings().setValue("live/shutter_label", dict(self._usb_found).get(key, ""))
         if (isinstance(key, str) and key.startswith("usb:")
                 and (getattr(self.usb, "key", None) != key or not self.usb.is_open())):
             self.usb.open(key)                   # as the shutter only: no live view asked

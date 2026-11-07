@@ -814,6 +814,54 @@ def test_remembered_usb_camera_is_opened_when_found(mon_usb):
     assert mon.camera_combo.currentText() == "USB · Canon EOS 5D Mark III"
 
 
+def test_a_replugged_camera_is_opened_under_its_new_port(mon_usb):
+    """libgphoto2's port carries the USB device number, which changes on every
+    re-plug: the user's GFX was listed and never opened (2026-11-07)."""
+    mon, feed, light, usb, mw, asked, lm = mon_usb
+    s = lm._settings()
+    s.setValue("live/camera_key", "usb:gphoto2:usb:001,004")
+    s.setValue("live/shutter", "usb:gphoto2:usb:001,004")
+    s.setValue("live/camera_label", "")              # before labels were kept
+    mon.find_cameras()
+    mon._on_cameras([])
+    usb.cameras_found.emit([("usb:gphoto2:usb:001,009", "USB · Fuji Fujifilm GFX100")])
+    _app.processEvents()
+    assert feed.log[-1] == ("open", "usb:gphoto2:usb:001,009", "auto")
+    assert s.value("live/camera_key") == "usb:gphoto2:usb:001,009"
+    assert s.value("live/shutter") == "usb:gphoto2:usb:001,009"
+    assert mon.shutter_combo.currentData() == "usb:gphoto2:usb:001,009"
+    mon._on_feed_status("open", "usb:gphoto2:usb:001,009")
+    assert s.value("live/camera_label") == "USB · Fuji Fujifilm GFX100"
+
+
+def test_a_replug_never_opens_another_model(mon_usb):
+    mon, feed, light, usb, mw, asked, lm = mon_usb
+    s = lm._settings()
+    s.setValue("live/camera_key", "usb:gphoto2:usb:001,004")
+    s.setValue("live/camera_label", "USB · Fuji Fujifilm GFX100")
+    mon.find_cameras()
+    mon._on_cameras([])
+    feed.log.clear()
+    usb.cameras_found.emit([("usb:gphoto2:usb:001,011", "USB · Canon EOS 5D Mark III")])
+    _app.processEvents()
+    assert not [e for e in feed.log if e[0] == "open"]
+    assert "Pick yours in the Camera list" in mon.canvas.message
+
+
+def test_relocate_key():
+    gfx, canon = "USB · Fuji Fujifilm GFX100", "USB · Canon EOS 5D Mark III"
+    a, b = "usb:gphoto2:usb:001,009", "usb:gphoto2:usb:001,010"
+    old = "usb:gphoto2:usb:001,004"
+    assert cb.relocate_key(old, [(old, gfx)]) == old                 # still there
+    assert cb.relocate_key(old, [(a, gfx)]) == a                     # the only one
+    assert cb.relocate_key(old, [(a, gfx), (b, canon)]) is None      # which? no label
+    assert cb.relocate_key(old, [(a, gfx), (b, canon)], canon) == b  # its label
+    assert cb.relocate_key(old, [(a, gfx), (b, gfx)], gfx) is None   # two alike
+    assert cb.relocate_key(old, [(a, canon)], gfx) is None           # another model
+    assert cb.relocate_key(old, [("usb:digicam:5D", gfx)]) is None   # another backend
+    assert cb.relocate_key("", [(a, gfx)]) == "" and cb.relocate_key("scanlight", []) == "scanlight"
+
+
 # --------------------------------------------------------------------------- #
 # the real libgphoto2, against its own virtual camera
 # --------------------------------------------------------------------------- #
