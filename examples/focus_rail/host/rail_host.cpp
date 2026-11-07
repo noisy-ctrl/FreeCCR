@@ -4,6 +4,9 @@
 //
 //   g++ -std=c++11 -O1 -I../arduino/FocusRail rail_host.cpp -o rail_host
 //   ./rail_host [SWITCH|STALL|NONE] [--realtime]
+//               [--belt <motor teeth> <screw teeth>] [--lead <mm>] [--microsteps <n>]
+//   (with --belt/--lead/--microsteps, STEPS_PER_MM and STEPS_PER_REV come from
+//   orp::screwStepsPerTurn, as FocusRail.ino computes them)
 //
 // Protocol lines go in on stdin, replies come out on stdout. Lines starting
 // with '#' are for the harness only:
@@ -86,16 +89,33 @@ static double nowMs() {
 int main(int argc, char** argv) {
   int mode = orp::HOME_SWITCH;
   bool realtime = false;
+  bool geared = false;
+  float motorTeeth = 1, screwTeeth = 1, lead = 8, micro = 16;
   for (int i = 1; i < argc; ++i) {
     if (!strcmp(argv[i], "NONE")) mode = orp::HOME_NONE;
     else if (!strcmp(argv[i], "STALL")) mode = orp::HOME_STALL;
     else if (!strcmp(argv[i], "SWITCH")) mode = orp::HOME_SWITCH;
     else if (!strcmp(argv[i], "--realtime")) realtime = true;
+    else if (!strcmp(argv[i], "--belt") && i + 2 < argc) {
+      motorTeeth = (float)atof(argv[++i]);
+      screwTeeth = (float)atof(argv[++i]);
+      geared = true;
+    } else if (!strcmp(argv[i], "--lead") && i + 1 < argc) {
+      lead = (float)atof(argv[++i]);
+      geared = true;
+    } else if (!strcmp(argv[i], "--microsteps") && i + 1 < argc) {
+      micro = (float)atof(argv[++i]);
+      geared = true;
+    }
   }
   orp::Config cfg;
   cfg.name = "Host Rail (simulated)";
   cfg.stepsPerMm = 400;
   cfg.stepsPerRev = 3200;
+  if (geared) {
+    cfg.stepsPerRev = orp::screwStepsPerTurn(200, micro, motorTeeth, screwTeeth);
+    cfg.stepsPerMm = cfg.stepsPerRev / lead;
+  }
   cfg.hasLimits = true;
   cfg.minPos = 0;
   cfg.maxPos = 40000;

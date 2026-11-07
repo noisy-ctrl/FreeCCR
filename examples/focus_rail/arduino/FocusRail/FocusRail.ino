@@ -6,7 +6,9 @@
 //
 // Libraries (Arduino Library Manager): FastAccelStepper (hardware-timed step
 // pulses with acceleration) and TMCStepper (the TMC2209's UART settings).
-// Board: any ESP32 (DevKit with a CP2102/CH340, or an S3 on its native USB).
+// Board: an ESP32-S3 (DevKitC-1, e.g. the N16R8) or a classic ESP32 DevKit;
+// the pins below follow whichever you compile for. The step-by-step guide,
+// with a wiring table and a first test, is examples/focus_rail/README.md.
 //
 // Wiring, in short (check your driver board's pinout):
 //   ESP32 STEP_PIN -> TMC2209 STEP      ESP32 DIR_PIN -> DIR
@@ -33,31 +35,58 @@
 
 // ---- your rail ----------------------------------------------------------
 #define RAIL_NAME "DIY Focus Rail (ESP32 + TMC2209)"
-#define FULL_STEPS_PER_REV 200      // a 1.8 degree NEMA 17
+#define FULL_STEPS_PER_REV 200      // a 1.8 degree NEMA 17 (pancake ones too)
 #define MICROSTEPS 16               // interpolated to 256 inside the TMC2209
 #define LEAD_MM 4.0f                // mm per screw turn. A ball screw's code ends in
                                     // it: SFU1204 = 4, SFU1605 = 5, SFU1610 = 10
                                     // (a T8x8 lead screw = 8, T8x2 = 2)
+// A belt between the motor and the screw: the teeth on each pulley (1 and 1
+// for a coupler straight onto the screw). The motor turns SCREW / MOTOR times
+// per screw turn, so a BIG pulley on the SCREW gives finer steps and more
+// torque there: 20 on the motor and 30 on the screw = 1200 steps a mm, 0.83 um
+// a step, 1.5 times the motor's torque at the screw. (The other way round, 30
+// on the motor and 20 on the screw, is 533.3 a mm, 1.9 um a step and 2/3 of
+// the torque.) These must match the pulleys fitted, or FreeCCR's millimetres
+// and the autofocus distances will be wrong.
+#define MOTOR_PULLEY_TEETH 20
+#define SCREW_PULLEY_TEETH 30
 #define SCREW_LENGTH_MM 300.0f      // the screw's whole length: HOME gives up after this
 #define TRAVEL_MM 200.0f            // soft limit from home (applies once homed). A 300 mm
                                     // SFU1204 leaves roughly 200 mm of stroke once its end
                                     // blocks and the nut are on: measure yours and set it
                                     // a little short of the far end
-#define RUN_CURRENT_MA 600          // RMS; a small NEMA 17 is happy at 400-800
-#define HOLD_FRACTION 0.5f          // current while standing still
-#define INVERT_DIR false            // true if HOME runs away from the end
-#define SPEED_MM_S 8.0f             // normal moves
-#define ACCEL_MM_S2 50.0f
+#define RUN_CURRENT_MA 600          // RMS. Never above the current on the motor's label;
+                                    // a pancake NEMA 17 is usually rated about 1 A
+#define HOLD_FRACTION 0.5f          // current while standing still: it holds the camera
+                                    // up through the belt. Raise it (up to 1.0) if the
+                                    // camera creeps down when the rail stops
+#define INVERT_DIR false            // true if a + move takes the camera the wrong way
+#define SPEED_MM_S 2.0f             // normal moves: half a turn of a 4 mm screw a second
+#define ACCEL_MM_S2 10.0f
+#define MAX_SPEED_MM_S 10.0f        // the fastest FreeCCR's SPEED may ask for
 
 // How HOME finds zero: orp::HOME_SWITCH, orp::HOME_STALL or orp::HOME_NONE
 // (none: no HOME; use Set Zero in FreeCCR). Undecided? Start with HOME_NONE.
 #define HOME_MODE orp::HOME_NONE
-#define HOME_FAST_MM_S 4.0f
-#define HOME_SLOW_MM_S 0.5f
+#define HOME_FAST_MM_S 2.0f
+#define HOME_SLOW_MM_S 0.25f
 #define HOME_BACKOFF_MM 0.5f
 #define STALL_THRESHOLD 60          // SGTHRS for stall homing: higher = stops sooner
 
-// ---- pins (an ESP32 DevKit; keep off the strapping pins 0, 2, 5, 12, 15) ---
+// ---- pins ---------------------------------------------------------------
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+// ESP32-S3 DevKitC-1 (N16R8 and the rest): all on the headers, and clear of
+// what the module uses: 26-32 (flash), 35-37 (octal PSRAM on R8 modules), the
+// strapping pins 0, 3, 45, 46, USB 19/20, UART0 43/44 and the RGB LED (38/48).
+#define STEP_PIN 4
+#define DIR_PIN 5
+#define EN_PIN 6
+#define TMC_TX_PIN 17               // UART1's usual pins on an S3
+#define TMC_RX_PIN 18
+#define DIAG_PIN 7
+#define SWITCH_PIN 15               // has a pull-up
+#else
+// A classic ESP32 DevKit (keep off the strapping pins 0, 2, 5, 12, 15).
 #define STEP_PIN 25
 #define DIR_PIN 26
 #define EN_PIN 27
@@ -65,14 +94,19 @@
 #define TMC_TX_PIN 17
 #define DIAG_PIN 34                 // input only, fine for DIAG
 #define SWITCH_PIN 33               // has a pull-up
+#endif
 #define R_SENSE 0.11f               // most TMC2209 boards
 #define DRIVER_ADDRESS 0b00
 
-static const float STEPS_PER_MM = FULL_STEPS_PER_REV * MICROSTEPS / LEAD_MM;
+// steps per turn of the screw, through the belt, and per millimetre
+static const float STEPS_PER_REV = orp::screwStepsPerTurn(
+    FULL_STEPS_PER_REV, MICROSTEPS, MOTOR_PULLEY_TEETH, SCREW_PULLEY_TEETH);
+static const float STEPS_PER_MM = STEPS_PER_REV / LEAD_MM;
 
 FastAccelStepperEngine engine;
 FastAccelStepper* stepper = nullptr;
-TMC2209Stepper driver(&Serial2, R_SENSE, DRIVER_ADDRESS);
+#define TMCSerial Serial1            // UART1: every ESP32 has it (Serial2 not on all)
+TMC2209Stepper driver(&TMCSerial, R_SENSE, DRIVER_ADDRESS);
 bool driverAnswers = false;
 
 class HwMotor : public orp::Motor {
@@ -118,7 +152,7 @@ static orp::Config makeConfig() {
   orp::Config c;
   c.name = RAIL_NAME;
   c.stepsPerMm = STEPS_PER_MM;
-  c.stepsPerRev = FULL_STEPS_PER_REV * MICROSTEPS;
+  c.stepsPerRev = STEPS_PER_REV;
   c.hasLimits = HOME_MODE != orp::HOME_NONE;
   c.minPos = 0;
   c.maxPos = (int32_t)(TRAVEL_MM * STEPS_PER_MM);
@@ -128,17 +162,20 @@ static orp::Config makeConfig() {
   c.homeBackoff = (int32_t)(HOME_BACKOFF_MM * STEPS_PER_MM);
   c.homeMaxTravel = (int32_t)(SCREW_LENGTH_MM * STEPS_PER_MM);   // from anywhere on it
   c.homeIgnoreSteps = (int32_t)(0.5f * STEPS_PER_MM);   // the stall flag while it starts
-  c.maxSps = (uint32_t)(20.0f * STEPS_PER_MM);
-  c.maxAccel = (uint32_t)(500.0f * STEPS_PER_MM);
+  c.maxSps = (uint32_t)(MAX_SPEED_MM_S * STEPS_PER_MM);
+  c.maxAccel = (uint32_t)(100.0f * STEPS_PER_MM);
   c.defaultSps = (uint32_t)(SPEED_MM_S * STEPS_PER_MM);
   c.defaultAccel = (uint32_t)(ACCEL_MM_S2 * STEPS_PER_MM);
   c.statusEveryMs = 200;
   return c;
 }
 
-static void setupDriver() {
-  Serial2.begin(115200, SERIAL_8N1, TMC_RX_PIN, TMC_TX_PIN);
-  driver.begin();
+// The TMC2209 only answers on its UART while its motor supply (VM) is on, and
+// forgets these settings when VM goes off (it then microsteps by its MS1/MS2
+// pins: 1/8 with both to GND, which would halve every distance). So they are
+// written whenever it starts answering, or reports that it was reset, and
+// checked once a second (superviseDriver).
+static void writeDriverSettings() {
   driver.pdn_disable(true);       // PDN_UART is the UART, not power-down
   driver.I_scale_analog(false);   // current from the register, not VREF
   driver.mstep_reg_select(true);  // microsteps from the register, not MS1/MS2
@@ -152,7 +189,23 @@ static void setupDriver() {
   driver.TPWMTHRS(0);             // StealthChop at every speed
   driver.TCOOLTHRS(0xFFFFF);      // stall flag (DIAG) at every speed
   driver.SGTHRS(STALL_THRESHOLD);
+  driver.GSTAT(0b111);            // clear "reset" so the next one shows
+}
+
+static void setupDriver() {
+  TMCSerial.begin(115200, SERIAL_8N1, TMC_RX_PIN, TMC_TX_PIN);
+  driver.begin();
   driverAnswers = driver.test_connection() == 0;
+  if (driverAnswers) writeDriverSettings();
+}
+
+static void superviseDriver(uint32_t now) {
+  static uint32_t last = 0;
+  if (now - last < 1000) return;
+  last = now;
+  bool ok = driver.test_connection() == 0;
+  if (ok && (!driverAnswers || (driver.GSTAT() & 0b001))) writeDriverSettings();
+  driverAnswers = ok;             // STATUS says DRIVER=0 while it doesn't answer
 }
 
 void setup() {
@@ -179,4 +232,5 @@ void loop() {
     core->feed(&b, 1, now);
   }
   core->loop(now);
+  superviseDriver(now);
 }
