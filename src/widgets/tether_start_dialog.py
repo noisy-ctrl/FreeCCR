@@ -1,6 +1,7 @@
 """The one window that starts Hot Folder Tether (spec/tether-start-window.md).
 
-Folder, what is being scanned, and the two choices that used to be separate
+Folder, what is being scanned (three picture tiles,
+spec/scan-type-tiles.md), and the two choices that used to be separate
 questions (close the open images, import the files already in the folder),
 in short words. `TetherStartDialog.options()` returns the answers; the main
 window acts on them.
@@ -8,7 +9,7 @@ window acts on them.
 import os
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox,
+from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox,
                                QFileDialog, QGridLayout, QHBoxLayout, QLabel,
                                QLineEdit, QPushButton, QVBoxLayout)
 
@@ -26,6 +27,19 @@ def count_supported(folder):
 
 
 class TetherStartDialog(QDialog):
+    # Capture's `light_dialog` sets this to the light look's recolouring; the
+    # scan-type tiles paint through it (spec/scan-type-tiles.md).
+    @property
+    def restyle(self):
+        return getattr(self, "_restyle", None) or (lambda qss: qss)
+
+    @restyle.setter
+    def restyle(self, fn):
+        self._restyle = fn
+        tiles = getattr(self, "scan_tiles", None)
+        if tiles is not None:
+            tiles.set_colour(fn)
+
     def __init__(self, parent=None, n_open=0, folder="", scan_type="colour",
                  from_monitor=False, chooser=None):
         super().__init__(parent)
@@ -51,13 +65,9 @@ class TetherStartDialog(QDialog):
         row.addWidget(self.choose_btn)
         grid.addLayout(row, 0, 1)
         grid.addWidget(QLabel("Scanning"), 1, 0, Qt.AlignRight)
-        from core import scan_type as st
-        self.scan_combo = QComboBox()
-        for t in st.SCAN_TYPES:
-            self.scan_combo.addItem(st.LABELS[t], t)
-        i = self.scan_combo.findData(st.clean(scan_type))
-        self.scan_combo.setCurrentIndex(max(0, i))
-        grid.addWidget(self.scan_combo, 1, 1)
+        from widgets.scan_type_tiles import ScanTypeTiles
+        self.scan_tiles = ScanTypeTiles(scan_type, colour=self.restyle)
+        grid.addWidget(self.scan_tiles, 1, 1)
         lay.addLayout(grid)
 
         n = self._n_open
@@ -101,7 +111,7 @@ class TetherStartDialog(QDialog):
     def options(self, started):
         return {"start": bool(started),
                 "folder": self.folder_edit.text(),
-                "scan_type": self.scan_combo.currentData(),
+                "scan_type": self.scan_tiles.currentData(),
                 "close_open": self._n_open > 0 and self.close_box.isChecked(),
                 "import_existing": (not self.import_box.isHidden()) and self.import_box.isChecked(),
                 "dont_ask": (not self.dont_ask_box.isHidden()) and self.dont_ask_box.isChecked()}

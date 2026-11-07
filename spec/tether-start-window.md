@@ -18,6 +18,8 @@ the folder."), then:
   folder is set.
 - **Scanning** [Colour · white light / Colour · trichrome / Black & white]
   — the app-wide scan type, set on Start (`MainWindow.set_scan_type`).
+  Since 2026-11-07 three picture tiles, RGB / White light / B&W
+  (`spec/scan-type-tiles.md`).
 - ☐ **Close the N open images first** — only with images open; unticked
   (adding is the default). Closing = `_close_session_for_tether` (edits
   saved, restored on reopening).

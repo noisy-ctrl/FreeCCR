@@ -39,7 +39,7 @@ def test_the_window_shows_only_the_choices_that_apply(tmp_path):
     assert not dlg.start_btn.isEnabled()                 # no folder yet
     assert dlg.close_box.isHidden() and dlg.import_box.isHidden()
     assert dlg.dont_ask_box.isHidden()
-    assert dlg.scan_combo.currentData() == "trichrome"
+    assert dlg.scan_tiles.currentData() == "trichrome"
     dlg.choose_btn.click()
     assert dlg.start_btn.isEnabled() and dlg.import_box.isHidden()   # empty folder
     _png(roll / "a.png")
