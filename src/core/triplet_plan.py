@@ -136,15 +136,46 @@ def rescue_weak_frames(colours, shares, pictures, reach=2):
     return out, rescued
 
 
-def plan_triplets(paths, shares_fn=None, quality=frame_quality, workers=None):
-    """Plan the merge of `paths` (any order, any count). `shares_fn(path)`
-    returns a `scan_type.LightReading` (the default, `read_light`) or plain
-    shares."""
+def natural_key(path):
+    """A file name as a person reads it: 'DSCF0002_2' before 'DSCF0002_10'."""
+    import re
+    name = os.path.basename(path).lower()
+    parts = re.split(r"(\d+)", name)
+    return (tuple((1, int(t), "") if t.isdigit() else (0, 0, t) for t in parts if t),
+            os.path.normcase(path))
+
+
+def capture_order(paths, time_fn=None, workers=1):
+    """`paths` in the order they were SHOT (revision 2026-11-07): by each
+    file's EXIF capture time when every file has one, the name read
+    naturally breaking ties; otherwise in natural name order. Name order
+    alone interleaved shots: a camera whose counter restarted gives
+    DSCF0001.raf, DSCF0001_1.raf, ... (the tether's "_1 on a name clash"),
+    so DSCF0001 of every session came first, then every DSCF0002."""
+    paths = list(paths)
+    time_fn = time_fn or st.capture_time
+    if workers > 1 and len(paths) > 1:
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            times = list(ex.map(time_fn, paths))
+    else:
+        times = [time_fn(p) for p in paths]
+    if paths and all(times):
+        when = dict(zip(paths, times))
+        return sorted(paths, key=lambda p: (when[p], natural_key(p)))
+    return sorted(paths, key=natural_key)
+
+
+def plan_triplets(paths, shares_fn=None, quality=frame_quality, workers=None,
+                  time_fn=None):
+    """Plan the merge of `paths` (any order, any count), taken in the order
+    they were shot (`capture_order`; `time_fn(path)` gives a capture time or
+    None, default `scan_type.capture_time`). `shares_fn(path)` returns a
+    `scan_type.LightReading` (the default, `read_light`) or plain shares."""
     shares_fn = shares_fn or st.read_light
-    ordered = sorted(paths, key=lambda p: (os.path.basename(p).lower(), os.path.normcase(p)))
     # Four readers at most: each holds a whole RAW while it reads (~100 MB for
     # 50 MP), and on a 2-core machine more threads were slower (measured).
     workers = workers or max(1, min(4, os.cpu_count() or 1))
+    ordered = capture_order(paths, time_fn, workers)
     if workers > 1 and len(ordered) > 1:
         with ThreadPoolExecutor(max_workers=workers) as ex:
             readings = list(ex.map(shares_fn, ordered))

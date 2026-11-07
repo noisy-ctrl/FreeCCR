@@ -291,6 +291,34 @@ def read_light(path):
         return LightReading(None, None)
 
 
+def capture_time(path):
+    """When a RAW was shot: (EXIF DateTimeOriginal, SubSecTimeOriginal padded
+    to 6 digits) as sortable text, or None. A Fujifilm RAF keeps its EXIF in
+    the embedded preview JPEG, which is read directly (exifread doesn't find
+    it in the RAF container); other RAWs are TIFF-based and read whole."""
+    try:
+        import io
+        import struct
+        import exifread
+        with open(path, "rb") as f:
+            head = f.read(100)
+            tags = {}
+            if head[:16] == b"FUJIFILMCCD-RAW ":
+                off, ln = struct.unpack(">II", head[84:92])
+                f.seek(off)
+                tags = exifread.process_file(io.BytesIO(f.read(ln)), details=False)
+            if "EXIF DateTimeOriginal" not in tags:
+                f.seek(0)
+                tags = exifread.process_file(f, details=False)
+        when = str(tags.get("EXIF DateTimeOriginal", "")).strip()
+        if not when or when.startswith("0000"):
+            return None
+        sub = str(tags.get("EXIF SubSecTimeOriginal", "")).strip()
+        return (when, sub[:6].ljust(6, "0") if sub.isdigit() else "000000")
+    except Exception:
+        return None
+
+
 def light_shares(path):
     """(R, G, B) shares of the RAW mosaic (see `read_light`), or None."""
     return read_light(path).shares
