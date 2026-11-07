@@ -20,6 +20,12 @@ remove an entry when it ships.
   is only worth reviving if the guide should ever place itself again.
 
 ## Known, not yet fixed
+- **The sharpness meter's "New frame: best reset" doesn't fire on 35 mm in
+  the user's carrier** (found 2026-11-07 on his recording): the feed's
+  `NewFrameDetector` compares 64 × 36 thumbnails of the whole view, which
+  the strip dominates (holes, film edges, mask); two frames still
+  correlate 0.87 against its 0.40. The guide's snap uses its own
+  `SettleWatch` instead. A fix would look inside the frame guide only.
 - **Hot Folder Tether: one missed or extra frame shifts every following
   triplet** (2026-11-02): it takes new RAWs three at a time in name order, so
   after a missed frame each triplet is R2 G2 R3, … and is held as "Not red,
