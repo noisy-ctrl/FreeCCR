@@ -14,6 +14,13 @@ the film inside the opening. So the guide follows the OPENING:
   solves a scale about the view's centre plus a shift from the sides seen
   now, and maps your guide through it. Steady: a median of the last few
   solutions and a dead band, and a large jump only on two agreeing finds.
+- Snapping to a new frame (revision 2): winding on moves the film, not the
+  carrier, so a new frame can land a little along from the last one. When
+  you place the guide, `frame_edges` finds the frame's own edges beside each
+  side (where the clear film between frames, or the rebate, meets the
+  picture) and the tracker remembers how far inside them you put each side;
+  `GuideTracker.snap(frame)` finds them again once a new frame has settled
+  and moves the guide to keep those margins.
 
 Qt-free; numpy + OpenCV.
 """
@@ -223,6 +230,178 @@ def find_opening(bgr):
 
 
 # --------------------------------------------------------------------------- #
+# the frame's own edges (revision 2: snapping to a new frame)
+# --------------------------------------------------------------------------- #
+EDGE_SIDE = 1280          # px: the long side edges are read at (at most)
+EDGE_OUT = 0.10           # look this far outside each side of the guide ...
+EDGE_IN = 0.06            # ... and this far inside it (of its size on that axis)
+EDGE_SPAN = 0.8           # along a side: its middle 80 % (clear of the corners)
+EDGE_FLAT = 0.06          # a line of clear film is this even (IQR / median) ...
+EDGE_BASE_TOL = 0.06      # ... within this of the brightest even line ...
+EDGE_GAP_MIN = 3          # ... and at least this many lines (px) deep
+EDGE_STEP = 0.12          # the picture beside it at least this much darker
+SNAP_REACH = 0.08         # a new frame's edge is looked for this far either way
+SNAP_AGREE = 0.004        # two sides of an axis agree within this (of the view)
+SNAP_MAX = 0.08           # a snap moves at most this (of the guide's size)
+SNAP_MIN = 0.0005         # a smaller move isn't one
+SNAP_TURN_MAX = 3.0       # degrees: a guide turned more than this isn't snapped
+
+
+def guide_side(g, side):
+    """A guide's side as a view fraction (x for left/right, y for top/bottom)."""
+    if side in X_SIDES:
+        return float(g["cx"]) + (0.5 if side == "right" else -0.5) * float(g["w"])
+    return float(g["cy"]) + (0.5 if side == "bottom" else -0.5) * float(g["h"])
+
+
+def _edge_lines(v, box, side, lo, hi):
+    """The lines (columns for left/right, rows for top/bottom) from `lo` to
+    `hi` (px) across the middle of the guide's side, outermost first:
+    [(position, samples)]."""
+    x0, y0, x1, y1 = box
+    h, w = v.shape
+    if side in X_SIDES:
+        a = int(round(y0 + (1 - EDGE_SPAN) / 2 * (y1 - y0)))
+        b = int(round(y1 - (1 - EDGE_SPAN) / 2 * (y1 - y0)))
+        a, b = max(0, a), min(h, b)
+        pos = [p for p in range(int(np.floor(lo)), int(np.ceil(hi)) + 1) if 0 <= p < w]
+        if b - a < 8 or not pos:
+            return []
+        block = v[a:b][:, pos]
+        out = [(p, block[:, i]) for i, p in enumerate(pos)]
+    else:
+        a = int(round(x0 + (1 - EDGE_SPAN) / 2 * (x1 - x0)))
+        b = int(round(x1 - (1 - EDGE_SPAN) / 2 * (x1 - x0)))
+        a, b = max(0, a), min(w, b)
+        pos = [p for p in range(int(np.floor(lo)), int(np.ceil(hi)) + 1) if 0 <= p < h]
+        if b - a < 8 or not pos:
+            return []
+        block = v[pos][:, a:b]
+        out = [(p, block[i]) for i, p in enumerate(pos)]
+    return out[::-1] if side in ("right", "bottom") else out
+
+
+def _edge(v, box, side, vmax, lo, hi):
+    """Where clear film (the gap between frames, or the rebate) meets the
+    picture, coming in from outside along `side`, in px; None when there is
+    no clear film in the band or no step from it to the picture."""
+    lines = _edge_lines(v, box, side, lo, hi)
+    if len(lines) < EDGE_GAP_MIN + 4:
+        return None
+    med = np.array([float(np.median(smp)) for _p, smp in lines])
+    q = np.array([float(np.subtract(*np.percentile(smp, (75, 25)))) for _p, smp in lines])
+    flat = (q <= EDGE_FLAT * np.maximum(med, 1.0)) & (med >= 0.3 * vmax)
+    if not flat.any():
+        return None
+    base_level = float(med[flat].max())
+    base = flat & (med >= base_level * (1 - EDGE_BASE_TOL))
+    run = 0
+    for k in range(len(lines)):
+        if base[k]:
+            run += 1
+            continue
+        if run >= EDGE_GAP_MIN:
+            pic = float(np.median(med[k:k + 6]))
+            if base_level - pic < EDGE_STEP * base_level:
+                return None              # the picture is as clear as the film
+            mid = 0.5 * (base_level + pic)
+            for j in range(k, min(len(lines), k + 4)):
+                if med[j] <= mid:
+                    a, b = med[j - 1], med[j]
+                    f = (a - mid) / max(1e-6, a - b)
+                    p0, p1 = lines[j - 1][0], lines[j][0]
+                    return p0 + f * (p1 - p0) + 0.5      # line centre -> boundary
+            return None
+        run = 0
+    return None
+
+
+def frame_edges(bgr, guide, expect=None):
+    """The frame's edges beside each side of `guide` (view fractions), as
+    {side: position} for the sides where one was found. Without `expect`,
+    each side is looked for from EDGE_IN inside the guide to EDGE_OUT outside;
+    with `expect` ({side: position}), within SNAP_REACH of it."""
+    if bgr is None:
+        return {}
+    a = np.asarray(bgr)
+    h0, w0 = a.shape[:2]
+    k = EDGE_SIDE / float(max(h0, w0))
+    if k < 1.0:
+        a = cv2.resize(a, (max(1, int(round(w0 * k))), max(1, int(round(h0 * k)))),
+                       interpolation=cv2.INTER_AREA)
+    v = _max3(a).astype(np.float32)
+    h, w = v.shape
+    vmax = float(np.percentile(v, 99.5))
+    if vmax <= 0:
+        return {}
+    box = ((guide["cx"] - guide["w"] / 2) * w, (guide["cy"] - guide["h"] / 2) * h,
+           (guide["cx"] + guide["w"] / 2) * w, (guide["cy"] + guide["h"] / 2) * h)
+    out = {}
+    for side in SIDES:
+        n = w if side in X_SIDES else h
+        size = (box[2] - box[0]) if side in X_SIDES else (box[3] - box[1])
+        if expect is not None:
+            if side not in expect:
+                continue
+            c = expect[side] * n
+            lo, hi = c - SNAP_REACH * size, c + SNAP_REACH * size
+        else:
+            edge = guide_side(guide, side) * n
+            outward = 1 if side in ("right", "bottom") else -1
+            lo, hi = sorted((edge - EDGE_IN * size * outward, edge + EDGE_OUT * size * outward))
+        e = _edge(v, box, side, vmax, lo, hi)
+        if e is not None:
+            out[side] = e / n
+    return out
+
+
+MOVE_MAD = 3.0            # 8-bit levels between two looks: the picture moved ...
+STILL_MAD = 2.5           # ... under this it is still ...
+SETTLE_LOOKS = 3          # ... for this many looks in a row (0.75 s at 4 a second)
+
+
+class SettleWatch:
+    """The picture moved and has settled: `update(frame)` with each look
+    (Capture looks 4 times a second) is True once, when a movement has been
+    followed by SETTLE_LOOKS still looks. Measured on the user's recordings
+    (64 × 36 grey thumbnails, mean difference between looks): still < 2.5,
+    focusing 3–9, winding on 15–33. The feed's new-frame test can't serve:
+    on 35 mm the strip (holes, film edges, mask) dominates and two frames
+    still correlate 0.87."""
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.last, self.moved, self.still = None, False, 0
+
+    def update(self, frame):
+        if frame is None:
+            return False
+        a = np.asarray(frame)
+        g = cv2.cvtColor(a, cv2.COLOR_BGR2GRAY) if a.ndim == 3 else a
+        th = cv2.resize(g, (64, 36), interpolation=cv2.INTER_AREA).astype(np.float32)
+        last, self.last = self.last, th
+        if last is None or last.shape != th.shape:
+            return False
+        mad = float(np.mean(np.abs(th - last)))
+        if mad >= MOVE_MAD:
+            self.moved, self.still = True, 0
+            return False
+        self.still = self.still + 1 if mad < STILL_MAD else 0
+        if self.moved and self.still >= SETTLE_LOOKS:
+            self.moved, self.still = False, 0
+            return True
+        return False
+
+
+def edge_relation(frame, guide):
+    """{side: how far inside the frame's edge the guide's side is} (view
+    fractions, signed: guide side minus edge) for the sides with an edge."""
+    return {s: guide_side(guide, s) - e for s, e in frame_edges(frame, guide).items()}
+
+
+# --------------------------------------------------------------------------- #
 # following
 # --------------------------------------------------------------------------- #
 def solve(ref, now, last=(1.0, 0.0, 0.0)):
@@ -277,6 +456,7 @@ class GuideTracker:
         self.reset()
 
     def reset(self):
+        self.rel = {}                    # side -> guide side minus the frame's edge
         self.ref_guide = None
         self.ref = None
         self.shown = None
@@ -296,12 +476,46 @@ class GuideTracker:
             return "Not following: no edge of the carrier in view"
         return ""
 
-    def anchor(self, guide, opening=None):
+    def anchor(self, guide, opening=None, frame=None):
+        """Follow `guide` from here: `opening` (seen now) is the reference,
+        and with `frame` (the live picture now) the frame's edges beside it
+        are found, for snapping to the next frame."""
+        self._set_reference(guide, opening)
+        self.rel = edge_relation(frame, guide) if frame is not None else {}
+
+    def _set_reference(self, guide, opening):
         self.ref_guide = dict(guide)
         self.shown = dict(guide)
         self.hist, self.last, self.pending, self.misses = [], (1.0, 0.0, 0.0), None, 0
         self.ref = dict(opening.sides) if (opening is not None and opening.sides) else None
         self.state = "following" if self.ref else "waiting"
+
+    def snap(self, frame, opening=None):
+        """A new frame has settled: find its edges where the margins you set
+        put them and move the guide to keep the margins (each axis from the
+        sides found; two sides of an axis must agree). The guide moved (it is
+        also the new reference), or None."""
+        g = self.shown
+        if not self.rel or g is None or frame is None:
+            return None
+        if abs(float(g.get("angle") or 0.0)) > SNAP_TURN_MAX:
+            return None
+        expect = {s: guide_side(g, s) - d for s, d in self.rel.items()}
+        found = frame_edges(frame, g, expect=expect)
+        move = []
+        for axis, size in ((X_SIDES, float(g["w"])), (Y_SIDES, float(g["h"]))):
+            shifts = [found[s] + self.rel[s] - guide_side(g, s) for s in axis if s in found]
+            if not shifts or (len(shifts) == 2 and abs(shifts[0] - shifts[1]) > SNAP_AGREE):
+                move.append(0.0)
+                continue
+            d = float(np.mean(shifts))
+            move.append(d if abs(d) <= SNAP_MAX * size else 0.0)
+        dx, dy = move
+        if max(abs(dx), abs(dy)) < SNAP_MIN:
+            return None
+        new = dict(g, cx=float(g["cx"]) + dx, cy=float(g["cy"]) + dy)
+        self._set_reference(new, opening)            # the margins (rel) stay yours
+        return dict(new)
 
     def _missed(self):
         self.misses += 1

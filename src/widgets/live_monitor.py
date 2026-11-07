@@ -1086,6 +1086,7 @@ class LiveCaptureMonitor(QWidget):
         self.canvas.guide_changed.connect(lambda g: self._guide_placed_by_hand())
         # your guide, kept on the frame (spec/guide-follow-and-crop.md §1-2)
         self._tracker = guide_tracker.GuideTracker()
+        self._settle = guide_tracker.SettleWatch()   # moved, then still: snap onto the frame
         self._guide_auto = _settings().value("live/guide_auto", True) not in (
             False, "false", "0", 0)
         self._guide_placed = False       # placed by hand this session
@@ -1452,9 +1453,13 @@ class LiveCaptureMonitor(QWidget):
         follow.setCheckable(True)
         follow.setChecked(self._guide_auto)
         follow.setToolTip("The guide stays where you put it on the frame and moves with the "
-                          "frame as focusing changes its size or position. Winding on "
-                          "doesn't move it: it follows the carrier's opening.")
+                          "frame as focusing changes its size or position. When you wind on "
+                          "and the new frame settles, it moves onto that frame, keeping the "
+                          "margins you set inside the frame's edges.")
         follow.triggered.connect(lambda on: self.set_guide_auto(bool(on)))
+        snap = m.addAction("Snap to the Frame", lambda: self._snap_guide(by_hand=True))
+        snap.setEnabled(self._guide_auto)
+        snap.setToolTip("Move the guide onto the frame in view now, keeping your margins.")
         m.addSeparator()
         fmt = self.canvas.guide.get("format")
         sub = m.addMenu("Format")
@@ -1518,8 +1523,36 @@ class LiveCaptureMonitor(QWidget):
         """Follow the guide as it is now: the opening seen now is its
         reference (or the next one seen, when none is in view)."""
         frame = None if self.magnified() else self.feed.last_full_frame()
-        self._tracker.anchor(dict(self.canvas.guide), guide_tracker.find_opening(frame))
+        self._tracker.anchor(dict(self.canvas.guide), guide_tracker.find_opening(frame),
+                             frame=frame)        # its margins inside the frame's edges
         self.canvas.set_guide_waiting(None)
+
+    def _snap_guide(self, by_hand=False):
+        """The picture moved and settled (or Snap to the Frame): move the guide
+        onto the frame, keeping the margins you set inside the frame's edges
+        (spec/guide-follow-and-crop.md revision 2). True when it moved."""
+        if (not self._guide_auto or not self.actions["guide"].isChecked()
+                or self.magnified() or self._sleeping is not None
+                or self._measure is not None or self.sequence.running):
+            return False
+        frame = self.feed.last_full_frame()
+        if frame is None:
+            return False
+        if not self._tracker.rel:
+            if by_hand:
+                self._note_caption("No edge of the frame showed beside the guide when it "
+                                   "was placed, so it can't snap: place it on the frame again.")
+            return False
+        g = self._tracker.snap(frame, guide_tracker.find_opening(frame))
+        if g is None:
+            if by_hand:
+                self._note_caption("The guide is on the frame (or the frame's edges can't "
+                                   "be seen).")
+            return False
+        self.canvas.set_guide(dict(g, format=self.canvas.guide.get("format")))
+        self.canvas.set_guide_waiting(None)
+        self._note_caption("The frame guide moved onto the new frame.")
+        return True
 
     def _guide_placed_by_hand(self):
         """You placed the guide: following (when on) keeps it there from now
@@ -1563,6 +1596,8 @@ class LiveCaptureMonitor(QWidget):
         if g is not None:
             self.canvas.set_guide(dict(g, format=self.canvas.guide.get("format")))
         self.canvas.set_guide_waiting(self._tracker.reason or None)
+        if self._settle.update(frame):
+            self._snap_guide()                   # the picture moved and settled
 
     def _set_guide_format(self, key):
         g = dict(self.canvas.guide)

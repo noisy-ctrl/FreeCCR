@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 import cv2  # noqa: E402
 import numpy as np  # noqa: E402
+import pytest  # noqa: E402
 
 from core import guide_tracker as gt  # noqa: E402
 
@@ -198,3 +199,144 @@ def test_solve_by_pairs_and_single_sides():
     s, dx, dy, n = gt.solve(one, {"left": REF["left"] + 0.01}, last=(1.0, 0.0, 0.003))
     assert s == 1.0 and abs(dx - 0.01) < 1e-9 and dy == 0.003 and n == 1
     assert gt.solve({"left": 0.1}, {"top": 0.1}) is None
+
+
+# --------------------------------------------------------------------------- #
+# revision 2: snapping to a new frame
+# --------------------------------------------------------------------------- #
+PITCH_W, GAP = 900, 40           # a 35 mm frame and the clear film between frames
+FILM_Y = (22, 757)               # the film's edges (the carrier is wider)
+PIC_Y = (90, 690)                # the picture between the rebates
+ENDS = (27, 986)                 # the carrier's ends
+X0 = 67                          # the first frame's left edge, unwound
+
+
+def strip(offset=0, ends=ENDS, noise=0.0, clear_left=False, seed=5):
+    """A 35 mm strip in a carrier as the live view sees it: black outside the
+    film and past the carrier's ends, orange base, sprocket holes top and
+    bottom, frames of picture with clear film between them; moved `offset`
+    px along the strip (frame k is a picture of its own)."""
+    img = np.zeros((H, W, 3), np.float32)
+    base = np.array((65, 139, 230), np.float32)
+    img[FILM_Y[0]:FILM_Y[1], ends[0]:ends[1]] = base
+    for k in range(-3, 4):
+        x0 = X0 + k * (PITCH_W + GAP) + offset
+        rng = np.random.default_rng(seed + k)
+        pic = np.empty((PIC_Y[1] - PIC_Y[0], PITCH_W, 3), np.float32)
+        pic[:] = base * 0.55
+        for _ in range(60):
+            cx, cy = rng.integers(0, PITCH_W), rng.integers(0, PIC_Y[1] - PIC_Y[0])
+            lv = float(rng.uniform(0.3, 0.8))
+            cv2.circle(pic, (int(cx), int(cy)), int(rng.integers(10, 70)), tuple(float(c) for c in base * lv), -1)
+        if clear_left and k == 1:
+            pic[:, :40] = base * 0.97                # a shadow as clear as the film
+        pic = cv2.GaussianBlur(pic, (0, 0), 1.5)
+        a, b = max(0, x0), min(W, x0 + PITCH_W)
+        if b > a:
+            img[PIC_Y[0]:PIC_Y[1], a:b] = pic[:, a - x0:b - x0]
+    pitch = (PITCH_W + GAP) / 8.0
+    for i in range(-30, 60):
+        hx = int(round(X0 - 20 + i * pitch + offset))
+        for y0 in (32, 712):
+            img[y0:y0 + 34, max(0, hx):max(0, hx + 22)] = (235, 242, 243)
+    img[:, :ends[0]] = 3.0
+    img[:, ends[1]:] = 3.0
+    if noise:
+        img = img + np.random.default_rng(seed + 99).normal(0, noise, img.shape)
+    return np.clip(img, 0, 255).astype(np.uint8)
+
+
+# your guide on frame 0: 6 px inside its left edge, 9 inside its right, 3 / 5
+# inside the picture's top and bottom
+HAND = {"cx": (X0 + 6 + X0 + PITCH_W - 9) / 2 / W, "cy": (PIC_Y[0] + 3 + PIC_Y[1] - 5) / 2 / H,
+        "w": (PITCH_W - 15) / W, "h": (PIC_Y[1] - PIC_Y[0] - 8) / H, "angle": 0.0,
+        "format": "135"}
+WIND = PITCH_W + GAP             # one frame along
+
+
+def _snapper(frame=None):
+    f = strip() if frame is None else frame
+    t = gt.GuideTracker()
+    t.anchor(HAND, gt.find_opening(f), frame=f)
+    return t
+
+
+def test_the_frames_edges_are_found_beside_the_guide():
+    rel = gt.edge_relation(strip(), HAND)
+    px = {k: v * (W if k in gt.X_SIDES else H) for k, v in rel.items()}
+    assert set(px) == set(gt.SIDES)
+    assert px["left"] == pytest.approx(6, abs=0.5) and px["right"] == pytest.approx(-9, abs=0.5)
+    assert px["top"] == pytest.approx(3, abs=0.5) and px["bottom"] == pytest.approx(-5, abs=0.5)
+
+
+def test_a_new_frame_landing_along_takes_the_guide_with_your_margins():
+    t = _snapper()
+    for land in (-5, 7):                      # the next frame lands 5 px short / 7 px on
+        t = _snapper()
+        f = strip(offset=-WIND + land)
+        g = t.snap(f, gt.find_opening(f))
+        assert g is not None
+        assert (g["cx"] - HAND["cx"]) * W == pytest.approx(land, abs=0.5)
+        assert (g["cy"] - HAND["cy"]) * H == pytest.approx(0, abs=0.3)
+        assert g["w"] == HAND["w"] and g["h"] == HAND["h"] and g["format"] == "135"
+        assert t.shown == g and t.anchored               # the new reference
+        assert gt.edge_relation(f, g).keys() == t.rel.keys()
+
+
+def test_the_same_frame_or_noise_doesnt_move_it():
+    t = _snapper(strip(noise=2.0))
+    for seed in range(4):
+        f = strip(noise=2.0, seed=5)
+        assert t.snap(f, gt.find_opening(f)) is None
+    f = strip(offset=-WIND)                     # landed exactly where the last one was
+    assert t.snap(f, gt.find_opening(f)) is None
+
+
+def test_a_side_the_carrier_hides_is_left_to_the_other():
+    ends = (X0 + 30, ENDS[1])                    # the carrier covers the left gap
+    t = _snapper(strip(ends=ends))
+    assert "left" not in t.rel and "right" in t.rel
+    f = strip(offset=-WIND - 5, ends=ends)
+    g = t.snap(f, gt.find_opening(f))
+    assert g is not None and (g["cx"] - HAND["cx"]) * W == pytest.approx(-5, abs=0.5)
+
+
+def test_a_shadow_as_clear_as_the_film_doesnt_make_it_jump():
+    """The next frame's left side is a shadow as clear as the film beside it:
+    its edge reads 40 px in, the two sides disagree and the guide stays where
+    it is (no snap) rather than jumping."""
+    t = _snapper()
+    f = strip(offset=-WIND - 5, clear_left=True)
+    found = gt.frame_edges(f, HAND, expect={s: gt.guide_side(HAND, s) - d
+                                             for s, d in t.rel.items()})
+    assert found["left"] * W == pytest.approx(X0 - 5 + 40, abs=1.5)   # the shadow's edge
+    assert found["right"] * W == pytest.approx(X0 - 5 + PITCH_W, abs=0.5)
+    assert t.snap(f, gt.find_opening(f)) is None
+    assert t.shown == HAND
+
+
+def test_no_margins_known_or_too_far_or_turned_no_snap():
+    t = gt.GuideTracker()
+    t.anchor(HAND, gt.find_opening(strip()))          # no frame given: no margins
+    f = strip(offset=-WIND - 5)
+    assert t.snap(f, gt.find_opening(f)) is None
+    t = _snapper()
+    f = strip(offset=-WIND - 120)                     # 13 % along: not this frame's edge
+    assert t.snap(f, gt.find_opening(f)) is None
+    t = _snapper()
+    t.shown = dict(HAND, angle=4.0)
+    f = strip(offset=-WIND - 5)
+    assert t.snap(f, gt.find_opening(f)) is None
+
+
+def test_settled_after_moving_is_said_once():
+    w = gt.SettleWatch()
+    still = strip()
+    assert not any(w.update(still) for _ in range(6))           # never moved
+    assert not w.update(strip(offset=-WIND // 2))               # winding
+    assert not w.update(strip(offset=-WIND - 5))
+    seen = [w.update(strip(offset=-WIND - 5)) for _ in range(5)]
+    assert seen == [False, False, True, False, False]           # three still looks
+    # noise alone never counts as moving
+    w = gt.SettleWatch()
+    assert not any(w.update(strip(noise=3.0, seed=5)) for _ in range(8))
