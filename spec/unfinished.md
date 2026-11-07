@@ -42,6 +42,11 @@ remove an entry when it ships.
   where the Shutter row shows the model the camera reports ("GFX50S II").
 
 ## To check on the user's machine
+- **The light found under a new port name, and "isn't taking data"**
+  (2026-11-07, `spec/live-capture-monitor.md` revision 2026-11-07): after one
+  connection with this version, moving the Scanlight's USB to another socket
+  should reconnect by itself; a light on a route that takes no data should
+  say so instead of "Waiting…", and Capture should close without hanging.
 - **The focus rail on his ESP32-S3** (2026-11-07, `spec/focus-rail.md`
   revision 2, guide `examples/focus_rail/README.md`): the sketch has never been
   compiled for an ESP32 (blocked here), so the first compile is his; then
