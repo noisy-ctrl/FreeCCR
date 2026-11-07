@@ -491,3 +491,53 @@ deleted through the real size check and `file_delete`.
 - Ending live view by reconnecting, setting and resuming leaves 0.4–0.7 s
   without a picture, and the picture follows the new exposure.
 So the monitor sets shutter speed and ISO itself: `spec/usb-exposure-control.md`.
+
+## 22. Live view after a Measure: the camera's priority (2026-11-07)
+The user's log of one Measure on the GFX 50S II (libgphoto2's debug log and
+the Terminal): live view ran at ~45 fps, the Measure reconnected to set the
+exposure and took six shots, each downloaded and deleted from the camera;
+then every request to start live view (Initiate Open Capture, 0x101C) was
+refused Device Busy for the 26 s until the user quit, through FreeCCR's two
+reconnects (435 refusals).
+
+What differs between the one start and the refusals is the Fujifilm
+PriorityMode (0xD207) the camera last accepted:
+- libgphoto2 sets it to USB when it connects (`camera_prepare_capture`) and
+  before each shot (`camera_fuji_capture`), and to **Camera** at the start
+  of EVERY event check (`camera_wait_for_event`'s Fujifilm branch, "reenable
+  event wait mode"). While live view runs the camera refuses that (busy), so
+  it stays USB; with live view off it is accepted.
+- The one live view that started (15:52:03) had USB as the last accepted
+  priority (connected, no event check before it). All 435 refusals had
+  Camera: after the Measure, and after each reconnect, FreeCCR's event check
+  ran between the connection and the first preview and set Camera.
+- Test 7-9 (§21) had already seen it from the other side: "Camera priority,
+  once accepted, stops live view entirely".
+So it was never the camera being slow or holding a shot (the shots were
+deleted), and reconnecting couldn't help: the event check undid the
+reconnect's USB before every try. It also explains why live view sometimes
+came back after a shot and sometimes didn't (a race between the event check
+and the next preview), and the test scripts' "busy every time" (§15: they
+waited for the shot's event first).
+
+**Change** (`Gphoto2Backend._usb_priority`): on a Fujifilm, whenever live
+view isn't running (`_live_on` false: not yet started on this connection,
+after a reconnect, after a shot), the backend sets the camera's
+`prioritymode` setting to its USB choice (one setting, ~2 PTP operations)
+right before each request for live view; once a picture comes, no more
+(a running live view refuses it anyway, and nothing between the set and the
+request runs on the camera's thread). A body without the setting is asked
+once per connection. The reconnect tries and the "unplug and plug in" advice
+stay as the fallback; libgphoto2's event check still sets Camera, which a
+running live view refuses as before.
+
+Also from the log: the libgphoto2 debug log no longer goes to the Terminal
+as well as its file (`propagate = False`; it doubled the Terminal to 15,000
+lines).
+
+Tests: a fake Fujifilm that refuses live view while its priority is Camera
+and whose event check sets Camera (as libgphoto2 does): before, live view
+never came back after an event check; now the backend sets USB first and the
+picture comes; no priority setting while live view runs; set again after a
+shot and after a reconnect; not on a camera that isn't a Fujifilm; a body
+without the setting is asked once per connection.

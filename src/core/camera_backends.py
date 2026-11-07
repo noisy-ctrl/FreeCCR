@@ -193,6 +193,7 @@ def _gphoto2_debug_log(gp):
         handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
         log.addHandler(handler)
         log.setLevel(logging.DEBUG)
+        log.propagate = False         # the file only, not the Terminal as well
         _GP_LOG.append(gp.check_result(gp.use_python_logging(mapping={
             gp.GP_LOG_ERROR: logging.WARNING,
             gp.GP_LOG_VERBOSE: logging.INFO,
@@ -287,6 +288,8 @@ class Gphoto2Backend:
     # measured 2.49x, 3.99x, ~8.3x on a GFX 50S II; 3 = 2, 6 and up = the max)
     FUJI_ZOOM_KEY = "d01b"
     FUJI_ZOOM = (("1", "1"), ("2.5", "2"), ("4", "4"), ("8", "5"), ("16", "6"))
+    # A Fujifilm's PriorityMode (0xD207): Camera / USB (spec/capture-routes.md §22)
+    PRIORITY_KEY = "prioritymode"
 
     def __init__(self, gp_module=None, clock=time.monotonic, sleep=time.sleep):
         self.gp = gp_module if gp_module is not None else _import_gphoto2()
@@ -312,6 +315,9 @@ class Gphoto2Backend:
         self._preview_frames = 0
         self._last_frame = None      # the last picture's bytes (a repeat is no picture)
         self._same_since = None      # first repeat of the current run of them
+        self._live_on = False        # live view running on this connection since the last shot
+        self._prio = None            # the USB priority choice; False: no such setting
+        self._prio_said = False
         self._reset_shot_state()
 
     def _reset_shot_state(self):
@@ -382,6 +388,8 @@ class Gphoto2Backend:
         self._preview_frames = 0
         self._last_frame = None
         self._same_since = None
+        self._live_on = False
+        self._prio = None
         self._reset_shot_state()
         return self.reported_model() or self._models.get(ident, "")
 
@@ -459,6 +467,8 @@ class Gphoto2Backend:
         # Set before asking: a request that starts the camera's live view and
         # then fails still leaves it running, and the next shot must end it.
         self._live_asked = True
+        if not self._live_on and self._is_fuji():
+            self._usb_priority()              # or the body refuses to start it
         try:
             cf = self.camera.capture_preview()
             data = bytes(memoryview(cf.get_data_and_size()))
@@ -478,6 +488,7 @@ class Gphoto2Backend:
             self._failed(e)
             return None
         self._errors = 0
+        self._live_on = True
         if data == self._last_frame:
             # the same picture again: not a new frame, and not live view
             # coming back (a stopped live view still serves its last picture)
@@ -545,6 +556,7 @@ class Gphoto2Backend:
                       f"firing again{again}")
         self._errors = 0
         self._live_asked = False
+        self._live_on = False                 # the capture call ended it
         self._shot_until = self.clock() + SHOT_WAIT_S
         if taken is not None:
             self._add_file(taken.folder, taken.name)
@@ -916,6 +928,7 @@ class Gphoto2Backend:
         self._ready_at = self.clock() + RECONNECT_SETTLE_S
         self.reconnects += 1
         self._live_asked = False
+        self._live_on = False
         self._last_preview = None
         self._busy_since = None
         self._busy_until = 0.0
@@ -951,6 +964,48 @@ class Gphoto2Backend:
 
     def _is_fuji(self):
         return "fuji" in (self._models.get(self._ident) or "").lower()
+
+    def _usb_priority(self):
+        """Give a Fujifilm's controls to the computer (PriorityMode = USB)
+        right before live view is asked for. With Camera priority the body
+        refuses to start live view (Device Busy), and libgphoto2's event
+        check sets Camera on every call; after a Measure every request was
+        refused, through reconnects (the user's log, 2026-11-07: 435
+        refusals, all with Camera; the one start had USB).
+        spec/capture-routes.md §22. True when the camera took it."""
+        if self._prio is False or self.camera is None:
+            return False
+        key = self.PRIORITY_KEY
+        try:
+            w = self._setting(key)
+            if self._prio is None:
+                choices = [str(w.get_choice(i)) for i in range(int(w.count_choices()))]
+                pick = next((c for c in choices if "usb" in c.lower()), None)
+                if pick is None and len(choices) == 2:
+                    pick = choices[1]         # libgphoto2's order: Camera, USB
+                if pick is None:
+                    self._prio = False
+                    return False
+                self._prio = pick
+        except Exception:
+            self._prio = False                # no such setting on this body
+            return False
+        try:
+            w.set_value(self._prio)
+            single = getattr(self.camera, "set_single_config", None)
+            if single is not None:
+                single(key, w)
+            else:
+                cfg = self.camera.get_config()
+                cfg.get_child_by_name(key).set_value(self._prio)
+                self.camera.set_config(cfg)
+        except Exception:
+            return False                      # refused (busy): the request will say so
+        if not self._prio_said:
+            self._prio_said = True
+            print("usb camera: priority set to USB before starting live view "
+                  "(the camera refuses live view with Camera priority)")
+        return True
 
     def zoom_levels(self):
         if self.camera is None:
