@@ -5,14 +5,6 @@ A running list of what is started but not done, or waiting on something
 remove an entry when it ships.
 
 ## Waiting on the user
-- **Rail autofocus before each shot, and the ESP32 bring-up** (plan sent
-  2026-11-07, not started): an "Autofocus before each shot" box (camera zoom
-  8× or Max, the existing sweep, back to Whole, then the Shoot as set up), the
-  firmware for his belt (30 T on the motor, 20 T on the screw: 533⅓ steps/mm
-  at 1/16), ESP32 and ESP32-S3 pins, slower default speeds, and a wiring and
-  flashing guide. Waiting on: go-ahead, which ESP32 board, and whether the
-  pulleys stay that way round (swapped = 1.5× finer and 2.25× the torque at
-  the screw, which matters for a pancake motor).
 - **Portra 400 Lab look: the second lab's frames** (148684250): 2 of its 3
   usable frames agree with the look (CIEDE2000 median 0.66, 1.00 with their
   own Channel Levels), the third doesn't (2.16, it needs −0.5 density). Not
@@ -50,6 +42,12 @@ remove an entry when it ships.
   where the Shutter row shows the model the camera reports ("GFX50S II").
 
 ## To check on the user's machine
+- **The focus rail on his ESP32-S3** (2026-11-07, `spec/focus-rail.md`
+  revision 2, guide `examples/focus_rail/README.md`): the sketch has never been
+  compiled for an ESP32 (blocked here), so the first compile is his; then
+  DRIVER=1, `MOVE 1200` = 1 mm with the swapped pulleys (20 T motor, 30 T
+  screw), direction, then Autofocus and "Autofocus before each shot" at 8× on
+  the GFX. Settle (300 ms) and Backlash (0.1 mm) may want tuning for the belt.
 - **"New frame: best reset" on 35 mm** (2026-11-07,
   `spec/sharpness-meter-v2.md` revision 3): it now looks inside the frame
   guide. Replayed on his recordings it fires once per new frame and never

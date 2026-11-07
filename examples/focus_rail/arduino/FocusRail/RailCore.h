@@ -35,10 +35,20 @@ class Motor {
 
 enum HomeMode { HOME_NONE = 0, HOME_SWITCH = 1, HOME_STALL = 2 };
 
+// Steps per turn of the SCREW when the motor drives it through a belt: the
+// motor turns screwTeeth / motorTeeth times per screw turn (a big pulley on
+// the screw = finer steps and more torque there; 1 and 1 for a coupler).
+inline float screwStepsPerTurn(float fullSteps, float microsteps, float motorTeeth,
+                               float screwTeeth) {
+  if (motorTeeth <= 0 || screwTeeth <= 0) return fullSteps * microsteps;
+  return fullSteps * microsteps * screwTeeth / motorTeeth;
+}
+
 struct Config {
   const char* name;
   float stepsPerMm;          // 0: unknown
-  uint32_t stepsPerRev;      // steps per screw turn (0: unknown); hosts show turns
+  float stepsPerRev;         // steps per screw turn (0: unknown; a belt makes it
+                             // fractional, 2133.33); hosts show turns
   bool hasLimits;            // soft limits (only once homed)
   int32_t minPos, maxPos;
   int homeMode;              // HomeMode
@@ -191,8 +201,8 @@ class RailCore {
     if (!strcmp(cmd, "HELLO")) {
       char l[MAX_LINE + 64];
       int k = snprintf(l, sizeof l, "ORP 1 STEPS_PER_MM=%g", (double)c_.stepsPerMm);
-      if (c_.stepsPerRev)
-        k += snprintf(l + k, sizeof l - k, " STEPS_PER_REV=%lu", (unsigned long)c_.stepsPerRev);
+      if (c_.stepsPerRev > 0)
+        k += snprintf(l + k, sizeof l - k, " STEPS_PER_REV=%g", (double)c_.stepsPerRev);
       if (c_.hasLimits) k += snprintf(l + k, sizeof l - k, " MIN=%ld MAX=%ld",
                                       (long)c_.minPos, (long)c_.maxPos);
       const char* hm = c_.homeMode == HOME_SWITCH ? "SWITCH"

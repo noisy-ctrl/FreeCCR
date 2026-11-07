@@ -45,6 +45,9 @@ comes for the old one, only for the last.
   absent: unknown, and hosts show steps).
 - `STEPS_PER_REV=` steps per turn of the screw (optional): hosts can then
   show a distance as an angle of the screw, and its lead (mm a turn).
+  Decimals allowed, and hosts must accept them: a motor driving the screw
+  through a belt or gears makes it fractional (a 30-tooth pulley on the motor
+  and 20 on the screw at 3200 motor steps a turn: `2133.33`).
 - `MIN=` / `MAX=` soft limits in steps, applied only while `HOMED=1`: a
   target beyond one is clamped and its `DONE` carries `LIMIT=1`.
 - `HOME=SWITCH`, `HOME=STALL` (the driver's stall detection, no switch) or

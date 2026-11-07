@@ -121,11 +121,15 @@ def parse_reply(line):
             spm = float(f.get("STEPS_PER_MM", "0"))
         except ValueError:
             spm = 0.0
+        try:                       # a belt makes it fractional (2133.33)
+            spr = float(f.get("STEPS_PER_REV", "0"))
+        except ValueError:
+            spr = 0.0
         home = f.get("HOME", "NONE").upper()
         if home not in ("SWITCH", "STALL", "NONE"):
             home = "NONE"
         return ("hello", {"version": v, "steps_per_mm": max(0.0, spm),
-                          "steps_per_rev": max(0, _int(f.get("STEPS_PER_REV"), 0)),
+                          "steps_per_rev": max(0.0, spr),
                           "min": _int(f.get("MIN")), "max": _int(f.get("MAX")),
                           "home": home.lower(), "name": f.get("NAME", "")})
     if head == "STATUS":

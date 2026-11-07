@@ -269,3 +269,157 @@ There is no focus ring."
 - Tests: `STEPS_PER_REV` parsed and in the host build's HELLO; `turn_text`
   / `lead_mm` (20 µm on a 4 mm lead = 1.8°, 1 mm = 90°); the monitor's status
   line and jog tooltip with a rail that reports it.
+
+## Revision 2 (2026-11-07): autofocus before each shot, his belt, an ESP32-S3
+The user: "start to build the architecture of autofocus … I need to get the
+esp32 up and running … a 'linear rail autofocus' box is checked, the software
+punches into 8x or max, moves the motor to find optimum sharpness, captures
+(in whatever mode its in). Currently, the nema 17 I have is attached to a 30t
+pulley. The linear rail has a 20t pulley. We're talking very very slow
+speeds, incredibly fine degrees of turn to focus." Answers: still the SFU1204
+(4 mm a turn); an **ESP32-S3-N16R8**; a NEMA 17 **pancake** motor; a 12 V 2 A
+supply. On the pulleys: he fitted 30 T on the motor and 20 T on the screw
+"to give very fine control … a little more torque might not be a bad thing";
+a belt does the reverse (see A), and once told he chose to **swap them: 20 T
+on the motor, 30 T on the screw**. The firmware's defaults are the swapped
+pair; they must match what is fitted.
+
+Most of the architecture is already here (§3-§7): the protocol, the link,
+the Focus Rail section, the sweep and the firmware. This revision adds:
+
+### A. The belt (firmware and protocol)
+- `FocusRail.ino`: `MOTOR_PULLEY_TEETH` 20, `SCREW_PULLEY_TEETH` 30 (1 and 1
+  for a coupler). Motor turns per screw turn = screw teeth / motor teeth, so
+  steps per screw turn = `FULL_STEPS_PER_REV · MICROSTEPS · SCREW / MOTOR` =
+  200 · 16 · 30/20 = **4800**, and **1200 steps/mm, 0.83 µm a step, 0.075° of
+  the screw a step**. Depth of field is 0.26-0.75 mm (§2): a step is about
+  1/300 to 1/900 of it, so 1/16 microsteps (interpolated to 256 inside the
+  TMC2209) stay. The same arithmetic lives in `RailCore.h` as
+  `orp::screwStepsPerTurn(full, micro, motorTeeth, screwTeeth)` so the host
+  build tests it. (As first fitted, 30 → 20: 2133⅓ a turn, 533⅓ a mm, 1.9 µm.)
+- 20 T → 30 T is a reduction: the screw turns 2/3 per motor turn and gets
+  1.5× the motor's torque. Holding a ~2 kg camera on the 4 mm screw takes
+  ~14 mN·m at the screw (rev. 1), ~9 mN·m at the motor; a pancake NEMA 17
+  (~0.13 N·m held at ~1 A) at half of 0.6 A is several times that, so
+  `HOLD_FRACTION` stays 0.5 (the comment says to raise it if the camera
+  creeps).
+- `STEPS_PER_REV` can be **fractional** (2133.33 with the first pulleys; any
+  belt ratio that isn't a whole number): `Config::stepsPerRev`
+  is a float, HELLO prints it with `%g` (as STEPS_PER_MM), the public doc says
+  a host must accept a decimal, `orp.parse_reply` reads a float and
+  `RailClient.steps_per_rev()` returns one. A whole number prints as before
+  ("3200"), so older rails and tests read the same.
+- **Slow by default**: moves 2 mm/s (half a screw turn a second; was 8),
+  acceleration 10 mm/s² (was 50), at most 10 mm/s; HOME 2 then 0.25 mm/s. A
+  20 µm autofocus step (24 steps) takes ~0.1 s at these.
+- `rail_host` takes `--belt <motor teeth> <screw teeth> --lead <mm>
+  --microsteps <n>` and fills `STEPS_PER_MM` / `STEPS_PER_REV` through the
+  same helper, so a test reads 1200 / 4800 (and 533.333 / 2133.33 for the
+  first pulleys) and "4 mm a turn" end to end.
+
+### B. The ESP32-S3 (firmware)
+- Pins by target (`CONFIG_IDF_TARGET_ESP32S3`): STEP 4, DIR 5, EN 6, the
+  TMC2209's UART on 17 (TX) / 18 (RX), DIAG 7, switch 15. All on the
+  DevKitC-1's headers and clear of what the N16R8 module uses: 26-32 (flash),
+  35-37 (its octal PSRAM), the strapping pins 0, 3, 45, 46, USB 19/20, UART0
+  43/44 and the RGB LED (38 or 48). A classic ESP32 keeps §7's pins.
+- The TMC2209's UART is `Serial1` (UART1 exists on every ESP32; `Serial2`
+  doesn't on all of them).
+- **The driver is set up whenever it starts answering.** A TMC2209 answers
+  on its UART only while VM (the 12 V) is on and forgets its settings when VM
+  goes; without them it microsteps by its MS1/MS2 pins (1/8 with both to GND:
+  every distance halved) at the VREF current. The sketch configured it once
+  in `setup()`, so 12 V switched on after the ESP32 left it unconfigured.
+  `superviseDriver` (once a second from `loop()`) checks it answers and writes
+  the settings when it starts answering or its GSTAT reset flag is set
+  (cleared after writing); `DRIVER=` in STATUS follows it. So the power-up
+  order doesn't matter, and the guide says so.
+- FreeCCR talks to `Serial`: on the DevKitC-1 that is the port marked
+  **UART/COM** (its USB bridge) with *USB CDC On Boot: Disabled*, or the port
+  marked **USB** with it *Enabled*. Both are ranked first in the rail's list
+  (Espressif 0x303A, Silicon Labs, WCH).
+- Not compiled for the ESP32 here (the toolchain downloads are blocked from
+  this machine): the first compile is on the user's Mac. `RailCore.h` and the
+  new helper are compiled and tested on the host as before.
+
+### C. Autofocus before each shot (FreeCCR)
+A row under the Focus Rail buttons: **Autofocus before each shot** (checkbox,
+`live/rail_af_shoot`, default off) and a list **8× / Max / No zoom**
+(`live/rail_af_zoom`, the camera zoom levels "8" / "16" / "", default "8";
+disabled when the camera has no magnifier). With it ticked, Shoot does:
+1. **Refusals first** (caption says why, nothing moves): the rail not
+   connected ("…untick the box to shoot without it"), no live view in the
+   last 2 s, and everything Shoot already refuses.
+2. **The shot is prepared now, at the whole frame**: the scan type, the USB
+   checks (trichrome needs the Scanlight, the hot folder is turned on), the
+   exposures (`_shoot_exposures`: an armed Use for This Frame, or this
+   frame's suggestion, measured on the whole frame) and the frame guide's
+   record (`_shot_guide_record`, which needs the whole picture). Shoot used to
+   do these as it started the sequence; they now sit in `_prepare_shot()`
+   and `_start_shot(prepared)`, and plain Shoot calls both at once, so it is
+   unchanged.
+3. **Magnify**: to the chosen level when the camera has a magnifier and isn't
+   at it already (`_set_cam_zoom`); wait for the camera to report it, then
+   for a picture at least `AF_SHOT_SETTLE_S` (1.0 s) after the report (frames
+   already on their way are at the old scale); give up after
+   `AF_SHOT_ZOOM_S` (10 s): "The camera didn't magnify".
+4. **Focus**: the existing sweep (`autofocus(then=…)`; it now returns
+   whether it started and calls `then(result)` when it ends).
+5. **Back to Whole** (when not at Whole), wait for the camera to report it
+   (`SHOOT_UNZOOM_S`, as Shoot already does), then **shoot** with the
+   prepared values: single, trichrome, film-base or frame exposures, as set
+   up.
+- **Fails** (no peak, flat, no readings, the camera didn't magnify): the
+  sweep already goes back to where it started; the camera goes back to the
+  zoom it had; **nothing is shot**; the capture caption says why and
+  "Nothing was shot". (A failed focus on someone's film is worse than a
+  missed frame.)
+- **Cancel**: Shoot again (it reads "Stop (Esc)" meanwhile) or Esc: the sweep
+  and the rail stop, the camera goes back to the zoom it had, nothing is shot.
+- It focuses under the light **as it is** (white light, or whatever the
+  Scanlight shows); trichrome then shoots its three colours at that focus.
+  Focusing under green for trichrome is a later option if colour shifts
+  focus.
+- Measure, Meter and the jog keys are refused meanwhile, as during a sweep
+  (`_rail_busy` counts the pre-shot autofocus); closing the monitor drops it.
+- The state is one dict, `_af_shot` {stage zoom/focus/whole, want, back,
+  zoom_at, prepared}, so a late zoom report or sweep result after a cancel is
+  ignored.
+
+Refinements (second pass):
+- Already at the chosen level (or "No zoom", or no magnifier): straight to
+  the sweep, no wait. The tests set `AF_SHOT_SETTLE_S` to 0 and feed a
+  picture after the zoom report.
+- A zoom change during the sweep already stops it ("the camera zoom
+  changed"); in a pre-shot sweep that is a failure: nothing shot.
+- After a good sweep at Whole already (no magnifier): shoot at once.
+- `_rail_can_move` refuses jogs, Set Zero and Home while `_af_shot` is set,
+  in every stage (the zoom stage has no sweep running yet).
+- `_refresh_shoot_enabled`: Shoot is enabled and reads "Stop   (Esc)" while
+  `_af_shot` is set (a sweep alone still disables it, as before).
+- Plain Autofocus (the button) is unchanged: no zoom, no shot.
+
+### D. A bring-up guide (`examples/focus_rail/README.md`)
+For his parts: ESP32-S3-N16R8 DevKitC-1, a TMC2209 module, a pancake NEMA 17,
+the 12 V 2 A supply with its screw-terminal plug. Wiring table, the
+capacitor, powering the ESP32 from the Mac's USB (not the 12 V), the order to
+connect things, Arduino IDE (the esp32 board package, *ESP32S3 Dev Module*,
+the two libraries), the settings at the top of the sketch, a first test in
+the Serial Monitor (HELLO, STATUS with DRIVER=1, MOVE 533 = 1 mm, which way
+"up" goes, INVERT_DIR), then FreeCCR (Connect, jog, Set Zero, Autofocus at
+8×, the new box). Troubleshooting: no port (a charge-only cable), upload
+(BOOT + RESET), DRIVER=0 (the UART wiring), a motor that hums (coil pairs), a
+hot motor (current), a camera that slides with the power off (ball screw).
+
+### Tests
+- `orp`: a fractional STEPS_PER_REV parsed; "4 mm a turn" and 1.8° per 20 µm
+  from 533.333 / 2133.33 and from 1200 / 4800.
+- Firmware (host build): `--belt 20 30 --lead 4 --microsteps 16` → HELLO
+  `STEPS_PER_MM=1200 STEPS_PER_REV=4800`, `--belt 30 20` → `533.333` /
+  `2133.33`; the link reads them; a whole number still prints "3200".
+- Monitor: with the box ticked and no magnifier, Shoot focuses then starts
+  the sequence; with a magnifier, the order is zoom 8× → (a picture) → sweep →
+  Whole → sequence, with the exposures and guide prepared before the zoom; a
+  failed sweep shoots nothing and goes back to Whole; Shoot again cancels
+  (STOP, back to Whole, no shot); the rail not connected refuses; the box and
+  level are remembered; Measure is refused meanwhile; the panel still fits.

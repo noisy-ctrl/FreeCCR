@@ -336,6 +336,8 @@ class LiveCaptureMonitor(QWidget):
         self._read_patch = be.read_patch
         # the focus rail (spec/focus-rail.md)
         self._af = None                  # the autofocus sweep running (or last run)
+        self._af_then = None             # called with the sweep's result when it ends
+        self._af_shot = None             # autofocus before a shot (spec/focus-rail.md rev. 2 C)
         self._rail_zeroed = False        # Set Zero pressed since the rail connected
         self._rail_home_id = None
         self._last_frame_t = -1e9
@@ -1002,6 +1004,27 @@ class LiveCaptureMonitor(QWidget):
                   self.rail_af_btn):
             r.addWidget(b, 1)
         sec.add_layout(r)
+        # autofocus before each shot (spec/focus-rail.md revision 2 C)
+        r = QHBoxLayout()
+        theme.apply_button_row(r)
+        self.rail_af_shoot = QCheckBox("Autofocus before each shot")
+        self.rail_af_shoot.setToolTip(
+            "Shoot first magnifies the camera, focuses with the rail, goes back to the "
+            "whole frame and then shoots, as set up (one colour or red, green and "
+            "blue). It focuses under the light as it is. If no focus is found, "
+            "nothing is shot.")
+        self.rail_af_zoom = QComboBox()
+        for label, data in (("at 8×", "8"), ("at Max", "16"), ("no zoom", "")):
+            self.rail_af_zoom.addItem(label, data)
+        self.rail_af_zoom.setToolTip(
+            "The camera zoom it focuses at (the camera's magnifier, when it has one)")
+        self.rail_af_shoot.setChecked(_settings().value("live/rail_af_shoot", False,
+                                                        type=bool))
+        i = self.rail_af_zoom.findData(str(_settings().value("live/rail_af_zoom", "8")))
+        self.rail_af_zoom.setCurrentIndex(max(0, i))
+        r.addWidget(self.rail_af_shoot, 1)
+        r.addWidget(self.rail_af_zoom)
+        sec.add_layout(r)
         self.rail_caption = _muted("")
         sec.add_widget(self.rail_caption)
         if _settings().value("live/rail_open", False, type=bool):
@@ -1121,6 +1144,11 @@ class LiveCaptureMonitor(QWidget):
         self._af_timer = QTimer(self)
         self._af_timer.setInterval(100)
         self._af_timer.timeout.connect(lambda: self._af is not None and self._af.tick())
+        self._af_shot_timer = QTimer(self)
+        self._af_shot_timer.setInterval(100)
+        self._af_shot_timer.timeout.connect(self._af_shot_tick)
+        self.rail_af_shoot.toggled.connect(self._on_af_shoot_toggled)
+        self.rail_af_zoom.currentIndexChanged.connect(self._on_af_zoom_changed)
         for key, slot in (("[", lambda: self.rail_jog(-1, "fine")),
                           ("]", lambda: self.rail_jog(1, "fine")),
                           ("{", lambda: self.rail_jog(-1, "coarse")),
@@ -1228,8 +1256,10 @@ class LiveCaptureMonitor(QWidget):
         self._closing = True
         QApplication.instance().removeEventFilter(self)
         for t in (self._idle_timer, self._status_timer, self._ring_timer, self._af_timer,
-                  self._frame_timer, self._auto_timer):
+                  self._frame_timer, self._auto_timer, self._af_shot_timer):
             t.stop()
+        self._af_shot = None
+        self._af_then = None
         if self._af is not None and self._af.running:
             self._af.on_finished = None
             self._af.stop()
@@ -1642,6 +1672,9 @@ class LiveCaptureMonitor(QWidget):
     def _on_escape(self):
         if self.canvas.cancel_mode():
             self._pending_measure = None
+            return
+        if self._af_shot is not None:
+            self._af_shot_cancel()
             return
         if self._measure is not None:
             self._measure_stop()
@@ -2147,6 +2180,9 @@ class LiveCaptureMonitor(QWidget):
         if self.sequence.running:
             self.sequence.stop()
             return
+        if self._af_shot is not None:
+            self._af_shot_cancel()                  # a second press while it focuses
+            return
         if self._shoot_when_whole is not None:
             self._shoot_when_whole = None           # a second press while waiting: cancel
             self._note_caption("Shoot cancelled.")
@@ -2157,6 +2193,9 @@ class LiveCaptureMonitor(QWidget):
             return                       # the light is off while idle: Wake first
         if self._rail_busy():
             self._warn_caption("Not while the focus rail is moving: the shot would blur.")
+            return
+        if self.rail_af_shoot.isChecked():
+            self._af_shot_start()                   # focus first, then the shot
             return
         if self.magnified() and self.usb.is_open():
             # A magnified camera got stuck shooting (the user, 2026-11-01):
@@ -2169,23 +2208,46 @@ class LiveCaptureMonitor(QWidget):
             QTimer.singleShot(int(self.SHOOT_UNZOOM_S * 1000),
                               lambda t=token: self._shoot_unzoom_timeout(t))
             return
+        prepared = self._prepare_shot()
+        if prepared is not None:
+            self._start_shot(prepared)
+
+    def _prepare_shot(self):
+        """What the shot needs, taken now, at the whole frame: the scan type,
+        the USB checks, the exposures and the frame guide's record
+        (spec/focus-rail.md revision 2 C.2). None when it can't shoot (the
+        caption says why)."""
         tri = self.scan_type() == "trichrome"
         self._used()
-        if self._shutter_is_usb():
+        usb = self._shutter_is_usb()
+        exposures = rearm = None
+        if usb:
             if tri and not self.light.is_open():
                 self._warn_caption("Trichrome needs the Scanlight connected: it sets "
                                    "the red, green and blue.")
-                return
+                return None
             if not self._ensure_hot_folder():
                 self._warn_caption("Shooting over USB brings the files in through Hot "
                                    "Folder Tether: turn it on to shoot.")
-                return
+                return None
+            rearm = self._frame_exposures       # put back if the shot never happens
             exposures = self._shoot_exposures(tri)
+        elif not self.light.is_open():
+            return None
+        return {"tri": tri, "usb": usb, "exposures": exposures, "rearm": rearm,
+                "guide": self._shot_guide_record(),
+                "note": getattr(self, "_frame_shot_note", "")}
+
+    def _start_shot(self, p):
+        """Start the sequence with what `_prepare_shot` took. True when it
+        started."""
+        tri, exposures = p["tri"], p["exposures"]
+        if p["usb"]:
             if exposures:
                 self._shoot_exp_before = {f: self._exposure.get(f) for f in ("shutter", "iso")
                                           if self._exposure.get(f)}
                 self._hold_live(True)
-            capture_guide.begin_shot(self._shot_guide_record())
+            capture_guide.begin_shot(p["guide"])
             started = self.sequence.start(self._timing, self._preset(), tri,
                                           shutter=self._usb_shutter, exposures=exposures)
             if not started and exposures:
@@ -2193,8 +2255,8 @@ class LiveCaptureMonitor(QWidget):
                 self._shoot_exp_before = None
         else:
             if not self.light.is_open():
-                return
-            capture_guide.begin_shot(self._shot_guide_record())
+                return False
+            capture_guide.begin_shot(p["guide"])
             started = self.sequence.start(self._timing, self._preset(), tri)
         if not started:
             capture_guide.begin_shot(None)
@@ -2204,9 +2266,144 @@ class LiveCaptureMonitor(QWidget):
             self.measure_btn.setEnabled(False)
             self.edit_btn.setEnabled(False)
             self._refresh_capture_caption()
-            note = getattr(self, "_frame_shot_note", "") or self._film_base_shoot_note(tri)
+            note = p["note"] or self._film_base_shoot_note(tri)
             if note:
                 self._note_caption(note)
+        return started
+
+    # --- autofocus before each shot (spec/focus-rail.md revision 2 C) -------
+    AF_SHOT_SETTLE_S = 1.0        # a picture this long after the camera says it zoomed
+    AF_SHOT_ZOOM_S = 10.0         # how long to wait for the camera to magnify
+
+    def _on_af_shoot_toggled(self, on):
+        _settings().setValue("live/rail_af_shoot", bool(on))
+        self._refresh_rail()
+
+    def _on_af_zoom_changed(self, _i):
+        _settings().setValue("live/rail_af_zoom", self.rail_af_zoom.currentData() or "")
+
+    def _af_shot_start(self):
+        if not self.rail.is_ready():
+            self._warn_caption("Autofocus before each shot is ticked, but the focus rail "
+                               "isn't connected: connect it, or untick the box to shoot "
+                               "without it.")
+            return
+        if time.monotonic() - self._last_frame_t > 2.0:
+            self._warn_caption("Autofocus before the shot needs the live view: no picture "
+                               "is coming in.")
+            return
+        prepared = self._prepare_shot()          # at the whole frame, before zooming
+        if prepared is None:
+            return
+        want = str(self.rail_af_zoom.currentData() or "")
+        if not (want and self._cam_zoom_action.isVisible()
+                and self.cam_zoom_combo.findData(want) >= 0):
+            want = ""                            # no magnifier, or "no zoom"
+        st = self._af_shot = {"stage": "zoom", "want": want, "back": self._cam_zoom or "1",
+                              "zoomed": False, "zoom_at": None,
+                              "started": time.monotonic(), "prepared": prepared}
+        self._refresh_shoot_enabled()
+        if want and self._cam_zoom != want:
+            st["zoomed"] = True
+            self._note_caption(f"Autofocus before the shot: Camera zoom "
+                               f"{self.cam_zoom_label(want)}…  (Shoot or Esc stops it)")
+            self._set_cam_zoom(want)
+            self._af_shot_timer.start()
+        else:
+            self._af_shot_focus()
+
+    def _af_shot_tick(self):
+        st = self._af_shot
+        if st is None or st["stage"] != "zoom":
+            self._af_shot_timer.stop()
+            return
+        if (st["zoom_at"] is not None
+                and self._last_frame_t >= st["zoom_at"] + self.AF_SHOT_SETTLE_S):
+            self._af_shot_timer.stop()
+            self._af_shot_focus()                # the magnified picture is coming in
+        elif time.monotonic() - st["started"] > self.AF_SHOT_ZOOM_S:
+            self._af_shot_timer.stop()
+            self._af_shot_fail("The camera didn't magnify")
+
+    def _af_shot_focus(self):
+        st = self._af_shot
+        if st is None:
+            return
+        st["stage"] = "focus"
+        self._note_caption("Focusing before the shot…  (Shoot or Esc stops it)")
+        if not self.autofocus(then=self._af_shot_focused):
+            why = (self.rail_caption.text() or "Autofocus couldn't start").rstrip(".")
+            self._af_shot_fail(why)
+
+    def _af_shot_focused(self, result):
+        st = self._af_shot
+        if st is None:
+            return
+        if not result.ok:
+            self._af_shot_fail(result.message.rstrip("."))
+            return
+        if self.magnified():
+            st["stage"] = "whole"
+            self._note_caption(result.message.rstrip(".") + ": back to the whole frame "
+                               "for the shot…")
+            self._set_cam_zoom("1")
+            QTimer.singleShot(int(self.SHOOT_UNZOOM_S * 1000),
+                              lambda s=st: self._af_shot_unzoom_timeout(s))
+        else:
+            self._af_shot_shoot()
+
+    def _af_shot_shoot(self):
+        st, self._af_shot = self._af_shot, None
+        if st is None:
+            return
+        self._refresh_shoot_enabled()
+        if not self._start_shot(st["prepared"]):
+            self._af_shot_rearm(st)
+            if not self.sequence.running:
+                self._warn_caption("Focused, but the shot couldn't start.")
+
+    def _af_shot_unzoom_timeout(self, st):
+        if self._af_shot is st and st["stage"] == "whole":
+            self._af_shot = None
+            self._af_shot_rearm(st)
+            self._refresh_shoot_enabled()
+            self._warn_caption("Focused, but the camera didn't go back to the whole frame, "
+                               "so nothing was shot. Set Camera zoom to Whole, then Shoot "
+                               "again.")
+
+    def _af_shot_rearm(self, st):
+        arm = st["prepared"].get("rearm")
+        if arm and self._frame_exposures is None:
+            self._frame_exposures = arm          # Use for This Frame still stands
+            self._refresh_frame_line()
+
+    def _af_shot_fail(self, why):
+        """No shot: the sweep has gone back to where it started (or was
+        stopped); the camera goes back to the zoom it had."""
+        st, self._af_shot = self._af_shot, None
+        if st is None:
+            return
+        self._af_shot_timer.stop()
+        self._af_shot_rearm(st)
+        if st["zoomed"]:
+            if self._cam_zoom != st["back"]:
+                self._set_cam_zoom(st["back"])
+            else:
+                self.usb.set_zoom(st["back"])    # its zoom request may still be on its way
+        self._refresh_shoot_enabled()
+        self._warn_caption(f"{why}. Nothing was shot.")
+        self._rail_caption(f"{why}. Nothing was shot.")   # stays when the other is redrawn
+
+    def _af_shot_cancel(self):
+        if self._af_shot is None:
+            return
+        self._af_then = None                     # its result is no longer wanted
+        if self._af is not None and self._af.running:
+            self._af.stop("Autofocus stopped.")
+            self.rail.stop()
+        elif self.rail.moving():
+            self.rail.stop()
+        self._af_shot_fail("Shoot cancelled")
 
     def _shot_guide_record(self):
         """The guide this shot's files carry to their crop
@@ -3003,6 +3200,14 @@ class LiveCaptureMonitor(QWidget):
         return data.startswith("usb:") and getattr(self.usb, "key", data) == data
 
     def _refresh_shoot_enabled(self):
+        if self._af_shot is not None:
+            self.shoot_btn.setEnabled(True)      # a second press stops it
+            self.shoot_btn.setText("Stop   (Esc)")
+            self.shoot_btn.setToolTip("Focusing before the shot: press to stop "
+                                      "(nothing is shot)")
+            return
+        if not self.sequence.running and self.shoot_btn.text() != "Shoot   (S)":
+            self.shoot_btn.setText("Shoot   (S)")
         if self._af is not None and self._af.running:
             self.shoot_btn.setEnabled(False)
             self.shoot_btn.setToolTip("Autofocus is moving the camera")
@@ -3366,6 +3571,7 @@ class LiveCaptureMonitor(QWidget):
         for lv in levels or []:
             self.cam_zoom_combo.addItem(self.cam_zoom_label(lv), lv)
         self._cam_zoom_action.setVisible(bool(levels))
+        self._refresh_rail()                     # the autofocus-before-shot zoom list
         self.cam_zoom_combo.setToolTip(
             "The camera's own live view magnifier, for focusing: it reads the sensor, "
             "so 8× shows about one sensor pixel per screen pixel. It zooms where the "
@@ -3417,6 +3623,12 @@ class LiveCaptureMonitor(QWidget):
         level = str(level or "1")
         was = self._cam_zoom
         self._cam_zoom = level
+        st = self._af_shot
+        if st is not None:
+            if st["stage"] == "zoom" and level == st["want"] and st["zoom_at"] is None:
+                st["zoom_at"] = time.monotonic()  # now wait for its picture
+            elif st["stage"] == "whole" and level == "1":
+                QTimer.singleShot(0, self._af_shot_shoot)
         if level == "1" and self._shoot_when_whole is not None:
             # Shoot waited for the whole frame: go on with it now
             self._shoot_when_whole = None
@@ -3623,7 +3835,8 @@ class LiveCaptureMonitor(QWidget):
         return self.rail.steps_per_mm() or raf.ASSUMED_STEPS_PER_MM
 
     def _rail_busy(self):
-        return (self._af is not None and self._af.running) or self.rail.moving()
+        return ((self._af is not None and self._af.running) or self.rail.moving()
+                or self._af_shot is not None)
 
     def _rail_caption(self, text):
         self.rail_caption.setText(text)
@@ -3666,7 +3879,7 @@ class LiveCaptureMonitor(QWidget):
         self._on_rail_ports(self.rail.ports)
 
     def _refresh_rail(self):
-        if not hasattr(self, "rail_status"):
+        if not hasattr(self, "rail_caption"):    # the section isn't built yet
             return
         state = self.rail.state
         self.rail_dot.setStyleSheet(f"color: {STATE_COLOURS.get(state, theme.BORDER_STRONG)}; "
@@ -3725,10 +3938,15 @@ class LiveCaptureMonitor(QWidget):
         # "Focusing…" while it runs (a click or Esc stops it): the row has no
         # room for a longer label in the panel's width
         self.rail_af_btn.setText("Focusing…" if running else "Autofocus")
+        self.rail_af_zoom.setEnabled(self.rail_af_shoot.isChecked()
+                                     and self._cam_zoom_action.isVisible())
         self._refresh_shoot_enabled()
 
-    def _rail_can_move(self, what):
+    def _rail_can_move(self, what, shot=False):
         if self._sleeping is not None or self._closing:
+            return False
+        if self._af_shot is not None and not shot:
+            self._rail_caption("Focusing before the shot: Shoot or Esc stops it.")
             return False
         if not self.rail.is_ready():
             self._rail_caption("Connect the focus rail first.")
@@ -3769,6 +3987,9 @@ class LiveCaptureMonitor(QWidget):
         self._refresh_rail()
 
     def rail_stop(self):
+        if self._af_shot is not None:
+            self._af_shot_cancel()               # focusing for a shot: no shot either
+            return
         if self._af is not None and self._af.running:
             self._af.stop("Autofocus stopped.")
         self.rail.stop()
@@ -3792,24 +4013,28 @@ class LiveCaptureMonitor(QWidget):
     def _on_rail_error(self, text):
         self._rail_caption(f"The rail said: {text}")
 
-    def autofocus(self):
-        """Start the sweep (spec/focus-rail.md §6), or stop it."""
+    def autofocus(self, then=None):
+        """Start the sweep (spec/focus-rail.md §6), or stop it. `then(result)`
+        is called when it ends (autofocus before a shot). True when it started."""
         if self._af is not None and self._af.running:
             self.rail_stop()
-            return
-        if not self._rail_can_move("Autofocus"):
-            return
+            return False
+        if then is None and self._af_shot is not None:
+            self._af_shot_cancel()               # the button while it focuses for a shot
+            return False
+        if not self._rail_can_move("Autofocus", shot=then is not None):
+            return False
         if self.rail.moving():
             self._rail_caption("Wait for the rail to stop.")
-            return
+            return False
         pos = self.rail.position()
         if pos is None:
             self.rail.ask_status()
             self._rail_caption("The rail hasn't said where it is yet: try again.")
-            return
+            return False
         if time.monotonic() - self._last_frame_t > 2.0:
             self._rail_caption("Autofocus needs the live view: no picture is coming in.")
-            return
+            return False
         if not self.actions["sharp"].isChecked():
             self.actions["sharp"].setChecked(True)       # it reads the sharpness meter
         info, st = self.rail.info, self.rail.status
@@ -3826,9 +4051,11 @@ class LiveCaptureMonitor(QWidget):
         self._new_frame_quiet = float("inf")          # a sweep changes the picture
         self._used()
         self._rail_caption("Autofocus: starting…" + self._af_tip)
+        self._af_then = then
         self._af_timer.start()
         self._af.start(pos)
         self._refresh_rail()
+        return True
 
     def _af_progress(self, text):
         self._used()
@@ -3840,6 +4067,9 @@ class LiveCaptureMonitor(QWidget):
         self._rail_caption(result.message)
         self._note_caption(result.message)
         self._refresh_rail()
+        then, self._af_then = self._af_then, None
+        if then is not None:
+            then(result)
 
     def _rail_jog_menu(self, pos):
         pop = OptionsPopup("Jog steps", [

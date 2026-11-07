@@ -89,6 +89,19 @@ def test_position_and_jog_text():
     assert orp.lead_mm(800, 3200) == 4.0 and orp.lead_mm(0, 3200) is None
 
 
+def test_a_belt_makes_the_steps_per_turn_fractional():
+    """spec/focus-rail.md revision 2 A: 30 teeth on the motor and 20 on the
+    screw at 3200 motor steps a turn give 2133.33 a screw turn; the user's
+    swapped pulleys (20 on the motor, 30 on the screw) give 4800."""
+    h = orp.parse_reply("ORP 1 STEPS_PER_MM=533.333 STEPS_PER_REV=2133.33 HOME=NONE "
+                        "NAME=DIY Focus Rail")[1]
+    assert h["steps_per_rev"] == 2133.33 and h["steps_per_mm"] == 533.333
+    assert f"{orp.lead_mm(h['steps_per_mm'], h['steps_per_rev']):g}" == "4"
+    assert orp.turn_text(20, 533.333, 2133.33) == "1.8°"
+    assert orp.turn_text(20, 1200, 4800) == "1.8°" and orp.lead_mm(1200, 4800) == 4.0
+    assert orp.parse_reply("ORP 1 STEPS_PER_REV=lots")[1]["steps_per_rev"] == 0.0
+
+
 # --------------------------------------------------------------------------- #
 # a fake rail on a fake port
 # --------------------------------------------------------------------------- #
@@ -96,7 +109,8 @@ class FakeRail:
     """Answers the Open Rail Protocol; moves finish on finish()."""
 
     def __init__(self, ignore_hellos=0, needs_dtr=None, light=False, silent=False,
-                 home="NONE"):
+                 home="NONE", spm="400", spr="3200"):
+        self.spm, self.spr = spm, spr
         self.ignore_hellos = ignore_hellos
         self.needs_dtr = needs_dtr
         self.light = light
@@ -125,8 +139,8 @@ class FakeRail:
             if self.light:
                 self.say("OLP 1 CH=R,G,B,W SHUTTER=1 FOCUS=0 NAME=Bench light")
             else:
-                self.say(f"ORP 1 STEPS_PER_MM=400 STEPS_PER_REV=3200 MIN=0 MAX=40000 "
-                         f"HOME={self.home} NAME=Fake Rail")
+                self.say(f"ORP 1 STEPS_PER_MM={self.spm} STEPS_PER_REV={self.spr} MIN=0 "
+                         f"MAX=40000 HOME={self.home} NAME=Fake Rail")
         elif cmd == "STATUS":
             self.status()
         elif cmd in ("GOTO", "MOVE"):
@@ -671,3 +685,156 @@ def test_the_panel_still_fits_with_the_rail_section_open(iso_settings):
         assert mon.panel.minimumSizeHint().width() <= lm.theme.PANEL_W
     finally:
         _close(mon)
+
+
+# --------------------------------------------------------------------------- #
+# autofocus before each shot (spec/focus-rail.md revision 2 C)
+# --------------------------------------------------------------------------- #
+def _connected_monitor(magnifier=True):
+    mon, feed, client, rail = _rail_monitor()
+    mon.rail.open_port("/dev/cu.usbserial-0001")
+    client.link.tick()
+    client.link.tick()
+    feed.result = _frame(1.0)
+    mon._on_frame()
+    order = []
+    mon.AF_SHOT_SETTLE_S = 0.0
+    if magnifier:
+        mon._on_zoom_levels(["1", "2.5", "4", "8", "16"])
+        mon.usb.set_zoom = lambda lv: order.append(f"zoom {lv}")
+    real_guide = mon._shot_guide_record
+    mon._shot_guide_record = lambda: (order.append("prepared"), real_guide())[1]
+    mon.rail_af_shoot.setChecked(True)
+    return mon, feed, client, rail, order
+
+
+def _drive_af(mon, feed, client, rail, sim, steps=600):
+    clock = Clock()
+    mon._af._clock = clock
+    for _ in range(steps):
+        if mon._af is None or not mon._af.running:
+            break
+        if rail.moving:
+            rail.finish()
+            sim.move(rail.pos)
+            client.link.tick()
+            continue
+        clock.t += 0.1
+        feed.result = _frame(sim.score())
+        mon._on_frame()
+
+
+def _magnify(mon, feed, level):
+    """The camera says it zoomed, then its first picture at that zoom comes."""
+    mon._on_cam_zoom(level)
+    feed.result = _frame(1.0)
+    mon._on_frame()
+    mon._af_shot_tick()
+
+
+def test_shoot_magnifies_focuses_goes_back_to_whole_then_shoots(iso_settings):
+    mon, feed, client, rail, order = _connected_monitor()
+    try:
+        mon.shoot()
+        assert order == ["prepared", "zoom 8"]           # the shot taken at the whole frame
+        assert mon._af_shot["stage"] == "zoom" and not mon.sequence.running
+        assert mon.shoot_btn.isEnabled() and mon.shoot_btn.text().startswith("Stop")
+        assert mon._rail_busy()                          # Measure, Meter, jogs refused
+        n = len(rail.lines)
+        mon.rail_jog(1, "fine")
+        assert len(rail.lines) == n and "before the shot" in mon.rail_caption.text()
+        _magnify(mon, feed, "8")
+        assert mon._af is not None and mon._af.running   # focusing at 8×
+        assert rail.lines[-1].startswith("GOTO ")
+        sim = SimRail(260.0, play_um=0.0, noise=0.0)
+        _drive_af(mon, feed, client, rail, sim)
+        assert mon._af.result.ok and abs(sim.carriage_um() - 260.0) <= 11
+        assert order[-1] == "zoom 1" and not mon.sequence.running   # back to Whole first
+        mon._on_cam_zoom("1")
+        _app.processEvents()
+        assert mon.sequence.running and mon._af_shot is None
+        assert mon.shoot_btn.text().startswith("Stop")
+        assert order.count("prepared") == 1
+    finally:
+        mon.sequence.stop()
+        _close(mon)
+
+
+def test_without_a_magnifier_it_focuses_then_shoots(iso_settings):
+    mon, feed, client, rail, order = _connected_monitor(magnifier=False)
+    try:
+        assert not mon.rail_af_zoom.isEnabled()          # nothing to zoom
+        mon.shoot()
+        assert mon._af is not None and mon._af.running
+        _drive_af(mon, feed, client, rail, SimRail(-120.0, play_um=0.0, noise=0.0))
+        _app.processEvents()
+        assert mon.sequence.running and order == ["prepared"]
+    finally:
+        mon.sequence.stop()
+        _close(mon)
+
+
+def test_no_focus_found_shoots_nothing_and_goes_back_to_whole(iso_settings):
+    mon, feed, client, rail, order = _connected_monitor()
+    try:
+        mon.shoot()
+        _magnify(mon, feed, "8")
+        _drive_af(mon, feed, client, rail, SimRail(0.0, play_um=0.0, flat=True))
+        assert not mon._af.result.ok and mon._af_shot is None
+        assert mon.capture_caption.text().startswith("Focus barely changed")
+        assert mon.capture_caption.text().endswith("Nothing was shot.")
+        _app.processEvents()
+        assert not mon.sequence.running and order[-1] == "zoom 1"
+        assert mon.rail_caption.text().endswith("Nothing was shot.")
+        assert mon.shoot_btn.text().startswith("Shoot")
+    finally:
+        _close(mon)
+
+
+def test_shoot_again_or_esc_stops_it_and_nothing_is_shot(iso_settings):
+    mon, feed, client, rail, order = _connected_monitor()
+    try:
+        mon.shoot()
+        _magnify(mon, feed, "8")
+        assert mon._af.running
+        mon.shoot()                                       # a second press
+        assert not mon._af.running and rail.lines[-1] == "STOP"
+        assert mon._af_shot is None and not mon.sequence.running
+        assert order[-1] == "zoom 1"
+        assert "Shoot cancelled. Nothing was shot." == mon.capture_caption.text()
+        assert mon.shoot_btn.text().startswith("Shoot")
+        # Esc while it is still magnifying
+        client.link.tick()                               # the STOP's DONE
+        mon._on_cam_zoom("1")
+        order.clear()
+        mon.shoot()
+        assert order == ["prepared", "zoom 8"]
+        mon._on_escape()
+        assert mon._af_shot is None and order[-1] == "zoom 1"
+        mon._on_cam_zoom("8")                            # the camera's late report
+        mon._af_shot_tick()
+        assert mon._af is None or not mon._af.running
+    finally:
+        _close(mon)
+
+
+def test_the_box_needs_the_rail_and_is_remembered(iso_settings):
+    mon, feed, client, rail = _rail_monitor()
+    try:
+        feed.result = _frame(1.0)
+        mon._on_frame()
+        mon.rail_af_shoot.setChecked(True)
+        mon.rail_af_zoom.setCurrentIndex(mon.rail_af_zoom.findData("16"))
+        mon.shoot()
+        assert not mon.sequence.running and mon._af_shot is None
+        assert "isn't connected" in mon.capture_caption.text()
+        assert lm._settings().value("live/rail_af_shoot", type=bool) is True
+        assert lm._settings().value("live/rail_af_zoom") == "16"
+    finally:
+        _close(mon)
+    mon2, *_rest = _rail_monitor()
+    try:
+        assert mon2.rail_af_shoot.isChecked()
+        assert mon2.rail_af_zoom.currentData() == "16"
+    finally:
+        _close(mon2)

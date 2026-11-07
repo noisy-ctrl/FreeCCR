@@ -40,9 +40,9 @@ def host(tmp_path_factory):
     return exe
 
 
-def run(exe, lines, mode="SWITCH", moving_status=False):
+def run(exe, lines, mode="SWITCH", moving_status=False, args=()):
     data = lines if isinstance(lines, bytes) else ("\n".join(lines) + "\n").encode()
-    out = subprocess.run([exe, mode], input=data, capture_output=True,
+    out = subprocess.run([exe, mode, *args], input=data, capture_output=True,
                          timeout=30).stdout.decode()
     return [ln for ln in out.splitlines()
             if ln != "#ok" and (moving_status or "MOVING=1" not in ln)]
@@ -56,6 +56,21 @@ def test_hello_status_and_other_bytes_ignored(host):
                    "ORP 1 STEPS_PER_MM=400 STEPS_PER_REV=3200 MIN=0 MAX=40000 HOME=SWITCH "
                    "NAME=Host Rail (simulated)",
                    "ERR unknown FOO"]
+
+
+def test_a_belt_drive_reports_its_steps_through_the_sketchs_arithmetic(host):
+    """spec/focus-rail.md revision 2 A: `orp::screwStepsPerTurn`, which
+    FocusRail.ino uses, through the host build."""
+    tail = " HOME=NONE NAME=Host Rail (simulated)"
+    swapped = run(host, ["HELLO"], mode="NONE",
+                  args=("--belt", "20", "30", "--lead", "4", "--microsteps", "16"))
+    assert swapped == ["ORP 1 STEPS_PER_MM=1200 STEPS_PER_REV=4800 MIN=0 MAX=40000" + tail]
+    first = run(host, ["HELLO"], mode="NONE", args=("--belt", "30", "20", "--lead", "4"))
+    assert first == ["ORP 1 STEPS_PER_MM=533.333 STEPS_PER_REV=2133.33 MIN=0 MAX=40000"
+                     + tail]
+    from core import orp
+    h = orp.parse_reply(first[0])[1]
+    assert f"{orp.lead_mm(h['steps_per_mm'], h['steps_per_rev']):g}" == "4"
 
 
 def test_goto_move_and_a_retarget(host):
