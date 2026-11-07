@@ -87,6 +87,65 @@ def test_the_camera_is_picked_by_port_then_name_then_maker():
     assert ch.pick_device(cam_only, "", "") is None
 
 
+# 2026-11-07, the user's Mac: Image Capture had the camera, which shows no
+# owner on its entry, while FreeCCR itself (python) held another USB device.
+IOREG_IMAGE_CAPTURE = """\
++-o GFX 50S II@02110000  <class IOUSBHostDevice, id 0x100000b44, registered, matched, active, busy 0 (12 ms), retain 28>
+  | {
+  |   "USB Product Name" = "GFX 50S II"
+  |   "idVendor" = 1227
+  |   "locationID" = 34668544
+  |   "USB Address" = 4
+  | }
+
++-o Gadget@01100000  <class IOUSBHostDevice, id 0x100000c10, registered, matched, active, busy 0 (2 ms), retain 22>
+  | {
+  |   "USB Product Name" = "Gadget"
+  |   "idVendor" = 11914
+  |   "locationID" = 17825792
+  |   "USB Address" = 3
+  | }
+  |
+  +-o Gadget@0  <class IOUSBHostInterface, id 0x100000c22, registered, matched, active, busy 0 (0 ms), retain 8>
+      {
+        "UsbExclusiveOwner" = "pid 6008, python"
+      }
+"""
+
+
+def _run(text):
+    return lambda cmd, **kw: types.SimpleNamespace(returncode=0, stdout=text)
+
+
+def test_another_devices_owner_is_never_named_for_the_camera():
+    devs = ch.parse_ioreg(IOREG_IMAGE_CAPTURE)
+    # the camera's own entry, by its port, even with no owner showing
+    assert ch.pick_device(devs, "usb:002,004", "GFX 50S II", me=6008)["name"] == "GFX 50S II"
+    assert ch.find("usb:002,004", "GFX 50S II", platform="darwin",
+                   run=_run(IOREG_IMAGE_CAPTURE), me=6008) == []
+    # without a port: a device only FreeCCR holds isn't anyone else's hold ...
+    assert ch.pick_device(devs, "", "", me=6008) is None
+    # ... and a lone device held by some program isn't taken for the camera
+    assert ch.pick_device(devs, "", "", me=1) is None
+
+
+def test_freeccr_holding_the_camera_itself_says_so():
+    mine = IOREG.replace("pid 512, ptpcamerad", "pid 6008, python")
+    hs = ch.find("usb:002,004", "GFX 50S II", platform="darwin", run=_run(mine), me=6008)
+    assert hs == [ch.Holder(6008, "python", own=True)]
+    assert hs[0].describe() == "FreeCCR itself (process 6008)"
+    # held by us AND another program: the other program is named
+    both = IOREG.replace('"UsbExclusiveOwner" = "pid 512, ptpcamerad"',
+                         '"UsbExclusiveOwner" = "pid 6008, python"\n'
+                         '          "UsbExclusiveOwner" = "pid 512, ptpcamerad"')
+    hs = ch.find("usb:002,004", "GFX 50S II", platform="darwin", run=_run(both), me=6008)
+    assert hs == [ch.Holder(512, "ptpcamerad", True)]
+    # a lone hold by the camera service, with nothing else to go on, is the camera
+    lone = [dict(d, vendor=None, name="Thing") for d in ch.parse_ioreg(IOREG)
+            if d["name"] == "GFX 50S II"]
+    assert ch.pick_device(lone, "", "")["name"] == "Thing"
+
+
 def test_mac_holders_run_ioreg_and_never_raise():
     calls = []
 
@@ -186,7 +245,15 @@ def test_the_monitor_names_the_holder(monitor, monkeypatch):
     _app.processEvents()
     assert "macOS is holding the camera (“ptpcamerad” (process 512)" in mon.canvas.message
     assert mon.release_btn.isVisibleTo(mon)
+    assert "If Image Capture, Photos or Preview is open, quit it" in mon.canvas.message
     mon.usb.holders = []
     mon.usb.state.emit("busy", "x")
     _app.processEvents()
-    assert mon.canvas.message.startswith("macOS is holding the camera, so")
+    assert mon.canvas.message.startswith("Another program has the camera, so")
+    assert "Image Capture" in mon.canvas.message and mon.release_btn.isVisibleTo(mon)
+    # FreeCCR's own earlier connection: never "another program", no Release
+    mon.usb.holders = [ch.Holder(6008, "python", own=True)]
+    mon.usb.state.emit("busy", "x")
+    _app.processEvents()
+    assert mon.canvas.message.startswith("FreeCCR still has the camera")
+    assert "python" not in mon.canvas.message and not mon.release_btn.isVisibleTo(mon)
