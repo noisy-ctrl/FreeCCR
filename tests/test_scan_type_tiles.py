@@ -101,6 +101,10 @@ def test_the_pictures_show_their_light():
     # RGB: red, green and blue light under an orange negative
     assert min(_count(rgb, RED), _count(rgb, GREEN), _count(rgb, BLUE)) > 100
     assert _count(rgb, ORANGE) > 1000
+    # its sprocket holes are white: no coloured light across the film's top
+    holes = rgb[28:38, 36:188]                          # the top row of holes at 2x
+    assert _count(holes, WHITE) > 50
+    assert max(_count(holes, RED), _count(holes, GREEN), _count(holes, BLUE)) == 0
     # White light: white light, the same negative, no green or blue light
     assert _count(white, WHITE) > 500 and _count(white, ORANGE) > 1000
     assert _count(white, GREEN) == 0 and _count(white, BLUE) == 0
