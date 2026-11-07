@@ -61,3 +61,24 @@ missing `ioreg` → `[]`. Linux: a fake `/proc` with a process holding the
 port's device file. `UsbCamera` keeps the holders on a busy open. The monitor
 names a non-system holder and hides Release Camera; names ptpcamerad and
 shows it.
+
+
+## Revision 2026-11-07: never another device's owner, never FreeCCR itself
+The user saw "“python” (process 6008) is using the camera" while Image
+Capture had it. Image Capture's hold shows no `UsbExclusiveOwner` on the
+camera's entry, so the camera wasn't among the HELD devices, and the
+"one held device and nothing else to go on" rule took the only held device:
+one FreeCCR itself (python) had open.
+- The port names the camera's entry outright, held or not; a camera entry
+  with no owner gives `[]` (a holder we can't see). Another device's owner is
+  never reported.
+- FreeCCR's own process (`os.getpid()`) counts only when nobody else holds
+  the camera's entry: `Holder(own=True)`, "FreeCCR itself (process N)"; the
+  monitor says "FreeCCR still has the camera from an earlier connection.
+  Unplug the camera's USB cable and plug it in again, then Find Cameras." (no
+  Release Camera). Without a port, devices only FreeCCR holds don't count.
+- The lone-held-device fallback needs a camera service as its owner.
+- On macOS the messages name Image Capture, Photos and Preview: "If Image
+  Capture, Photos or Preview is open, quit it", with or without a holder
+  found ("Another program has the camera, so FreeCCR can't open it." when
+  none is).
