@@ -1086,6 +1086,8 @@ class LiveCaptureMonitor(QWidget):
         self.release_btn.clicked.connect(self._on_release_camera)
         self.light.state_changed.connect(self._on_light_state)
         self.light.telemetry_changed.connect(lambda t: self._refresh_light_status())
+        if hasattr(self.light, "identity_changed"):
+            self.light.identity_changed.connect(self._on_light_identity)
         self.light.ports_changed.connect(self._on_ports)
         self.rescan_btn.clicked.connect(self.light.rescan)
         self.connect_btn.clicked.connect(self._on_connect_clicked)
@@ -1191,9 +1193,12 @@ class LiveCaptureMonitor(QWidget):
 
     def _start(self):
         port = str(_settings().value("live/port", "") or "")
+        ident = str(_settings().value("live/port_id", "") or "")
+        if ident and hasattr(self.light, "set_auto_ident"):
+            self.light.set_auto_ident(ident)      # found wherever it's plugged in now
         if port:
             self.light.set_auto_port(port)
-            self.light.rescan()                   # connect now, not on the next 3 s scan
+        self.light.rescan()                       # connect now, not on the next 3 s scan
         rport = str(_settings().value("live/rail_port", "") or "")
         if rport and rport != port:
             self.rail.set_auto_port(rport)
@@ -1985,6 +1990,12 @@ class LiveCaptureMonitor(QWidget):
         port = self.port_combo.currentText()
         if port and port != "No ports found":
             self.light.open_port(port)
+
+    def _on_light_identity(self, ident):
+        """The answering light's USB identity: how it is found next time,
+        wherever it is plugged in (spec/live-capture-monitor.md 2026-11-07)."""
+        if ident:
+            _settings().setValue("live/port_id", str(ident))
 
     def _on_light_state(self, state, port, detail):
         if state in ("ok", "waiting") and port:

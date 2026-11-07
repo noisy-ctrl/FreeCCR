@@ -16,6 +16,23 @@ from core import olp
 
 STATES_OPEN = ("waiting", "ok", "silent")
 DRAIN_S = 0.05            # after the last bytes, before the port closes
+DRAIN_POLL_S = 0.01       # waiting for queued bytes to go, at most
+DRAIN_POLLS = 50          # 50 x 10 ms (then they are dropped: a stuck light)
+STUCK_TEXT = ("The light isn't taking data: unplug its USB and plug it back in, "
+              "straight into the computer if you can")
+SILENT_TEXT = ("No answer: another program may have the port, or the light's USB is "
+               "stuck (unplug it and plug it back in)")
+
+
+def _is_write_timeout(err):
+    """pyserial's write timeout: the far end isn't reading."""
+    try:
+        import serial
+        if isinstance(err, serial.SerialTimeoutException):
+            return True
+    except Exception:
+        pass
+    return "timeout" in type(err).__name__.lower()
 
 
 def _pyserial_factory():
@@ -31,6 +48,7 @@ class LightLink(QObject):
     state_changed = Signal(str, str, str)      # state, port, detail
     telemetry_changed = Signal(object)         # {"vbus": volts, "temp": celsius}
     ports_changed = Signal(list)
+    identity_changed = Signal(str)             # the answering light's USB identity
 
     TICK_MS = 15
     SCAN_MS = 3000
@@ -41,16 +59,20 @@ class LightLink(QObject):
     BAUD = 115200
 
     def __init__(self, serial_factory=None, port_lister=None,
-                 clock=time.monotonic, sleep=time.sleep, available=None):
+                 clock=time.monotonic, sleep=time.sleep, available=None,
+                 identify=None):
         super().__init__()
         self._available = cl.SERIAL_AVAILABLE if available is None else bool(available)
         self._factory = serial_factory or _pyserial_factory
         self._lister = port_lister or cl.list_ports
+        self._identify = identify or cl.port_identities    # {device: "vid:pid:serial"}
         self._clock = clock
         self._sleep = sleep
         self._ser = None
         self._port = ""
         self._auto_port = ""
+        self._auto_ident = ""        # the light we had, wherever it is plugged in now
+        self._stuck_port = ""        # took no data: not reopened until it goes away
         self._user_closed = False
         self._parser = cl.PacketParser()
         # Two protocols on one port (spec/open-light-protocol.md): the
@@ -108,22 +130,38 @@ class LightLink(QObject):
             else:
                 self._flush_colour(force=True)
             self._drain()
-        self._close_quietly()
+        self._close_quietly(wait=False)          # drained just now
         self._auto_port = ""
 
     def _drain(self):
         """Let the last bytes reach the light before the port closes: closing
         straight after a write can drop them, and the light stayed on when
-        Capture closed (the user, 2026-11-01)."""
+        Capture closed (the user, 2026-11-01). Bounded: pyserial's flush()
+        (tcdrain) waits for ever on a light that isn't reading."""
+        if self._ser is None:
+            return
+        self._settle_output(wait=True)
+        self._sleep(DRAIN_S)
+
+    def _settle_output(self, wait):
+        """Let queued bytes go (up to DRAIN_POLLS x DRAIN_POLL_S when `wait`),
+        then drop what is left: on macOS closing a port with bytes still queued
+        waits until they go, which with a light that doesn't read was for ever
+        (FreeCCR had to be killed, 2026-11-07). Returns the bytes dropped."""
         ser = self._ser
         if ser is None:
-            return
+            return 0
         try:
-            if hasattr(ser, "flush"):
-                ser.flush()                  # pyserial: waits until written (tcdrain)
+            for _ in range(DRAIN_POLLS if wait else 0):
+                if not ser.out_waiting:
+                    break
+                self._sleep(DRAIN_POLL_S)
+            left = int(ser.out_waiting or 0)
+            if left:
+                ser.reset_output_buffer()
+            return left
         except Exception:
-            pass
-        self._sleep(DRAIN_S)
+            return 0
 
     # ------------------------------------------------------------------ #
     # commands (queued from the GUI)
@@ -133,6 +171,8 @@ class LightLink(QObject):
         """A connect the user asked for (or the remembered port appearing)."""
         self._user_closed = False
         self._retried = False
+        if port == self._stuck_port:
+            self._stuck_port = ""            # they plugged it in again and asked
         self._open(port, assert_dtr=True)
 
     @Slot()
@@ -148,6 +188,10 @@ class LightLink(QObject):
     @Slot(str)
     def set_auto_port(self, port):
         self._auto_port = port or ""
+
+    @Slot(str)
+    def set_auto_ident(self, ident):
+        self._auto_ident = ident or ""
 
     @Slot()
     def rescan(self):
@@ -196,6 +240,7 @@ class LightLink(QObject):
             now = self._clock()
             if self._state[0] in ("waiting", "silent") and self._rx > 0:
                 self._set_state("ok", self._port, "Responding")
+                self._learn_identity()
             elif self._state[0] == "waiting" and now - self._opened_at >= self.LINK_CHECK_S:
                 if not self._retried:
                     # Silent: DTR may have reset the board, or the firmware
@@ -203,8 +248,7 @@ class LightLink(QObject):
                     self._retried = True
                     self._open(self._port, assert_dtr=not self._dtr)
                     return
-                self._set_state("silent", self._port,
-                                "Port open but silent: another program may have it")
+                self._set_state("silent", self._port, SILENT_TEXT)
             self._flush_colour()
             if (self._telemetry_dirty
                     and now - self._last_telemetry >= self.TELEMETRY_GAP_S):
@@ -221,10 +265,47 @@ class LightLink(QObject):
         if ports != self._ports or force_emit:
             self._ports = ports
             self.ports_changed.emit(list(ports))
-        if (self._ser is None and self._auto_port and not self._user_closed
-                and self._auto_port in ports):
-            self._retried = False
-            self._open(self._auto_port, assert_dtr=True)
+        if self._stuck_port and self._stuck_port not in ports:
+            self._stuck_port = ""            # unplugged: worth trying when it's back
+        if self._ser is None and not self._user_closed:
+            target = self._auto_target(ports)
+            if target:
+                self._retried = False
+                self._open(target, assert_dtr=True)
+
+    def _auto_target(self, ports):
+        """Where to reconnect by itself (spec/live-capture-monitor.md revision
+        2026-11-07): the light we had, wherever it is now; else the saved port
+        when nothing says it is now another device; else any Scanlight."""
+        usable = [p for p in ports if p and p != self._stuck_port]
+        if not usable:
+            return None
+        try:
+            idents = dict(self._identify() or {})
+        except Exception:
+            idents = {}
+        want = self._auto_ident
+        if want:
+            for p in usable:
+                if cl.same_device(idents.get(p, ""), want):
+                    return p
+        if self._auto_port in usable:
+            have = idents.get(self._auto_port, "")
+            if not want or not have or cl.same_device(have, want):
+                return self._auto_port
+        for p in usable:
+            if cl.identity_vid(idents.get(p, "")) in cl.SCANLIGHT_VIDS:
+                return p
+        return None
+
+    def _learn_identity(self):
+        try:
+            ident = dict(self._identify() or {}).get(self._port, "")
+        except Exception:
+            ident = ""
+        if ident and ident != self._auto_ident:
+            self._auto_ident = ident
+            self.identity_changed.emit(ident)
 
     # ------------------------------------------------------------------ #
     # internals
@@ -331,14 +412,28 @@ class LightLink(QObject):
             self._ser.write(pkt)
             return True
         except Exception as e:
-            self._lose(e)
+            if _is_write_timeout(e):
+                self._stuck()
+            else:
+                self._lose(e)
             return False
 
     def _lose(self, err):
-        self._close_quietly()
+        self._close_quietly(wait=False)
         self._set_state("lost", self._port, "Disconnected (unplugged?)")
 
-    def _close_quietly(self):
+    def _stuck(self):
+        """The light took no data: say so, and don't reopen it by itself until
+        it has been unplugged (or Connect is pressed)."""
+        port = self._port
+        self._stuck_port = port
+        self._close_quietly(wait=False)
+        self._set_state("lost", port, STUCK_TEXT)
+
+    def _close_quietly(self, wait=True):
+        """Close the port, never waiting on bytes a light won't take."""
+        if self._ser is not None:
+            self._settle_output(wait)
         ser, self._ser = self._ser, None
         if ser is not None:
             try:
@@ -365,6 +460,7 @@ class LightClient(QObject):
     state_changed = Signal(str, str, str)
     telemetry_changed = Signal(object)
     ports_changed = Signal(list)
+    identity_changed = Signal(str)
 
     _do_open = Signal(str)
     _do_close = Signal()
@@ -372,6 +468,7 @@ class LightClient(QObject):
     _do_pulse = Signal(int)
     _do_focus = Signal(bool)
     _do_auto = Signal(str)
+    _do_ident = Signal(str)
     _do_rescan = Signal()
 
     def __init__(self, link=None, threaded=True, parent=None):
@@ -384,12 +481,14 @@ class LightClient(QObject):
         self.link.state_changed.connect(self._on_state)
         self.link.telemetry_changed.connect(self._on_telemetry)
         self.link.ports_changed.connect(self._on_ports)
+        self.link.identity_changed.connect(self.identity_changed)
         self._do_open.connect(self.link.open_port)
         self._do_close.connect(self.link.close_port)
         self._do_levels.connect(self.link.set_levels)
         self._do_pulse.connect(self.link.pulse)
         self._do_focus.connect(self.link.focus)
         self._do_auto.connect(self.link.set_auto_port)
+        self._do_ident.connect(self.link.set_auto_ident)
         self._do_rescan.connect(self.link.rescan)
         if threaded:
             from utils.qt_threads import new_thread
@@ -436,6 +535,9 @@ class LightClient(QObject):
 
     def set_auto_port(self, port):
         self._do_auto.emit(port or "")
+
+    def set_auto_ident(self, ident):
+        self._do_ident.emit(ident or "")
 
     def rescan(self):
         self._do_rescan.emit()

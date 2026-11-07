@@ -148,6 +148,57 @@ def port_info_rank(device, vid=None, description=""):
     return base
 
 
+def port_identity(vid=None, pid=None, serial_number=""):
+    """What a USB serial device IS, wherever it is plugged in: "vid:pid:serial"
+    (hex ids; serial may be empty), or "" for a port with no USB ids. macOS
+    names a port by where it is plugged in, so this is how the light is found
+    after moving it (spec/live-capture-monitor.md revision 2026-11-07)."""
+    if vid is None:
+        return ""
+    try:
+        return f"{int(vid):04x}:{int(pid or 0):04x}:{str(serial_number or '').strip()}"
+    except (TypeError, ValueError):
+        return ""
+
+
+def port_identities():
+    """{device: identity} for every serial port ({} without pyserial)."""
+    if not SERIAL_AVAILABLE:
+        return {}
+    try:
+        infos = list(serial.tools.list_ports.comports())
+    except Exception:
+        return {}
+    return {p.device: port_identity(getattr(p, "vid", None), getattr(p, "pid", None),
+                                    getattr(p, "serial_number", "") or "")
+            for p in infos}
+
+
+def _ident_parts(ident):
+    parts = (str(ident or "").split(":", 2) + ["", "", ""])[:3]
+    return parts[0], parts[1], parts[2]
+
+
+def same_device(a, b):
+    """Two identities are the same device: the whole identity when both have
+    serial numbers, else vendor and product."""
+    if not a or not b:
+        return False
+    va, pa, sa = _ident_parts(a)
+    vb, pb, sb = _ident_parts(b)
+    if sa and sb:
+        return (va, pa, sa) == (vb, pb, sb)
+    return (va, pa) == (vb, pb)
+
+
+def identity_vid(ident):
+    v = _ident_parts(ident)[0]
+    try:
+        return int(v, 16) if v else None
+    except ValueError:
+        return None
+
+
 def list_ports():
     """Serial port device names, likely ones first. [] without pyserial."""
     if not SERIAL_AVAILABLE:

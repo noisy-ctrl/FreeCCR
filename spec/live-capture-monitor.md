@@ -766,3 +766,79 @@ Tests: shutdown writes OFF, flushes, then closes (in that order, one drain
 wait); the Quit box sleeps Capture and No wakes it to the same levels and
 camera; the main window's closeEvent calls them in that order and ignores the
 event on No.
+
+## Revision 2026-11-07: the light found wherever it is plugged in, and a stuck light said plainly
+The user's Scanlight "responded" but did nothing, then sat at "Waiting for
+the light…", then wouldn't connect. A small script, with FreeCCR closed,
+showed why: on its usual USB route (`/dev/cu.usbmodem11401`, through a hub)
+the light took no data at all (the script's first 3-byte write blocked), and
+plugged in elsewhere (`/dev/cu.usbmodem31201`) it answered at once. So the
+light was fine and FreeCCR was fine. But FreeCCR said neither, and it kept
+the old port name, which no longer existed.
+
+### 1. Found by what it is, not where it is (§7.3)
+- macOS names a USB serial port by where it is plugged in, so moving the
+  light renames it, and a different device can later get the old name.
+- FreeCCR now remembers the light's **USB identity** as well as its port:
+  `vid:pid:serial`, e.g. `2e8a:000a:E6614C…`. The serial is the chip's unique
+  id.
+  - `capture_light.port_identity`, `port_identities()` (device → identity
+    for every port) and `same_device(a, b)`. A whole identity must match when
+    both have serial numbers; with no serial, vendor and product are
+    compared.
+  - The link learns the identity when the light first answers ("ok"),
+    emits `identity_changed` and keeps it as `_auto_ident`. The monitor saves
+    it as `live/port_id` and hands it back at start (`set_auto_ident`).
+- Automatic (re)connection picks its target (`LightLink._auto_target`) in
+  this order, never after the user's Disconnect:
+  1. the port that has the remembered identity, wherever it is;
+  2. the saved port name, when present and either its identity is unknown or
+     it matches. A saved name now held by another device (the rail's ESP32
+     in that socket, say) is skipped;
+  3. any port with the Scanlight's USB vendor id (0x2E8A). This covers a
+     first connection and a replaced light; the identity is learned once it
+     answers.
+- A port that just failed with "not taking data" (§2) is never the automatic
+  target until it disappears from the list (unplugged).
+- A Connect by hand is unchanged: it opens exactly the port chosen.
+
+### 2. "The light isn't taking data" (§7.3)
+- pyserial raises a **write timeout** (`write_timeout` 0.5 s) when the far
+  end doesn't read. That used to count as unplugged ("Disconnected
+  (unplugged?)") and was reopened 3 s later, round and round.
+- Now a write timeout closes the port and shows: "The light isn't taking
+  data: unplug its USB and plug it back in, straight into the computer if you
+  can". The port is held back from automatic reconnection until it leaves
+  the list (unplugged) or the user presses Connect. Other write and read
+  errors are still "unplugged".
+- **Closing never hangs on a stuck light.** On macOS, closing a serial port
+  with bytes still queued waits until they go. A light that doesn't read
+  never takes them, and the user had to kill FreeCCR from Terminal.
+  pyserial's `flush()` (tcdrain) waits the same way.
+  - `_settle_output(wait)` polls `out_waiting` (up to `DRAIN_POLLS` ×
+    `DRAIN_POLL_S` = 0.5 s when waiting), then drops whatever is left
+    (`reset_output_buffer`) before any close.
+  - `_drain` (Capture closing, Quit?) uses it instead of `flush()`, then
+    still pauses `DRAIN_S`, so the last "off" reaches a working light as
+    before.
+  - A user's Disconnect waits; an I/O error or a write timeout doesn't.
+- "Silent" (open, nothing heard either way round) now says both likely
+  causes: "No answer: another program may have the port, or the light's USB
+  is stuck (unplug it and plug it back in)".
+
+### Tests (`tests/test_live_capture_light.py`)
+- **Write timeout:** the stuck text; no reopen while the port is still
+  listed; reopened once it has gone and come back; Connect by hand reopens at
+  once; the close discards the queue and doesn't wait.
+- **Identity:**
+  - the remembered light is found under a new name;
+  - a saved name now another device's is skipped for a Scanlight by vendor
+    id;
+  - nothing saved opens a Scanlight;
+  - Disconnect stops all of it;
+  - an unknown identity still opens the saved name (as before);
+  - `identity_changed` fires when the light answers.
+- **Drain:** a working light still gets its last bytes and the `DRAIN_S`
+  pause; a stuck one has them dropped, and the close doesn't wait.
+- **Monitor:** `live/port_id` saved on the signal and handed to the link at
+  start.

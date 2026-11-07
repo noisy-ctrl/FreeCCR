@@ -742,3 +742,24 @@ def test_the_start_window_is_light_and_capture_comes_back_to_the_front():
         assert len(raised) > n                         # ... and once more after the event loop
     finally:
         _close(mon)
+
+
+def test_the_lights_usb_identity_is_remembered_and_handed_back(iso_settings):
+    """spec/live-capture-monitor.md revision 2026-11-07: found wherever it is
+    plugged in next time."""
+    ident = "2e8a:000a:E6614C311B7A9C2D"
+    mon, feed, light, dev = _monitor(connect=False)
+    try:
+        light.link._identify = lambda: {"/dev/cu.usbmodem1": ident}
+        light.open_port("/dev/cu.usbmodem1")
+        light.link.tick()
+        assert light.state == "ok"
+        assert lm._settings().value("live/port_id") == ident
+    finally:
+        _close(mon)
+    mon2, feed2, light2, dev2 = _monitor(connect=False)
+    try:
+        _app.processEvents()
+        assert light2.link._auto_ident == ident
+    finally:
+        _close(mon2)

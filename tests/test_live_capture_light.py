@@ -93,7 +93,14 @@ class FakeDevice:
         self.answers = answers
         self.written = []
         self.unplugged = False
-        self.log = []                    # write / flush / close, in order
+        self.stuck = False               # takes no data (a write times out)
+        self.queued = 0                  # bytes the OS still holds for it
+        self.drains_after = 0            # polls before queued bytes go (a working light)
+        self.log = []                    # write / discard / close, in order
+
+
+class SerialTimeoutException(Exception):
+    """pyserial's write timeout, by name."""
 
 
 class FakeSerial:
@@ -116,10 +123,23 @@ class FakeSerial:
 
     def close(self):
         self.is_open = False
-        self.dev.log.append("close")
+        self.dev.log.append(f"close with {self.dev.queued} queued")
+        self.dev.queued = 0
 
     def flush(self):
-        self.dev.log.append("flush")
+        self.dev.log.append("flush")     # tcdrain: must never be used (it can wait for ever)
+
+    @property
+    def out_waiting(self):
+        if self.dev.queued and not self.dev.stuck:
+            if self.dev.drains_after <= 0:
+                self.dev.queued = 0
+            self.dev.drains_after -= 1
+        return self.dev.queued
+
+    def reset_output_buffer(self):
+        self.dev.log.append(f"discard {self.dev.queued}")
+        self.dev.queued = 0
 
     def reset_input_buffer(self):
         self._out.clear()
@@ -140,6 +160,9 @@ class FakeSerial:
     def write(self, b):
         if self.dev.unplugged:
             raise OSError("device gone")
+        if self.dev.stuck:
+            self.dev.queued += len(b)
+            raise SerialTimeoutException("Write timeout")
         self.dev.written.append(bytes(b))
         self.dev.log.append("write")
         return len(b)
@@ -153,7 +176,7 @@ class Clock:
         return self.t
 
 
-def _link(dev, ports=("/dev/cu.usbmodem1",), fail_open=False):
+def _link(dev, ports=("/dev/cu.usbmodem1",), fail_open=False, idents=None):
     clock = Clock()
     made = []
 
@@ -162,7 +185,8 @@ def _link(dev, ports=("/dev/cu.usbmodem1",), fail_open=False):
         made.append(s)
         return s
     link = LightLink(serial_factory=factory, port_lister=lambda: list(ports),
-                     clock=clock, sleep=lambda s: None, available=True)
+                     clock=clock, sleep=lambda s: None, available=True,
+                     identify=lambda: dict(idents or {}))
     states = []
     link.state_changed.connect(lambda s, p, d: states.append(s))
     tele = []
@@ -521,7 +545,8 @@ def test_presets_import_the_other_apps_file():
 
 def test_shutdown_lets_the_off_bytes_reach_the_light_before_closing():
     """2026-11-01: the light stayed on when Capture closed. The OFF packet is
-    drained (pyserial flush) and given a moment before the port closes."""
+    given time to go (bounded: never pyserial's flush, which waits for ever
+    on a light that isn't reading) and a moment before the port closes."""
     dev = FakeDevice()
     slept = []
     made = []
@@ -536,7 +561,137 @@ def test_shutdown_lets_the_off_bytes_reach_the_light_before_closing():
     link.tick()
     dev.log.clear()
     slept.clear()
+    dev.queued, dev.drains_after = 9, 3               # the OFF bytes take 3 polls to go
     link.shutdown(light_off=True)
     assert dev.written[-1] == cl.colour_packet(cl.OFF)
-    assert dev.log[-3:] == ["write", "flush", "close"]
-    assert slept == [ll.DRAIN_S]
+    assert dev.log[-2:] == ["write", "close with 0 queued"] and "flush" not in dev.log
+    assert slept == [ll.DRAIN_POLL_S] * 3 + [ll.DRAIN_S]
+
+
+# --------------------------------------------------------------------------- #
+# a light that takes no data, and one plugged in somewhere else
+# (spec/live-capture-monitor.md revision 2026-11-07)
+# --------------------------------------------------------------------------- #
+def test_a_light_that_takes_no_data_is_said_plainly_and_left_until_replugged():
+    dev = FakeDevice()
+    ports = ["/dev/cu.usbmodem11401"]
+    link, clock, made, states, _ = _link(dev, ports=ports)
+    details = []
+    link.state_changed.connect(lambda st, p, d: details.append(d))
+    link.set_auto_port("/dev/cu.usbmodem11401")
+    link.open_port("/dev/cu.usbmodem11401")
+    link.tick()
+    assert states[-1] == "ok"
+    dev.stuck = True
+    link.set_levels({"w": 200})                          # times out
+    assert states[-1] == "lost" and details[-1] == ll.STUCK_TEXT
+    assert not link.is_open()
+    assert dev.log[-1] == f"close with 0 queued" and dev.log[-2].startswith("discard")
+    n = len(made)
+    for _ in range(3):
+        link.scan()                                       # still listed: left alone
+    assert len(made) == n and not link.is_open()
+    ports.clear()
+    link.scan()                                           # unplugged ...
+    dev.stuck = False
+    ports.append("/dev/cu.usbmodem11401")
+    link.scan()                                           # ... and back: tried again
+    assert link.is_open() and len(made) == n + 1
+
+
+def test_connect_by_hand_tries_a_stuck_port_at_once():
+    dev = FakeDevice()
+    link, clock, made, states, _ = _link(dev)
+    link.open_port("/dev/cu.usbmodem1")
+    dev.stuck = True
+    link.set_levels({"w": 1})
+    assert states[-1] == "lost"
+    dev.stuck = False
+    link.open_port("/dev/cu.usbmodem1")
+    assert link.is_open() and states[-1] == "waiting"
+
+
+def test_an_unplugged_light_still_reads_as_unplugged():
+    dev = FakeDevice()
+    link, clock, made, states, _ = _link(dev)
+    details = []
+    link.state_changed.connect(lambda st, p, d: details.append(d))
+    link.open_port("/dev/cu.usbmodem1")
+    dev.unplugged = True
+    link.set_levels({"w": 1})
+    assert states[-1] == "lost" and details[-1] == "Disconnected (unplugged?)"
+
+
+def test_silent_says_both_likely_causes():
+    dev = FakeDevice(answers=False)
+    link, clock, made, states, _ = _link(dev)
+    details = []
+    link.state_changed.connect(lambda st, p, d: details.append(d))
+    link.open_port("/dev/cu.usbmodem1")
+    for _ in range(2):
+        clock.t += 2.6
+        link.tick()
+    assert states[-1] == "silent" and details[-1] == ll.SILENT_TEXT
+
+
+SCANLIGHT = "2e8a:000a:E6614C311B7A9C2D"
+RAIL = "303a:1001:F4:12:FA:00:11:22"
+
+
+def test_the_light_is_found_under_its_new_name():
+    """The user's light moved from /dev/cu.usbmodem11401 to 31201."""
+    dev = FakeDevice()
+    idents = {"/dev/cu.usbmodem31201": SCANLIGHT}
+    link, clock, made, states, _ = _link(dev, ports=["/dev/cu.usbmodem31201"], idents=idents)
+    link.set_auto_port("/dev/cu.usbmodem11401")
+    link.set_auto_ident(SCANLIGHT)
+    link.scan()
+    assert link.is_open() and made[-1].port == "/dev/cu.usbmodem31201"
+
+
+def test_a_saved_name_now_another_devices_is_skipped_for_the_scanlight():
+    dev = FakeDevice()
+    idents = {"/dev/cu.usbmodem11401": RAIL, "/dev/cu.usbmodem31201": SCANLIGHT}
+    link, clock, made, states, _ = _link(
+        dev, ports=["/dev/cu.usbmodem11401", "/dev/cu.usbmodem31201"], idents=idents)
+    link.set_auto_port("/dev/cu.usbmodem11401")
+    link.set_auto_ident("2e8a:000a:OTHERUNIT")           # a light that isn't here now
+    link.scan()
+    assert made[-1].port == "/dev/cu.usbmodem31201"      # a Scanlight, not the rail
+
+
+def test_nothing_saved_opens_a_scanlight_and_learns_it():
+    dev = FakeDevice()
+    idents = {"/dev/cu.usbserial-1": RAIL, "/dev/cu.usbmodem31201": SCANLIGHT}
+    link, clock, made, states, _ = _link(
+        dev, ports=["/dev/cu.usbserial-1", "/dev/cu.usbmodem31201"], idents=idents)
+    learned = []
+    link.identity_changed.connect(learned.append)
+    link.scan()
+    assert made[-1].port == "/dev/cu.usbmodem31201"
+    link.tick()
+    assert states[-1] == "ok" and learned == [SCANLIGHT]
+
+
+def test_an_unknown_identity_still_opens_the_saved_name_and_disconnect_stops_it_all():
+    dev = FakeDevice()
+    link, clock, made, states, _ = _link(dev, ports=["/dev/cu.usbmodem1"], idents={})
+    link.set_auto_port("/dev/cu.usbmodem1")
+    link.scan()
+    assert link.is_open()                                 # as before
+    link.close_port()
+    idents = {"/dev/cu.usbmodem1": SCANLIGHT}
+    link2, clock2, made2, states2, _ = _link(dev, ports=["/dev/cu.usbmodem1"], idents=idents)
+    link2.close_port()                                    # the user's Disconnect
+    link2.scan()
+    assert not made2                                      # not even a Scanlight
+
+
+def test_same_device_and_identities():
+    assert cl.port_identity(0x2E8A, 0x000A, "E66") == "2e8a:000a:E66"
+    assert cl.port_identity(None, None, "x") == ""
+    assert cl.same_device("2e8a:000a:E66", "2e8a:000a:E66")
+    assert not cl.same_device("2e8a:000a:E66", "2e8a:000a:E67")
+    assert cl.same_device("2e8a:000a:", "2e8a:000a:E67")   # no serial: the kind
+    assert not cl.same_device("", "2e8a:000a:E66")
+    assert cl.identity_vid(SCANLIGHT) in cl.SCANLIGHT_VIDS and cl.identity_vid("") is None
