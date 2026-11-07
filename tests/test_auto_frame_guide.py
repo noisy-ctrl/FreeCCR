@@ -331,3 +331,53 @@ def test_shoot_takes_the_guide_to_the_shots_files(film_mon):
     mon.actions["guide"].setChecked(False)
     assert mon._shot_guide_record() is None            # the guide hidden: no record
     cg.clear()
+
+
+def test_capture_snaps_the_guide_onto_a_new_frame_once_it_settles(film_mon):
+    """spec/guide-follow-and-crop.md revision 2: a wound-on frame that lands
+    5 px along takes the guide with it, your margins kept, once the picture
+    has been still for three looks; following off leaves it."""
+    from test_guide_tracker import HAND, WIND, strip
+    mon, usb, light, lm, path = film_mon
+    mon.actions["guide"].setChecked(True)
+    mon.set_guide_auto(True)
+    mon.feed.full = strip()
+    mon.canvas.set_guide(dict(HAND))
+    mon.canvas.guide_changed.emit(dict(mon.canvas.guide))      # placed: margins found
+    assert set(mon._tracker.rel) == {"left", "right", "top", "bottom"}
+    for _ in range(3):
+        mon._auto_guide_tick()                                  # still: nothing to do
+    assert mon.canvas.guide["cx"] == HAND["cx"]
+    # winding on: the picture moves ...
+    mon.feed.full = strip(offset=-WIND // 2)
+    mon._auto_guide_tick()
+    mon.feed.full = strip(offset=-WIND - 5)
+    mon._auto_guide_tick()
+    mon._auto_guide_tick()
+    assert mon.canvas.guide["cx"] == HAND["cx"]                 # ... not settled yet
+    mon._auto_guide_tick()
+    mon._auto_guide_tick()                                      # still for three looks
+    g = mon.canvas.guide
+    assert (g["cx"] - HAND["cx"]) * W == pytest.approx(-5, abs=0.5)
+    assert (g["cy"] - HAND["cy"]) * H == pytest.approx(0, abs=0.3)
+    assert g["w"] == HAND["w"] and g["format"] == "135"
+    assert "moved onto the new frame" in mon.capture_caption.text()
+    # the menu offers it by hand while following
+    from PySide6.QtCore import QPoint
+    mon._guide_menu(QPoint(10, 10))
+    snap = [a for a in mon._popup.actions() if a.text() == "Snap to the Frame"][0]
+    assert snap.isEnabled()
+    mon._popup.close()
+    assert mon._snap_guide(by_hand=True) is False                 # on the frame already
+    assert "on the frame" in mon.capture_caption.text()
+    # following off: never moved
+    mon.set_guide_auto(False)
+    before = dict(mon.canvas.guide)
+    mon.feed.full = strip(offset=-2 * WIND + 4)
+    for _ in range(5):
+        mon._auto_guide_tick()
+    assert mon.canvas.guide == before
+    mon._guide_menu(QPoint(10, 10))
+    snap = [a for a in mon._popup.actions() if a.text() == "Snap to the Frame"][0]
+    assert not snap.isEnabled()
+    mon._popup.close()

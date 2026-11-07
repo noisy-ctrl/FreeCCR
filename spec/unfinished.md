@@ -53,7 +53,9 @@ remove an entry when it ships.
   capture prints "Capture guide for NAME: matched 0.xx" (or "didn't line
   up") in the Terminal: the scores tell whether `ECC_MIN` / `ORIENT_MIN`
   suit real pairs. `GUIDE_SNAP` (2.5 %) was set from auto crop's inset on
-  synthetic scans.
+  synthetic scans. Revision 2 (snapping onto a new frame) was measured on
+  his 35 mm screen recording (−5.3 to −5.6 px, matching the frame's own
+  shift); check it on 120, where only the left rebate shows.
 - **Film Look auto balance (experimental) and the colour-only looks**
   (2026-11-04, `spec/film-look-auto-balance.md`): measured on one lab's nine
   Portra frames only. Needs the re-issued "Portra 400 Lab.cube" (same table,

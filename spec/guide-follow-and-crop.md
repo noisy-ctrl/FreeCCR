@@ -195,3 +195,77 @@ ignored.
   history, so a placed guide never jumps back to an older median.
 - A guide placed while the tracker is lost becomes the new reference at the
   next opening seen (identity at that moment).
+
+
+## Revision 2 (2026-11-07): snapping onto a new frame
+The user, with a screen recording of a 35 mm roll: "It doesn't quite snap
+to a new frame when movement is settled. Being able to do so would be
+ideal." Following the carrier's opening keeps the guide still while the
+film is wound on, but the next frame doesn't land exactly where the last
+one did: on the recording it landed 4.5 px (left edge) / 6.2 px (right
+edge) further along in the 1024 px live view (0.55 % of the frame), so the
+guide's right side ran onto the clear film.
+
+**The frame's own edges** (`guide_tracker.frame_edges`): beside each side of
+the guide, lines across the middle 80 % of that side (columns for left /
+right, rows for top / bottom), from 6 % inside the guide to 10 % outside
+(of its size on that axis), at up to 1280 px. Clear film (the gap between
+frames, or the rebate between the sprocket holes and the picture) is a run
+of ≥ 3 lines that are even (IQR ≤ 6 % of the line's median of the brightest
+channel), bright (≥ 0.3 × the view's 99.5th percentile) and within 6 % of
+the brightest such line; coming in from outside, the first such run's inner
+end is the frame's edge, placed where the line median crosses halfway to
+the picture's level beside it, provided the picture is at least 12 %
+darker. Sprocket-hole rows aren't even and the black mask isn't bright, so
+neither counts. ~40 ms; only when a guide is placed or a new frame settles.
+
+**Your margins**: anchoring with the live picture (`anchor(..., frame=)`,
+which Capture now passes) records, per side found, how far inside the edge
+you put the guide (`GuideTracker.rel`). **Snapping**
+(`GuideTracker.snap(frame, opening)`): the edges are looked for within 8 %
+(of the guide's size) of where your margins put them; each axis moves by
+its sides' shift, the mean when both sides were found, and NOT AT ALL when
+those two disagree by more than 0.4 % of the view (a shadow as clear as the
+film beside an edge reads as film: tested, the guide stays rather than
+jump) or the move is over 8 % of the guide; a guide turned more than 3° isn't
+snapped. Size, angle and format are kept, the result becomes the tracker's
+new reference (the margins stay yours).
+
+**When**: the picture moved and settled. `guide_tracker.SettleWatch` gets
+each of Capture's looks (4 a second, `_auto_guide_tick`, so only while
+following, the camera at Whole, no Shoot / measuring / sleep): the mean
+difference of 64 × 36 grey thumbnails between looks ≥ 3 levels is
+movement, < 2.5 is still, and three still looks after a movement (0.75 s)
+snap once. Measured on the user's three recordings: still < 2.5, focusing
+3–9, winding on 15–33. The feed's new-frame test (`NewFrameDetector`) was
+tried first and can't serve: on 35 mm in his carrier the strip (holes,
+film edges, mask) dominates its thumbnail and two frames still correlate
+0.87 (it needs < 0.40), so it never fires there (nor, so, does the
+sharpness meter's "new frame" reset). Settling after focusing snaps too:
+the tracker has followed the scale, the snap takes off what's left. Also
+on the guide's right-click **Snap to the Frame** (enabled while following;
+says why when it can't). Caption: "The frame guide moved onto the new
+frame."
+
+**Measured on the recording** (its live picture cut out of the screen
+recording and scaled back to 1024 × 768, the guide placed as in it): the
+margins 5.7 / 9.5 / 3.1 / 5.2 px (left, right, top, bottom); on the new
+frame the guide moves −5.3 to −5.6 px across and −1.4 px down
+(14–22 s, four frames), and mid-wind (11–12 s) no side is found. Run whole
+as Capture runs it (following + SettleWatch + snap, from the first frame):
+two small snaps after focusing (5.25 s, 7.75 s), one after the wind
+(14.25 s, −5.2 px), ending 5.8 / 8.8 px inside the new frame's left / right
+edges against the 6.3 / 9.9 px placed. On the
+user's two 120 recordings of 2026-11-01 (the carrier masks all but the
+frame) only the left rebate is ever found, so a snap there moves only along
+that side's axis, by that side.
+
+Tests (`tests/test_guide_tracker.py`, `tests/test_auto_frame_guide.py`): a
+synthetic 35 mm strip in a carrier (mask, film edges, sprocket holes, frames
+with clear film between them): margins found to 0.5 px; frames landing 5 px
+short and 7 px on → the guide follows to 0.5 px, the other axis within
+0.3 px; the same frame or noise → no move; a side the carrier hides → the
+other side alone; a shadow as clear as the film → no move; no margins / 13 %
+away / turned 4° → no snap; `SettleWatch` says once after a move and
+three still looks, never for noise; Capture snaps after settling only with
+following on, and its menu item.
