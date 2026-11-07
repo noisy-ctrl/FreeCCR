@@ -373,6 +373,101 @@ def test_a_new_frame_is_said_once_after_it_settles():
         assert not d.update(b)                                     # a still picture: no more
 
 
+# --------------------------------------------------------------------------- #
+# a new frame on 35 mm: look inside the frame (spec/sharpness-meter-v2.md
+# revision 3)
+# --------------------------------------------------------------------------- #
+def _strip_kit():
+    sys.path.insert(0, os.path.dirname(__file__))
+    from test_guide_tracker import strip, HAND, WIND
+    return strip, HAND, WIND
+
+
+def _feed(d, frames, box, t, dt=0.1):
+    said = []
+    for f in frames:
+        t[0] += dt
+        b = box(f) if callable(box) else box
+        said.append(d.update(lf.new_frame_view(f), b))
+    return said
+
+
+class _SnapAfter:
+    """The guide's box, then (after `n` pictures) the box moved: the guide
+    snapping onto the new frame while it settles."""
+
+    def __init__(self, before, after, n):
+        self.before, self.after, self.n, self.k = before, after, n, 0
+
+    def __call__(self, _frame):
+        self.k += 1
+        return self.before if self.k <= self.n else self.after
+
+
+def test_the_new_frame_check_looks_inside_the_guide_or_the_middle():
+    g = {"cx": 0.5, "cy": 0.5, "w": 0.5, "h": 0.4, "angle": 2.0}
+    assert lf.new_frame_box(320, 240, g) == (96, 82, 224, 158)       # its inner 80 %
+    middle = (64, 48, 256, 192)                                        # the middle 60 %
+    assert lf.new_frame_box(320, 240) == middle
+    for bad in ({"cx": 0.5}, {"cx": 3.0, "cy": 0.5, "w": 0.3, "h": 0.3},
+                {"cx": "x", "cy": 0.5, "w": 0.3, "h": 0.3}, {"cx": 0.5, "cy": 0.5, "w": 0.01, "h": 0.5}):
+        assert lf.new_frame_box(320, 240, bad) == middle
+    v = lf.new_frame_view(np.zeros((768, 1024, 3), np.uint8))
+    assert v.shape == (240, 320) and v.dtype == np.float32
+    small = lf.new_frame_view(np.zeros((36, 64), np.uint8))
+    assert small.shape == (36, 64)                                     # never enlarged
+
+
+def test_winding_on_a_35mm_strip_is_seen_inside_the_guide():
+    """The sprocket rows, rebate and carrier fill the whole view and are the
+    same in every frame: across the whole view (the old way) two frames
+    correlate ~0.92 and nothing is said; inside the guide, once."""
+    strip, HAND, WIND = _strip_kit()
+    still, nxt = strip(), strip(offset=-WIND)
+    moving = [strip(offset=-(WIND * k) // 6) for k in range(1, 6)]
+    w, h = lf.new_frame_view(still).shape[::-1]
+    guide = lf.new_frame_box(w, h, HAND)
+    snapped = lf.new_frame_box(w, h, dict(HAND, cx=HAND["cx"] + 5.0 / 1024))
+    for box, want in ((None, 0), (guide, 1),
+                      (_SnapAfter(guide, snapped, 10), 1)):   # a snap while it settles
+        t = [0.0]
+        d = lf.NewFrameDetector(clock=lambda: t[0])
+        said = _feed(d, [still] * 3 + moving + [nxt] * 15, box, t)
+        assert said.count(True) == want, box
+        if want:
+            assert said.index(True) >= 3 + len(moving) + 8                # after it settled
+
+
+def test_focusing_and_moving_the_guide_are_not_a_new_frame():
+    strip, HAND, _WIND = _strip_kit()
+    still = strip()
+    hh, ww = still.shape[:2]
+    m = np.float32([[1.03, 0, -0.015 * ww], [0, 1.03, -0.015 * hh]])  # 3 % larger, blurred
+    focus = cv2.GaussianBlur(cv2.warpAffine(still, m, (ww, hh)), (0, 0), 2.0)
+    w, h = lf.new_frame_view(still).shape[::-1]
+    t = [0.0]
+    d = lf.NewFrameDetector(clock=lambda: t[0])
+    assert not any(_feed(d, [still] * 3 + [focus] * 12, lf.new_frame_box(w, h, HAND), t))
+    # the guide dragged a fifth of the view on a still picture: the same box
+    # is cut from the picture kept, so it is the same picture
+    dragged = lf.new_frame_box(w, h, dict(HAND, cx=HAND["cx"] - 0.2, w=HAND["w"] * 0.6))
+    assert not any(_feed(d, [focus] * 12, dragged, t))
+
+
+def test_the_feed_looks_for_a_new_frame_inside_the_guide_it_is_given():
+    strip, HAND, WIND = _strip_kit()
+    still, nxt = strip(), strip(offset=-WIND)
+    t = [0.0]
+    p = lf.Processor(clock=lambda: t[0])
+    said = []
+    for f in [still] * 3 + [strip(offset=-WIND // 2)] + [nxt] * 14:
+        t[0] += 0.1
+        r = p.process(f, lf.ViewParams(canvas_w=1024, canvas_h=768, sharp=True, denoise=False,
+                                       frame_area=dict(HAND)))
+        said.append(r.new_frame)
+    assert said.count(True) == 1
+
+
 def test_the_view_can_zoom_well_past_fit_on_a_small_live_view():
     # a 1024 px USB live view on a Retina-sized canvas fits at ~2.15
     fs = lf.fit_scale(1024, 768, 2200, 1878)
