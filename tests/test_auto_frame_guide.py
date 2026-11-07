@@ -233,43 +233,101 @@ def test_the_estimate_uses_a_remembered_base_when_none_shows():
 from test_film_base_shoot import film_mon  # noqa: E402,F401
 
 
-def test_capture_follows_the_frame_waits_and_hands_over_to_the_hand(film_mon):
+def _zoomed(img, s, dx=0.0, dy=0.0):
+    """Focusing: the whole live picture scaled `s` about its centre and
+    shifted (dx, dy) of the view."""
+    m = np.float32([[s, 0, (1 - s) * W / 2 + dx * W], [0, s, (1 - s) * H / 2 + dy * H]])
+    return cv2.warpAffine(img, m, (W, H), flags=cv2.INTER_LINEAR, borderValue=(0, 0, 0))
+
+
+def test_capture_keeps_your_guide_on_the_frame(film_mon):
+    """spec/guide-follow-and-crop.md §2 (replaces revision 1's finder): you
+    place the guide; Follow the Frame keeps it on the frame through focusing,
+    and winding on (the carrier still) doesn't move it."""
+    from PySide6.QtCore import QPoint
+    from core import guide_tracker
     mon, usb, light, lm, path = film_mon
     assert mon._guide_auto                       # on by default
     mon.actions["guide"].setChecked(True)
     mon.feed.full = _live()
+    placed = {"cx": 0.5, "cy": 0.51, "w": 0.86, "h": 0.88, "angle": 0.0, "format": None}
+    mon.canvas.set_guide(placed)
+    mon.canvas.guide_changed.emit(dict(mon.canvas.guide))      # a drag: anchors, stays on
+    assert mon._guide_auto and mon._guide_placed and mon._tracker.anchored
+    assert mon.canvas.guide["cx"] == placed["cx"]               # not moved by finding
+    # focusing: everything 2 % bigger and a little off; the guide goes with it
+    mon.feed.full = _zoomed(_live(), 1.02, 0.004, -0.003)
     mon._auto_guide_tick()
-    mon._auto_guide_tick()
-    t = _truth((60, 40, 980, 740))
-    assert mon.canvas.guide["w"] == pytest.approx(t["w"], abs=0.015)
-    assert mon.canvas.guide["cx"] == pytest.approx(t["cx"], abs=0.005)
-    assert mon.canvas.guide_waiting is None
-    # winding on: the guide waits, dashed with its note, and the estimate stops
-    mon.feed.full = _live(gap=(330, 430))
-    mon._auto_guide_tick()
-    assert mon.canvas.guide_waiting
-    assert mon._remembered_base is not None
+    want = guide_tracker.apply((1.02, 0.004, -0.003), placed)
+    for k in ("cx", "cy", "w", "h"):
+        assert mon.canvas.guide[k] == pytest.approx(want[k], abs=0.0015), k
+    # winding on: clear film across the frame, the carrier still: no move
+    before = dict(mon.canvas.guide)
+    mon.feed.full = _zoomed(_live(gap=(330, 430), seed=3), 1.02, 0.004, -0.003)
+    mon._last_base_find = 0.0                     # the film base is read once a second
+    for _ in range(3):
+        mon._auto_guide_tick()
+    assert mon.canvas.guide == before and mon.canvas.guide_waiting is None
+    assert mon._remembered_base is not None       # the film base is still remembered
     mon.film_base_box.setVisible(True)
     mon._update_frame_estimate()
-    assert mon._frame_est == [] and "whole frame" in mon._frame_live_reason
-    # the frame back: following, and a new frame clears an armed exposure
-    mon._frame_exposures = {"w": {"shutter": "1/2", "iso": "100", "levels": None}}
-    mon.feed.full = _live()
-    mon._auto_guide_tick()
-    mon._auto_guide_tick()
-    assert mon.canvas.guide_waiting is None and mon._frame_exposures is None
-    # the menu offers it; a drag turns it off
-    from PySide6.QtCore import QPoint
+    assert "whole frame" not in (mon._frame_live_reason or "")   # no "between frames" pause
+    # the menu says what it does
     mon._guide_menu(QPoint(10, 10))
     first = mon._popup.actions()[0]
     assert first.text() == "Follow the Frame" and first.isChecked()
+    assert "where you put it" in first.toolTip()
     mon._popup.close()
-    mon.canvas.guide_changed.emit(dict(mon.canvas.guide))
-    assert not mon._guide_auto
-    assert "no longer follows the frame" in mon.capture_caption.text()
-    before = dict(mon.canvas.guide)
-    mon.feed.full = _live((100, 80, 900, 700))
+    # off: left where the hand put it
+    mon.set_guide_auto(False)
+    assert lm._settings().value("live/guide_auto") in (False, "false")
+    mon.feed.full = _zoomed(_live(), 1.05)
     mon._auto_guide_tick()
-    assert mon.canvas.guide == before            # off: left where the hand put it
+    assert mon.canvas.guide == before
+    # on again with no carrier in view: held, dashed, saying why
     mon.set_guide_auto(True)
     assert lm._settings().value("live/guide_auto") in (True, "true")
+    mon.feed.full = np.full((H, W, 3), BASE, np.uint8)
+    mon._auto_guide_tick()
+    mon._auto_guide_tick()
+    assert mon.canvas.guide == before
+    assert "no edge of the carrier" in (mon.canvas.guide_waiting or "")
+
+
+def test_shoot_takes_the_guide_to_the_shots_files(film_mon):
+    """spec/guide-follow-and-crop.md §3: Shoot records the placed guide and
+    a USB shot's file is tied to it; with no guide placed, nothing."""
+    from core import capture_guide as cg
+    from test_capture_routes import _wait
+    from test_frame_exposure import _with_base
+    cg.clear()
+    mon, usb, light, lm, path = film_mon
+    _with_base(mon)
+    mon.actions["guide"].setChecked(True)
+    mon.feed.full = _live()
+    mon._shutter_is_usb = lambda: True
+    mon._ensure_hot_folder = lambda: True
+    usb.dest = usb.dest or mon._usb_dest
+    mon.set_guide_auto(False)
+    mon._guide_placed = False
+    assert mon._shot_guide_record() is None          # shown but never placed
+    from widgets.live_canvas import GUIDE_DEFAULT
+    mon.set_guide_auto(True)
+    mon._set_guide(dict(GUIDE_DEFAULT))              # Reset Guide: the default box
+    assert mon._tracker.anchored and mon._shot_guide_record() is None
+    mon.set_guide_auto(False)
+    placed = {"cx": 0.5, "cy": 0.5, "w": 0.9, "h": 0.9, "angle": 0.5, "format": "6x7"}
+    mon.canvas.set_guide(placed)
+    mon.canvas.guide_changed.emit(dict(mon.canvas.guide))
+    saved = []
+    usb.file_saved.connect(saved.append)
+    mon.shoot()
+    rec = cg.active()
+    assert rec is not None and rec["guide"]["angle"] == 0.5 and rec["format"] == "6x7"
+    assert rec["live_size"] == (W, H)
+    assert _wait(lambda: not mon.sequence.running, 20)
+    assert saved and all(cg.lookup([p]) is rec for p in saved)
+    assert cg.active() is rec                          # late files: for a while yet
+    mon.actions["guide"].setChecked(False)
+    assert mon._shot_guide_record() is None            # the guide hidden: no record
+    cg.clear()

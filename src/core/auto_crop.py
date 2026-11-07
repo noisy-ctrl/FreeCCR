@@ -142,7 +142,7 @@ class Prior:
 
 
 _LEARNED_NOTES = {"matched": "matched your frame", "usual": "your usual frame",
-                  "roll": "matched to the roll"}
+                  "roll": "matched to the roll", "guide": "from Capture's frame guide"}
 
 
 _SIDE_NAMES = {"L": "left", "R": "right", "T": "top", "B": "bottom"}
@@ -1039,3 +1039,90 @@ def _finish(L, best, strip, ang, w, h, inset_frac, priors, L0=None):
                      confidence=conf, soft=soft_sides, strip=strip,
                      fmt=(prior.fmt or best["fmt"]) if prior is not None else best["fmt"],
                      reason=why, learned=learned_kind, geom=geom, debug=debug)
+
+
+# --- Capture's frame guide (spec/guide-follow-and-crop.md §4) ----------------
+GUIDE_SNAP = 0.025        # a guide side snaps to a found edge this near (of its size):
+                          # auto crop's box sits ~1 % inside the gate (inset + blur)
+GUIDE_ANGLE_SAME = 0.5    # degrees: all four snapped and this close = the detection itself
+
+
+def guide_box(guide, w, h):
+    """(cx, cy, bw, bh, angle) in px of a w × h scan from a guide in scan
+    fractions; None when it is too small or mostly outside the scan."""
+    try:
+        cx, cy = float(guide["cx"]) * w, float(guide["cy"]) * h
+        bw, bh = float(guide["w"]) * w, float(guide["h"]) * h
+        ang = float(guide.get("angle") or 0.0)
+    except (KeyError, TypeError, ValueError):
+        return None
+    if bw < MIN_SIDE * w or bh < MIN_SIDE * h:
+        return None
+    if not (0.0 <= cx <= w and 0.0 <= cy <= h):
+        return None
+    return cx, cy, bw, bh, ang
+
+
+def _rot(deg):
+    a = np.radians(deg)
+    return np.array([[np.cos(a), -np.sin(a)], [np.sin(a), np.cos(a)]])
+
+
+def snap_to_guide(det, box, w, h, fmt=""):
+    """Capture's guide (`box` = guide_box) as the crop, each side snapped to
+    the matching side of the detection `det` when that lies within
+    GUIDE_SNAP of the guide's size on that axis (measured at the side's
+    middle, in the guide's own turned frame); all four snapped with the
+    angles alike gives the detection itself."""
+    gcx, gcy, gw, gh, ga = box
+    R = _rot(ga)
+    sides = {"L": -gw / 2, "R": gw / 2, "T": -gh / 2, "B": gh / 2}
+    snapped = []
+    if det is not None and det.usable:
+        x1, y1, x2, y2 = det.rect
+        dc = np.array([(x1 + x2) / 2 * w, (y1 + y2) / 2 * h])
+        dw, dh = (x2 - x1) * w, (y2 - y1) * h
+        D = _rot(det.angle)
+        mids = {"L": (-dw / 2, 0.0), "R": (dw / 2, 0.0), "T": (0.0, -dh / 2), "B": (0.0, dh / 2)}
+        for side, q in mids.items():
+            u = R.T @ (dc + D @ np.array(q) - np.array([gcx, gcy]))
+            val, size = (u[0], gw) if side in "LR" else (u[1], gh)
+            if abs(val - sides[side]) <= GUIDE_SNAP * size:
+                sides[side] = float(val)
+                snapped.append(side)
+    n = len(snapped)
+    why = f"from Capture's frame guide ({n} of 4 sides on the edges found)"
+    if n == 4 and abs(det.angle - ga) <= GUIDE_ANGLE_SAME:
+        return replace(det, learned="guide", reason=why,
+                       confidence="high" if det.confidence == "high" else "medium",
+                       fmt=fmt or det.fmt, geom=dict(det.geom or {}, guide=box, snapped=n))
+    l, r, t, b = sides["L"], sides["R"], sides["T"], sides["B"]
+    c = np.array([gcx, gcy]) + R @ np.array([(l + r) / 2, (t + b) / 2])
+    bw, bh = r - l, b - t
+    rect = ((c[0] - bw / 2) / w, (c[1] - bh / 2) / h, (c[0] + bw / 2) / w, (c[1] + bh / 2) / h)
+    return FrameCrop(tuple(float(v) for v in rect), angle=float(ga), confidence="medium",
+                     strip=bool(det.strip) if det is not None else False,
+                     fmt=fmt or (det.fmt if det is not None else "") or "frame",
+                     reason=why, learned="guide",
+                     geom=dict(size=(w, h), guide=box, snapped=n),
+                     debug=dict(base=det))
+
+
+def detect_guided(raw, guide, priors=None, inset_frac=INSET_FRAC):
+    """The crop from Capture's frame guide (`guide`: cx, cy, w, h in scan
+    fractions, angle, as `capture_guide.map_guide` gives it): auto crop's
+    own detection, then each side of the guide snapped to it. The guide is
+    NOT given to the detection as a prior: a size prior makes candidate
+    boxes of the guide's size, and a side would then snap to an edge that
+    only the prior put there. None when the guide can't be used (the caller
+    detects as usual)."""
+    a = np.asarray(raw)
+    if a.ndim not in (2, 3) or min(a.shape[:2]) < 64:
+        return None
+    h, w = a.shape[:2]
+    box = guide_box(guide, w, h)
+    if box is None:
+        return None
+    fmt = (guide.get("format") or "") if isinstance(guide, dict) else ""
+    det = detect_frame(a, inset_frac=inset_frac, priors=priors)
+    return snap_to_guide(det, box, w, h, fmt=fmt)

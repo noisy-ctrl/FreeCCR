@@ -187,10 +187,15 @@ def apply_look_template(img, t):
     img.fine_rotation_angle = t["fine_rotation_angle"]
     img.horizontal_mirrored = t["horizontal_mirrored"]
     img.vertical_mirrored = t["vertical_mirrored"]
-    img.crop_rect = t["crop_rect"]
-    img.crop_angle = t["crop_angle"]
-    if t.get("crop_is_auto") and t["crop_rect"] is not None:
-        img.auto_crop_rect = tuple(t["crop_rect"])
+    if getattr(img, "capture_guide", None) and getattr(ccr_backend, "crop_from_guide", True):
+        # its own crop comes from Capture's frame guide
+        # (spec/guide-follow-and-crop.md §3), not the frame before
+        img.crop_rect, img.crop_angle = None, 0.0
+    else:
+        img.crop_rect = t["crop_rect"]
+        img.crop_angle = t["crop_angle"]
+        if t.get("crop_is_auto") and t["crop_rect"] is not None:
+            img.auto_crop_rect = tuple(t["crop_rect"])
     img.color_profile = t["color_profile"]
 
 
@@ -252,7 +257,7 @@ class TetherWatchWorker(QObject):
             if not imgs:
                 self.captureError.emit(path, "no image produced")
                 return
-            self._finish(imgs, template)
+            self._finish(imgs, template, paths=[path])
         except Exception as e:
             # Terse form: the GUI shows this inline in the hint strip, so a
             # tethered capture FreeCCR cannot decode still says why.
@@ -294,7 +299,7 @@ class TetherWatchWorker(QObject):
             if not imgs:
                 self.captureError.emit(paths[0], "no image produced")
                 return
-            self._finish(imgs, template)
+            self._finish(imgs, template, paths=paths)
         except Exception as e:
             self.needsAttention.emit({
                 "paths": paths, "reason": f"the merge failed: {e}",
@@ -332,8 +337,9 @@ class TetherWatchWorker(QObject):
             "paths": paths, "reason": job.get("reason", ""),
             "thumbs": [st.thumb_bgr(p) for p in paths]})
 
-    def _finish(self, imgs, template=None):
-        """Inherit the look, then convert (when the session has a black point)
+    def _finish(self, imgs, template=None, paths=None):
+        """Capture's frame guide onto the scan (when the shot carried one),
+        inherit the look, then convert (when the session has a black point)
         exactly as Convert Current would, and hand over."""
         # Snapshot once per file so a mid-decode flip (Positive mode / B/W
         # point change) can't make one file half-convert.
@@ -349,12 +355,31 @@ class TetherWatchWorker(QObject):
                 img.lit_level = None if img.converted else lead_frame.lit_level(img)
             except Exception:
                 img.lit_level = None
+            if paths and not img.converted:
+                self._guide_from_capture(img, paths)
             if template is not None and not img.converted:
                 apply_look_template(img, template)
                 img._tether_template_applied = True
             if convert and not img.converted:
                 self._convert_like_current(img)
             self.captured.emit(img)
+
+    @staticmethod
+    def _guide_from_capture(img, paths):
+        """The guide Capture's shot carried, lined up with this scan
+        (spec/guide-follow-and-crop.md §3): `img.capture_guide`, or left
+        unset when the shot had none or the pictures don't line up."""
+        from core import capture_guide
+        rec = capture_guide.lookup(paths)
+        if rec is None:
+            return
+        g = capture_guide.map_guide(rec, img.resized_raw)
+        name = os.path.basename(paths[0])
+        if g is None:
+            print(f"Capture guide for {name}: the live picture didn't line up with the scan")
+            return
+        img.capture_guide = g
+        print(f"Capture guide for {name}: {g['how']} {g['score']:.2f}")
 
     @staticmethod
     def _convert_like_current(img):

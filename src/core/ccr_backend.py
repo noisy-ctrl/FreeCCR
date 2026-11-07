@@ -139,6 +139,9 @@ class CCRBackend:
         # Learn from the crops you confirm (spec/auto-crop-learning.md).
         # Persisted by MainWindow (crop/learn); the store is core.crop_memory.
         self.auto_crop_learn: bool = True
+        # Crop a capture to the frame guide Capture's shot carried
+        # (spec/guide-follow-and-crop.md §4); Settings → Auto crop
+        self.crop_from_guide: bool = True
         # Input transfer function for non-RAW (TIFF) imports: FreeCCR's density
         # math assumes LINEAR data, but a scanner TIFF is often gamma-encoded.
         # `ask` shows the import dialog; `mode` ("embedded"|"linear"|"manual")
@@ -2854,7 +2857,15 @@ class CCRBackend:
             key = setup_key(img, w, h)
             priors = list(memory().priors(key)) if self.auto_crop_learn else []
             priors += list(extra_priors or ())
-            res = detect_frame(raw, priors=priors)
+            res = None
+            guide = getattr(img, "capture_guide", None)
+            if guide and self.crop_from_guide:
+                # Capture's frame guide: the crop, its sides snapped to the
+                # edges found (spec/guide-follow-and-crop.md §4)
+                from core.auto_crop import detect_guided
+                res = detect_guided(raw, guide, priors=priors)
+            if res is None:
+                res = detect_frame(raw, priors=priors)
             img.auto_crop_last, img.auto_crop_key = res, key
             return res
         except Exception as e:                    # never let a crop stop a convert
@@ -2873,6 +2884,8 @@ class CCRBackend:
         rect = getattr(img, "crop_rect", None)
         if not self.auto_crop_learn or det is None or key is None or rect is None:
             return False
+        if getattr(det, "learned", "") == "guide":
+            return False                 # Capture's guide, not auto crop: nothing to learn
         try:
             w, h = (int(v) for v in key.split("|")[1].split("x"))
             final = box_of(rect, getattr(img, "crop_angle", 0.0), w, h)
@@ -2902,8 +2915,11 @@ class CCRBackend:
         Returns the (possibly replaced) frames and how many were re-placed."""
         import numpy as np
         from core.auto_crop import Prior, snap_soft_sides
+        # a crop from Capture's frame guide is yours: it neither sets the roll's
+        # size nor is re-placed by it (spec/guide-follow-and-crop.md §4)
         gates = [(i, f.geom["gate"]) for i, f in enumerate(frames)
-                 if f is not None and f.usable and (f.geom or {}).get("gate")]
+                 if f is not None and f.usable and (f.geom or {}).get("gate")
+                 and f.learned != "guide"]
         if len(gates) < 3:
             return frames, 0
         g = np.array([v for _, v in gates], float)
@@ -2925,7 +2941,7 @@ class CCRBackend:
                       strip=max(set(strips), key=strips.count))
         out, n = list(frames), 0
         for i, f in enumerate(frames):
-            if f is None:
+            if f is None or f.learned == "guide":
                 continue
             gate = (f.geom or {}).get("gate")
             if f.usable and gate and all(abs(gate[k] / roll[k] - 1) < 0.03 for k in (0, 1)):

@@ -1,6 +1,10 @@
 # The frame guide finds the frame by itself
 
-Status: specified and built 2026-11-01.
+Status: specified and built 2026-11-01. **Superseded 2026-11-07** by
+`spec/guide-follow-and-crop.md`: you place the guide and Follow the Frame
+keeps it on the carrier's opening (revision 2's mask-first opening finder,
+below, is what it uses); `find_frame` now only reads the film base for the
+exposure estimate, and `GuideFollower` no longer places the guide.
 
 The user (2026-11-01, with two screen recordings of Capture: the film wound
 through the carrier, and focusing on the rail): "Frame guide is automatic,
