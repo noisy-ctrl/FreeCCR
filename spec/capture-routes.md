@@ -541,3 +541,34 @@ never came back after an event check; now the backend sets USB first and the
 picture comes; no priority setting while live view runs; set again after a
 shot and after a reconnect; not on a camera that isn't a Fujifilm; a body
 without the setting is asked once per connection.
+
+## 23. A re-plugged camera keeps its place (2026-11-07)
+The user re-cabled his desk: the GFX 50S II was listed in Capture's Camera
+list ("USB · Fuji Fujifilm GFX100") but never opened, and the picture said
+"No camera found … HDMI picture". A camera's key is
+`usb:gphoto2:<libgphoto2 port>`, and that port, `usb:BBB,DDD`, carries the
+USB **device number**, which changes every time the camera is plugged in. So
+the remembered `live/camera_key` (and `live/shutter`) went stale. The monitor
+then fell back to a capture device, and with none it said "none". Choosing
+the camera again in the list worked, because the list fires on `activated`.
+
+- `camera_backends.relocate_key(saved, found, label)` gives a remembered
+  key's current one:
+  - the saved key when it is listed;
+  - else, on the same backend, the one camera with the saved **label**;
+  - with no label saved (older settings), the only camera on that backend;
+  - else None: two alike, none, or another model, which is never opened by
+    itself.
+- The monitor keeps the label beside the key (`live/camera_label`,
+  `live/shutter_label`), set when a camera is chosen or opens.
+- `_relocate_usb_keys` runs first in `_on_usb_cameras`: it moves
+  `_want_key`, `live/camera_key` and a `live/shutter` that pointed at the
+  same camera to the new key before the lists are rebuilt. It prints
+  "usb camera: <label> is at <new> now (was <old>)".
+- With USB cameras listed but none open, the picture says "No camera open.
+  Pick yours in the Camera list below." The HDMI advice is only for no
+  camera at all.
+
+Tests (`tests/test_capture_routes.py`): a re-plugged camera with no label
+saved is opened under its new port, and the shutter follows; another model
+is never opened; `relocate_key`'s cases.

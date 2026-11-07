@@ -102,6 +102,28 @@ def split_key(key):
     return parts[1], parts[2]
 
 
+def relocate_key(saved, found, label=""):
+    """The key a remembered USB camera has NOW. libgphoto2's port
+    ("usb:020,007") carries the USB device number, which changes every time
+    the camera is plugged in, so a remembered key goes stale on a re-plug
+    (the user, 2026-11-07: the GFX was listed and never opened).
+    `found` is [(key, label)]. The saved key when it is listed; else the one
+    camera on the same backend with the saved label; with no label saved, the
+    only camera on that backend; else None (several, or none, or another
+    model)."""
+    keys = [k for k, _l in found]
+    if not saved or saved in keys:
+        return saved
+    sk = split_key(saved)
+    if sk is None:
+        return saved
+    same = [(k, l) for k, l in found if (split_key(k) or ("",))[0] == sk[0]]
+    if label:
+        named = [k for k, l in same if l == label]
+        return named[0] if len(named) == 1 else None
+    return same[0][0] if len(same) == 1 else None
+
+
 def is_raw_name(name):
     return os.path.splitext(str(name))[1].lower() in RAW_EXTS
 
