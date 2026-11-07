@@ -21,6 +21,14 @@ LABELS = {"colour": "Colour · white light",
           "trichrome": "Colour · trichrome (R → G → B)",
           "bw": "Black & white"}
 SHORT = {"colour": "colour", "trichrome": "trichrome", "bw": "B&W"}
+# The Start window's picture tiles (spec/scan-type-tiles.md): in the order the
+# user lists them, with a short name under each picture.
+TILE_ORDER = ("trichrome", "colour", "bw")
+TILE_NAMES = {"trichrome": "RGB", "colour": "White light", "bw": "B&W"}
+TILE_HINTS = {"trichrome": "Red, green and blue exposures of a colour negative, "
+                           "merged into one frame.",
+              "colour": "One exposure of a colour negative under white light.",
+              "bw": "One exposure of a black-and-white negative."}
 DEFAULT = "colour"
 
 # A frame lit by one LED colour puts most of its signal in that channel.
