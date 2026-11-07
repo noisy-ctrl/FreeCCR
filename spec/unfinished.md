@@ -38,13 +38,16 @@ remove an entry when it ships.
   test_case_insensitive` expects "photo-1.jpg" beside "Photo.jpg" on a
   case-sensitive (Linux) disk. Also: one 2,907-test run stopped at 79 % with
   no error (the rest passed when run on their own) — likely memory.
-- **Live view doesn't come back after Measure** (GFX 50S II, 2026-11-01: 0.0
-  fps, the last frame held). Waiting on the user's `usb camera:` Terminal
-  lines and a `FREECCR_GPHOTO2_LOG` log of one Measure.
 - **The Camera list names libgphoto2's table entry** ("Fuji Fujifilm GFX100")
   where the Shutter row shows the model the camera reports ("GFX50S II").
 
 ## To check on the user's machine
+- **Live view after Measure on the GFX** (2026-11-07,
+  `spec/capture-routes.md` §22): his log showed the camera refusing live view
+  whenever its priority was Camera, which libgphoto2's event check sets; the
+  backend now sets USB first. Check a Measure (and a Shoot) brings live view
+  straight back; the Terminal says "priority set to USB before starting live
+  view" once. If it still doesn't, the same two logs again.
 - **"New frame: best reset" on 35 mm** (2026-11-07,
   `spec/sharpness-meter-v2.md` revision 3): it now looks inside the frame
   guide. Replayed on his recordings it fires once per new frame and never

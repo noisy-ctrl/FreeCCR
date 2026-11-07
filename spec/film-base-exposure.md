@@ -456,6 +456,15 @@ with gaps, given up with no loop, a picture or a hold's end starts the count
 over; the monitor's three messages, kept between tries, none for a capture
 device's picture.
 
+## Revision 8: the cause, from the user's log (2026-11-07)
+The log of one Measure showed why live view didn't come back: the camera's
+PriorityMode. libgphoto2's event check sets it to Camera, and a GFX 50S II
+with Camera priority refuses to start live view; reconnecting set USB, but
+the next event check set Camera again before the first preview. Every one of
+435 refusals had Camera, the one start USB. The backend now sets USB right
+before asking for live view whenever it isn't running: spec/capture-routes.md
+§22. Revisions 6-7's reconnects and advice stay as the fallback.
+
 ## Code
 - `core/base_exposure.py` (new, Qt-free): `seconds`, `iso_number`,
   `exposure_of`, `Reading` + `reading_from_mosaic` + `read_patch`, `Plan` +
