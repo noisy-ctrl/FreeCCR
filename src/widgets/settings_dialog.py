@@ -215,6 +215,13 @@ class SettingsDialog(QDialog):
         forget_row.addWidget(self._btn_forget_crops)
         gcr.addLayout(forget_row)
         self._refresh_crop_memory_label()
+        # spec/guide-follow-and-crop.md §4
+        self._cb_crop_guide = QCheckBox("Crop to Capture's frame guide")
+        gcr.addWidget(self._cb_crop_guide)
+        gcr.addWidget(self._muted(
+            "A frame shot from Capture with the frame guide placed is cropped "
+            "to that guide. Each side of the guide moves onto an edge auto crop "
+            "finds close by; otherwise it stays where you put it."))
         lay.addWidget(grp_crop)
 
         # --- Input colour space (non-RAW / TIFF decode space) ------------ #
@@ -785,6 +792,8 @@ class SettingsDialog(QDialog):
                          getattr(ccr_backend, "crop_after_convert", True)),
                         (self._cb_crop_learn,
                          getattr(ccr_backend, "auto_crop_learn", True)),
+                        (self._cb_crop_guide,
+                         getattr(ccr_backend, "crop_from_guide", True)),
                         (self._cb_auto_awb, ccr_backend.auto_awb),
                         (self._cb_gamma_lum, ccr_backend.gamma_luminance),
                         (self._cb_sprocket, ccr_backend.sprocket_mask_white),
@@ -911,6 +920,9 @@ class SettingsDialog(QDialog):
         if (bool(self._cb_crop_learn.isChecked())
                 != bool(getattr(ccr_backend, "auto_crop_learn", True))):
             self._mw.on_auto_crop_learn_toggled(bool(self._cb_crop_learn.isChecked()))
+        if (bool(self._cb_crop_guide.isChecked())
+                != bool(getattr(ccr_backend, "crop_from_guide", True))):
+            self._mw.on_crop_from_guide_toggled(bool(self._cb_crop_guide.isChecked()))
         # Resolution-only, display-only: no reprocess pass (spec/preview-detail.md).
         level = self._combo_preview_detail.currentData()
         if level and level != getattr(ccr_backend, "preview_detail", "full"):

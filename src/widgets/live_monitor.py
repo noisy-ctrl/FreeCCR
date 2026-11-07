@@ -29,7 +29,9 @@ from core import base_exposure as be
 from core import camera_backends as cb
 from core import capture_light as cl
 from core import capture_sequence as cs
+from core import capture_guide
 from core import frame_meter as fm
+from core import guide_tracker
 from core import light_presets as lp
 from core import live_feed as lf
 from core import live_frame
@@ -1082,10 +1084,12 @@ class LiveCaptureMonitor(QWidget):
         self.frame_auto.toggled.connect(self._on_frame_auto)
         self.canvas.guide_changed.connect(lambda g: self._frame_changed())
         self.canvas.guide_changed.connect(lambda g: self._guide_placed_by_hand())
-        # the guide finds the frame by itself (spec/auto-frame-guide.md)
-        self._follower = live_frame.GuideFollower()
+        # your guide, kept on the frame (spec/guide-follow-and-crop.md §1-2)
+        self._tracker = guide_tracker.GuideTracker()
         self._guide_auto = _settings().value("live/guide_auto", True) not in (
             False, "false", "0", 0)
+        self._guide_placed = False       # placed by hand this session
+        self._last_base_find = 0.0       # find_frame (for the film base) once a second
         self._remembered_base = None     # (base8, key): film base seen, for the estimate
         self._auto_timer = QTimer(self)
         self._auto_timer.setInterval(AUTO_GUIDE_MS)
@@ -1447,8 +1451,9 @@ class LiveCaptureMonitor(QWidget):
         follow = m.addAction("Follow the Frame")
         follow.setCheckable(True)
         follow.setChecked(self._guide_auto)
-        follow.setToolTip("The guide finds the frame by itself and follows it as focusing "
-                          "moves it; it waits while the film is wound on.")
+        follow.setToolTip("The guide stays where you put it on the frame and moves with the "
+                          "frame as focusing changes its size or position. Winding on "
+                          "doesn't move it: it follows the carrier's opening.")
         follow.triggered.connect(lambda on: self.set_guide_auto(bool(on)))
         m.addSeparator()
         fmt = self.canvas.guide.get("format")
@@ -1497,23 +1502,31 @@ class LiveCaptureMonitor(QWidget):
         if by_hand:
             self._guide_placed_by_hand()
 
-    # --- the guide finds the frame (spec/auto-frame-guide.md) ---------------
+    # --- your guide, kept on the frame (spec/guide-follow-and-crop.md) -------
     def set_guide_auto(self, on):
         self._guide_auto = bool(on)
         _settings().setValue("live/guide_auto", self._guide_auto)
-        self._follower.reset()
+        self._tracker.reset()
         self.canvas.set_guide_waiting(None)
         if on:
             if not self.actions["guide"].isChecked():
                 self.actions["guide"].setChecked(True)
-            self._note_caption("The frame guide follows the frame.")
-            self._auto_guide_tick()
+            self._anchor_guide()
+            self._note_caption("The frame guide stays on the frame as you focus.")
+
+    def _anchor_guide(self):
+        """Follow the guide as it is now: the opening seen now is its
+        reference (or the next one seen, when none is in view)."""
+        frame = None if self.magnified() else self.feed.last_full_frame()
+        self._tracker.anchor(dict(self.canvas.guide), guide_tracker.find_opening(frame))
+        self.canvas.set_guide_waiting(None)
 
     def _guide_placed_by_hand(self):
+        """You placed the guide: following (when on) keeps it there from now
+        on, and the shots carry it to their crop."""
+        self._guide_placed = True
         if self._guide_auto:
-            self.set_guide_auto(False)
-            self._note_caption("You placed the guide, so it no longer follows the frame. "
-                               "Right-click Frame guide → Follow the Frame turns it back on.")
+            self._anchor_guide()
 
     def _remembered_key(self):
         return (self._exposure.get("shutter"), self._exposure.get("iso"),
@@ -1521,11 +1534,12 @@ class LiveCaptureMonitor(QWidget):
                 str(self._cam_zoom))
 
     def _auto_guide_tick(self):
-        """Find the frame in the newest full live picture and move the guide
-        to it (4 times a second while the guide follows)."""
+        """Keep the guide on the frame: find the carrier's opening in the
+        newest full live picture and move the guide with it (4 times a second
+        while it follows). The film base seen is remembered once a second."""
         if self._closing:
             return
-        if (not self._guide_auto or not self.actions["guide"].isChecked()
+        if (not self.actions["guide"].isChecked()
                 or self.magnified() or self._sleeping is not None
                 or self._measure is not None or self.sequence.running):
             self.canvas.set_guide_waiting(None)
@@ -1533,23 +1547,22 @@ class LiveCaptureMonitor(QWidget):
         frame = self.feed.last_full_frame()
         if frame is None:
             return
-        find = live_frame.find_frame(frame)
-        if find.base8 is not None:
-            self._remembered_base = (find.base8, self._remembered_key())
-        ratio = None
-        fmt = self.canvas.guide.get("format")
-        if fmt:
-            from core.film_formats import ratio as format_ratio
-            ratio = format_ratio(fmt)
-        was = self._follower.state
-        changed = self._follower.update(find, time.monotonic(), ratio,
-                                        (frame.shape[1], frame.shape[0]))
-        if changed and self._follower.guide is not None:
-            self.canvas.set_guide(dict(self._follower.guide, format=fmt))
-        waiting = self._follower.state != "following" and self._follower.guide is not None
-        self.canvas.set_guide_waiting(self._follower.reason if waiting else None)
-        if was == "waiting" and self._follower.state == "following":
-            self._frame_changed()                  # a new frame is in
+        now = time.monotonic()
+        if now - self._last_base_find >= 1.0:
+            self._last_base_find = now
+            find = live_frame.find_frame(frame)
+            if find.base8 is not None:
+                self._remembered_base = (find.base8, self._remembered_key())
+        if not self._guide_auto:
+            self.canvas.set_guide_waiting(None)
+            return
+        if self._tracker.ref_guide is None:
+            self._anchor_guide()
+            return
+        g = self._tracker.update(guide_tracker.find_opening(frame))
+        if g is not None:
+            self.canvas.set_guide(dict(g, format=self.canvas.guide.get("format")))
+        self.canvas.set_guide_waiting(self._tracker.reason or None)
 
     def _set_guide_format(self, key):
         g = dict(self.canvas.guide)
@@ -1568,7 +1581,7 @@ class LiveCaptureMonitor(QWidget):
             nw = math.sqrt(area * want)
             nh = nw / want
             g["w"], g["h"] = nw / fw, nh / fh
-        self._set_guide(g, by_hand=not self._guide_auto)    # following keeps the frame's size
+        self._set_guide(g)
 
     def _nudge_guide(self, scale=None, dx=0.0, dy=0.0, dangle=0.0, angle=None):
         g = dict(self.canvas.guide)
@@ -2132,6 +2145,7 @@ class LiveCaptureMonitor(QWidget):
                 self._shoot_exp_before = {f: self._exposure.get(f) for f in ("shutter", "iso")
                                           if self._exposure.get(f)}
                 self._hold_live(True)
+            capture_guide.begin_shot(self._shot_guide_record())
             started = self.sequence.start(self._timing, self._preset(), tri,
                                           shutter=self._usb_shutter, exposures=exposures)
             if not started and exposures:
@@ -2140,7 +2154,10 @@ class LiveCaptureMonitor(QWidget):
         else:
             if not self.light.is_open():
                 return
+            capture_guide.begin_shot(self._shot_guide_record())
             started = self.sequence.start(self._timing, self._preset(), tri)
+        if not started:
+            capture_guide.begin_shot(None)
         if started:
             self._await_exposure = True
             self.shoot_btn.setText("Stop   (Esc)")
@@ -2150,6 +2167,26 @@ class LiveCaptureMonitor(QWidget):
             note = getattr(self, "_frame_shot_note", "") or self._film_base_shoot_note(tri)
             if note:
                 self._note_caption(note)
+
+    def _shot_guide_record(self):
+        """The guide this shot's files carry to their crop
+        (spec/guide-follow-and-crop.md §3), or None: the guide must be shown
+        and placed (by hand this session, or followed from an opening)."""
+        if not self.actions["guide"].isChecked() or self.magnified():
+            return None
+        following = self._guide_auto and self._tracker.anchored
+        if not (self._guide_placed or following):
+            return None
+        placed = self._tracker.ref_guide if following else self.canvas.guide
+        if all(abs(float(placed.get(k, 0.0) or 0.0) - float(GUIDE_DEFAULT[k])) < 1e-6
+               for k in ("cx", "cy", "w", "h", "angle")):
+            return None                  # the untouched default box isn't a frame
+        frame = self.feed.last_full_frame()
+        if frame is None:
+            return None
+        return capture_guide.make_record(
+            self.canvas.guide, frame,
+            following=self._guide_auto and self._tracker.state == "following")
 
     def _shoot_unzoom_timeout(self, token):
         if self._shoot_when_whole is token:
@@ -2174,6 +2211,7 @@ class LiveCaptureMonitor(QWidget):
             self.rings[ch].set_progress(p)
 
     def _on_sequence_finished(self, reason):
+        capture_guide.end_shot()                 # late files still get it, for a while
         if self._shoot_exp_before is not None:   # a film-base Shoot: put the camera back
             before, self._shoot_exp_before = self._shoot_exp_before, None
             self._hold_live(False)
@@ -2409,11 +2447,6 @@ class LiveCaptureMonitor(QWidget):
                 self._frame_est = []
             elif self.magnified():
                 pass                                  # paused: the picture is a part
-            elif self._guide_auto and self._follower.state != "following":
-                # the film is between frames: nothing to estimate yet
-                self._frame_live_reason = (self._follower.reason or "No whole frame in view.")
-                self._frame_live_source = ""
-                self._frame_est = []
             else:
                 remembered = None
                 if (self._remembered_base is not None
@@ -3117,6 +3150,7 @@ class LiveCaptureMonitor(QWidget):
         if self._measure is not None:
             self._measure_landed(path)
             return
+        capture_guide.remember(path)             # the shot's own file: its guide
         if self.sequence.running and self.sequence.camera_shutter:
             self.sequence.frame_done(path)
         elif not self.sequence.running:

@@ -351,6 +351,8 @@ class MainWindow(QMainWindow):
         # Auto crop learns from confirmed crops (spec/auto-crop-learning.md).
         ccr_backend.auto_crop_learn = self._settings.value(
             "crop/learn", True, type=bool)
+        ccr_backend.crop_from_guide = self._settings.value(
+            "convert/crop_from_guide", True, type=bool)
         # Input transfer function for non-RAW (TIFF) imports: ask on import by
         # default, and remember the answer when the user opts out of asking.
         # Affects the NEXT import only. See spec/input-transfer-function.md.
@@ -1250,6 +1252,12 @@ class MainWindow(QMainWindow):
         ccr_backend.auto_crop_learn = bool(checked)
         self._settings.setValue("crop/learn", bool(checked))
 
+    def on_crop_from_guide_toggled(self, checked: bool):
+        """Crop captures to Capture's frame guide on / off
+        (spec/guide-follow-and-crop.md §4). Crops already set stay."""
+        ccr_backend.crop_from_guide = bool(checked)
+        self._settings.setValue("convert/crop_from_guide", bool(checked))
+
     def on_auto_white_point_toggled(self, checked: bool):
         """Auto white point on / off: the starting choice for frames that
         have none of their own (spec/white-point-choice.md). Affects the next
@@ -2120,6 +2128,8 @@ class MainWindow(QMainWindow):
 
     def _route_tether_file(self, path):
         from core.ccr_merge import is_raw_path
+        from core import capture_guide
+        capture_guide.stamp(path)        # Capture's guide, for a shot that has one
         if (getattr(ccr_backend, "scan_type", "colour") == "trichrome"
                 and self._tether_grouper is not None):
             if not is_raw_path(path):

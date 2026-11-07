@@ -683,7 +683,8 @@ class LiveCanvas(QWidget):
             p.restore()
             box = QRectF(c.x() - w / 2, c.y() - h / 2, w, h)
             self._paint_label(p, QPointF(max(8.0, box.left() + 8), max(8.0, box.top() + 8)),
-                              "No whole frame in view")
+                              self.guide_waiting if isinstance(self.guide_waiting, str)
+                              else "No whole frame in view")
             return
         p.setPen(QPen(QColor(255, 255, 255, 70), 1))
         for i in (1, 2):

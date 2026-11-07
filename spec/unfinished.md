@@ -12,20 +12,12 @@ remove an entry when it ships.
   wants a both-labs look.
 
 ## Parked
-- **Follow the Frame, revision 2** (`spec/auto-frame-guide.md`, branch
-  `fix/auto-guide-mask-first`, not merged; the app runs revision 1). Built:
-  the carrier's opening first, the rebate trimmed by colour on all three
-  channels (10 px rebates to ±1 px on synthetic frames), remembered rebate
-  widths (`FrameFinder`), a steady follower (median of 5 finds + dead band),
-  film-format shaping; the user's two recordings pass. Not done:
-  - (the Format list and the outline's right-click shipped on their own:
-    revision (3));
-  - **35 mm**: sprocket holes are bare light beside the rebate (the user's
-    screenshots, 2026-11-01); untested;
-  - speed: 20–40 ms a find at 640 px on the GUI thread, 4 times a second —
-    move it to a worker or cut it;
-  - tests for the new cases (patch / stripe / noise helpers exist in
-    `tests/test_auto_frame_guide.py`, unused).
+- **Follow the Frame, revision 2's picture finder** (branch
+  `fix/auto-guide-mask-first`, not merged): superseded on 2026-11-07 by
+  `spec/guide-follow-and-crop.md` (you place the guide; it follows the
+  carrier's opening, taken from this branch's mask-first finder). The rest
+  of the branch (rebate trimming, remembered rebate widths, format shaping)
+  is only worth reviving if the guide should ever place itself again.
 
 ## Known, not yet fixed
 - **Hot Folder Tether: one missed or extra frame shifts every following
@@ -53,6 +45,15 @@ remove an entry when it ships.
   where the Shutter row shows the model the camera reports ("GFX50S II").
 
 ## To check on the user's machine
+- **Capture's frame guide and the crop** (2026-11-07,
+  `spec/guide-follow-and-crop.md`): built and tested on synthetic pictures
+  only. On his rig: does the guide follow focusing and stay put while
+  winding on (his carrier, 120 and 35 mm; on 35 mm the opening may show
+  sprocket holes), and do the captures line up with their RAWs? Each
+  capture prints "Capture guide for NAME: matched 0.xx" (or "didn't line
+  up") in the Terminal: the scores tell whether `ECC_MIN` / `ORIENT_MIN`
+  suit real pairs. `GUIDE_SNAP` (2.5 %) was set from auto crop's inset on
+  synthetic scans.
 - **Film Look auto balance (experimental) and the colour-only looks**
   (2026-11-04, `spec/film-look-auto-balance.md`): measured on one lab's nine
   Portra frames only. Needs the re-issued "Portra 400 Lab.cube" (same table,
