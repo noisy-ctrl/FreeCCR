@@ -67,7 +67,7 @@ def _index_of(layout, widget):
 
 def test_section_sits_below_convert_and_above_awb(panel):
     layout = _scroll_layout(panel)
-    convert = _index_of(layout, panel.convert_current_bwp_btn)
+    convert = _index_of(layout, panel.convert_all_bwp_btn)
     section = _index_of(layout, panel.od_section)
     awb = _index_of(layout, panel.auto_wb_btn)
 

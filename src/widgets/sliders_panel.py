@@ -1160,15 +1160,15 @@ class SlidersPanel(QWidget):
         self._sync_wp_combo()
         self.convert_current_bwp_btn = QPushButton("Convert Current")
         self.convert_all_bwp_btn = QPushButton("Convert All")
-        # Convert Current is the section's primary (core single-image action);
-        # Convert All stays neutral and gets a count confirmation instead.
-        theme.style_button(self.convert_current_bwp_btn, "primary")
+        # Only Convert All and Auto Crop All sit in the panel, side by side (the
+        # user, 2026-11-08: the frame on screen is the toolbar's Convert and
+        # Auto Crop). Convert Current and Auto Crop stay as hidden buttons, so
+        # the code that greys / restores them is unchanged (spec/panel-buttons.md).
+        theme.style_button(self.convert_all_bwp_btn, "primary")
         self.convert_current_bwp_btn.setFixedHeight(theme.CONTROL_H)
         self.convert_all_bwp_btn.setFixedHeight(theme.CONTROL_H)
-        convert_row = theme.apply_button_row(QHBoxLayout())
-        convert_row.addWidget(self.convert_current_bwp_btn)
-        convert_row.addWidget(self.convert_all_bwp_btn)
-        scroll_layout.insertLayout(_convert_slot, convert_row)
+        self.convert_current_bwp_btn.setParent(self)
+        self.convert_current_bwp_btn.hide()
         # Auto crop, independent of Convert (spec/auto-crop-buttons.md): find
         # the frame on the raw scan, straighten, crop to the picture, with what
         # it has learned from your confirmed crops (spec/auto-crop-learning.md).
@@ -1189,11 +1189,16 @@ class SlidersPanel(QWidget):
             b.setFixedHeight(theme.CONTROL_H)
         self.auto_crop_btn.clicked.connect(self._on_auto_crop_current)
         self.auto_crop_all_btn.clicked.connect(self._on_auto_crop_all)
-        crop_row = theme.apply_button_row(QHBoxLayout())
-        crop_row.addWidget(self.auto_crop_btn)
-        crop_row.addWidget(self.auto_crop_all_btn)
-        scroll_layout.insertLayout(_convert_slot + 1, crop_row)
-        scroll_layout.insertWidget(_convert_slot + 2, self.bwp_mode_label)
+        self.auto_crop_btn.setParent(self)
+        self.auto_crop_btn.hide()
+        self.convert_all_bwp_btn.setToolTip(
+            "Convert every frame, each from its own film border (asks first). "
+            "The frame on screen alone: Convert on the toolbar.")
+        convert_row = theme.apply_button_row(QHBoxLayout())
+        convert_row.addWidget(self.convert_all_bwp_btn)
+        convert_row.addWidget(self.auto_crop_all_btn)
+        scroll_layout.insertLayout(_convert_slot, convert_row)
+        scroll_layout.insertWidget(_convert_slot + 1, self.bwp_mode_label)
 
         # Channel Levels sits directly under the Convert row and above the
         # WB/AWB row: it is the FIRST stage of the adjustment pipeline (it runs
@@ -1492,6 +1497,14 @@ class SlidersPanel(QWidget):
         self.sync_to_all_button = QPushButton("Sync to All")
         self.sync_to_all_button.setFixedHeight(theme.CONTROL_H)
         sync_layout.addWidget(self.sync_to_all_button)
+        # Export at the very bottom, full width (the user, 2026-11-08)
+        export_layout = QHBoxLayout()
+        self.export_button = QPushButton("Export…")
+        self.export_button.setFixedHeight(theme.CONTROL_H)
+        theme.style_button(self.export_button, "primary")
+        self.export_button.setToolTip("Export the selected frames (Ctrl+E).")
+        self.export_button.clicked.connect(self._on_export)
+        export_layout.addWidget(self.export_button)
 
         # --- Collapsible sections ---
         # Display order (top→bottom): Channel Levels and Channel Balance (placed
@@ -1521,6 +1534,7 @@ class SlidersPanel(QWidget):
         scroll_layout.addWidget(theme.section_separator())
         scroll_layout.addLayout(buttons_layout)
         scroll_layout.addLayout(sync_layout)
+        scroll_layout.addLayout(export_layout)
         # Every hideable section exists now: apply the user's Settings -> Panel
         # choice (spec/panel-visibility.md), and let each one's header hide it
         # (revision 2026-11-01)
@@ -4108,6 +4122,12 @@ class SlidersPanel(QWidget):
         except AttributeError:
             pass
         ccr_backend.save_catalog()
+
+    def _on_export(self):
+        """The panel's Export…: the same window as File → Export…."""
+        ip = getattr(self, "image_preview", None)
+        if ip is not None and hasattr(ip, "open_export_dialog"):
+            ip.open_export_dialog()
 
     def _on_auto_crop_current(self):
         if self.current_idx is None:

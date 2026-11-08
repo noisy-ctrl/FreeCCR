@@ -49,8 +49,7 @@ def test_starts_open_and_folds_the_sampling_rows_only(fresh_setting):
         assert sec._toggle_btn.isChecked() and sec._toggle_btn.text() == "- Film B/W Point"
         rows = (p.black_point_btn, p.white_point_btn, p.clear_white_point_btn,
                 p.film_stock_combo, p.wp_combo, p.wp_show_btn)
-        stay = (p.convert_current_bwp_btn, p.convert_all_bwp_btn,
-                p.auto_crop_btn, p.auto_crop_all_btn)
+        stay = (p.convert_all_bwp_btn, p.auto_crop_all_btn)
         assert all(r.isVisibleTo(p) for r in rows + stay)
         sec._toggle_btn.click()
         _app.processEvents()
@@ -68,7 +67,7 @@ def test_remembers_being_closed(fresh_setting):
     w, p = _window()
     try:
         assert not p.bwp_section._toggle_btn.isChecked()
-        assert not p.black_point_btn.isVisibleTo(p) and p.convert_current_bwp_btn.isVisibleTo(p)
+        assert not p.black_point_btn.isVisibleTo(p) and p.convert_all_bwp_btn.isVisibleTo(p)
         p.bwp_section._toggle_btn.click()
         _app.processEvents()
         assert p.black_point_btn.isVisibleTo(p) and st.value(key, type=bool) is True
@@ -95,10 +94,10 @@ def test_convert_and_auto_crop_sit_above_the_section(fresh_setting):
     try:
         top = lambda wid: wid.mapTo(p, wid.rect().topLeft()).y()
         sec = top(p.bwp_section)
-        assert top(p.convert_current_bwp_btn) < top(p.auto_crop_btn) < sec
+        assert top(p.convert_all_bwp_btn) == top(p.auto_crop_all_btn) < sec   # one row
         p.bwp_section._toggle_btn.click()                 # folded: still above
         _app.processEvents()
-        assert top(p.convert_current_bwp_btn) < top(p.bwp_section)
+        assert top(p.convert_all_bwp_btn) < top(p.bwp_section)
     finally:
         w.hide()
 
@@ -116,7 +115,29 @@ def test_reset_compare_sync_are_the_last_rows_of_the_panel(fresh_setting):
         assert top(p.compare_button) == top(p.reset_button)
         assert top(p.sync_to_all_button) > top(p.reset_button)
         sl = p.reset_button.parentWidget().layout()
-        last = sl.itemAt(sl.count() - 1)
-        assert last.layout() is not None and last.layout().indexOf(p.sync_to_all_button) >= 0
+        last = sl.itemAt(sl.count() - 1)                # Export under Sync (2026-11-08)
+        assert last.layout() is not None and last.layout().indexOf(p.export_button) >= 0
+        before = sl.itemAt(sl.count() - 2)
+        assert before.layout().indexOf(p.sync_to_all_button) >= 0
+    finally:
+        w.hide()
+
+
+def test_only_the_roll_buttons_and_export_last(fresh_setting):
+    """The user, 2026-11-08: Convert All and Auto Crop All side by side, no
+    Convert Current / Auto Crop in the panel, Export full width at the bottom."""
+    w, p = _window()
+    try:
+        assert not p.convert_current_bwp_btn.isVisibleTo(p)
+        assert not p.auto_crop_btn.isVisibleTo(p)
+        a, b = p.convert_all_bwp_btn, p.auto_crop_all_btn
+        assert a.mapTo(p, a.rect().topRight()).x() < b.mapTo(p, b.rect().topLeft()).x()
+        top = lambda wid: wid.mapTo(p, wid.rect().topLeft()).y()
+        assert top(p.export_button) > top(p.sync_to_all_button)
+        assert abs(p.export_button.width() - p.sync_to_all_button.width()) <= 2
+        opened = []
+        w.image_preview.open_export_dialog = lambda: opened.append(1)
+        p.export_button.click()
+        assert opened == [1]
     finally:
         w.hide()
