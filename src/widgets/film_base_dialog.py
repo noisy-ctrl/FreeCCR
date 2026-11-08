@@ -136,6 +136,11 @@ class FilmBaseEditDialog(QDialog):
 
         btns = QHBoxLayout()
         theme.apply_button_row(btns)
+        # Delete this film base (the user, 2026-11-08); it asks first
+        self.delete_btn = QPushButton("Delete…")
+        self.delete_btn.setToolTip("Delete this film base and its measurements.")
+        theme.style_button(self.delete_btn, "danger")
+        btns.addWidget(self.delete_btn)
         btns.addStretch(1)
         self.cancel_btn = QPushButton("Cancel")
         self.new_btn = QPushButton("Save as New")
@@ -150,6 +155,7 @@ class FilmBaseEditDialog(QDialog):
         self.cancel_btn.clicked.connect(self.reject)
         self.new_btn.clicked.connect(lambda: self._finish("new"))
         self.save_btn.clicked.connect(lambda: self._finish("save"))
+        self.delete_btn.clicked.connect(lambda: self._finish("delete"))
         self._update()
 
     def _finish(self, action):
