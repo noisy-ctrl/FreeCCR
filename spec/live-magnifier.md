@@ -75,7 +75,9 @@ synthetic texture finds a known centre and scale and rejects a mismatch.
   `MAX_SCALE` 4, under 2x the fitted view. Now the list is **Fit, Fit Guide,
   2×, 4×, 8×** — times the fitted view (`LiveCanvas.zoom("4")`,
   `zoom_factor()`); the cap is `live_feed.max_scale(fs)` = max(4, 8 × fit);
-  F and double-click switch Fit ↔ 4× (double-click about the pointer); the
+  F and double-click switch Fit ↔ 4× (double-click about the pointer; while
+  the CAMERA is magnified a double-click goes back to Whole instead and fits
+  the view, the user 2026-11-08); the
   list follows the wheel and shows a custom "5.2×" when between presets
   (`_sync_view_zoom`).
 
