@@ -573,3 +573,12 @@ The level is unchanged (the median of the agreeing cells' photosites). The
 frame meter already reads 16 × 16 block means.
 Tests: a synthetic base with 9 % photosite grain reads even (< 4 %) at its
 level; the same grain over two levels is uneven.
+
+## Revision 9 (2026-11-08): Delete in the Edit window
+
+The user: "the ability to delete film measurements in the edit window". The
+Edit window has a **Delete…** button (danger style, left of the row); it
+closes the window with action "delete" and the monitor asks "Delete “name”
+and its measurements?" (Yes / No, No the default; `_confirm_delete_film_base`,
+the test seam), the same path as the film base menu's Delete…. Test:
+`tests/test_film_base_shoot.py::test_edit_window_deletes_after_asking`.

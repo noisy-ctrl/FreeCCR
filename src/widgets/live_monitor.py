@@ -2659,8 +2659,8 @@ class LiveCaptureMonitor(QWidget):
         return name.strip() if ok and name.strip() else None
 
     def _edit_film_base_dialog(self, base):
-        """The test seam: (action, name, values) with action "save", "new" or
-        None (cancelled)."""
+        """The test seam: (action, name, values) with action "save", "new",
+        "delete" or None (cancelled)."""
         from widgets.film_base_dialog import FilmBaseEditDialog
         dlg = FilmBaseEditDialog(base, self._exp_choices.get("shutter") or [],
                                  self._exp_choices.get("iso") or [], self)
@@ -2676,6 +2676,9 @@ class LiveCaptureMonitor(QWidget):
         if base is None or self._measure is not None or self.sequence.running:
             return
         action, name, values = self._edit_film_base_dialog(base)
+        if action == "delete":
+            self._on_delete_film_base()          # asks first
+            return
         if action not in ("save", "new"):
             return
         colours = be.edited_colours(base["colours"], values)
@@ -2701,13 +2704,18 @@ class LiveCaptureMonitor(QWidget):
             self._save_film_bases()
             self._refresh_film_bases()
 
+    def _confirm_delete_film_base(self, base):
+        """The test seam: Yes / No, No the default."""
+        return QMessageBox.question(
+            self, "Delete Film Base",
+            f"Delete “{base['name']}” and its measurements?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes
+
     def _on_delete_film_base(self):
         base = self._film_base()
         if base is None:
             return
-        if QMessageBox.question(self, "Delete Film Base", f"Delete “{base['name']}”?",
-                                QMessageBox.Yes | QMessageBox.No,
-                                QMessageBox.No) != QMessageBox.Yes:
+        if not self._confirm_delete_film_base(base):
             return
         self._bases = be.delete(self._bases, self._bases["selected"])
         self._save_film_bases()

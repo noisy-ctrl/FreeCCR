@@ -989,3 +989,25 @@ def test_a_fujifilm_always_gets_the_capture_call(tmp_path):
         b.fire()
     assert used == ["capture"] * 3
     assert b._pending                                         # the capture call's file
+
+
+def test_edit_window_deletes_after_asking(film_mon):
+    """The user, 2026-11-08: delete a film base from its Edit window."""
+    from widgets.film_base_dialog import FilmBaseEditDialog
+    mon, usb, light, lm, path = film_mon
+    mon._bases = be.add(mon._bases, _ektar())
+    mon._bases = be.add(mon._bases, be.entry("Portra", _ektar()["colours"], "GFX"))
+    mon._refresh_film_bases()
+    dlg = FilmBaseEditDialog(mon._film_base(), SPEEDS, ISOS)
+    dlg.delete_btn.click()
+    assert dlg.action == "delete" and dlg.result() == 1
+    asked = []
+    mon._edit_film_base_dialog = lambda base: ("delete", "", {})
+    mon._confirm_delete_film_base = lambda base: asked.append(base["name"]) or False
+    mon.edit_btn.click()
+    assert asked == ["Portra"] and len(mon._bases["bases"]) == 2     # No: kept
+    mon._confirm_delete_film_base = lambda base: True
+    mon.edit_btn.click()
+    assert [b["name"] for b in mon._bases["bases"]] == ["Ektar"]
+    saved = be.normalise(QSettings(path, QSettings.IniFormat).value("live/film_bases"))
+    assert [b["name"] for b in saved["bases"]] == ["Ektar"]
