@@ -40,3 +40,18 @@ toolbar keeps a margin at the minimum width (886 of 900 px).
 - Every action keeps its attribute, tooltip, checkable state and handler,
   so nothing else changed; the toolbar still fits at the window's minimum
   width (`tests/test_panel_width.py`).
+
+## Revision 2026-11-08: Auto Crop on the toolbar
+
+The user: "add an auto crop button to the left of unconvert in top menu (with
+a space between autocrop and unconvert)". `ImagePreview.auto_crop_action`
+("Auto Crop", text only) sits after `export_push`, then a plain
+`AUTO_CROP_GAP_PX` (12) gap with no line, then Un-convert; it calls the
+panel's `_on_auto_crop_current` (the same as the panel's Auto Crop button).
+
+To keep the row inside the canvas's 900 px minimum (the main window's
+minimum is already 1496 px, so the canvas can't grow), every toolbar button
+is now sized from its content (`_tighten_text_buttons`): a text button its
+words + `TEXT_BUTTON_PAD` (8; Qt's own hint added ~17), a picture button its
+24 px icon + `ICON_BUTTON_PAD` (6; was 8). Measured at 1.06× the UI font:
+884 px (886 before Auto Crop). Tests: `tests/test_export_placement.py`.

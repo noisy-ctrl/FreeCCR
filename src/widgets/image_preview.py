@@ -2,7 +2,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QToolBar, QMessageBox, QSlider, QGraphicsView, QGraphicsScene,
     QGraphicsPixmapItem, QGraphicsRectItem, QGraphicsPathItem, QGraphicsEllipseItem,
     QGraphicsLineItem, QGraphicsPolygonItem, QStyleOptionSlider, QDialog,
-    QLabel, QPushButton, QStyle, QSizePolicy, QApplication, QComboBox
+    QLabel, QPushButton, QStyle, QSizePolicy, QApplication, QComboBox, QToolButton
 )
 from PySide6.QtGui import (QPixmap, QIcon, QTransform, QPen, QColor, QAction, QPainter,
                            QCursor, QDesktopServices, QPainterPath,
@@ -819,6 +819,9 @@ def orientation_prompt(kind, frames):
 
 EXPORT_GAP_PX = 32     # the line-less break between Convert and Export (was 18)
 ZOOM_GAP_PX = 8        # ... and the one between Export and the zoom box
+TEXT_BUTTON_PAD = 8    # a text button's width past its words (Qt's hint: ~17)
+ICON_BUTTON_PAD = 6    # a picture button's width past its icon (Qt's hint: 8)
+AUTO_CROP_GAP_PX = 12  # the plain gap between Auto Crop and Un-convert (2026-11-08)
 
 
 class ImagePreview(QWidget):
@@ -858,6 +861,13 @@ class ImagePreview(QWidget):
         self.convert_action.setToolTip(
             "Convert the current frame or all frames (asks which).")
         self.convert_action.triggered.connect(self.convert_ccr)
+        # Auto Crop, the panel's button on the toolbar too (the user,
+        # 2026-11-08): left of Un-convert, a plain gap between them
+        self.auto_crop_action = QAction("Auto Crop", self)
+        self.auto_crop_action.setToolTip(
+            "Find this frame's picture on the scan, straighten it and crop to "
+            "it, as the panel's Auto Crop button does. Ctrl+Z undoes it.")
+        self.auto_crop_action.triggered.connect(self.auto_crop_current)
         self.unconvert_action = QAction("Un-convert", self)
         self.unconvert_action.triggered.connect(self.unconvert_ccr)
 
@@ -1016,6 +1026,11 @@ class ImagePreview(QWidget):
         self.export_push.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.toolbar.addWidget(self.export_push)
 
+        self.toolbar.addAction(self.auto_crop_action)
+        self.auto_crop_gap = QWidget()
+        self.auto_crop_gap.setFixedWidth(AUTO_CROP_GAP_PX)
+        self.auto_crop_gap.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+        self.toolbar.addWidget(self.auto_crop_gap)
         self.toolbar.addAction(self.unconvert_action)
         # Destructive revert → red text when enabled, muted when disabled.
         _unconv_btn = self.toolbar.widgetForAction(self.unconvert_action)
@@ -1048,6 +1063,7 @@ class ImagePreview(QWidget):
         export_margin.setFixedWidth(6)
         export_margin.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
         self.toolbar.addWidget(export_margin)
+        self._tighten_text_buttons()
 
         self.layout.addWidget(self.toolbar)
 
@@ -2507,6 +2523,34 @@ class ImagePreview(QWidget):
             self._convert_current_by_reference()
         elif panel is not None:
             panel._on_convert_current_bwpoint()
+
+    def _tighten_text_buttons(self):
+        """Every text-only toolbar button as wide as its words plus
+        TEXT_BUTTON_PAD (a picture button its icon plus ICON_BUTTON_PAD): Qt's own hint adds ~17 px a button, and with Auto
+        Crop on the toolbar (2026-11-08) the row must still fit the canvas's
+        minimum width (tests/test_panel_width.py)."""
+        from PySide6.QtGui import QFontMetrics
+        for act in self.toolbar.actions():
+            btn = self.toolbar.widgetForAction(act)
+            if not isinstance(btn, QToolButton) or not act.text():
+                continue
+            if not act.icon().isNull():
+                # a picture button: its icon plus 3 px a side (Qt's hint: 4)
+                btn.setFixedWidth(self.toolbar.iconSize().width() + ICON_BUTTON_PAD)
+                continue
+            font = btn.font()
+            if "font-weight: bold" in btn.styleSheet():
+                font.setBold(True)
+            btn.setFixedWidth(QFontMetrics(font).horizontalAdvance(act.text())
+                              + TEXT_BUTTON_PAD)
+
+    def auto_crop_current(self):
+        """Toolbar Auto Crop: the panel's Auto Crop for the frame on screen."""
+        if self.current_idx is None:
+            return
+        panel = getattr(self.parent().parent(), "sliders_panel", None)
+        if panel is not None:
+            panel._on_auto_crop_current()
 
     def _convert_current_by_reference(self):
         """The reference-frame conversion of the current frame (what the

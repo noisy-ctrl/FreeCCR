@@ -60,3 +60,32 @@ def test_convert_and_un_convert_sit_with_export_behind_a_plain_gap():
     assert EXPORT_GAP_PX > 18                                 # wider than it was
     assert un.left() - fc.right() > 100                       # pushed right, away from the rest
     assert ip.zoom_combo.geometry().left() > exp.right()      # zoom box last
+
+
+def test_auto_crop_sits_left_of_un_convert_behind_a_plain_gap(monkeypatch):
+    """The user, 2026-11-08: an Auto Crop button left of Un-convert, with a
+    space between them; it runs the panel's Auto Crop."""
+    from ui.main_window import MainWindow
+    from widgets.image_preview import AUTO_CROP_GAP_PX
+    w = MainWindow()
+    _KEEP.append(w)
+    w.resize(1600, 900)
+    w.show()
+    _app.processEvents()
+    ip = w.image_preview
+    tb = ip.toolbar
+    acts = tb.actions()
+    i_ac, i_un = acts.index(ip.auto_crop_action), acts.index(ip.unconvert_action)
+    assert i_ac < i_un
+    assert not any(a.isSeparator() for a in acts[i_ac:i_un])
+    ac = tb.widgetForAction(ip.auto_crop_action).geometry()
+    un = tb.widgetForAction(ip.unconvert_action).geometry()
+    assert un.left() - ac.right() >= AUTO_CROP_GAP_PX
+    calls = []
+    monkeypatch.setattr(w.sliders_panel, "_on_auto_crop_current", lambda: calls.append(1))
+    ip.current_idx = None
+    ip.auto_crop_action.trigger()
+    assert calls == []                                        # nothing on screen
+    ip.current_idx = 0
+    ip.auto_crop_action.trigger()
+    assert calls == [1]
