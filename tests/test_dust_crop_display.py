@@ -417,3 +417,29 @@ class TestBwPointUncrop:
         ip.set_bwpoint_mode("white")
         ip.set_bwpoint_mode(None)
         assert calls == []
+
+
+class TestSourceRingCursor:
+    """The user, 2026-11-08: the cursor changes over a source ring and while
+    dragging it."""
+
+    def test_open_hand_over_the_ring_closed_while_dragging(self, tmp_path):
+        from PySide6.QtCore import Qt
+        ip, img = _converted_preview(tmp_path, crop_rect=None)
+        ip.enter_dust_mode()
+        ip._maybe_request_hires = lambda: None
+        ip.dust_press(QPointF(300, 200))
+        ip.dust_release()
+        cy, cx, off, *_ = next(r for r in img._dust_plan_cache[1] if r[2] is not None)
+        ring = QPointF((cx + off[1]) * 600, (cy + off[0]) * 400)
+        ip.dust_move(ring)
+        assert ip.view.cursor().shape() == Qt.OpenHandCursor
+        assert ip._dust_cursor_item is None                     # no brush circle
+        ip.dust_press(ring)
+        assert ip.view.cursor().shape() == Qt.ClosedHandCursor
+        ip.dust_right_move(QPointF(ring.x(), ring.y() + 40))
+        ip.dust_right_release()
+        assert ip.view.cursor().shape() == Qt.OpenHandCursor
+        ip.dust_move(QPointF(40, 40))                           # away: the brush again
+        assert ip.view.cursor().shape() == Qt.CrossCursor
+        assert ip._dust_cursor_item is not None
