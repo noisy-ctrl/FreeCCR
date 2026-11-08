@@ -296,3 +296,32 @@ def test_shoot_waiting_for_whole_can_be_cancelled_and_times_out(film_mon, monkey
     assert _wait(lambda: mon._shoot_when_whole is None, 3)
     assert "didn't go back to the whole frame" in mon.capture_caption.text()
     assert usb.fires == []
+
+
+# --- 2026-11-08: a double click while magnified goes back to Whole -----------
+def _dbl(canvas):
+    from PySide6.QtCore import QPointF, Qt, QEvent
+    from PySide6.QtGui import QMouseEvent
+    p = QPointF(canvas.width() / 2, canvas.height() / 2)
+    canvas.mouseDoubleClickEvent(QMouseEvent(
+        QEvent.MouseButtonDblClick, p, canvas.mapToGlobal(p), Qt.LeftButton,
+        Qt.LeftButton, Qt.NoModifier))
+
+
+def test_double_click_while_magnified_asks_for_whole_not_a_digital_zoom(film_mon):
+    mon, usb, light, lm, path = film_mon
+    import numpy as np
+    from core import live_feed as lf
+    frame = np.zeros((768, 1024, 3), np.uint8)
+    w, h = mon.canvas.device_size()
+    mon.canvas.set_result(lf.Processor().process(frame, lf.ViewParams(canvas_w=w, canvas_h=h)))
+    mon._on_zoom_levels(["1", "2.5", "4", "8", "16"])
+    mon._on_cam_zoom("8")
+    assert mon.canvas.is_fit()
+    _dbl(mon.canvas)
+    assert usb.log[-1] == ("zoom", "1")
+    assert mon.canvas.is_fit()                      # no digital zoom on top
+    mon._on_cam_zoom("1")
+    _dbl(mon.canvas)                                # not magnified: Fit -> 4x as before
+    assert not mon.canvas.is_fit()
+    assert usb.log[-1] == ("zoom", "1")

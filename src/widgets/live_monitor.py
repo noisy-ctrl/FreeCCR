@@ -1077,6 +1077,7 @@ class LiveCaptureMonitor(QWidget):
         self.cam_zoom_combo.activated.connect(
             lambda i: self._set_cam_zoom(self.cam_zoom_combo.itemData(i)))
         self.canvas.menu_requested.connect(self._canvas_menu)
+        self.canvas.unmagnify_requested.connect(lambda: self._set_cam_zoom("1"))
         self.canvas.guide_menu_requested.connect(self._guide_menu)
         self.format_combo.activated.connect(
             lambda i: self._set_guide_format(self.format_combo.itemData(i) or None))

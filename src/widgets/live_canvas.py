@@ -68,6 +68,7 @@ class LiveCanvas(QWidget):
     meter_clicked = Signal()           # a left click on the sharpness readout
     menu_requested = Signal(object)    # a right click on the picture (global QPoint)
     guide_menu_requested = Signal(object)   # a right click on the frame guide's outline
+    unmagnify_requested = Signal()     # a double click while the camera is magnified
     DRAG_MIN_PX = 6                    # a box pick moved this far is a drag, not a click
 
     def __init__(self, parent=None):
@@ -306,6 +307,13 @@ class LiveCanvas(QWidget):
             return
         g = self.geometry_()
         if g is None:
+            return
+        if self.magnified:
+            # the camera's own magnifier is on: back to the whole frame, not a
+            # further digital zoom (the user, 2026-11-08)
+            if not self.is_fit():
+                self.zoom("fit")
+            self.unmagnify_requested.emit()
             return
         if self.is_fit():
             self._zoom_about(4.0, e.position())     # 4x the fitted view, about the pointer
