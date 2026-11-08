@@ -166,11 +166,22 @@ def capture_order(paths, time_fn=None, workers=1):
 
 
 def plan_triplets(paths, shares_fn=None, quality=frame_quality, workers=None,
-                  time_fn=None):
+                  time_fn=None, use_log=True):
     """Plan the merge of `paths` (any order, any count), taken in the order
     they were shot (`capture_order`; `time_fn(path)` gives a capture time or
     None, default `scan_type.capture_time`). `shares_fn(path)` returns a
-    `scan_type.LightReading` (the default, `read_light`) or plain shares."""
+    `scan_type.LightReading` (the default, `read_light`) or plain shares.
+    Shots Capture logged in the files' folders are taken from the log,
+    exactly, first (spec/capture-log-and-names.md)."""
+    if use_log:
+        from core import capture_log
+        logged, used = capture_log.logged_sets(list(paths))
+        if logged:
+            rest = [p for p in paths if p not in used]
+            plan = plan_triplets(rest, shares_fn, quality, workers, time_fn,
+                                 use_log=False) if rest else Plan()
+            plan.sets = list(logged) + list(plan.sets)
+            return plan
     shares_fn = shares_fn or st.read_light
     # Four readers at most: each holds a whole RAW while it reads (~100 MB for
     # 50 MP), and on a 2-core machine more threads were slower (measured).

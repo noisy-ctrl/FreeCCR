@@ -659,8 +659,9 @@ class FakeUsb(QObject):
     def set_live(self, on):
         pass
 
-    def fire(self):
+    def fire(self, exposure=None, name=None):
         self.log.append("fire")
+        self.names = getattr(self, "names", []) + [name]
 
     def set_zoom(self, lv):
         self.log.append(("zoom", lv))

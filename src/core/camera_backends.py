@@ -183,6 +183,15 @@ def unique_path(folder, name):
     return path
 
 
+def named_path(folder, name, want=None):
+    """Where a downloaded `name` goes: `want` + the file's own extension when
+    FreeCCR named the shot (spec/capture-log-and-names.md), else its own
+    name; `_1`, `_2`… if taken."""
+    if want:
+        return unique_path(folder, want + os.path.splitext(name)[1])
+    return unique_path(folder, name)
+
+
 def exposure_text(exp):
     bits = []
     s = (exp or {}).get("shutter")
@@ -758,7 +767,10 @@ class Gphoto2Backend:
 
     def _download(self, folder, name):
         gp = self.gp
-        target = unique_path(self.dest, name)
+        # FreeCCR's name for the shot, used for its first file only; a file
+        # nobody asked for keeps the camera's name
+        want, self.next_name = getattr(self, "next_name", None), None
+        target = named_path(self.dest, name, want)
         part = target + ".part"
         try:
             cf = self.camera.file_get(folder, name, gp.GP_FILE_TYPE_NORMAL)
@@ -1453,7 +1465,8 @@ class FakeBackend:
             else:
                 import cv2
                 import numpy as np
-                path = unique_path(self.dest, name)
+                want, self.next_name = getattr(self, "next_name", None), None
+                path = named_path(self.dest, name, want)
                 cv2.imwrite(path, np.full((40, 60, 3), 128, np.uint8))
                 out.append(("file", path))
         self._due = keep

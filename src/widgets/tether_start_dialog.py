@@ -10,8 +10,8 @@ import os
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox,
-                               QFileDialog, QGridLayout, QHBoxLayout, QLabel,
-                               QLineEdit, QPushButton, QVBoxLayout)
+                               QComboBox, QFileDialog, QGridLayout, QHBoxLayout,
+                               QLabel, QLineEdit, QPushButton, QVBoxLayout)
 
 from ui import theme
 
@@ -41,7 +41,8 @@ class TetherStartDialog(QDialog):
             tiles.set_colour(fn)
 
     def __init__(self, parent=None, n_open=0, folder="", scan_type="colour",
-                 from_monitor=False, chooser=None):
+                 from_monitor=False, chooser=None, roll="", film_format="", film="",
+                 films=()):
         super().__init__(parent)
         self.setWindowTitle("Start Hot Folder Tether")
         self._n_open = int(n_open or 0)
@@ -68,6 +69,35 @@ class TetherStartDialog(QDialog):
         from widgets.scan_type_tiles import ScanTypeTiles
         self.scan_tiles = ScanTypeTiles(scan_type, colour=self.restyle)
         grid.addWidget(self.scan_tiles, 1, 1)
+        # what the captures are called and logged as (spec/capture-log-and-names.md)
+        from core import capture_log, film_formats
+        grid.addWidget(QLabel("Roll"), 2, 0, Qt.AlignRight)
+        self.roll_edit = QLineEdit(capture_log.clean_roll(roll) or capture_log.DEFAULT_ROLL)
+        self.roll_edit.setToolTip(
+            "Starts each capture's file name, e.g. R0034_645_Portra400_013_RED.RAF, and "
+            "its line in the capture log. It counts up for each new roll; type your own "
+            "if you like (letters, digits and -).")
+        self.roll_edit.setMaximumWidth(160)
+        grid.addWidget(self.roll_edit, 2, 1, Qt.AlignLeft)
+        grid.addWidget(QLabel("Format"), 3, 0, Qt.AlignRight)
+        self.format_combo = QComboBox()
+        self.format_combo.addItem("Not set", "")
+        for key, label, _r, _c in film_formats.FILM_FORMATS:
+            self.format_combo.addItem(label, key)
+        i = self.format_combo.findData(film_format or "")
+        self.format_combo.setCurrentIndex(max(0, i))
+        grid.addWidget(self.format_combo, 3, 1, Qt.AlignLeft)
+        grid.addWidget(QLabel("Film"), 4, 0, Qt.AlignRight)
+        self.film_combo = QComboBox()
+        self.film_combo.setEditable(True)
+        self.film_combo.setInsertPolicy(QComboBox.NoInsert)
+        for f in films or ():
+            if f:
+                self.film_combo.addItem(str(f))
+        self.film_combo.setEditText(film or "")
+        self.film_combo.lineEdit().setPlaceholderText("e.g. Portra 400 (optional)")
+        self.film_combo.setMinimumWidth(200)
+        grid.addWidget(self.film_combo, 4, 1, Qt.AlignLeft)
         lay.addLayout(grid)
 
         n = self._n_open
@@ -89,6 +119,10 @@ class TetherStartDialog(QDialog):
         self.buttons.rejected.connect(self.reject)
         lay.addWidget(self.buttons)
         self._refresh_folder()
+
+    def roll_value(self):
+        from core import capture_log
+        return capture_log.clean_roll(self.roll_edit.text()) or capture_log.DEFAULT_ROLL
 
     def _choose(self):
         picked = self._chooser(self.folder_edit.text() or "")
@@ -112,6 +146,9 @@ class TetherStartDialog(QDialog):
         return {"start": bool(started),
                 "folder": self.folder_edit.text(),
                 "scan_type": self.scan_tiles.currentData(),
+                "roll": self.roll_value(),
+                "format": self.format_combo.currentData() or "",
+                "film": self.film_combo.currentText().strip(),
                 "close_open": self._n_open > 0 and self.close_box.isChecked(),
                 "import_existing": (not self.import_box.isHidden()) and self.import_box.isChecked(),
                 "dont_ask": (not self.dont_ask_box.isHidden()) and self.dont_ask_box.isChecked()}
