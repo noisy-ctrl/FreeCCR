@@ -230,15 +230,22 @@ def _to_uint16_full_range(img: np.ndarray) -> np.ndarray:
     return np.clip(img.astype(np.float64) * scale, 0, 65535).astype(np.uint16)
 
 
-def look_balance_shift(img, look):
+def look_balance_shift(img, look, value=None):
     """Film Look auto balance per frame (spec/film-look-auto-balance.md):
     the (R, G, B) Shift offsets in slider units for `img` with `look` (a
     LookLUT or FrameLook from look_lut.for_frame), or None when it doesn't
     apply - the setting off, no balance data in the cube, not a converted
     black-point (density) frame. Measured on the frame's PREVIEW base, so
-    the preview, zoom, slices and export all get the same offsets."""
+    the preview, zoom, slices and export all get the same offsets. On or off
+    per frame by the balance mark on its look_lut `value` (the Balance box
+    beside the look lists); a value with no mark follows the old Settings
+    option (revision 2026-11-08)."""
     from core.ccr_backend import ccr_backend
-    if not getattr(ccr_backend, "look_auto_balance", False):
+    from core.look_lut import parse_look
+    on = parse_look(value)[2] if value else None
+    if on is None:
+        on = bool(getattr(ccr_backend, "look_auto_balance", False))
+    if not on:
         return None
     balance = getattr(look, "balance", None)
     if balance is None or not getattr(img, "converted", False):
@@ -2107,7 +2114,8 @@ class CCRImage:
         full_look = look is not None and not getattr(look, "colour_only", False)
         # Auto balance per frame (experimental): the lab's colour balance as
         # hidden R/G/B Shift offsets, added to the user's values.
-        look_bal = look_balance_shift(self, look) if look is not None else None
+        look_bal = (look_balance_shift(self, look, s.get("look_lut"))
+                    if look is not None else None)
         auto_on = (getattr(ccr_backend, "auto_gain", True) and self.converted
                    and not full_look)
         clip_ag = None if full_look else clip_gain_offset(self, None, ws)
