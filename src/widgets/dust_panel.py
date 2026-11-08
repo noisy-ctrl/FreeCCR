@@ -234,7 +234,9 @@ class DustRemovalPanel(QWidget):
 
         hint = QLabel(
             "Click or drag over dust to remove it. Ctrl+wheel resizes the "
-            "brush.\n"
+            "brush. The spot you just painted shows where it copies from: "
+            "drag that green ring to copy from somewhere else (Ctrl+Z undoes "
+            "it).\n"
             "With heal sources shown: right-drag a stroke to move it (it "
             "keeps sampling the same patch); right-drag a source ring to "
             "re-pick where it samples; double right-click deletes the "

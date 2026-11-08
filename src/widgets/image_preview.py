@@ -446,7 +446,10 @@ class GraphicsImageView(QGraphicsView):
             return super().mouseReleaseEvent(event)
         if self.parent_widget.dust_mode:
             if event.button() == Qt.LeftButton:
-                self.parent_widget.dust_release()
+                if self.parent_widget._dust_src_drag is not None:
+                    self.parent_widget.dust_right_release()   # a left-dragged source
+                else:
+                    self.parent_widget.dust_release()
             elif event.button() == Qt.RightButton:
                 self.parent_widget.dust_right_release()
             return
@@ -1166,6 +1169,9 @@ class ImagePreview(QWidget):
         self._dust_debug_items = []      # its scene items (outlines/arrows)
         self._dust_drag = None           # right-drag state (move a stroke)
         self._dust_src_drag = None       # right-drag state (re-pick a source)
+        # the stroke painted last: its source rings show (and left-drag) even
+        # with 'Show heal sources' off (spec/dust-spot-editing.md, Brush part)
+        self._dust_selected = None
 
         # Coalesce a fine-rotation drag into a single undo step
         self._fine_rot_burst_active = False
@@ -3937,6 +3943,8 @@ class ImagePreview(QWidget):
         n = self._dust_scene_to_norm(scene_pos)
         if n is None:
             return
+        if self._dust_grab_source(n):
+            return                     # left-drag a source ring: re-pick it
         self._dust_painting = True
         self._dust_pts = [n]
         self._draw_dust_stroke()
@@ -3966,9 +3974,51 @@ class ImagePreview(QWidget):
         if img is None:
             return
         img.push_undo_state()
-        img.dust_spots.append(
-            {"kind": "brush", "pts": pts, "r": float(self._dust_brush_r)})
+        spot = {"kind": "brush", "pts": pts, "r": float(self._dust_brush_r)}
+        img.dust_spots.append(spot)
+        self._dust_selected = spot
         self._commit_dust_change(img)
+
+    def _dust_selected_index(self, img):
+        """Index of the stroke whose sources show without the overlay (the
+        last one painted), or None once it is gone (deleted, undone)."""
+        sel = self._dust_selected
+        if sel is None or img is None:
+            return None
+        for i, sp in enumerate(getattr(img, "dust_spots", []) or []):
+            if sp is sel:
+                return i
+        return None
+
+    def _dust_visible_records(self, img):
+        """Indices of the plan records whose source rings are drawn: all with
+        'Show heal sources', else those of the selected stroke (on its
+        footprint), else none."""
+        cached = getattr(img, "_dust_plan_cache", None)
+        spots = getattr(img, "dust_spots", []) or []
+        if cached is None or cached[0] != repr(spots):
+            return []
+        if self._dust_debug:
+            return list(range(len(cached[1])))
+        si = self._dust_selected_index(img)
+        size = self._dust_full_frame_size()
+        if si is None or size is None:
+            return []
+        w, h = size
+        return [i for i, rec in enumerate(cached[1])
+                if dust_spot_hit(spots[si], rec[1], rec[0], w, h, slack_px=2.0)]
+
+    def _dust_grab_source(self, n):
+        """Start re-picking the source ring under `n`, if one is drawn there."""
+        si = self._dust_source_index_at(n)
+        if si is None:
+            return False
+        img = ccr_backend.get_image_by_index(self.current_idx)
+        cached = img._dust_plan_cache
+        self._dust_src_drag = {"idx": si, "start": n, "rec": cached[1][si],
+                               "before": (cached[0], list(cached[1])),
+                               "moved": False}
+        return True
 
     # --- Right-button stroke editing (with the sources overlay shown) ------
     def _dust_spot_index_at(self, scene_pos):
@@ -4002,8 +4052,9 @@ class ImagePreview(QWidget):
         # divide by the view scale to get scene/full-frame pixels — capped,
         # or a degenerate scale would let the marker swallow every click.
         hit = min(24.0, 10.0 / max(self._view_scale() or 0.0, 1e-6))
+        visible = set(self._dust_visible_records(img))
         for i, rec in enumerate(cached[1]):
-            if rec[2] is None:
+            if rec[2] is None or i not in visible:
                 continue
             sx, sy = rec[1] + rec[2][1], rec[0] + rec[2][0]
             if math.hypot((n[0] - sx) * w, (n[1] - sy) * h) <= hit:
@@ -4019,12 +4070,7 @@ class ImagePreview(QWidget):
         n = self._dust_scene_to_norm(scene_pos)
         if n is None:
             return
-        si = self._dust_source_index_at(n)
-        if si is not None:
-            img = ccr_backend.get_image_by_index(self.current_idx)
-            self._dust_src_drag = {"idx": si, "start": n,
-                                   "rec": img._dust_plan_cache[1][si],
-                                   "moved": False}
+        if self._dust_grab_source(n):
             return
         idx = self._dust_spot_index_at(scene_pos)
         if idx is None:
@@ -4095,6 +4141,11 @@ class ImagePreview(QWidget):
             if src.get("moved"):
                 img = ccr_backend.get_image_by_index(self.current_idx)
                 if img is not None:
+                    # one undo step: snapshot the plan as it was before the drag
+                    picked = img._dust_plan_cache
+                    img._dust_plan_cache = src["before"]
+                    img.push_undo_state()
+                    img._dust_plan_cache = picked
                     # Re-heal: the segment binds at its centroid and pins
                     # the user-chosen offset verbatim — the new reference.
                     self._commit_dust_change(img)
@@ -4353,10 +4404,12 @@ class ImagePreview(QWidget):
 
     def _draw_dust_debug(self):
         self._clear_dust_debug_items()
-        if not (self.dust_mode and self._dust_debug):
+        if not self.dust_mode:
             return
         img = ccr_backend.get_image_by_index(self.current_idx)
         if img is None or self.current_pixmap is None:
+            return
+        if not self._dust_debug and self._dust_selected_index(img) is None:
             return
         t = self._base_transform()
         size = self._dust_full_frame_size()
@@ -4372,6 +4425,11 @@ class ImagePreview(QWidget):
         # preview not re-rendered yet) → outlines only.
         cached = getattr(img, "_dust_plan_cache", None)
         plan = cached[1] if (cached and cached[0] == repr(spots)) else None
+        if not self._dust_debug:
+            # only the stroke painted last, and its own sources
+            keep = self._dust_visible_records(img)
+            spots = [spots[self._dust_selected_index(img)]]
+            plan = [plan[i] for i in keep] if plan is not None else None
         geo = dust_debug_geometry(spots, plan, w, h)
         to_display = None
         if self._crop_display_transform is not None:

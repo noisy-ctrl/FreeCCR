@@ -2524,7 +2524,16 @@ class CCRImage:
             # Deep copy: each spot nests a point list, so a shallow copy would
             # alias live state and a later edit would corrupt the snapshot.
             "dust_spots": copy.deepcopy(getattr(self, "dust_spots", [])),
+            # the heal plan, so a re-picked dust source is one undo step
+            # (spec/dust-spot-editing.md); records are tuples, kept as they are
+            "dust_plan": self._dust_plan_snapshot(),
         }
+
+    def _dust_plan_snapshot(self):
+        cached = getattr(self, "_dust_plan_cache", None)
+        if not cached or not getattr(self, "dust_spots", None):
+            return None
+        return (cached[0], tuple(cached[1]))
 
     def push_undo_state(self) -> None:
         """Push the current state onto the undo stack. Call BEFORE mutating
@@ -2553,6 +2562,9 @@ class CCRImage:
         self.vertical_mirrored = state["vertical_mirrored"]
         self.area_layers = copy.deepcopy(state.get("area_layers", []))
         self.dust_spots = copy.deepcopy(state.get("dust_spots", []))
+        if "dust_plan" in state:
+            plan = state["dust_plan"]
+            self._dust_plan_cache = (plan[0], list(plan[1])) if plan else None
         # The previously-active area may have been added back/removed by this
         # undo; the panel re-resolves None -> global if the id is now stale.
         active_id = getattr(self, "active_area_id", None)
