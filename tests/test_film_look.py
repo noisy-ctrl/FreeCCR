@@ -448,7 +448,7 @@ def test_combo_lists_library(panel):
     texts = [panel.look_combo.itemText(i) for i in range(panel.look_combo.count())]
     assert texts[0] == "LUT (none loaded)"
     assert "Noritsu Test" in texts
-    assert texts[-1].startswith("Import")
+    assert texts[-2].startswith("Import") and texts[-1] == "Manage…"
 
 
 def test_the_look_has_its_own_fold_above_the_histogram(panel, monkeypatch):

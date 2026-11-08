@@ -452,6 +452,41 @@ def import_look(src_path: str) -> str:
     return name
 
 
+def look_path(name: str) -> str:
+    """The library file of a look value (any colour / balance marks dropped)."""
+    return os.path.join(looks_dir(), split_look_name(name)[0])
+
+
+def delete_look(name: str, trash=None) -> bool:
+    """Remove a look from the library: to the Trash when the system has one
+    (`trash(path)` -> bool, default Qt's QFile.moveToTrash), else deleted.
+    Returns whether it is gone. Frames that used it render without it and
+    show it as "(missing)" (spec/look-manager.md)."""
+    path = look_path(name)
+    if not os.path.isfile(path):
+        return False
+    if trash is None:
+        def trash(p):
+            try:
+                from PySide6.QtCore import QFile
+                return bool(QFile.moveToTrash(p))
+            except Exception:
+                return False
+    gone = False
+    try:
+        gone = bool(trash(path))
+    except Exception:
+        gone = False
+    if not gone:
+        try:
+            os.remove(path)
+            gone = True
+        except OSError:
+            gone = False
+    _cache.pop(path, None)
+    return gone and not os.path.exists(path)
+
+
 _cache = {}               # path -> (mtime, LookLUT)
 _warned = set()
 

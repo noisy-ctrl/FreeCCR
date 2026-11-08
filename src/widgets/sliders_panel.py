@@ -828,6 +828,7 @@ class SlidersPanel(QWidget):
         "FreeCCR's own brightness and contrast, so Auto Gain, Cineon and the "
         "tone sliders work as without a look.")
     LOOK_IMPORT = "__import__"
+    LOOK_MANAGE = "__manage__"
     LOOK_BALANCE_TOOLTIP = (
         "Balance this frame's colour for the Film Look, the way a lab balances "
         "each frame: about half of the frame's overall cast is taken out, as "
@@ -3086,6 +3087,7 @@ class SlidersPanel(QWidget):
                               colour_only_name(name))
             combo.insertSeparator(combo.count())
             combo.addItem("Import…", self.LOOK_IMPORT)
+            combo.addItem("Manage…", self.LOOK_MANAGE)
             combo.blockSignals(False)
         self._select_look_in_combo(current)
 
@@ -3153,6 +3155,13 @@ class SlidersPanel(QWidget):
 
     def _on_look_activated(self, index, combo=None):
         data = (combo or self.look_combo).itemData(index)
+        if data == self.LOOK_MANAGE:
+            img = (ccr_backend.get_image_by_index(self.current_idx)
+                   if self.current_idx is not None else None)
+            self._select_look_in_combo(
+                (img.adjustment_settings.get("look_lut") if img else "") or "")
+            self.manage_looks()
+            return
         if data == self.LOOK_IMPORT:
             from PySide6.QtWidgets import QFileDialog
             from core.look_lut import import_look, CubeError
@@ -3182,6 +3191,40 @@ class SlidersPanel(QWidget):
             from core.look_lut import with_balance
             data = with_balance(data, True)
         self.set_look(data or "")
+
+    @staticmethod
+    def look_users(name):
+        """How many loaded frames use the look file `name` (any version)."""
+        from core.look_lut import split_look_name
+        want = split_look_name(name)[0]
+        return sum(1 for img in list(ccr_backend.images or [])
+                   if split_look_name((getattr(img, "adjustment_settings", None) or {})
+                                      .get("look_lut") or "")[0] == want)
+
+    def manage_looks(self):
+        """Film Look lists → Manage…: the looks library window
+        (spec/look-manager.md). The lists rebuild if it changed anything;
+        frames using a deleted look re-render without it."""
+        from widgets.look_manager import LookManager
+        dlg = self._make_look_manager()
+        dlg.exec()
+        if not dlg.changed:
+            return dlg
+        img = (ccr_backend.get_image_by_index(self.current_idx)
+               if self.current_idx is not None else None)
+        self._populate_look_combo(
+            select=(img.adjustment_settings.get("look_lut") if img else "") or "")
+        self._sync_look_balance_boxes(img)
+        if img is not None and img.adjustment_settings.get("look_lut"):
+            img.update_thumbnail_and_preview()
+            self._show_rendered()
+            self._update_thumb()
+        return dlg
+
+    def _make_look_manager(self):
+        """The window, made here so a test can drive it. The test seam."""
+        from widgets.look_manager import LookManager
+        return LookManager(self, in_use=self.look_users)
 
     def set_look(self, name, hint=True):
         """Set (or clear, with "") the Film Look on the current image's GLOBAL
