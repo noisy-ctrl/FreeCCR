@@ -255,3 +255,8 @@ Shoot note of Expose each frame for itself still says it at shot time
 live estimate (an older click: another roll's, or a gap since wound on into a
 frame): it looks beside the guide instead of answering "the click is inside
 the frame guide".
+
+## Revision 2026-11-08: the box's label
+
+"Expose each frame for itself" now reads **"Per shot, scale exposure to the
+frame's density"** (the user's wording). Behaviour unchanged.
