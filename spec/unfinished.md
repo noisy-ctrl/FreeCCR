@@ -42,6 +42,14 @@ remove an entry when it ships.
   where the Shutter row shows the model the camera reports ("GFX50S II").
 
 ## To check on the user's machine
+- **2026-11-08 batch**: the Balance box beside the look lists (on with a
+  balanced cube, greyed otherwise); the dust source ring after painting
+  (left-drag, Ctrl+Z); Auto Crop on the toolbar and the tighter buttons on
+  a real Mac font; the uncropped view while picking a black / white point;
+  double-click in Capture while camera-magnified.
+- **Dust spot editing, the Edit tool** (`spec/dust-spot-editing.md`): only the
+  Brush part's source handle is built; select / move / resize any spot waits
+  on the spec's two questions.
 - **The light found under a new port name, and "isn't taking data"**
   (2026-11-07, `spec/live-capture-monitor.md` revision 2026-11-07): after one
   connection with this version, moving the Scanlight's USB to another socket

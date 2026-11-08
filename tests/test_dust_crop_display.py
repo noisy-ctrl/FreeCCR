@@ -372,3 +372,48 @@ class TestSourceHandleAfterPainting:
         assert ip._dust_selected_index(img) is None
         ip._draw_dust_debug()
         assert ip._dust_debug_items == []
+
+
+class TestBwPointUncrop:
+    """spec/bw-point-uncrop.md: a black / white point pick shows the frame
+    uncropped, and the crop comes back when the pick ends."""
+
+    def test_arming_uncrops_and_esc_recrops(self, tmp_path):
+        ip, img = _converted_preview(tmp_path)
+        assert ip.current_pixmap.width() == 300
+        ip.set_bwpoint_mode("black")
+        assert (ip.current_pixmap.width(), ip.current_pixmap.height()) == (600, 400)
+        assert ip._crop_display_transform is None
+        assert img.crop_rect == (0.25, 0.25, 0.75, 0.75)          # untouched
+        ip._on_escape_key()
+        assert ip.view.bwpoint_mode is None
+        assert ip.current_pixmap.width() == 300
+
+    def test_a_drawn_pick_samples_the_full_frame_then_recrops(self, tmp_path, monkeypatch):
+        from PySide6.QtCore import QEvent, QPoint, Qt
+        from PySide6.QtGui import QMouseEvent
+        ip, img = _converted_preview(tmp_path)
+        got = []
+        monkeypatch.setattr(ccr_backend, "set_black_point",
+                            lambda bgr, exposure=None: got.append(bgr))
+        ip.set_bwpoint_mode("black")
+        # a box in the top-left corner: outside the crop, in the film area
+        ip.view._bw_drag_start = ip.view.mapToScene(ip.view.mapFromScene(QPointF(10, 10)))
+        end = ip.view.mapFromScene(QPointF(60, 50))
+        ip.view.mouseReleaseEvent(QMouseEvent(
+            QEvent.MouseButtonRelease, QPointF(end), QPointF(ip.view.mapToGlobal(end)),
+            Qt.LeftButton, Qt.NoButton, Qt.NoModifier))
+        assert len(got) == 1
+        raw = img.read_image(img.file_path, max_long_side=1080)
+        want = raw[10:50, 10:60].reshape(-1, 3).mean(axis=0)
+        assert np.allclose(got[0], want, rtol=0.03)
+        assert ip.view.bwpoint_mode is None
+        assert ip.current_pixmap.width() == 300                   # cropped again
+
+    def test_no_crop_no_rerender(self, tmp_path, monkeypatch):
+        ip, img = _converted_preview(tmp_path, crop_rect=None)
+        calls = []
+        monkeypatch.setattr(ip, "update_preview", lambda i: calls.append(i))
+        ip.set_bwpoint_mode("white")
+        ip.set_bwpoint_mode(None)
+        assert calls == []

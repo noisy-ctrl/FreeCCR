@@ -535,6 +535,10 @@ class GraphicsImageView(QGraphicsView):
                                         bgr_tuple, rect_n)
                                 except AttributeError:
                                     pass
+            # the pick is over: show the crop again (if sampling re-rendered
+            # already, this is the same picture)
+            if pw.current_pixmap is not None and pw._crop_display_transform is None:
+                pw._bw_uncrop_refresh()
             return
 
         if self.drawing_reference and event.button() == Qt.RightButton:
@@ -1352,6 +1356,9 @@ class ImagePreview(QWidget):
         elif self.dust_mode:
             # Esc leaves dust mode (MainWindow restores the sliders panel).
             self.window().toggle_dust_removal(False)
+        elif self.view.bwpoint_mode:
+            # Esc abandons a black / white point pick (and re-crops the view)
+            self.set_bwpoint_mode(None)
 
     # --- Tethering banner (watch-folder mode) ----------------------------
     def set_tether_banner(self, banner):
@@ -1479,6 +1486,10 @@ class ImagePreview(QWidget):
         if (preview_img is not None and not preview_img.isNull()
                 and crop is not None and not self.crop_mode
                 and not self.area_mode
+                # picking a black / white point shows the whole frame, so the
+                # rebate and film base outside the crop can be sampled (the
+                # user, 2026-11-08; spec/bw-point-uncrop.md)
+                and not self.view.bwpoint_mode
                 and (ccr_backend.images[idx].converted or ccr_backend.positive_mode)):
             if crop_angle:
                 extracted = self._extract_rotated_crop(preview_img, crop, crop_angle)
@@ -2606,9 +2617,21 @@ class ImagePreview(QWidget):
             self.cancel_crop_mode()
         if mode and self.slice_mode:
             self.cancel_slice_mode()
+        was = bool(self.view.bwpoint_mode)
         self.view.bwpoint_mode = mode
         self.view.wb_pick_mode = False
         self.view.setCursor(Qt.CrossCursor if mode else Qt.ArrowCursor)
+        if bool(mode) != was:
+            self._bw_uncrop_refresh()
+
+    def _bw_uncrop_refresh(self):
+        """Re-show the frame on screen after a black / white point pick began
+        or ended, if it has a crop (uncropped while picking)."""
+        if self.current_idx is None:
+            return
+        img = ccr_backend.get_image_by_index(self.current_idx)
+        if img is not None and getattr(img, "crop_rect", None) is not None:
+            self.update_preview(self.current_idx)
 
     def set_wb_pick_mode(self, enabled):
         """Eyedropper mode: next click on the image picks a neutral point
