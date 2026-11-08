@@ -315,3 +315,60 @@ class TestCommittedSpotIsFullFrame:
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+class TestSourceHandleAfterPainting:
+    """spec/dust-spot-editing.md, the Brush part (2026-11-08): the stroke just
+    painted shows its source ring with 'Show heal sources' OFF, and a LEFT
+    drag on the ring re-picks it, one undo step."""
+
+    def _painted(self, tmp_path):
+        ip, img = _converted_preview(tmp_path, crop_rect=None)
+        ip.enter_dust_mode()
+        ip._maybe_request_hires = lambda: None
+        img.dust_spots = [{"kind": "brush", "pts": [[0.2, 0.2]], "r": 0.02}]
+        img.update_thumbnail_and_preview()
+        ip.dust_press(QPointF(300, 200))
+        ip.dust_release()
+        assert len(img.dust_spots) == 2
+        return ip, img
+
+    def _ring(self, img, spot_x):
+        for cy, cx, off, *rest in img._dust_plan_cache[1]:
+            if off is not None and abs(cx - spot_x) < 0.02:
+                return cy, cx, off
+        raise AssertionError("no sampled record")
+
+    def test_the_new_strokes_ring_shows_and_left_drags(self, tmp_path):
+        ip, img = self._painted(tmp_path)
+        assert not ip._dust_debug and ip._dust_debug_items      # drawn anyway
+        # only the new stroke's sources are grabbable
+        cy0, cx0, off0 = self._ring(img, 0.2)
+        assert ip._dust_source_index_at(
+            [cx0 + off0[1], cy0 + off0[0]]) is None
+        cy, cx, off = self._ring(img, 0.5)
+        sx, sy = (cx + off[1]) * 600, (cy + off[0]) * 400
+        ip.dust_press(QPointF(sx, sy))
+        assert ip._dust_src_drag is not None and not ip._dust_painting
+        ip.dust_right_move(QPointF(sx, sy + 60))
+        ip.dust_right_release()
+        assert len(img.dust_spots) == 2                          # nothing painted
+        cy2, cx2, off2 = self._ring(img, 0.5)
+        assert cy2 + off2[0] == pytest.approx((sy + 60) / 400.0, abs=0.01)
+        # one Ctrl+Z puts the source back, the stroke stays
+        assert img.pop_undo_state()
+        assert len(img.dust_spots) == 2
+        img.update_thumbnail_and_preview()
+        cy3, cx3, off3 = self._ring(img, 0.5)
+        assert off3 == pytest.approx(off, abs=1e-6)
+
+    def test_a_click_off_the_ring_paints_and_undo_hides_the_ring(self, tmp_path):
+        ip, img = self._painted(tmp_path)
+        ip.dust_press(QPointF(100, 300))
+        assert ip._dust_painting and ip._dust_src_drag is None
+        ip.dust_release()
+        assert len(img.dust_spots) == 3
+        img.pop_undo_state()
+        assert ip._dust_selected_index(img) is None
+        ip._draw_dust_debug()
+        assert ip._dust_debug_items == []

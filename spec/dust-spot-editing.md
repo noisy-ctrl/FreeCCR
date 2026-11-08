@@ -1,6 +1,8 @@
 # Dust spots you can edit (draft for the user's review)
 
-Status: DRAFT 2026-10-30, not built. Detection stays as it is (manual brush +
+Status: DRAFT 2026-10-30. **The Brush part's source handle is built
+(2026-11-08, the user: "allow the ability to manually move the sample spot")**:
+see "Built" at the end. Edit (select / move / resize any spot) is not. Detection stays as it is (manual brush +
 the AI detector); infrared is to be tested later (the user's lens passes IR).
 
 ## What's there now (spec/dust-removal.md)
@@ -75,3 +77,18 @@ unchanged.
    existing spot then needs a modifier key)?
 2. Should moving a spot keep copying from the same patch (as now) or move its
    source along with it?
+
+
+## Built (2026-11-08): the source handle after painting
+
+- `ImagePreview._dust_selected` = the stroke painted last (by identity, so an
+  undo or delete drops it). With "Show heal sources" OFF, `_draw_dust_debug`
+  draws that stroke's outline and the source rings of the plan records on its
+  footprint (`_dust_visible_records`); with it ON, everything as before.
+- A LEFT press on a drawn ring (`_dust_grab_source`, hit-tested only on drawn
+  rings) re-picks it instead of painting; release goes through the existing
+  re-pick path (`dust_right_release`). The right-button gestures are unchanged.
+- A re-pick is now ONE undo step (left or right drag): the undo snapshot
+  carries the heal plan (`capture_undo_state()["dust_plan"]`, restored by
+  `pop_undo_state`); the release snapshots the plan as it was before the drag.
+- Tests: `tests/test_dust_crop_display.py::TestSourceHandleAfterPainting`.
