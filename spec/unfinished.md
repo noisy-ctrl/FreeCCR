@@ -42,6 +42,9 @@ remove an entry when it ships.
   where the Shutter row shows the model the camera reports ("GFX50S II").
 
 ## To check on the user's machine
+- **Capture log and names** (2026-11-08): a USB trichrome Shoot gives
+  `R…_RED/GREEN/BLUE.RAF` and a `freeccr-capture-log.jsonl` line; Open on the
+  folder groups by the log; the Start window's Roll / Format / Film.
 - **2026-11-08 batch**: the Balance box beside the look lists (on with a
   balanced cube, greyed otherwise); the dust source ring after painting
   (left-drag, Ctrl+Z); Auto Crop on the toolbar and the tighter buttons on

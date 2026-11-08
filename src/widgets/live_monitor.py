@@ -30,6 +30,7 @@ from core import camera_backends as cb
 from core import capture_light as cl
 from core import capture_sequence as cs
 from core import capture_guide
+from core import capture_log
 from core import frame_meter as fm
 from core import guide_tracker
 from core import light_presets as lp
@@ -333,6 +334,7 @@ class LiveCaptureMonitor(QWidget):
         self._zoom_token = 0
         self._zoom_spot = None           # (fx, fy) where it last looked
         self._shoot_exp_before = None    # the camera's exposure before a film-base Shoot
+        self._log_shot = None            # the shot being logged (spec/capture-log-and-names.md)
         self._read_patch = be.read_patch
         # the focus rail (spec/focus-rail.md)
         self._af = None                  # the autofocus sweep running (or last run)
@@ -875,6 +877,9 @@ class LiveCaptureMonitor(QWidget):
         self.shoot_btn.setFixedHeight(theme.CONTROL_H_LG)
         theme.style_button(self.shoot_btn, "primary")
         lay.addWidget(self.shoot_btn)
+        # the roll and the next shot's number (spec/capture-log-and-names.md)
+        self.roll_note = _muted("")
+        lay.addWidget(self.roll_note)
         # The roll's black point is sampled in the main window on a capture
         # (spec/tether-black-point.md): this brings it there, light ready.
         self.black_point_btn = QPushButton("Set Black Point…")
@@ -1863,6 +1868,8 @@ class LiveCaptureMonitor(QWidget):
     def _refresh_status_strip(self):
         if self._closing:
             return
+        if not (self.sequence.running if hasattr(self, "sequence") else False):
+            self._refresh_roll_note()
         bits = []
         size = getattr(self.feed, "size", None)
         if self.canvas.result is not None:
@@ -2307,7 +2314,9 @@ class LiveCaptureMonitor(QWidget):
             started = self.sequence.start(self._timing, self._preset(), tri)
         if not started:
             capture_guide.begin_shot(None)
+            self._log_shot = None
         if started:
+            self._begin_log_shot(p)
             self._await_exposure = True
             self.shoot_btn.setText("Stop   (Esc)")
             self.measure_btn.setEnabled(False)
@@ -2317,6 +2326,65 @@ class LiveCaptureMonitor(QWidget):
             if note:
                 self._note_caption(note)
         return started
+
+    # --- the capture log and file names (spec/capture-log-and-names.md) -----
+    def capture_session(self):
+        """(folder, {roll, format, film}) of the hot folder Capture shoots
+        into, or (None, None) with no hot folder."""
+        mw = self._mw
+        if mw is None or not getattr(mw, "_tether_active", False):
+            return None, None
+        folder = getattr(mw, "_tether_folder", None)
+        sess = getattr(mw, "capture_session", None)
+        if not folder or not isinstance(sess, dict):
+            return None, None
+        return folder, sess
+
+    def _begin_log_shot(self, p):
+        folder, sess = self.capture_session()
+        self._log_shot = None
+        if folder is None:
+            capture_log.clear()
+            return
+        roll = capture_log.clean_roll(sess.get("roll")) or capture_log.DEFAULT_ROLL
+        shot = capture_log.next_shot(folder, roll)
+        scan = "trichrome" if p["tri"] else self.scan_type()
+        exps = p.get("exposures")
+        entry = {"roll": roll, "shot": shot, "scan_type": scan,
+                 "format": sess.get("format") or "", "film": sess.get("film") or "",
+                 "route": "usb" if p["usb"] else "cable",
+                 "exposures": ({k: {f: v.get(f) for f in ("shutter", "iso") if v.get(f)}
+                                for k, v in exps.items() if isinstance(v, dict)}
+                               if exps else None)}
+        capture_log.begin_shot(folder, entry)
+        self._log_shot = entry
+        self._refresh_roll_note(shot + 1)
+
+    def _shot_file_stem(self, channel):
+        """The name FreeCCR gives the file of `channel` in the shot running."""
+        e = self._log_shot
+        if not e:
+            return None
+        slot = {"r": "red", "g": "green", "b": "blue"}.get(channel) \
+            or capture_log.single_slot(e["scan_type"])
+        return capture_log.shot_stem(e["roll"], e["format"], e["film"], e["shot"], slot)
+
+    def _refresh_roll_note(self, next_shot=None):
+        folder, sess = self.capture_session()
+        if folder is None:
+            self.roll_note.setText("")
+            return
+        roll = capture_log.clean_roll(sess.get("roll")) or capture_log.DEFAULT_ROLL
+        if next_shot is None:
+            next_shot = capture_log.next_shot(folder, roll)
+        bits = [f"Roll {roll}"]
+        if sess.get("format"):
+            from core import film_formats
+            bits.append(film_formats.label(sess["format"]) or sess["format"])
+        if sess.get("film"):
+            bits.append(str(sess["film"]))
+        bits.append(f"next shot {int(next_shot):03d}")
+        self.roll_note.setText(" · ".join(bits))
 
     # --- autofocus before each shot (spec/focus-rail.md revision 2 C) -------
     AF_SHOT_SETTLE_S = 1.0        # a picture this long after the camera says it zoomed
@@ -2496,6 +2564,7 @@ class LiveCaptureMonitor(QWidget):
 
     def _on_sequence_finished(self, reason):
         capture_guide.end_shot()                 # late files still get it, for a while
+        capture_log.end_shot(reason)             # and join its log entry
         if self._shoot_exp_before is not None:   # a film-base Shoot: put the camera back
             before, self._shoot_exp_before = self._shoot_exp_before, None
             self._hold_live(False)
@@ -3455,6 +3524,7 @@ class LiveCaptureMonitor(QWidget):
             self._measure_landed(path)
             return
         capture_guide.remember(path)             # the shot's own file: its guide
+        capture_log.add_file(path)               # ... and its line in the log
         if self.sequence.running and self.sequence.camera_shutter:
             self.sequence.frame_done(path)
         elif not self.sequence.running:
@@ -4316,7 +4386,10 @@ class _UsbShutter:
         self.win = win
 
     def fire(self, exposure=None):
-        if exposure:
+        name = self.win._shot_file_stem(self.win.sequence.channel)
+        if name:
+            self.win.usb.fire(exposure or None, name=name)
+        elif exposure:
             self.win.usb.fire(exposure)
         else:
             self.win.usb.fire()

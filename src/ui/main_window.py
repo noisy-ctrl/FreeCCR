@@ -233,6 +233,7 @@ class MainWindow(QMainWindow):
         # ImagePreview's parent().parent() chains stay valid — see
         # spec/camera-tethering.md §9.1.5.
         self._tether_active = False
+        self.capture_session = None      # roll, format, film (spec/capture-log-and-names.md)
         self._tether_thread = None
         self._tether_worker = None
         self._tether_timer = None
@@ -2045,6 +2046,7 @@ class MainWindow(QMainWindow):
         folder = os.path.normpath(normalized)
         if opts.get("scan_type"):
             self.set_scan_type(opts["scan_type"])
+        self._set_capture_session(opts.get("roll"), opts.get("format"), opts.get("film"))
 
         # Snapshot the folder's current supported files. They are seeded into the
         # scanner (so the poller never re-imports them); optionally import them now.
@@ -2142,6 +2144,8 @@ class MainWindow(QMainWindow):
         from core.ccr_merge import is_raw_path
         from core import capture_guide
         capture_guide.stamp(path)        # Capture's guide, for a shot that has one
+        from core import capture_log
+        capture_log.add_file(path)       # Capture's log, for a shot being recorded
         if (getattr(ccr_backend, "scan_type", "colour") == "trichrome"
                 and self._tether_grouper is not None):
             if not is_raw_path(path):
@@ -2500,14 +2504,42 @@ class MainWindow(QMainWindow):
                  and ccr_backend.black_point_bgr is None
                  and not ccr_backend.positive_mode))
 
+    # --- the capture session: roll, format, film (spec/capture-log-and-names.md)
+    def _capture_defaults(self):
+        """What the Start window offers: the next roll after the last one used,
+        and the last format and film."""
+        from core import capture_log
+        st = self._settings
+        films = st.value("capture/films", [], type=list) or []
+        return {"roll": capture_log.next_roll(st.value("capture/last_roll", "", type=str)),
+                "format": st.value("capture/format", "", type=str) or "",
+                "film": st.value("capture/film", "", type=str) or "",
+                "films": [f for f in films if f][:10]}
+
+    def _set_capture_session(self, roll, fmt, film):
+        from core import capture_log
+        roll = capture_log.clean_roll(roll) or capture_log.DEFAULT_ROLL
+        fmt, film = str(fmt or ""), str(film or "").strip()
+        self.capture_session = {"roll": roll, "format": fmt, "film": film}
+        st = self._settings
+        st.setValue("capture/last_roll", roll)
+        st.setValue("capture/format", fmt)
+        st.setValue("capture/film", film)
+        if film:
+            films = [f for f in (st.value("capture/films", [], type=list) or []) if f != film]
+            st.setValue("capture/films", [film] + films[:9])
+
     def _tether_start_options(self, n_open, start_dir, from_monitor=False, parent=None):
         """The Start Hot Folder Tether window's answers (dict, see
         TetherStartDialog.options), "start" False on Cancel. The test seam."""
         from widgets.tether_start_dialog import TetherStartDialog
+        sess = self._capture_defaults()
         dlg = TetherStartDialog(parent or self, n_open=n_open,
                                 folder=start_dir if start_dir and os.path.isdir(start_dir) else "",
                                 scan_type=getattr(ccr_backend, "scan_type", "colour"),
-                                from_monitor=from_monitor)
+                                from_monitor=from_monitor, roll=sess["roll"],
+                                film_format=sess["format"], film=sess["film"],
+                                films=sess["films"])
         if hasattr(parent, "light_dialog"):
             parent.light_dialog(dlg)
         started = dlg.exec() == QDialog.Accepted
@@ -2591,6 +2623,12 @@ class MainWindow(QMainWindow):
         # rejected combinations belonged to the roll just closed
         self._tether_attention = []
         self.thumbnail_list.set_attention(self._tether_attention)
+        sess = getattr(self, "capture_session", None)
+        if isinstance(sess, dict) and not session:
+            # a new roll gets the next roll id (format and film kept)
+            from core import capture_log
+            self._set_capture_session(capture_log.next_roll(sess.get("roll")),
+                                      sess.get("format"), sess.get("film"))
         if self._tether_active:
             self._tether_count = 0
             self._tether_prompted = False

@@ -92,11 +92,12 @@ class UsbCamera(WorkerThread):
     def set_live(self, on):
         self._command(("live", bool(on)))
 
-    def fire(self, exposure=None):
+    def fire(self, exposure=None, name=None):
         """Take a picture. With `exposure` ({"shutter", "iso"}) the worker sets
         it first, in the same turn, and fires only if the camera took every
-        value (spec/film-base-exposure.md)."""
-        self._command(("fire", dict(exposure) if exposure else None))
+        value (spec/film-base-exposure.md). `name`: what to call the shot's
+        file (no extension; spec/capture-log-and-names.md)."""
+        self._command(("fire", dict(exposure) if exposure else None, name or None))
 
     def pause_live(self, on):
         """Hold live view: no preview requests until released, so a camera
@@ -303,6 +304,11 @@ class UsbCamera(WorkerThread):
             exposure = cmd[1] if len(cmd) > 1 else None
             if exposure and not self._set_for_shot(exposure):
                 return
+            try:
+                # the shot's file name, used by the backend for its first file
+                self.backend.next_name = cmd[2] if len(cmd) > 2 else None
+            except AttributeError:
+                pass
             try:
                 self.backend.fire()
                 self.fired.emit()

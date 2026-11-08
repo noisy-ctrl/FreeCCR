@@ -376,8 +376,9 @@ class FilmCam(FakeUsb):
     def set_exposure(self, field, value):
         self.sets.append((field, value))
 
-    def fire(self, exposure=None):
+    def fire(self, exposure=None, name=None):
         self.fires.append(exposure)
+        self.names = getattr(self, "names", []) + [name]
         self.log.append("fire")
         if self.fail_next:
             text, self.fail_next = self.fail_next, None

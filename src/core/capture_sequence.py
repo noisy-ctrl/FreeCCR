@@ -159,6 +159,11 @@ class CaptureSequence:
             self._finish("stopped")
         # "exposing": the shot's file is awaited, then it stops
 
+    @property
+    def channel(self):
+        """The colour being shot ("red"/"green"/"blue", None for one exposure)."""
+        return self._channel
+
     def frame_done(self, path=None):
         """The camera's file for the shot in flight has landed."""
         if not self.running or self._phase != "exposing":

@@ -1,0 +1,88 @@
+# Capture log and file names
+
+The user, 2026-11-08: "Can we not have a log somewhere where captures are
+recorded? … file names repeat themselves in the folder … there should be a
+session id then underscore and number … it could also say the format (e.g.
+645) and film … an option when opening a new capture". Answers to the
+questions asked: names `R0034_645_Portra400_013_RED.RAF`; the roll id an
+auto number you can edit; the log in the capture folder. Shooting over USB
+is the norm; files that arrive another way (a shutter cable, with the
+camera's own software saving them) keep their names but are logged.
+
+## Goals
+- Every shot Capture takes is written down in the capture folder: which
+  files, which colour each is, when, the roll, shot number, scan type,
+  format, film and exposures.
+- Files FreeCCR downloads get names that say what they are and never repeat:
+  `<roll>_<format>_<film>_<shot>_<COLOUR>.<ext>`.
+- Opening the folder later puts each logged triplet together from the log,
+  exactly; only files the log doesn't know are grouped by their light.
+
+Non-goals: renaming files another program saved; editing or deleting log
+entries from the app; using the log for Hot Folder Tether's live grouping
+(captures already combine as they arrive).
+
+## Names (`capture_log.shot_stem`)
+`R0034_645_Portra400_013_RED`: roll id, format key (film_formats key, e.g.
+`645`, `6x7`, `35mm`), film with everything but letters and digits removed
+(`Portra 400` → `Portra400`), shot number (3 digits, more if needed), colour
+word: RED / GREEN / BLUE for a trichrome shot, WHITE for a single colour
+exposure, BW for a black-and-white scan. Format and film are left out when
+not set. The extension is the camera's. `camera_backends.unique_path` still
+adds `_1` if a name is taken (a retake of one colour).
+
+The backend names the file as it downloads it: `UsbCamera.fire(exposure,
+name)` hands the stem to the worker, which sets `backend.next_name` before
+firing; `Gphoto2Backend._download` (and the fake backend) use it once, for
+the first file that arrives, then clear it. A file nobody asked for (the
+camera's own button) keeps the camera's name. digiCamControl names its own
+files (its session folder) and is left alone.
+
+## The session: roll, format, film
+The Start Hot Folder Tether window (opened from File or from Capture) gets
+three fields under Scanning: **Roll** (default: the last roll used + 1,
+`R0001`, `R0002`…; editable; letters, digits and `-` only), **Format** (blank
+or a film format from the table) and **Film** (free text, the last ten used
+offered). Stored in QSettings `capture/last_roll`, `capture/format`,
+`capture/film`, `capture/films`; held as `MainWindow.capture_session`
+{roll, format, film}. **New Roll** moves the roll on by one (format and film
+kept). Capture shows "Roll R0034 · 645 · Portra 400 · next shot 013" under
+Shoot.
+
+Shot numbers carry on within a roll: next = 1 + the highest shot of that roll
+in the folder's log or in the folder's file names, so restarting FreeCCR or
+re-entering the same roll id never repeats a number.
+
+## The log (`freeccr-capture-log.jsonl`, in the capture folder)
+One JSON object a line, appended. A shot's line is written again each time
+one of its files arrives and when it ends; a reader keeps the LAST line per
+(roll, shot). Fields: `v` 1, `roll`, `shot`, `time` (ISO, local), `scan_type`,
+`format`, `film`, `files` {red, green, blue | white | bw: file name},
+`exposures` (as shot, per colour), `route` "usb" | "cable", `done`
+(true once the sequence ended), `stopped` (the end reason if it didn't finish
+normally). Unreadable lines are skipped.
+
+Recording is a small registry like `capture_guide`'s:
+`begin_shot(folder, entry)` at Shoot, `add_file(path)` for each file (Capture's
+USB `file_saved`, and the main window's hot-folder route for cable shots,
+ignoring one already added), `end_shot(reason)` when the sequence ends; files
+arriving within 60 s of the end still join that shot. A file is given the
+next colour of the shot not yet filled, in the order shot (red, green, blue),
+which is the colour that was lit for it (a USB shot's file lands before the
+next colour fires; a cable route shoots R, G, B in order).
+
+## Open uses the log (`triplet_plan.plan_triplets`)
+Before reading any light: each folder among the paths is checked for a log;
+every logged trichrome shot whose red, green and blue files are all among the
+paths becomes a set, exactly. The remaining paths go through the light-based
+planner as before. The log's sets come first, in shooting order.
+
+## Tests
+`tests/test_capture_log.py`: names (parts left out, film cleaned, colour
+words, wide numbers); next roll id; next shot from log and names; the log
+round trip, last line wins, bad lines skipped; the registry (colours in order,
+late file within grace, not twice, after grace not added); plan_triplets takes
+logged sets exactly (mixed with unlogged files, a set with a file missing
+falls back); backend naming (used once, then the camera's name; `_1` on a
+clash); the start window's fields and defaults; New Roll moves the roll on;
+Capture names a USB trichrome shot RED/GREEN/BLUE and logs it.
