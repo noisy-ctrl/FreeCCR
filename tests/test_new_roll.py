@@ -21,10 +21,19 @@ from core.ccr_backend import ccr_backend  # noqa: E402
 from test_tether_start_window import _png, mw  # noqa: E402,F401
 
 
+_KEEP = []
+
+
 def _file_menu(w):
-    for a in w.menuBar().actions():
+    # keep every wrapper alive: dropping the menu bar's action wrappers
+    # mid-loop let PySide delete the File menu itself in the tests
+    bar = w.menuBar().actions()
+    _KEEP.append(bar)
+    for a in bar:
         if a.text() == "File":
-            return [x for x in a.menu().actions() if not x.isSeparator()]
+            m = a.menu()
+            _KEEP.append(m)
+            return [x for x in m.actions() if not x.isSeparator()]
     raise AssertionError("no File menu")
 
 

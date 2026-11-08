@@ -632,7 +632,9 @@ def test_file_menu_opens_one_monitor(monkeypatch):
     monkeypatch.setattr(lm, "LiveCaptureMonitor", make)
     w = MainWindow()
     assert w.live_monitor_action.text() == "Capture…"
-    acts = [a.text() for a in w.menuBar().actions()[0].menu().actions()]
+    bar = w.menuBar().actions()          # wrappers kept alive (see test_new_roll)
+    file_menu = bar[0].menu()
+    acts = [a.text() for a in file_menu.actions()]
     assert acts.index("Capture…") == acts.index("Hot Folder Tether…") + 1
     w.live_monitor_action.trigger()
     w.live_monitor_action.trigger()
