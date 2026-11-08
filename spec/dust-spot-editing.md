@@ -92,3 +92,6 @@ unchanged.
   carries the heal plan (`capture_undo_state()["dust_plan"]`, restored by
   `pop_undo_state`); the release snapshots the plan as it was before the drag.
 - Tests: `tests/test_dust_crop_display.py::TestSourceHandleAfterPainting`.
+- Cursor (2026-11-08, the user): over a draggable source ring the pointer is
+  an open hand and the brush circle hides (`_dust_hover_source`); dragging it
+  is a closed hand; away from it, the cross and brush circle again.

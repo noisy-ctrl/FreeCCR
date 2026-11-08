@@ -4026,6 +4026,8 @@ class ImagePreview(QWidget):
     def dust_move(self, scene_pos):
         if not self.dust_mode:
             return
+        if not self._dust_painting and self._dust_hover_source(scene_pos):
+            return                      # over a source ring: a hand, no brush
         self._update_dust_cursor(scene_pos)
         if not self._dust_painting:
             return
@@ -4081,11 +4083,25 @@ class ImagePreview(QWidget):
         return [i for i, rec in enumerate(cached[1])
                 if dust_spot_hit(spots[si], rec[1], rec[0], w, h, slack_px=2.0)]
 
+    def _dust_hover_source(self, scene_pos):
+        """Over a source ring that can be dragged: an open hand and no brush
+        circle (the user, 2026-11-08). Returns whether it is over one."""
+        n = self._dust_scene_to_norm(scene_pos) if scene_pos is not None else None
+        over = n is not None and self._dust_source_index_at(n) is not None
+        if over:
+            self._update_dust_cursor(None)
+            self.view.setCursor(Qt.OpenHandCursor)
+        elif self.view.cursor().shape() == Qt.OpenHandCursor:
+            self.view.setCursor(Qt.CrossCursor)
+        return over
+
     def _dust_grab_source(self, n):
         """Start re-picking the source ring under `n`, if one is drawn there."""
         si = self._dust_source_index_at(n)
         if si is None:
             return False
+        self._update_dust_cursor(None)
+        self.view.setCursor(Qt.ClosedHandCursor)
         img = ccr_backend.get_image_by_index(self.current_idx)
         cached = img._dust_plan_cache
         self._dust_src_drag = {"idx": si, "start": n, "rec": cached[1][si],
@@ -4211,6 +4227,7 @@ class ImagePreview(QWidget):
         src = self._dust_src_drag
         self._dust_src_drag = None
         if src is not None:
+            self.view.setCursor(Qt.OpenHandCursor)   # still over the ring
             if src.get("moved"):
                 img = ccr_backend.get_image_by_index(self.current_idx)
                 if img is not None:
