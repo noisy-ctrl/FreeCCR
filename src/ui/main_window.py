@@ -1,5 +1,5 @@
 from PySide6.QtWidgets import QApplication, QMainWindow, QHBoxLayout, QWidget, QFileDialog, QMessageBox, QDialog, QVBoxLayout, QTextEdit, QPushButton, QLabel, QProgressDialog
-from PySide6.QtGui import QIcon, QShortcut, QKeySequence
+from PySide6.QtGui import QAction, QIcon, QShortcut, QKeySequence
 from PySide6.QtCore import (Qt, QEvent, QThread, Signal, QObject, QSettings,
                             QTimer, QMetaObject, Q_ARG)
 from widgets.thumbnail_list import ThumbnailList
@@ -833,7 +833,7 @@ class MainWindow(QMainWindow):
         # Close the roll on screen and start empty (spec/new-roll.md)
         self.new_roll_action = file_menu.addAction("New Roll…")
         self.new_roll_action.setShortcut("Ctrl+N")
-        self.new_roll_action.triggered.connect(self.new_roll)
+        self.new_roll_action.triggered.connect(lambda: self.new_roll())
 
         open_action = file_menu.addAction("Open Files")
         open_action.triggered.connect(self.open_files)
@@ -848,6 +848,11 @@ class MainWindow(QMainWindow):
         self.live_monitor_action = file_menu.addAction("Capture…")
         self.live_monitor_action.triggered.connect(self.open_live_monitor)
 
+        # Close everything loaded; the files stay on disk (spec/close-session.md)
+        file_menu.addSeparator()
+        self.close_session_action = file_menu.addAction("Close Session…")
+        self.close_session_action.triggered.connect(lambda: self.close_session())
+
         file_menu.addSeparator()
         export_action = file_menu.addAction("Export…")
         export_action.setShortcut("Ctrl+E")
@@ -859,6 +864,13 @@ class MainWindow(QMainWindow):
         settings_action = file_menu.addAction("Settings…")
         settings_action.setShortcut("Ctrl+,")
         settings_action.triggered.connect(self.open_settings)
+
+        file_menu.addSeparator()
+        self.quit_action = file_menu.addAction("Quit")
+        self.quit_action.setShortcut("Ctrl+Q")
+        # kept in the File menu on a Mac too (Qt would move it to the app menu)
+        self.quit_action.setMenuRole(QAction.NoRole)
+        self.quit_action.triggered.connect(self.close)
 
         # Add Help menu with About, Licenses, and Help actions
         help_menu = menu_bar.addMenu("Help")
@@ -2539,11 +2551,35 @@ class MainWindow(QMainWindow):
         box.exec()
         return box.clickedButton() is new_btn
 
-    def new_roll(self):
+    def _confirm_close_session(self, n):
+        """Ask before File → Close Session closes `n` images. The test seam."""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Question)
+        box.setWindowTitle("Close Session")
+        box.setText(f"Close all {n} loaded image{'' if n == 1 else 's'}?")
+        box.setInformativeText(
+            "The files stay on disk, and your edits are saved and come back when "
+            "you open them again.")
+        box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        box.setDefaultButton(QMessageBox.No)
+        return box.exec() == QMessageBox.Yes
+
+    def close_session(self):
+        """File → Close Session…: close everything loaded (edits saved, files
+        left on disk), as New Roll does. spec/close-session.md."""
+        n = len(ccr_backend.images or [])
+        if not n:
+            self.sliders_panel.set_temporary_hint("Nothing is loaded.", duration=3000)
+            return False
+        if not self._confirm_close_session(n):
+            return False
+        return self.new_roll(confirmed=True, session=True)
+
+    def new_roll(self, confirmed=False, session=False):
         """File → New Roll…: close the open images (edits saved) and start
         the next roll as a fresh batch does. spec/new-roll.md."""
         n = len(ccr_backend.images or [])
-        if n and not self._confirm_new_roll(n):
+        if n and not confirmed and not self._confirm_new_roll(n):
             return False
         if n:
             self._close_session_for_tether()
@@ -2568,9 +2604,13 @@ class MainWindow(QMainWindow):
                         "reason": f"New Roll with {len(left)} frame(s) of a trichrome "
                                   "shot waiting for the rest"}, hint=False)
             self.refresh_tether_banner()
-        self.sliders_panel.set_temporary_hint(
-            f"New roll: closed {n} image{'' if n == 1 else 's'} (edits saved)." if n
-            else "Ready for a new roll.", duration=4000)
+        if session:
+            msg = (f"Closed {n} image{'' if n == 1 else 's'}: edits saved, the "
+                   "files are still on disk.")
+        else:
+            msg = (f"New roll: closed {n} image{'' if n == 1 else 's'} (edits saved)."
+                   if n else "Ready for a new roll.")
+        self.sliders_panel.set_temporary_hint(msg, duration=4000)
         return True
 
     def _bring_to_front(self):
