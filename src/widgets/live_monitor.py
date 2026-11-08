@@ -844,7 +844,7 @@ class LiveCaptureMonitor(QWidget):
         self.frame_note = _muted("")
         fb.addWidget(self.frame_note)
         # revision 3: every Shoot uses this frame's suggestion, no Use click
-        self.frame_auto = QCheckBox("Expose each frame for itself")
+        self.frame_auto = QCheckBox("Per shot, scale exposure to the frame's density")
         self.frame_auto.setToolTip(
             "Every Shoot uses the frame's own exposures, from the line above (the "
             "live view's estimate, or a Meter reading): longer for a dense frame. "
@@ -2646,7 +2646,7 @@ class LiveCaptureMonitor(QWidget):
     def _shoot_exposures(self, tri):
         """The film base's exposures for a USB Shoot, or None. Use for This
         Frame's exposures go first, once (spec/frame-exposure.md §6); then,
-        with Expose each frame for itself ticked, the frame's own suggestion
+        with "Per shot, scale exposure to the frame's density" ticked, the frame's own suggestion
         (revision 3), which also sets the note Shoot shows (`_frame_shot_note`)."""
         self._frame_shot_note = ""
         armed, self._frame_exposures = self._frame_exposures, None
