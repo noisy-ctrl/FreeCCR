@@ -55,3 +55,10 @@ is now sized from its content (`_tighten_text_buttons`): a text button its
 words + `TEXT_BUTTON_PAD` (8; Qt's own hint added ~17), a picture button its
 24 px icon + `ICON_BUTTON_PAD` (6; was 8). Measured at 1.06× the UI font:
 884 px (886 before Auto Crop). Tests: `tests/test_export_placement.py`.
+
+## Revision 2026-11-08 (2): "Dust removal"
+
+The user asked for the full name. The 13 three-pixel spacers between toolbar
+buttons are gone (`add_spacer()` is now a no-op unless given a width): every
+button is already sized to its content with padding, so they still read
+apart. Measured at 1.06× the UI font: 885 of 900 px.

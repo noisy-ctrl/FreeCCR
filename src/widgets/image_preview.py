@@ -847,7 +847,13 @@ class ImagePreview(QWidget):
         # arrow (tests/test_panel_width.py). The 3 px spacers mark the groups.
         self.toolbar.setStyleSheet("QToolBar { spacing: 1px; }")
 
-        def add_spacer(width=3):
+        def add_spacer(width=0):
+            # No gap between buttons any more: each is sized to its words or
+            # icon plus padding (_tighten_text_buttons), which separates them,
+            # and the 13 three-pixel spacers were the room "Dust removal"
+            # needed (2026-11-08). Kept as a call so a gap is one argument away.
+            if not width:
+                return
             spacer = QWidget()
             spacer.setFixedWidth(width)
             spacer.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
@@ -958,10 +964,10 @@ class ImagePreview(QWidget):
 
         # Dust removal: opens the Dust Removal panel (covers the sliders) and a
         # paint/AI-detect mode on the canvas. Checkable so it reflects mode
-        # state. With the area tools. "Dust", not "Dust Removal": the toolbar
-        # must still fit at a 14-inch Mac's full width without pushing Export
-        # into the overflow menu (a test checks).
-        self.dust_action = QAction("Dust", self)
+        # state. With the area tools. "Dust removal" (the user, 2026-11-08):
+        # the toolbar must still fit at a 14-inch Mac's full width without
+        # pushing Export into the overflow menu (a test checks).
+        self.dust_action = QAction("Dust removal", self)
         self.dust_action.setCheckable(True)
         self.dust_action.setToolTip(
             "Spot out dust, hair and small scratches. Opens the Dust Removal "
