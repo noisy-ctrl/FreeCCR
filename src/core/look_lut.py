@@ -332,12 +332,46 @@ COLOUR_SUFFIX = "|colour"          # look_lut value of a look's colour-only vers
 _Y709 = np.array([0.2126, 0.7152, 0.0722], np.float32)
 
 
-def split_look_name(value):
-    """'Portra.cube|colour' -> ('Portra.cube', True); 'Portra.cube' -> (.., False)."""
+BALANCE_ON = "|bal"                # this frame: balance its colour for the look
+BALANCE_OFF = "|nobal"             # this frame: don't (none = the Settings fallback)
+
+
+def parse_look(value):
+    """A look_lut value -> (file, colour_only, balance). Flags are peeled off
+    the END: 'Portra.cube|colour|bal' -> ('Portra.cube', True, True);
+    'Portra.cube' -> (.., False, None). balance None = no mark (a value from
+    before the per-frame box: the Settings fallback decides)."""
     value = str(value or "")
-    if value.endswith(COLOUR_SUFFIX):
-        return value[:-len(COLOUR_SUFFIX)], True
-    return value, False
+    balance = None
+    if value.endswith(BALANCE_ON):
+        value, balance = value[:-len(BALANCE_ON)], True
+    elif value.endswith(BALANCE_OFF):
+        value, balance = value[:-len(BALANCE_OFF)], False
+    colour = value.endswith(COLOUR_SUFFIX)
+    if colour:
+        value = value[:-len(COLOUR_SUFFIX)]
+    return value, colour, balance
+
+
+def split_look_name(value):
+    """'Portra.cube|colour' -> ('Portra.cube', True); 'Portra.cube' -> (.., False).
+    A balance mark is dropped."""
+    name, colour, _ = parse_look(value)
+    return name, colour
+
+
+def look_choice(value):
+    """The value without its balance mark: what the Film Look lists hold."""
+    name, colour, _ = parse_look(value)
+    return (name + COLOUR_SUFFIX if colour else name) if name else ""
+
+
+def with_balance(value, on):
+    """The value with its balance mark set (True/False) or removed (None)."""
+    base = look_choice(value)
+    if not base or on is None:
+        return base
+    return base + (BALANCE_ON if on else BALANCE_OFF)
 
 
 def colour_only_name(name):

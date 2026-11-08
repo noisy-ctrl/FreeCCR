@@ -225,3 +225,43 @@ In the look's slot (after Channel Levels, where Cineon would be):
   darker than FreeCCR's tone; that is headroom like any other in the
   windowed stage and clamps at the end as before (none reached the clip on
   the four real frames checked).
+
+## Revision 2026-11-08: a per-frame Balance box beside the look lists
+
+The user: the Settings option is "too far out of the way"; the choice belongs
+with the look. Chosen: a tick box per frame (option 1 of three offered).
+
+**UX.** A small "Balance" tick box to the right of BOTH Film Look lists
+(Channel Levels' and the row above the histogram), kept in step like the lists.
+Ticked = this frame's colour is balanced for the look. Disabled (unticked)
+when no look is set, the cube has no balance data, or an area layer is active
+(the look is whole-image). Its tooltip says what it does in one paragraph.
+Picking a look whose cube has balance data starts with the box TICKED (that is
+why such a cube was fitted). Toggling is one undo step and re-renders.
+
+The Settings → General → Film Look checkbox is removed. Its stored value
+(`look/auto_balance`, `ccr_backend.look_auto_balance`) stays only as the
+fallback for a frame whose value carries no balance mark (catalogues and
+copies made before this revision), so no existing render changes.
+
+**Data.** No new key: the mark rides the `look_lut` VALUE, like the
+colour-only suffix, so copy, paste, Sync, Sync to All, catalogues, undo and
+tether templates carry it with the look and need no change. Flags are peeled
+off the END of the value (a file name with "|" in it is left alone):
+`Portra.cube`, `Portra.cube|colour`, `Portra.cube|bal`, `Portra.cube|nobal`,
+`Portra.cube|colour|bal`, … `look_lut.parse_look(value)` → (file, colour_only,
+balance: True/False/None); `split_look_name` returns (file, colour_only) with
+any balance mark dropped, so `resolve_look`, `is_full_look`, the display name
+and the colour-only checks are unchanged; `look_choice(value)` = the value
+without its balance mark (what the lists hold); `with_balance(value, on)`
+writes the mark (on=None removes it).
+
+**Render.** `ccr_image.look_balance_shift(img, look, value)`: balance = the
+mark, else `ccr_backend.look_auto_balance`; everything else as before.
+
+**Tests.** parse/compose round trips incl. old values; the mark doesn't change
+resolve/is_full_look/display name; the shift follows the mark and falls back
+to the setting when unmarked; the box: disabled with no look / no balance data
+/ an area active, ticked on picking a balanced look, toggling writes the mark
+(one undo step) and keeps both boxes and both lists in step; the paste row
+carries the mark; Settings has no Film Look balance box.

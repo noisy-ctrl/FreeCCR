@@ -387,24 +387,9 @@ class SettingsDialog(QDialog):
             "25 is one pixel at full size, so judge it at 100% zoom."))
         lay.addWidget(grp_det)
 
-        grp_look = QGroupBox("Film Look")
-        gfl = QVBoxLayout(grp_look)
-        gfl.setSpacing(theme.GAP_ROW)
-        self._cb_look_balance = QCheckBox(
-            "Balance each frame's colour for the Film Look (experimental)")
-        self._cb_look_balance.setToolTip(
-            "Sets each frame's colour the way the lab's scanner did for the scans "
-            "the look was fitted on, as hidden R/G/B Shift: your own Channel "
-            "Levels still start at 0 and fine-tune on top. Brightness stays "
-            "yours (Master Shift). Only for looks made by FreeCCR's fitter, which "
-            "measures the lab's balance; measured on one lab's scans so far.")
-        gfl.addWidget(self._cb_look_balance)
-        gfl.addWidget(self._muted(
-            "Experimental. A lab balances every frame by itself; a Film Look on "
-            "its own does not, so each frame needs its own colour set. On the "
-            "Portra 400 Lab look this removed about two thirds of each frame's "
-            "cast once the brightness was set."))
-        lay.addWidget(grp_look)
+        # Film Look balance moved beside the look lists, per frame
+        # (spec/film-look-auto-balance.md, revision 2026-11-08); its old stored
+        # value is only the fallback for frames from before.
 
         grp_keys = QGroupBox("Keyboard")
         gk = QVBoxLayout(grp_keys)
@@ -799,8 +784,6 @@ class SettingsDialog(QDialog):
                         (self._cb_sprocket, ccr_backend.sprocket_mask_white),
                         (self._cb_balance_hotkeys,
                          getattr(ccr_backend, "balance_hotkeys", False)),
-                        (self._cb_look_balance,
-                         getattr(ccr_backend, "look_auto_balance", False)),
                         (self._cb_mono_raw,
                          getattr(ccr_backend, "mono_raw", False))):
             cb.blockSignals(True)
@@ -956,10 +939,6 @@ class SettingsDialog(QDialog):
                 != bool(getattr(ccr_backend, "balance_hotkeys", False))):
             self._mw.on_balance_hotkeys_toggled(
                 bool(self._cb_balance_hotkeys.isChecked()))
-        if (bool(self._cb_look_balance.isChecked())
-                != bool(getattr(ccr_backend, "look_auto_balance", False))):
-            self._mw.on_look_auto_balance_toggled(
-                bool(self._cb_look_balance.isChecked()))
         # Monochrome RAW interpretation re-decodes every loaded image, so it is
         # applied last — after the toggles that only affect the next import.
         if (bool(self._cb_mono_raw.isChecked())

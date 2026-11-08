@@ -339,26 +339,139 @@ def test_paste_row_names_the_colour_only_look():
     assert ("Channel Levels", "look_lut", "Film Look: Noritsu Test (colour only)") in rows
 
 
-def test_settings_checkbox_stages_and_applies(monkeypatch):
+def test_settings_has_no_film_look_balance_box(monkeypatch):
+    """Moved beside the look lists (revision 2026-11-08)."""
     from PySide6.QtWidgets import QApplication, QWidget
     QApplication.instance() or QApplication([])
-    from core.ccr_backend import ccr_backend
     from widgets.settings_dialog import SettingsDialog
-
-    class MW(QWidget):
-        toggled = []
-
-        def on_look_auto_balance_toggled(self, on):
-            self.toggled.append(on)
-    monkeypatch.setattr(ccr_backend, "look_auto_balance", False, raising=False)
-    mw = MW()
+    mw = QWidget()
     dlg = SettingsDialog(mw)
     _KEEP.append((mw, dlg))
-    assert not dlg._cb_look_balance.isChecked()
-    assert "experimental" in dlg._cb_look_balance.text().lower()
-    dlg._cb_look_balance.setChecked(True)
-    dlg._apply_pending()
-    assert MW.toggled == [True]
+    assert not hasattr(dlg, "_cb_look_balance")
+
+
+# --------------------------------------------------------------------------- #
+# the per-frame Balance box (revision 2026-11-08)
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("value, want", [
+    ("", ("", False, None)),
+    ("P.cube", ("P.cube", False, None)),
+    ("P.cube|colour", ("P.cube", True, None)),
+    ("P.cube|bal", ("P.cube", False, True)),
+    ("P.cube|nobal", ("P.cube", False, False)),
+    ("P.cube|colour|bal", ("P.cube", True, True)),
+    ("P.cube|colour|nobal", ("P.cube", True, False)),
+    ("a|b.cube", ("a|b.cube", False, None)),
+])
+def test_parse_look(value, want):
+    assert ll.parse_look(value) == want
+    name, colour, bal = want
+    if name:
+        assert ll.with_balance(value, bal) == value
+        assert ll.split_look_name(value) == (name, colour)
+        assert ll.look_choice(value) == (name + "|colour" if colour else name)
+
+
+def test_balance_mark_doesnt_change_the_look():
+    assert ll.with_balance("P.cube|colour", True) == "P.cube|colour|bal"
+    assert ll.with_balance("P.cube|colour|bal", False) == "P.cube|colour|nobal"
+    assert ll.with_balance("P.cube|bal", None) == "P.cube"
+    assert ll.with_balance("", True) == ""
+    assert ll.is_full_look("P.cube|bal") and not ll.is_full_look("P.cube|colour|nobal")
+    from widgets.sliders_panel import _look_display_name
+    assert _look_display_name("P.cube|colour|bal") == "P (colour only)"
+
+
+@pytest.mark.parametrize("value, setting, applies", [
+    ("x.cube|bal", False, True), ("x.cube|nobal", True, False),
+    ("x.cube", True, True), ("x.cube", False, False),
+    ("x.cube|colour|bal", False, True),
+])
+def test_the_mark_decides_and_unmarked_follows_the_setting(monkeypatch, value, setting, applies):
+    seen = _capture(monkeypatch, _frame({"look_lut": value}), _blut(), on=setting)
+    assert (abs(seen["ch_b_shift"]) > 0.5) == applies
+
+
+def _write_balanced(lib, name="Balanced.cube"):
+    ll.write_cube(str(lib / name), _curvy_table(5), (-0.25,) * 3, (1.25,) * 3,
+                  balance=BAL)
+
+
+class _PanelImg:
+    converted = True
+
+    def __init__(self):
+        self.active_area_id = None
+        self.adjustment_settings = {}
+        self.undo = 0
+
+    def push_undo_state(self):
+        self.undo += 1
+
+    def update_thumbnail_and_preview(self):
+        pass
+
+
+@pytest.fixture
+def bal_panel(panel, tmp_path, monkeypatch):
+    from core.ccr_backend import ccr_backend
+    _write_balanced(tmp_path / "looks")
+    panel._populate_look_combo()
+    img = _PanelImg()
+    monkeypatch.setattr(ccr_backend, "get_image_by_index", lambda i: img)
+    monkeypatch.setattr(ccr_backend, "look_auto_balance", False, raising=False)
+    monkeypatch.setattr(panel, "_update_thumb", lambda: None)
+    monkeypatch.setattr(panel, "_show_rendered", lambda: None)
+    panel.current_idx = 0
+    return panel, img
+
+
+def _pick(panel, combo, data):
+    panel._on_look_activated(combo.findData(data), combo)
+
+
+def test_box_is_off_with_no_look_and_with_no_balance_data(bal_panel):
+    panel, img = bal_panel
+    panel._sync_look_balance_boxes(img)
+    assert all(not b.isEnabled() and not b.isChecked() for b in panel._look_balance_boxes)
+    _pick(panel, panel.look_combo, "Noritsu Test.cube")            # fitted without
+    assert img.adjustment_settings["look_lut"] == "Noritsu Test.cube"
+    assert all(not b.isEnabled() for b in panel._look_balance_boxes)
+
+
+def test_picking_a_balanced_look_ticks_the_box_and_toggling_marks_it(bal_panel):
+    panel, img = bal_panel
+    _pick(panel, panel.look_combo_top, "Balanced.cube|colour")
+    assert img.adjustment_settings["look_lut"] == "Balanced.cube|colour|bal"
+    assert all(b.isEnabled() and b.isChecked() for b in panel._look_balance_boxes)
+    assert panel.look_combo.currentData() == "Balanced.cube|colour"
+    n = img.undo
+    panel.look_balance_box.setChecked(False)
+    assert img.adjustment_settings["look_lut"] == "Balanced.cube|colour|nobal"
+    assert img.undo == n + 1
+    assert not panel.look_balance_top.isChecked()                  # kept in step
+    assert panel.look_combo_top.currentData() == "Balanced.cube|colour"
+    _pick(panel, panel.look_combo, "Balanced.cube|colour")         # same look again
+    assert img.adjustment_settings["look_lut"] == "Balanced.cube|colour|nobal"
+
+
+def test_unmarked_frame_shows_the_old_setting_and_an_area_disables(bal_panel, monkeypatch):
+    from core.ccr_backend import ccr_backend
+    panel, img = bal_panel
+    img.adjustment_settings["look_lut"] = "Balanced.cube"
+    monkeypatch.setattr(ccr_backend, "look_auto_balance", True, raising=False)
+    panel._sync_look_balance_boxes(img)
+    assert panel.look_balance_box.isChecked() and panel.look_balance_box.isEnabled()
+    img.active_area_id = "a1"
+    panel._sync_look_balance_boxes(img)
+    assert not panel.look_balance_box.isEnabled()
+
+
+def test_paste_row_says_whether_balanced():
+    from widgets.sliders_panel import paste_options
+    rows = paste_options({"adjustments": {}, "look_lut": "N.cube|nobal"}, lambda k: 0)
+    assert ("Channel Levels", "look_lut", "Film Look: N, not balanced") in rows
 
 
 _KEEP = []

@@ -271,8 +271,11 @@ def paste_options(clip, default_for):
     if clip.get("cineon_log"):
         rows.append(("Channel Levels", "cineon_log", "Cineon Log → Workspace"))
     if clip.get("look_lut"):
+        from core.look_lut import parse_look
+        bal = {True: ", balanced", False: ", not balanced"}.get(
+            parse_look(clip["look_lut"])[2], "")
         rows.append(("Channel Levels", "look_lut",
-                     f"Film Look: {_look_display_name(clip['look_lut'])}"))
+                     f"Film Look: {_look_display_name(clip['look_lut'])}{bal}"))
     if clip.get("profile", "color") != "color":
         rows.append(("Colour", "profile", "Colour Profile: Black & White"))
     if clip.get("curves"):
@@ -825,6 +828,12 @@ class SlidersPanel(QWidget):
         "FreeCCR's own brightness and contrast, so Auto Gain, Cineon and the "
         "tone sliders work as without a look.")
     LOOK_IMPORT = "__import__"
+    LOOK_BALANCE_TOOLTIP = (
+        "Balance this frame's colour for the Film Look, the way a lab balances "
+        "each frame: about half of the frame's overall cast is taken out, as "
+        "hidden R/G/B Shift offsets added to yours. Brightness never moves.\n\n"
+        "Only for looks fitted with balance data (tools/fit_look.py), on a "
+        "converted frame with a black point. Experimental.")
 
     def _update_crosstalk_hint(self, img):
         from core.ccr_processor import crosstalk_applies
@@ -919,7 +928,11 @@ class SlidersPanel(QWidget):
         look_top_row.setContentsMargins(0, 0, 0, 0)
         self.look_combo_top = QComboBox()
         self.look_combo_top.setToolTip(self.LOOK_TOOLTIP)
-        look_top_row.addWidget(self.look_combo_top)
+        look_top_row.addWidget(self.look_combo_top, 1)
+        # Balance per frame, beside each list (spec/film-look-auto-balance.md,
+        # revision 2026-11-08)
+        self.look_balance_top = self._make_look_balance_box()
+        look_top_row.addWidget(self.look_balance_top)
         look_top_outer = QHBoxLayout()
         look_top_outer.setContentsMargins(theme.GAP_PANEL, theme.GAP_PANEL, theme.GAP_PANEL, 0)
         look_top_outer.addWidget(self.look_top_section)
@@ -1591,6 +1604,9 @@ class SlidersPanel(QWidget):
                 lambda index, c=combo: self._on_look_activated(index, c))
         look_row.addWidget(look_label)
         look_row.addWidget(self.look_combo, 1)
+        self.look_balance_box = self._make_look_balance_box()
+        look_row.addWidget(self.look_balance_box)
+        self._look_balance_boxes = (self.look_balance_box, self.look_balance_top)
         self.od_section.add_layout(look_row)
         self._populate_look_combo()
         gain_label = QLabel("Master Gain · applied after Channel Balance")
@@ -2004,6 +2020,7 @@ class SlidersPanel(QWidget):
         self._select_look_in_combo(look_name)
         for combo in self._look_combos:
             combo.setEnabled(global_layer)
+        self._sync_look_balance_boxes(img)
         # Crosstalk is a base-level correction: whole image only.
         for i, key in enumerate(self.adjustment_keys):
             if key.startswith("xt_") and i < len(self.sliders):
@@ -3058,7 +3075,55 @@ class SlidersPanel(QWidget):
             combo.blockSignals(False)
         self._select_look_in_combo(current)
 
+    def _make_look_balance_box(self):
+        box = QCheckBox("Balance")
+        box.setToolTip(self.LOOK_BALANCE_TOOLTIP)
+        box.setEnabled(False)
+        box.toggled.connect(self._on_look_balance_toggled)
+        return box
+
+    @staticmethod
+    def _look_has_balance(value):
+        """The look named by `value` is in the library and its cube carries
+        balance data."""
+        from core.look_lut import resolve_look
+        look = resolve_look(value) if value else None
+        return look is not None and getattr(look, "balance", None) is not None
+
+    def look_balance_on(self, img):
+        """Whether this frame's look is balanced: its mark, else the old
+        Settings option (for values from before the box)."""
+        from core.look_lut import parse_look
+        value = (img.adjustment_settings.get("look_lut") if img is not None else "") or ""
+        if not value:
+            return False
+        on = parse_look(value)[2]
+        return bool(getattr(ccr_backend, "look_auto_balance", False)) if on is None else on
+
+    def _sync_look_balance_boxes(self, img):
+        value = (img.adjustment_settings.get("look_lut") if img is not None else "") or ""
+        usable = (img is not None and img.active_area_id is None
+                  and self._look_has_balance(value))
+        checked = usable and self.look_balance_on(img)
+        for box in getattr(self, "_look_balance_boxes", ()):
+            box.blockSignals(True)
+            box.setChecked(checked)
+            box.setEnabled(usable)
+            box.blockSignals(False)
+
+    def _on_look_balance_toggled(self, checked):
+        from core.look_lut import with_balance
+        img = (ccr_backend.get_image_by_index(self.current_idx)
+               if self.current_idx is not None else None)
+        value = (img.adjustment_settings.get("look_lut") if img is not None else "") or ""
+        if not value:
+            self._sync_look_balance_boxes(img)
+            return
+        self.set_look(with_balance(value, bool(checked)), hint=False)
+
     def _select_look_in_combo(self, name):
+        from core.look_lut import look_choice
+        name = look_choice(name)
         for combo in self._look_combos:
             i = combo.findData(name or "")
             if i < 0 and name:
@@ -3092,9 +3157,19 @@ class SlidersPanel(QWidget):
                 self._select_look_in_combo(previous)
                 return
             self._populate_look_combo(select=data)
+        from core.look_lut import look_choice
+        img = (ccr_backend.get_image_by_index(self.current_idx)
+               if self.current_idx is not None else None)
+        current = (img.adjustment_settings.get("look_lut") if img is not None else "") or ""
+        if data and look_choice(current) == data:
+            return                     # the same look again: keep its Balance
+        if data and self._look_has_balance(data):
+            # a look fitted with balance data starts balanced (revision 2026-11-08)
+            from core.look_lut import with_balance
+            data = with_balance(data, True)
         self.set_look(data or "")
 
-    def set_look(self, name):
+    def set_look(self, name, hint=True):
         """Set (or clear, with "") the Film Look on the current image's GLOBAL
         settings — one undo step, then re-render (same path as Cineon)."""
         if self.current_idx is None:
@@ -3110,17 +3185,19 @@ class SlidersPanel(QWidget):
         if name:
             img.adjustment_settings["look_lut"] = name
             if is_full_look(name):
-                hint = (f"Film Look '{_look_display_name(name)}': Auto Gain is off for "
+                text = (f"Film Look '{_look_display_name(name)}': Auto Gain is off for "
                         "this image — set exposure with Master Shift, colour with "
                         "R/G/B Shift.")
             else:
-                hint = (f"Film Look '{_look_display_name(name)}': the look's colour "
+                text = (f"Film Look '{_look_display_name(name)}': the look's colour "
                         "with FreeCCR's own brightness and contrast.")
-            self.set_temporary_hint(hint, duration=6000)
+            if hint:
+                self.set_temporary_hint(text, duration=6000)
         else:
             img.adjustment_settings.pop("look_lut", None)
         self.cineon_checkbox.setEnabled(not is_full_look(name))
         self._select_look_in_combo(name)
+        self._sync_look_balance_boxes(img)
         self._update_crosstalk_hint(img)
         self._cancel_live()
         img.update_thumbnail_and_preview()
