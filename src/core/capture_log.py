@@ -43,6 +43,22 @@ def shot_stem(roll, fmt, film, shot, slot):
     return "_".join(parts)
 
 
+_SLOT_RE = re.compile(r"^(.*_\d{3,})_(RED|GREEN|BLUE)(?:_(\d+))?$")
+_SLOT_ORDER = {"RED": 0, "GREEN": 1, "BLUE": 2}
+
+
+def slot_order(name):
+    """For a file FreeCCR named (`..._013_RED`, `..._013_GREEN_1`): (stem up
+    to the shot number, 0/1/2 for red/green/blue, retake number), so a shot
+    sorts red, green, blue — by name it is BLUE, GREEN, RED. None for any
+    other name."""
+    stem = os.path.splitext(os.path.basename(str(name)))[0]
+    m = _SLOT_RE.match(stem)
+    if not m:
+        return None
+    return m.group(1).lower(), _SLOT_ORDER[m.group(2)], int(m.group(3) or 0)
+
+
 def single_slot(scan_type):
     """The slot word of a one-exposure shot."""
     return "bw" if scan_type == "bw" else "white"

@@ -62,7 +62,13 @@ def clean(t):
 # grouping
 # --------------------------------------------------------------------------- #
 def _key(path):
-    return (os.path.basename(path).lower(), os.path.normcase(path))
+    """Name order, except that a shot FreeCCR named sorts red, green, blue
+    (`R0034_013_BLUE` would come first by name; spec/capture-log-and-names.md)."""
+    from core.capture_log import slot_order
+    so = slot_order(path)
+    if so is not None:
+        return (so[0], so[1], so[2], os.path.normcase(path))
+    return (os.path.basename(path).lower(), 0, 0, os.path.normcase(path))
 
 
 class TripletGrouper:

@@ -265,3 +265,29 @@ def test_no_hot_folder_no_names(tmp_path, monkeypatch):
             next(gen)
         except StopIteration:
             pass
+
+
+# --- 2026-11-09: FreeCCR's names sort red, green, blue -----------------------
+def test_slot_order_and_the_tether_grouper_takes_red_green_blue():
+    from core.scan_type import TripletGrouper
+    from core import triplet_plan as tp
+    assert cl.slot_order("/x/R0034_645_Portra400_013_GREEN.RAF") == \
+        ("r0034_645_portra400_013", 1, 0)
+    assert cl.slot_order("R1_002_RED_1.RAF") == ("r1_002", 0, 1)
+    assert cl.slot_order("DSCF0001.RAF") is None and cl.slot_order("R1_002_WHITE.RAF") is None
+    names = [f"/h/R0034_645_Portra400_{n:03d}_{c}.RAF"
+             for n in (1, 2) for c in ("BLUE", "RED", "GREEN")]
+    g = TripletGrouper()
+    for n in reversed(names):                       # any arrival order
+        g.add(n)
+    trips = g.take()
+    words = [[p.rsplit("_", 1)[1][:-4] for p in t] for t in trips]
+    assert words == [["RED", "GREEN", "BLUE"], ["RED", "GREEN", "BLUE"]]
+    assert [t[0][-11:-8] for t in trips] == ["001", "002"]
+    order = sorted(names, key=tp.natural_key)
+    assert [p.rsplit("_", 1)[1][:-4] for p in order][:3] == ["RED", "GREEN", "BLUE"]
+    # camera names keep their old order
+    g2 = TripletGrouper()
+    for n in ("/h/DSCF0003.RAF", "/h/DSCF0001.RAF", "/h/DSCF0002.RAF"):
+        g2.add(n)
+    assert [p[-12:] for p in g2.take()[0]] == ["DSCF0001.RAF", "DSCF0002.RAF", "DSCF0003.RAF"]

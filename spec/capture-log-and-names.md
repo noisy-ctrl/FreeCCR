@@ -86,3 +86,15 @@ logged sets exactly (mixed with unlogged files, a set with a file missing
 falls back); backend naming (used once, then the camera's name; `_1` on a
 clash); the start window's fields and defaults; New Roll moves the roll on;
 Capture names a USB trichrome shot RED/GREEN/BLUE and logs it.
+
+## Revision 2026-11-09: the colours sort red, green, blue
+
+Reported: with Capture shooting into the hot folder, the main window rejected
+every trichrome shot. Cause: Hot Folder Tether's `TripletGrouper` takes new
+RAWs in NAME order, and the new names sort `…_013_BLUE`, `…_013_GREEN`,
+`…_013_RED` — so each three reached the light check as blue, green, red and
+failed it. Fix: `capture_log.slot_order(name)` reads FreeCCR's own names
+(stem up to the shot number, red 0 / green 1 / blue 2, retake number), and
+both `scan_type._key` (the grouper) and `triplet_plan.natural_key` (Open's
+tie-break) sort by it; any other name sorts exactly as before. Test:
+`tests/test_capture_log.py::test_slot_order_and_the_tether_grouper_takes_red_green_blue`.

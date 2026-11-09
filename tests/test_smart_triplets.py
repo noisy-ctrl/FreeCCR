@@ -223,8 +223,11 @@ def test_on_the_users_raws():
     assert [n["short"] for n in plan.notes] == ["Frames missing"]
 
 
+# the 51 frames of 2026-11-02 (later uploads share their numbers: DSCF0007_11 …)
+_LATER = {"DSCF0007_11.raf", "DSCF0008_11.raf", "DSCF0009_12.raf"}
 PORTRA = sorted(p for p in glob.glob("/mnt/user-data/uploads/DSCF00*.raf")
-                if int(os.path.basename(p)[4:8]) in set(range(1, 10)) | set(range(38, 80)))
+                if int(os.path.basename(p)[4:8]) in set(range(1, 10)) | set(range(38, 80))
+                and os.path.basename(p) not in _LATER)
 
 
 @pytest.mark.skipif(len(PORTRA) < 51, reason="the user's Portra 400 RAFs aren't here")
