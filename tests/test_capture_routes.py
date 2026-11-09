@@ -797,7 +797,8 @@ def test_monitor_busy_camera_offers_release_on_a_mac(mon_usb, monkeypatch):
     assert not mon.release_btn.isVisibleTo(mon)
     usb.zoom_levels.emit(["1", "5", "10"])
     _app.processEvents()
-    assert mon.cam_zoom_combo.isVisibleTo(mon) and mon.cam_zoom_combo.count() == 3
+    # the zoom list sits in the toolbar now, shown through its action
+    assert mon._cam_zoom_action.isVisible() and mon.cam_zoom_combo.count() == 3
     mon.cam_zoom_combo.activated.emit(1)
     assert ("zoom", "5") in usb.log
 

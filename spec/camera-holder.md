@@ -82,3 +82,8 @@ one FreeCCR itself (python) had open.
   Capture, Photos or Preview is open, quit it", with or without a holder
   found ("Another program has the camera, so FreeCCR can't open it." when
   none is).
+
+## 2026-11-09
+
+The button is now **Release Camera from Other Apps** (the user's wording); its
+question's title follows. Behaviour unchanged.
