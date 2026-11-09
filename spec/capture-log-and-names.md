@@ -98,3 +98,15 @@ failed it. Fix: `capture_log.slot_order(name)` reads FreeCCR's own names
 both `scan_type._key` (the grouper) and `triplet_plan.natural_key` (Open's
 tie-break) sort by it; any other name sorts exactly as before. Test:
 `tests/test_capture_log.py::test_slot_order_and_the_tether_grouper_takes_red_green_blue`.
+
+## Revision 2026-11-09 b: a number before the colour
+
+The user: "what can we add in the file names so that it keeps in the order of
+red, green, blue" — "R0003_004_1RED.raf long like this works". A trichrome
+shot's words are now `1RED`, `2GREEN`, `3BLUE` (`capture_log.WORDS`), so the
+files sort red, green, blue by name in any app (Finder included); single
+exposures keep `WHITE` / `BW`. `slot_order` and `_shot_from_name` (next shot)
+read both the new names and the older `RED` / `GREEN` / `BLUE`, so rolls
+already shot still group and number correctly. Tests:
+`test_new_names_sort_red_green_blue_and_old_names_still_read`,
+`test_next_shot_reads_old_and_new_names`.

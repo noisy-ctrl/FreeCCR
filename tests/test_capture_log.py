@@ -31,11 +31,12 @@ def _fresh():
 # names
 # --------------------------------------------------------------------------- #
 def test_names():
-    assert cl.shot_stem("R0034", "645", "Portra 400", 13, "red") == "R0034_645_Portra400_013_RED"
-    assert cl.shot_stem("R0034", "", "", 13, "green") == "R0034_013_GREEN"
+    assert cl.shot_stem("R0034", "645", "Portra 400", 13, "red") == "R0034_645_Portra400_013_1RED"
+    assert cl.shot_stem("R0034", "", "", 13, "green") == "R0034_013_2GREEN"
+    assert cl.shot_stem("R0034", "", "", 13, "blue") == "R0034_013_3BLUE"
     assert cl.shot_stem("R0034", "6x7", "", 2, "white") == "R0034_6x7_002_WHITE"
     assert cl.shot_stem("R0034", "", "HP5+ @800", 1234, "bw") == "R0034_HP5800_1234_BW"
-    assert cl.shot_stem("", "", "", 1, "blue") == "R0001_001_BLUE"
+    assert cl.shot_stem("", "", "", 1, "blue") == "R0001_001_3BLUE"
     assert cl.single_slot("bw") == "bw" and cl.single_slot("colour") == "white"
 
 
@@ -232,7 +233,7 @@ def test_capture_names_and_logs_a_usb_trichrome_shot(tmp_path, monkeypatch):
         assert mon.roll_note.text() == "Roll R0034 · 120: 6x4.5 · Portra 400 · next shot 001"
         mon.shoot()
         assert mon.sequence.running
-        for word in ("RED", "GREEN", "BLUE"):
+        for word in ("1RED", "2GREEN", "3BLUE"):
             n = len(getattr(usb, "names", []))
             assert _wait(lambda: len(getattr(usb, "names", [])) > n)
             name = usb.names[-1]
@@ -241,8 +242,9 @@ def test_capture_names_and_logs_a_usb_trichrome_shot(tmp_path, monkeypatch):
             _app.processEvents()
         assert _wait(lambda: not mon.sequence.running)
         (e,) = cl.read_log(mw.folder)
-        assert e["files"] == {c: f"R0034_645_Portra400_001_{c.upper()}.RAF"
-                              for c in ("red", "green", "blue")}
+        assert e["files"] == {c: f"R0034_645_Portra400_001_{w}.RAF"
+                              for c, w in (("red", "1RED"), ("green", "2GREEN"),
+                                           ("blue", "3BLUE"))}
         assert e["done"] and e["route"] == "usb" and e["scan_type"] == "trichrome"
         assert "next shot 002" in mon.roll_note.text()
     finally:
@@ -291,3 +293,24 @@ def test_slot_order_and_the_tether_grouper_takes_red_green_blue():
     for n in ("/h/DSCF0003.RAF", "/h/DSCF0001.RAF", "/h/DSCF0002.RAF"):
         g2.add(n)
     assert [p[-12:] for p in g2.take()[0]] == ["DSCF0001.RAF", "DSCF0002.RAF", "DSCF0003.RAF"]
+
+
+def test_new_names_sort_red_green_blue_and_old_names_still_read():
+    """2026-11-09: 1RED / 2GREEN / 3BLUE sort by name in any app."""
+    from core.scan_type import TripletGrouper
+    names = [f"R0034_013_{w}.RAF" for w in ("3BLUE", "1RED", "2GREEN")]
+    assert sorted(names) == ["R0034_013_1RED.RAF", "R0034_013_2GREEN.RAF",
+                             "R0034_013_3BLUE.RAF"]
+    assert [cl.slot_order(n)[1] for n in sorted(names)] == [0, 1, 2]
+    assert cl.slot_order("R0034_013_3BLUE_1.RAF") == ("r0034_013", 2, 1)
+    assert cl.slot_order("R0034_013_BLUE.RAF") == ("r0034_013", 2, 0)       # older names
+    g = TripletGrouper()
+    for n in ["/h/R0034_013_BLUE.RAF", "/h/R0034_013_RED.RAF", "/h/R0034_013_GREEN.RAF"]:
+        g.add(n)
+    assert [p.rsplit("_", 1)[1] for p in g.take()[0]] == ["RED.RAF", "GREEN.RAF", "BLUE.RAF"]
+
+
+def test_next_shot_reads_old_and_new_names(tmp_path):
+    (tmp_path / "R0005_004_BLUE.RAF").write_bytes(b"x")
+    (tmp_path / "R0005_007_3BLUE.RAF").write_bytes(b"x")
+    assert cl.next_shot(str(tmp_path), "R0005") == 8
