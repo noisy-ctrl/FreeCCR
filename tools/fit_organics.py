@@ -97,6 +97,10 @@ def main(argv=None):
     ap.add_argument("--smooth", type=float, default=1.0,
                     help="smoothness round the hue circle (default 1)")
     ap.add_argument("--out", default=os.path.join(os.getcwd(), "organics_fit"))
+    ap.add_argument("--by-samples", dest="labs_equal", action="store_false", default=True,
+                    help="weight cells by sample count across ALL labs (a lab with more "
+                         "frames counts for more); by default each lab counts the same "
+                         "(spec/colour-organics.md, revision 2026-11-09)")
     ap.add_argument("--write", action="store_true",
                     help="write src/core/organics_measured.py")
     ap.add_argument("--moves", help="an .npz to keep the measured hue moves in: "
@@ -133,6 +137,8 @@ def main(argv=None):
                         store[f"{name}|{i}|{k}"] = arr
             np.savez_compressed(a.moves, **store)
     cells_by_lab = [of.cells(*stack(rows)) for _n, _f, rows in per_lab]
+    if a.labs_equal:
+        cells_by_lab = [of.equal_weight(c) for c in cells_by_lab]
     all_cells = np.concatenate(cells_by_lab)
     if len(all_cells) < 6:
         sys.exit("too few coloured samples to measure a curve")
@@ -179,12 +185,13 @@ def main(argv=None):
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(
                 '"""Colour Organics\' measured hue curve (spec/colour-organics.md,\n'
-                'revision 2026-11-02). Written by tools/fit_organics.py - do not edit\n'
+                'revision 2026-11-09). Written by tools/fit_organics.py - do not edit\n'
                 'by hand; re-run the tool with more pairs instead.\n\n'
                 'TABLE[k] is the hue move in HSV degrees at hue 10*k, at the stored\n'
                 'amount 100 (shown 50), read by a periodic Catmull-Rom spline."""\n\n'
                 f"# Fitted on {sum(len(f) for _n, f, _r in per_lab)} pairs from "
-                f"{len(per_lab)} lab(s), smoothness {a.smooth:g}:\n{head}\n\n"
+                f"{len(per_lab)} lab(s), smoothness {a.smooth:g}"
+                f"{', each lab weighted the same' if a.labs_equal else ''}:\n{head}\n\n"
                 "HUE_STEP = 10.0\n"
                 f"TABLE = (\n    {body},\n)\n")
         log(f"wrote {os.path.normpath(path)}")

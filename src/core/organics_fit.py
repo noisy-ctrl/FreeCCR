@@ -87,6 +87,20 @@ def cells(h, dh, w, v, bands=VALUE_BANDS, step=BIN_DEG, min_n=CELL_MIN):
     return np.array(rows, np.float64).reshape(-1, 4)
 
 
+LAB_WEIGHT = 1000.0          # every lab's cells sum to this with equal weighting
+
+
+def equal_weight(c, total=LAB_WEIGHT):
+    """One lab's cells with their weights scaled to sum to `total`, so each
+    lab counts the same in a fit across labs (a lab with more frames would
+    otherwise decide the curve). Counts (column 3) are kept."""
+    c = np.array(c, np.float64, copy=True).reshape(-1, 4)
+    s = c[:, 2].sum()
+    if s > 0:
+        c[:, 2] *= total / s
+    return c
+
+
 def fit_curve(c, lam=1.0, lam0=0.3):
     """The curve's knots (degrees) from cells `c` (centre, move, weight, ...):
     weighted least squares in the render's own Catmull-Rom basis, a

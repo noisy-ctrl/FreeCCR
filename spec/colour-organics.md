@@ -411,3 +411,54 @@ no data.
 - **Old shapes**: `normalize_organics_shape` keeps only the three region
   keys; a dict with none of them is the default (None), so old catalogues
   load without warnings and paste rows don't show stale families.
+
+## Revision 2026-11-09: three labs, each counted the same
+
+The user sent a Noritsu roll of Portra 400 (36 JPEGs, roll 00003875) with
+his own trichrome scans of 16 of its frames (R0001 001–012, R0002 001–004),
+plus two more lab-060940 pairs. Paired automatically as before; 33 pairs in
+all (060940: 10, 148684250: 7, 00003875: 16). Frames whose film base was
+clipped (the per-frame exposure lengthens the shot) were not skipped this
+time: their base is the roll's base per unit of the shot's shortest exposure
+(constant within ±4 % across a roll: R0001 2.54 / 1.92 / 2.91) times this
+shot's, and the clipped pixels are left out (1–13 % of a picture). One of
+the two new "pairs" (DSCF0010–0012) shows another picture (a tree and a
+pale wall) than its TIFF (060940010017, buildings) and was left out.
+
+**Measured, by lab** (area-weighted mean hue move, degrees, by our hue):
+
+| our hue | 060940 | 148684250 | 00003875 (Noritsu) |
+|---|---|---|---|
+| 0–30 | +5.4 | +5.6 | +1.9 |
+| 30–60 (skin, orange) | +3.6 | +5.1 | +0.6 |
+| 60–90 | +1.3 | +2.3 | +0.5 |
+| 90–150 (greens) | +1.1 to +1.2 | +2.4 to +3.7 | +3.9 to +5.9 |
+| 150–180 | +0.4 | −3.8 | +5.1 |
+| 180–210 (sky) | 0.0 | −0.6 | −0.1 |
+| 210–240 (blue) | −5.9 | −9.2 | −4.9 |
+| 330–360 (magenta-red) | +12.0 | +15.1 | +6.6 |
+
+All three turn reds and magenta-reds towards orange and blues back towards
+sky, and leave sky alone; the Noritsu roll leaves skin and oranges where they
+are and turns greens towards cyan more than the others. Still nothing
+measured at 240–330° (violet, purple, magenta): 16 samples in all, on 33
+frames.
+
+**Change.** The curve is fitted on all three labs with each lab's cells
+scaled to the same total weight (`organics_fit.equal_weight`;
+`tools/fit_organics.py` does this by default now, `--by-samples` for the old
+weighting), so the lab with the most frames doesn't decide it. Smoothness 1
+as before. RMS by area (degrees):
+
+| | 060940 | 148684250 | 00003875 | mean square over labs |
+|---|---|---|---|---|
+| no curve | 2.92 | 3.57 | 2.56 | 3.05 |
+| previous table (fitted on the first two) | 1.44 | 2.39 | 2.56 | 2.19 |
+| new table | 1.58 | 2.51 | 2.10 | 2.10 |
+| each lab predicted from the other two | 1.77 | 2.73 | 2.54 | |
+
+The new table at stored 100: reds +2.1 to +2.6, skin and oranges +1.9 to
++3.3, yellow-greens +0.5 to +0.9, greens +1.1 to +1.5, sky +0.4, blues −1.0
+to −2.4, violet and purple ~0, magenta-reds +0.7 to +2.2. Slope round the
+circle 0.84–1.09. A lab's own rendering (the Noritsu roll's skin and greens)
+belongs in a Film Look fitted on that lab, not here.
