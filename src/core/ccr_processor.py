@@ -15,6 +15,7 @@ from core.golden import apply_golden
 from core.shadow_neutral import apply_shadow_neutralise
 from core.glow import apply_glow
 from core.shadow_lift import apply_shadow_lift
+from core.clean_lights import apply_clean_lights
 # ... and their GPU versions (spec/gpu-finishing-tools.md), run straight after
 # the main kernel when the OpenCL device is a GPU.
 from core import finish_gpu
@@ -54,14 +55,16 @@ _gpu_finish_broken = False
 
 def _finish_on_gpu(ctx, queue, img_buf, H, W, golden_highlights, golden_shape,
                    shadow_neutralise, shadow_shape, glow, glow_shape,
-                   glow_area=None, shadow_lift=0.0, shadow_lift_shape=None) -> bool:
+                   glow_area=None, shadow_lift=0.0, shadow_lift_shape=None,
+                   clean_lights=0.0) -> bool:
     """Golden Highlights / Shadow Neutralise / Glow on the main kernel's
     buffer, on the GPU. True when done there; False to use numpy (none on,
     not a GPU device, FREECCR_GPU_FINISH=0, or it failed)."""
     global _gpu_finish_broken
     if not ((golden_highlights and golden_highlights > 0)
             or (shadow_neutralise and shadow_neutralise > 0) or (glow and glow > 0)
-            or (shadow_lift and shadow_lift > 0)):
+            or (shadow_lift and shadow_lift > 0)
+            or (clean_lights and clean_lights > 0)):
         return False
     if _gpu_finish_broken:
         return False
@@ -70,7 +73,8 @@ def _finish_on_gpu(ctx, queue, img_buf, H, W, golden_highlights, golden_shape,
             return False
         finish_gpu.for_queue(ctx, queue).finish(
             img_buf, H, W, golden_highlights, golden_shape, shadow_neutralise,
-            shadow_shape, glow, glow_shape, glow_area, shadow_lift, shadow_lift_shape)
+            shadow_shape, glow, glow_shape, glow_area, shadow_lift, shadow_lift_shape,
+            clean_lights)
         return True
     except Exception as e:
         print(f"GPU finishing failed, using numpy from now on: {e}")
@@ -3873,6 +3877,9 @@ def adjust_image(
     # default). Appended last.
     shadow_lift: float = 0.0,
     shadow_lift_shape=None,
+    # Clean Lights (spec/clean-lights.md), 0..100 (50 = the labs' amount).
+    # Appended last.
+    clean_lights: float = 0.0,
 ) -> np.ndarray:
     """
     Apply temperature, tint, exposure, brightness, blackpoint, whitepoint, highlights, shadows,
@@ -4095,6 +4102,11 @@ def adjust_image(
             img_norm = np.clip(img / 65535.0, 0.0, 1.0).astype(np.float32)
             img = _apply_color_bands_float(img_norm, bin_deltas, feather) * 65535.0
 
+    # Clean Lights: less colour in the light tones, before the gold is added
+    # (spec/clean-lights.md).
+    if clean_lights and clean_lights > 0:
+        img = apply_clean_lights(np.clip(img / 65535.0, 0.0, 1.0).astype(np.float32),
+                                 clean_lights) * 65535.0
     # Golden Highlights: the last colour stage, finishing the look (after the
     # saturation sliders and the bands, so they don't push it around).
     if golden_highlights and golden_highlights > 0:
@@ -4412,6 +4424,8 @@ def adjust_image_opencl(
     glow_area=None,
     shadow_lift: float = 0.0,
     shadow_lift_shape=None,
+    # Clean Lights — appended last, see adjust_image.
+    clean_lights: float = 0.0,
 ) -> np.ndarray:
     """
     GPU-accelerated (OpenCL) version of adjust_image.
@@ -4599,7 +4613,8 @@ def adjust_image_opencl(
                           shadow_neutralise=shadow_neutralise,
                           shadow_shape=shadow_shape,
                           glow=glow, glow_shape=glow_shape, glow_area=glow_area,
-                          shadow_lift=shadow_lift, shadow_lift_shape=shadow_lift_shape)
+                          shadow_lift=shadow_lift, shadow_lift_shape=shadow_lift_shape,
+                          clean_lights=clean_lights)
 
     try:
       # Serialize GPU submissions: the hi-res zoom worker may run this
@@ -4668,14 +4683,19 @@ def adjust_image_opencl(
         finished = _finish_on_gpu(ctx, queue, img_buf, img.shape[0], img.shape[1],
                                   golden_highlights, golden_shape,
                                   shadow_neutralise, shadow_shape, glow, glow_shape,
-                                  glow_area, shadow_lift, shadow_lift_shape)
+                                  glow_area, shadow_lift, shadow_lift_shape,
+                                  clean_lights)
 
         # Get results and reshape
         result = img_buf.get().reshape(img.shape)
       if finished:
           return np.clip(result, 0, 65535).astype(np.uint16)
-      # Otherwise Golden Highlights runs after everything else, in numpy
-      # (the same function as adjust_image's last stage).
+      # Otherwise Clean Lights then Golden Highlights run after everything
+      # else, in numpy (the same functions as adjust_image's last stages).
+      if clean_lights and clean_lights > 0:
+          result = apply_clean_lights(
+              np.clip(result / 65535.0, 0.0, 1.0).astype(np.float32),
+              clean_lights) * 65535.0
       if golden_highlights and golden_highlights > 0:
           result = apply_golden(np.clip(result / 65535.0, 0.0, 1.0).astype(np.float32),
                                 golden_highlights, golden_shape) * 65535.0
@@ -4722,7 +4742,8 @@ def adjust_image_opencl(
                           shadow_neutralise=shadow_neutralise,
                           shadow_shape=shadow_shape,
                           glow=glow, glow_shape=glow_shape, glow_area=glow_area,
-                          shadow_lift=shadow_lift, shadow_lift_shape=shadow_lift_shape)
+                          shadow_lift=shadow_lift, shadow_lift_shape=shadow_lift_shape,
+                          clean_lights=clean_lights)
 
 
 

@@ -2207,6 +2207,7 @@ class CCRImage:
                      glow_area=_glow_area_of(self),
                      shadow_lift=s.get('shadow_lift', 0),
                      shadow_lift_shape=s.get('shadow_lift_shape'),
+                     clean_lights=s.get('clean_lights', 0),
                      # Per-color-band sliders ride the same GPU pass (or the
                      # CPU fallback); None keeps the inactive case free.
                      band_settings=(s if any(s.get(k, 0)
@@ -2296,7 +2297,7 @@ class CCRImage:
                                         s.get('sharpen_amount', dd.get('sharpen_amount')),
                                         s.get('sharpen_radius', dd.get('sharpen_radius')),
                                         s.get('sharpen_masking', dd.get('sharpen_masking')),
-                                        (self._sharpen_scale_for(adjusted)
+                                        (CCRImage._sharpen_scale_for(self, adjusted)
                                          if sharpen_scale is None else sharpen_scale))
         return adjusted
 
@@ -2374,6 +2375,7 @@ class CCRImage:
                      glow_area=_glow_area_of(self),
                      shadow_lift=s.get('shadow_lift', 0),
                      shadow_lift_shape=s.get('shadow_lift_shape'),
+                     clean_lights=s.get('clean_lights', 0),
                      balance_r=s.get('balance_r', 0),
                      balance_g=s.get('balance_g', 0),
                      balance_b=s.get('balance_b', 0),

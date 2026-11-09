@@ -61,6 +61,15 @@ def _merged_image(sources, demosaic=True):
     return img
 
 
+
+def _edits(adj):
+    """The edits, without the Details defaults the catalogue writes down with
+    any edited frame (spec/details-defaults.md)."""
+    from core import detail_defaults
+    d = detail_defaults.current()
+    return {k: v for k, v in adj.items() if not (k in d and v == d[k])}
+
+
 class TestMergeKey:
     def test_prefix_and_order_sensitive(self, tmp_path):
         r, g, b = _triplet(tmp_path)
@@ -132,7 +141,7 @@ class TestRekeyToReplacement:
         entries = catalog.entries_for_path(tiff, path=cat)
         assert entries and len(entries) == 1
         state = entries[0]
-        assert state["adjustment_settings"] == {"contrast": 15, "balance_g": 22}
+        assert _edits(state["adjustment_settings"]) == {"contrast": 15, "balance_g": 22}
         assert state["rotation_angle"] == 90
         assert state["dust_spots"] == [{"x": 0.5, "y": 0.5, "r": 0.01}]
 
@@ -212,7 +221,7 @@ class TestUpdateRouting:
         assert entries is not None and len(entries) == 1
         state = entries[0]
         assert state["is_merged"] is True
-        assert state["adjustment_settings"] == {"contrast": 15, "saturation": -3}
+        assert _edits(state["adjustment_settings"]) == {"contrast": 15, "saturation": -3}
         assert state["crop_rect"] == [0.1, 0.1, 0.9, 0.9]
 
     def test_mixed_batch_keys_both(self, tmp_path):
@@ -275,7 +284,7 @@ class TestRemovalPreservation:
 
         entries = catalog.entries_for_merge([r, g, b], path=cat)
         assert entries is not None and len(entries) == 1
-        assert entries[0]["adjustment_settings"] == {"exposure": 6}
+        assert _edits(entries[0]["adjustment_settings"]) == {"exposure": 6}
 
 
 class TestRestoreConstruction:

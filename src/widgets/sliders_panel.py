@@ -50,7 +50,7 @@ SYNC_GROUPS = [
     # The Lab Finish tools ride this group with their options (Shadow Lift
     # too: it is a finishing tone curve, set together with the rest).
     ("sat", "Saturation & Lab Finish", ("saturation", "sat_rolloff", "vibrance",
-                            "golden_highlights", "shadow_neutralise",
+                            "clean_lights", "golden_highlights", "shadow_neutralise",
                             "shadow_lift", "glow", "colour_organics")),
     ("crop", "Crop", ()),
     # Coarse 90-degree rotation + the mirror flags, synced like crop (whole-image
@@ -181,6 +181,7 @@ _BASIC_LABELS = {
     "saturation": "Saturation", "sat_rolloff": "Saturation Roll-off",
     "vibrance": "Vibrance",
     "colour_organics": "Colour Organics",
+    "clean_lights": "Clean Lights",
     "golden_highlights": "Golden Highlights",
     "shadow_neutralise": "Shadow Neutralise",
     "shadow_lift": "Shadow Lift",
@@ -755,7 +756,9 @@ class SlidersPanel(QWidget):
         # ignored - CCRImage no longer passes it to the render.)
         # Golden Highlights sits directly above Colour Organics
         # (spec/golden-highlights.md), then Colour Organics, the last of the
-        # colour sliders (spec/colour-organics.md)
+        # colour sliders (spec/colour-organics.md). Clean Lights first, the
+        # top of Lab Finish (spec/clean-lights.md).
+        "clean_lights",
         "golden_highlights",
         # Shadow Neutralise right under it (spec/shadow-neutralise.md)
         "shadow_neutralise",
@@ -1382,6 +1385,16 @@ class SlidersPanel(QWidget):
         # at unchanged brightness; right-click for hue / start / clean whites.
         # Created right before Colour Organics (ADJUSTMENT_KEYS zip).
         # spec/golden-highlights.md
+        # Clean Lights: less colour in the light tones, as lab scans render
+        # them (measured; 50 = the labs' amount). Created right before Golden
+        # Highlights (ADJUSTMENT_KEYS zip). spec/clean-lights.md
+        self.clean_lights_slider_layout = self.create_slider(
+            "Clean Lights", min_value=0, max_value=100)
+        self.clean_lights_slider_layout.itemAt(0).widget().setToolTip(
+            "Clean Lights: takes some colour out of the light tones (pale skin, "
+            "walls, clouds, whites) at unchanged brightness, the way lab scans "
+            "keep them cleaner. Measured from lab scans: 50 is the labs' "
+            "amount, 100 twice it. Darks and mid-tones are untouched.")
         self.golden_slider_layout = self.create_slider(
             "Golden Highlights", min_value=0, max_value=100)
         self._golden_shape = None        # active layer's options (None = default)
@@ -1472,6 +1485,7 @@ class SlidersPanel(QWidget):
         scroll_layout.addWidget(sep)
         self._section_separators["lab_finish"] = sep
         self.lab_finish_section = CollapsibleSection("Lab Finish")
+        self.lab_finish_section.add_layout(self.clean_lights_slider_layout)
         self.lab_finish_section.add_layout(self.golden_slider_layout)
         self.lab_finish_section.add_layout(self.shadow_neutralise_slider_layout)
         self.lab_finish_section.add_layout(self.shadow_lift_slider_layout)
