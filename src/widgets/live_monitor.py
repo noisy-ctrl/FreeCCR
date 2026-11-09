@@ -2362,6 +2362,11 @@ class LiveCaptureMonitor(QWidget):
                  "exposures": ({k: {f: v.get(f) for f in ("shutter", "iso") if v.get(f)}
                                 for k, v in exps.items() if isinstance(v, dict)}
                                if exps else None)}
+        if p.get("guide") is not None:
+            # the guide goes with the shot for good (spec/guide-in-log.md)
+            g = capture_guide.save_for_log(folder, roll, shot, p["guide"])
+            if g is not None:
+                entry["guide"] = g
         capture_log.begin_shot(folder, entry)
         self._log_shot = entry
         self._refresh_roll_note(shot + 1)

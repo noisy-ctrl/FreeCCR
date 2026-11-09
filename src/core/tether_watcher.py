@@ -370,16 +370,8 @@ class TetherWatchWorker(QObject):
         (spec/guide-follow-and-crop.md §3): `img.capture_guide`, or left
         unset when the shot had none or the pictures don't line up."""
         from core import capture_guide
-        rec = capture_guide.lookup(paths)
-        if rec is None:
-            return
-        g = capture_guide.map_guide(rec, img.resized_raw)
-        name = os.path.basename(paths[0])
-        if g is None:
-            print(f"Capture guide for {name}: the live picture didn't line up with the scan")
-            return
-        img.capture_guide = g
-        print(f"Capture guide for {name}: {g['how']} {g['score']:.2f}")
+        # the session's record, else the capture log's (spec/guide-in-log.md)
+        capture_guide.attach(img, paths)
 
     @staticmethod
     def _convert_like_current(img):
