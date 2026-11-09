@@ -133,7 +133,7 @@ class CCRBackend:
         # Convert, then crop (spec/convert-crop-and-clip.md §1): after a frame
         # converts it gets the frame auto crop finds, when auto crop may change
         # its crop and is sure. Restored by MainWindow (convert/crop_after).
-        self.crop_after_convert: bool = True
+        self.crop_after_convert: bool = False   # off since 2026-11-09 (spec/convert-no-auto-crop.md)
         # Auto crop (spec/auto-crop.md, spec/auto-crop-buttons.md) is also its
         # own action: see auto_crop_one / auto_crop_all.
         # Learn from the crops you confirm (spec/auto-crop-learning.md).
@@ -3006,6 +3006,18 @@ class CCRBackend:
         auto = getattr(img, "auto_crop_rect", None)
         return auto is not None and tuple(rect) == tuple(auto)
 
+    def crops_at_conversion(self, img) -> bool:
+        """Convert crops this frame (spec/convert-no-auto-crop.md): auto crop
+        may change its crop, and either "Crop each frame after converting it"
+        is on (off by default since 2026-11-09) or the frame carries Capture's
+        frame guide and "Crop to Capture's frame guide" is on: a box you placed
+        yourself, not one auto crop guessed."""
+        if not self.is_crop_candidate(img):
+            return False
+        if self.crop_after_convert:
+            return True
+        return bool(self.crop_from_guide and getattr(img, "capture_guide", None))
+
     def auto_crop_candidates(self):
         """Frames Auto Crop All may change (is_crop_candidate)."""
         return [img for img in self.images if self.is_crop_candidate(img)]
@@ -3016,8 +3028,8 @@ class CCRBackend:
         Auto Crop would (one undo step, after the conversion), when the setting
         is on, auto crop may change this frame's crop and the detection is
         usable. An unchanged crop is left alone (no junk undo step)."""
-        if (not self.crop_after_convert or frame is None or not frame.usable
-                or not self.is_crop_candidate(img)):
+        if (frame is None or not frame.usable
+                or not self.crops_at_conversion(img)):
             return False
         rect = getattr(img, "crop_rect", None)
         if (rect is not None
@@ -3556,7 +3568,7 @@ class CCRBackend:
         awp_rec = None
         per_frame_wp = black is not None and self.white_point_bgr is None
         crop = None
-        if self.crop_after_convert and self.is_crop_candidate(img):
+        if self.crops_at_conversion(img):
             # Convert, then crop (spec/convert-crop-and-clip.md §1): find the
             # frame now, on the unconverted scan, and measure inside it.
             crop = getattr(img, "auto_crop_last", None)
@@ -3683,11 +3695,9 @@ class CCRBackend:
         FrameCrop} for the frames auto crop may change, found on their
         unconverted scans (the detection pass reloaded them) and checked
         against the roll exactly as Auto Crop All does."""
-        if not self.crop_after_convert:
-            return {}
         idx, imgs, frames, raws = [], [], [], []
         for i, (img, res) in enumerate(zip(self.images, results)):
-            if not self.is_crop_candidate(img):
+            if not self.crops_at_conversion(img):
                 continue
             try:
                 if res is None and img.converted:

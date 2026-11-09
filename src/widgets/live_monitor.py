@@ -345,6 +345,8 @@ class LiveCaptureMonitor(QWidget):
         self._last_frame_t = -1e9
         self._live_trouble = None        # USB live view stopped: see _on_live_paused
         self._camera_up = False          # a camera connected (the feed's or a USB one)
+        # the light comes on white as it connects (2026-11-09; tests turn it off)
+        self.light_on_connect = True
         # this frame's own exposure (spec/frame-exposure.md)
         self._frame_est = []             # recent live ratios
         self._frame_metered = None       # a Meter's Suggestion for the frame in view
@@ -2054,9 +2056,13 @@ class LiveCaptureMonitor(QWidget):
             # panel (all 0) leaves the light as it is, and one off while idle
             # stays off until Wake
             self.light.set_levels(self._levels)
-        if (state == "waiting" and not was_open and self._camera_up
-                and not any(self._levels.values())):
-            self._light_on_for_camera()            # the camera came first
+        if (state == "waiting" and not was_open and not any(self._levels.values())
+                and (self._camera_up or self.light_on_connect)):
+            # the light comes on as it connects (the user, 2026-11-09), or
+            # because the camera came first (2026-11-01)
+            self._light_on_for_camera(
+                "The light came on (white, 100 %) as it connected."
+                if not self._camera_up else None)
         self._prev_light = state
         self._refresh_light_status()
         self.rail.set_blocked([port] if state in ("ok", "waiting", "silent") and port else [])
@@ -2067,11 +2073,11 @@ class LiveCaptureMonitor(QWidget):
         self._camera_up = True
         self._light_on_for_camera()
 
-    def _light_on_for_camera(self):
-        """White at 100 % when a camera connects, if the light is there and
-        dark: levels set by hand stay, idle sleep and a running shot or
-        measuring are left alone, and Settings can turn it off
-        (`live/light_on_camera`)."""
+    def _light_on_for_camera(self, note=None):
+        """White at 100 % when the light or a camera connects, if the light is
+        there and dark: levels set by hand stay, idle sleep (its timer runs
+        as before) and a running shot or measuring are left alone, and
+        Settings can turn it off (`live/light_on_camera`)."""
         if not _settings().value("live/light_on_camera", True, type=bool):
             return
         if (self._closing or self._sleeping is not None or self.sequence.running
@@ -2079,7 +2085,7 @@ class LiveCaptureMonitor(QWidget):
                 or any(self._levels.values())):
             return
         self.set_levels(cl.exclusive(cl.OFF, "w", 255))
-        self._note_caption("The light came on (white, 100 %) with the camera.")
+        self._note_caption(note or "The light came on (white, 100 %) with the camera.")
 
     def _refresh_light_status(self):
         state, detail = self.light.state, self.light.detail

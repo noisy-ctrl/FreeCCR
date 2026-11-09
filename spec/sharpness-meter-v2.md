@@ -145,3 +145,15 @@ reading's own noise (~2 %). `update` returns (steady, best, known) and
 The bar is drawn as before (full and green at the best). Tests:
 `tests/test_live_feed.py::test_the_best_is_known_only_once_focus_has_varied`,
 `tests/test_live_canvas.py::test_the_readout_says_dashes_until_focus_has_varied`.
+
+## Revision 5 (2026-11-09): "__" until the number reaches 96
+
+The user: "I meant to have __ until say the reading goes to 96% or similar as
+the focus is changing." Revision 4 waited for a drop to 0.90 of the best
+(shown 66), far more than a careful focus pull makes. `known` now comes once
+the steady reading has fallen to `KNOWN_BELOW` = 0.96^(1/4) = 0.9898 of the
+best, i.e. the shown number has been 96 or less since the reset
+(`FocusMeter.KNOWN_SHOWN`). The 15-reading median holds ordinary noise well
+inside that; a drop that small from noise alone would only show the number
+a little early. Test as before, now with a 97 that doesn't count and a 95
+that does.

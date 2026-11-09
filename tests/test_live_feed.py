@@ -344,15 +344,20 @@ def test_the_meter_is_steadied_and_its_best_too():
 
 
 def test_the_best_is_known_only_once_focus_has_varied():
-    """The user, 2026-11-09: no 100 after a new frame until focus has moved."""
+    """The user, 2026-11-09: "__" after a new frame until the shown number
+    has gone down to 96 as focus moves."""
     m = lf.FocusMeter()
     for _ in range(20):
         assert m.update(50.0)[2] is False                          # steady: unknown
-    for v in [50.5, 49.6, 51.0] * 5:                                # noise isn't a change
+    for v in [50.2, 49.9, 50.4] * 5:                                # noise isn't a change
         assert m.update(v)[2] is False
     for _ in range(15):
-        m.update(40.0)                                              # focus moved
-    assert m.update(40.0)[2] is True
+        m.update(49.7)                                              # shown 97: not yet
+    assert m.update(49.7)[2] is False
+    for _ in range(15):
+        m.update(49.3)                                              # shown 95: focus moved
+    assert m.update(49.3)[2] is True
+    assert lf.focus_closeness(lf.FocusMeter.KNOWN_BELOW) == pytest.approx(0.96)
     m.reset()
     assert m.update(50.0)[2] is False
     m = lf.FocusMeter()                                             # starting soft, focusing up

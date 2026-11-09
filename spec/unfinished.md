@@ -102,3 +102,9 @@ remove an entry when it ships.
   Confirm a Measure completes.
 - **The light at Capture's close / the Quit? box** (2026-11-01): the OFF bytes
   are now drained before the port closes; confirm the Scanlight goes dark.
+- **Convert without auto crop, the light on at connect, Focus "__" until 96**
+  (2026-11-09, `spec/convert-no-auto-crop.md`, live-capture-monitor.md,
+  sharpness-meter-v2.md rev 5): check that Convert leaves crops alone (a
+  capture shot with a frame guide is still cropped to it), the Scanlight
+  lights white as it connects and still sleeps, and the Focus readout shows
+  "__" until a focus pull has taken it to 96.

@@ -103,13 +103,14 @@ def _light():
     return LightClient(link=link, threaded=False), dev, made
 
 
-def _monitor(mw=None, connect=True, usb=None):
+def _monitor(mw=None, connect=True, usb=None, light_on=False):
     from core.usb_camera import UsbCamera
     feed = FakeFeed()
     light, dev, made = _light()
     mon = lm.LiveCaptureMonitor(main_window=mw, feed=feed, light=light,
                                 usb=usb if usb is not None else UsbCamera(backends=[]))
     mon._start_hot_folder = lambda from_monitor=False: None
+    mon.light_on_connect = light_on        # most tests start with the light dark
     mon.resize(1300, 820)
     mon.show()
     _app.processEvents()
@@ -707,6 +708,33 @@ def test_a_light_connected_after_the_camera_comes_on_too_but_not_asleep(iso_sett
         feed.status.emit("open", "1")
         assert not any(mon._levels.values())
         mon._sleeping = None
+    finally:
+        _close(mon)
+
+
+def test_the_light_comes_on_white_as_it_connects_and_still_sleeps(iso_settings):
+    """The user, 2026-11-09: the light comes on white as soon as it connects
+    after Capture opens; idle sleep still turns it off."""
+    mon, feed, light, dev = _monitor(light_on=True)
+    try:
+        _app.processEvents()
+        assert mon._levels == {"r": 0, "g": 0, "b": 0, "w": 255, "ir": 0}
+        assert dev.written[-1] == cl.colour_packet({"w": 255})
+        lm._settings().setValue("live/idle_minutes", 1)
+        mon._last_use -= 61
+        mon._check_idle()
+        assert mon._sleeping == {"r": 0, "g": 0, "b": 0, "w": 255, "ir": 0}
+        assert not any(mon._levels.values())
+    finally:
+        _close(mon)
+    # hand-set levels before connecting stay; Settings off: stays dark
+    mon, feed, light, dev = _monitor(light_on=True, connect=False)
+    try:
+        lm._settings().setValue("live/light_on_camera", False)
+        light.open_port("/dev/cu.usbmodem1")
+        light.link.tick()
+        _app.processEvents()
+        assert not any(mon._levels.values())
     finally:
         _close(mon)
 
