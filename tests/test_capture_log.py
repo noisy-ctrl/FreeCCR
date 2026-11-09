@@ -36,7 +36,7 @@ def test_names():
     assert cl.shot_stem("R0034", "", "", 13, "blue") == "R0034_013_3BLUE"
     assert cl.shot_stem("R0034", "6x7", "", 2, "white") == "R0034_6x7_002_WHITE"
     assert cl.shot_stem("R0034", "", "HP5+ @800", 1234, "bw") == "R0034_HP5800_1234_BW"
-    assert cl.shot_stem("", "", "", 1, "blue") == "R0001_001_BLUE"
+    assert cl.shot_stem("", "", "", 1, "blue") == "R0001_001_3BLUE"
     assert cl.single_slot("bw") == "bw" and cl.single_slot("colour") == "white"
 
 
