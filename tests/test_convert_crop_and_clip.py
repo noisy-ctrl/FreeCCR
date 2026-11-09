@@ -233,6 +233,57 @@ def test_a_hand_or_confirmed_crop_stays_and_the_setting_turns_it_off(frame, monk
     assert off.crop_rect is None
 
 
+def test_off_by_default_but_a_capture_guide_still_crops(frame, monkeypatch):
+    """spec/convert-no-auto-crop.md: Convert leaves the crop alone, except
+    to the frame guide placed in Capture."""
+    from core.ccr_backend import CCRBackend
+    assert CCRBackend().crop_after_convert is False
+    monkeypatch.setattr(ccr_backend, "crop_after_convert", False, raising=False)
+    monkeypatch.setattr(ccr_backend, "crop_from_guide", True, raising=False)
+    calls = []
+    _fake_detect(monkeypatch, calls=calls)
+    plain = frame("plain.tif")
+    plain.crop_rect = None
+    _convert(plain)
+    assert plain.converted and plain.crop_rect is None   # measured inside it, not cropped
+    guided = frame("guided.tif", seed=4)
+    guided.crop_rect = None
+    guided.capture_guide = {"cx": 0.5, "cy": 0.5, "w": 0.8, "h": 0.8, "angle": 0.0}
+    _convert(guided)
+    assert guided.crop_rect == (0.12, 0.11, 0.88, 0.9)
+    monkeypatch.setattr(ccr_backend, "crop_from_guide", False, raising=False)
+    g2 = frame("g2.tif", seed=5)
+    g2.crop_rect = None
+    g2.capture_guide = dict(guided.capture_guide)
+    _convert(g2)
+    assert g2.crop_rect is None
+
+
+def test_a_stored_on_is_turned_off_once():
+    from ui.main_window import MainWindow
+    before = ccr_backend.crop_after_convert
+    w = MainWindow()
+    try:
+        w._settings.setValue("convert/crop_after", True)
+        w._settings.remove("convert/crop_after_off_2026_11")
+        w2 = MainWindow()
+        assert ccr_backend.crop_after_convert is False
+        assert w2._settings.value("convert/crop_after", True, type=bool) is False
+        w2.on_crop_after_convert_toggled(True)           # ticked again: it sticks
+        w3 = MainWindow()
+        assert ccr_backend.crop_after_convert is True
+        w2.hide()
+        w3.hide()
+        _KEEP_WINDOWS.extend([w2, w3])
+    finally:
+        w.on_crop_after_convert_toggled(before)
+        w.hide()
+        _KEEP_WINDOWS.append(w)
+
+
+_KEEP_WINDOWS = []
+
+
 def test_an_unsure_detection_doesnt_crop(frame, monkeypatch):
     monkeypatch.setattr(ccr_backend, "crop_after_convert", True, raising=False)
     _fake_detect(monkeypatch, confidence="low")

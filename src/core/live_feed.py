@@ -255,10 +255,13 @@ class FocusMeter:
     """The median of the last MEDIAN readings, and the best of those (15 at
     30 a second: half a second, steady enough to read one number)."""
     MEDIAN = 15
-    # Until a steady reading has been this far below the best since the last
-    # reset, the best is only "where it started": the readout shows "__"
-    # rather than a 100 that nothing has earned (the user, 2026-11-09).
-    KNOWN_BELOW = 0.90
+    # Until the shown number has fallen to KNOWN_SHOWN since the last reset
+    # (focus has moved), the best is only "where it started": the readout
+    # shows "__" rather than a 100 that nothing has earned (the user,
+    # 2026-11-09: "until say the reading goes to 96%"). As a ratio of the
+    # best: 0.96 ** (1/4) = 0.9898.
+    KNOWN_SHOWN = 0.96
+    KNOWN_BELOW = KNOWN_SHOWN ** (1.0 / FOCUS_POWER)
 
     def __init__(self):
         self.reset()

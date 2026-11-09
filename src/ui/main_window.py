@@ -344,8 +344,13 @@ class MainWindow(QMainWindow):
         ccr_backend.warn_no_anchor_convert = self._settings.value(
             "convert/warn_no_anchor", True, type=bool)
         # Convert, then crop; nothing clips (spec/convert-crop-and-clip.md).
+        # Off by default since 2026-11-09 (spec/convert-no-auto-crop.md): auto
+        # crop got too many frames wrong. A stored "on" is turned off once.
+        if not self._settings.value("convert/crop_after_off_2026_11", False, type=bool):
+            self._settings.setValue("convert/crop_after", False)
+            self._settings.setValue("convert/crop_after_off_2026_11", True)
         ccr_backend.crop_after_convert = self._settings.value(
-            "convert/crop_after", True, type=bool)
+            "convert/crop_after", False, type=bool)
         from core.clip_guard import clean_mode
         ccr_backend.clip_mode = clean_mode(str(self._settings.value(
             "convert/clip_mode", "rolloff") or "rolloff"))
@@ -1291,7 +1296,8 @@ class MainWindow(QMainWindow):
         self._settings.setValue("convert/crop_after", bool(checked))
         self.sliders_panel.set_temporary_hint(
             "Convert now crops each frame to what Auto Crop finds." if checked
-            else "Convert no longer crops; use Auto Crop.", duration=5000)
+            else "Convert no longer crops (except to Capture's frame guide); "
+            "use Auto Crop.", duration=5000)
 
     def on_clip_mode_changed(self, mode: str):
         """How Convert treats each frame's ends (spec/convert-crop-and-clip.md

@@ -548,6 +548,7 @@ def _rail_monitor(rail=None, ports=("/dev/cu.usbmodem1", "/dev/cu.usbserial-0001
     light, dev, _m = _light()
     mon = lm.LiveCaptureMonitor(feed=feed, light=light, usb=UsbCamera(backends=[]),
                                 rail=client)
+    mon.light_on_connect = False
     mon._start_hot_folder = lambda from_monitor=False: None
     mon.resize(1300, 820)
     mon.show()

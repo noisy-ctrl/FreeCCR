@@ -842,3 +842,16 @@ the old port name, which no longer existed.
   pause; a stuck one has them dropped, and the close doesn't wait.
 - **Monitor:** `live/port_id` saved on the signal and handed to the link at
   start.
+
+## Revision 2026-11-09: the light comes on as it connects
+The user: "Can the scanlight immediately light up white when connected, after
+opening the capture window (but still time out and sleep etc)". The light
+connecting (its first "waiting" after being closed) now does what a camera
+connecting does: dark, not asleep, no Shoot or measuring, levels not set by
+hand → White 255 (`_light_on_for_camera(note)`), caption "The light came on
+(white, 100 %) as it connected." Same Settings box, relabelled "Turn the
+light on (white, 100 %) when it or a camera connects"
+(`live/light_on_camera`). Idle sleep is untouched: it turns the light off
+after the idle time, and only Wake brings it back. `light_on_connect` (an
+attribute, default True) lets tests start with a dark light. Test:
+`tests/test_live_monitor.py::test_the_light_comes_on_white_as_it_connects_and_still_sleeps`.

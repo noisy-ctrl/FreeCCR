@@ -172,7 +172,10 @@ class SettingsDialog(QDialog):
         gc.addWidget(self._muted(
             "Convert finds the frame the way Auto Crop does, measures the "
             "conversion inside it, then crops to it (one undo step). Only when "
-            "auto crop is sure, and never over a crop you drew or confirmed."))
+            "auto crop is sure, and never over a crop you drew or confirmed. "
+            "Off by default. A capture shot with Capture's frame guide is "
+            "still cropped to its guide (Auto crop → Crop to Capture's frame "
+            "guide)."))
         row = QHBoxLayout()
         row.addWidget(QLabel("Highlights and shadows"))
         self._combo_clip_mode = QComboBox()
@@ -429,9 +432,10 @@ class SettingsDialog(QDialog):
             "Ask about Hot Folder Tether when Capture opens")
         gl.addWidget(self._cb_live_ask_tether)
         self._cb_live_light_on_camera = QCheckBox(
-            "Turn the light on (white, 100 %) when a camera connects")
+            "Turn the light on (white, 100 %) when it or a camera connects")
         self._cb_live_light_on_camera.setToolTip(
-            "Only when the light is connected and off: levels you set yourself stay.")
+            "Only when the light is connected and off: levels you set yourself "
+            "stay, and it still turns off when Capture goes idle.")
         gl.addWidget(self._cb_live_light_on_camera)
         self._cb_live_frame_meter = QCheckBox(
             "Show Meter: this frame's exposure from RAW test shots")
@@ -774,7 +778,7 @@ class SettingsDialog(QDialog):
                         (self._cb_warn_no_anchor,
                          getattr(ccr_backend, "warn_no_anchor_convert", True)),
                         (self._cb_crop_after,
-                         getattr(ccr_backend, "crop_after_convert", True)),
+                         getattr(ccr_backend, "crop_after_convert", False)),
                         (self._cb_crop_learn,
                          getattr(ccr_backend, "auto_crop_learn", True)),
                         (self._cb_crop_guide,
@@ -895,7 +899,7 @@ class SettingsDialog(QDialog):
             self._mw.on_warn_no_anchor_toggled(
                 bool(self._cb_warn_no_anchor.isChecked()))
         if (bool(self._cb_crop_after.isChecked())
-                != bool(getattr(ccr_backend, "crop_after_convert", True))):
+                != bool(getattr(ccr_backend, "crop_after_convert", False))):
             self._mw.on_crop_after_convert_toggled(bool(self._cb_crop_after.isChecked()))
         mode = self._combo_clip_mode.currentData()
         if mode and mode != getattr(ccr_backend, "clip_mode", "rolloff"):
