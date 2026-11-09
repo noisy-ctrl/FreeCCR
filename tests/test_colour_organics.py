@@ -71,8 +71,8 @@ def test_it_turns_hues_the_way_the_labs_did():
     assert move(355.0) > 1.0 and move(10.0) > 1.0          # reds -> orange
     assert move(40.0) > 1.0                                # skin, orange -> yellower
     assert move(210.0) < -1.0                              # blue -> towards sky
-    for h in range(270, 311, 10):                          # violets: not measured
-        assert abs(move(float(h))) < 0.5
+    for h in range(270, 311, 10):                          # violets: only the Portra 160
+        assert 0.0 <= move(float(h)) < 1.0                 # gap cells, a small move to red
 
 
 @pytest.mark.parametrize("amount", [50, 100, 150, 200])
