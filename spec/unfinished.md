@@ -121,3 +121,9 @@ remove an entry when it ships.
   exposure to the frame's density": the panel should say the Black Point came
   from the film base, and those frames should convert without a hand-sampled
   black point. Film bases measured before this need Measure Again.
+- Clean Lights (spec/clean-lights.md, 2026-11-09): built with a fixed,
+  measured shape and no options. To check on his Mac: at 50 on a Portra frame,
+  pale skin / clouds / whites should read cleaner with darks unchanged. If
+  wanted later: a Start option and Show where it acts (plumbed like
+  `shadow_lift_shape`). The GPU twin is tested only where OpenCL exists (not
+  in this container).

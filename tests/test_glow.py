@@ -241,7 +241,7 @@ def test_slider_sits_in_lab_finish_under_shadow_lift(panel):
     labels = [lay.itemAt(0).widget() for lay in (panel.golden_slider_layout,
               panel.shadow_neutralise_slider_layout, panel.glow_slider_layout)]
     assert all(sec.isAncestorOf(lb) for lb in labels)
-    assert sec._content_layout.indexOf(panel.glow_slider_layout) == 3   # the last of four
+    assert sec._content_layout.indexOf(panel.glow_slider_layout) == 4   # the last of five
     lbl = panel._glow_label
     assert lbl.text() == "Glow"
     assert lbl.contextMenuPolicy() == Qt.CustomContextMenu and "Right-click" in lbl.toolTip()

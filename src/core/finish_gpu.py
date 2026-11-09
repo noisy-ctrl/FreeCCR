@@ -30,6 +30,7 @@ from core import golden as gd
 from core import shadow_neutral as sn
 from core import glow as gw
 from core import shadow_lift as lf
+from core import clean_lights as cln
 
 RUN = 32                    # pixels per work item in the sliding box filter
 BIG_RENDER = 8_000_000      # pixels: above this the memory pool is emptied after
@@ -327,6 +328,17 @@ __kernel void shadow_weight(__global const float* Ls, __global const float* As,
     float t = 1.0f - sstep((Ls[i] - t_lo) / t_span);
     float q = hypot(As[i], Bs[i]) / c0;
     m[i] = kk * t * exp(-(q * q));
+}}
+
+/* core.clean_lights: m = 1 - (1 - R . smoothstep((L - l0)/span)^p)^e on the
+   decision view; applied by shadow_apply with Depth off (the same maths) */
+__kernel void clean_weight(__global const float* Ls, __global float* m,
+                           float l0, float span, float p, float rmax, float e,
+                           int n) {{
+    int i = get_global_id(0);
+    if (i >= n) return;
+    float w = pow(sstep((Ls[i] - l0) / span), p);
+    m[i] = 1.0f - pow(1.0f - rmax * w, e);
 }}
 
 __kernel void shadow_apply(__global float* rgb, __global const float* m,
@@ -755,6 +767,19 @@ class FinishGPU:
                    moved.data,
                    _fl(np.cos(hg)), _fl(np.sin(hg)), _fl(gd.K_EPS), _i(n))
 
+    def clean_lights(self, rgb, moved, W, H, amount):
+        n = W * H
+        amount = min(float(amount), 100.0)
+        (Ls, _As, _Bs), (L, A, B) = self.decision_lab(rgb, W, H, ok.DENOISE_R)
+        m = self.empty(n)
+        self._run1("clean_weight", n, Ls.data, m.data, _fl(cln.L0), _fl(cln.SPAN),
+                   _fl(cln.POWER), _fl(cln.R_MAX), _fl(amount / cln.LAB_AMOUNT), _i(n))
+        m, top = self.finish_matte(m, Ls, cln.SMOOTHING, W, H)
+        if top <= 0.0:
+            return
+        self._run1("shadow_apply", n, rgb.data, m.data, L.data, A.data, B.data,
+                   moved.data, _i(0), _fl(0.0), _fl(1.0), _fl(cln.M_EPS), _i(n))
+
     def shadow(self, rgb, moved, W, H, amount, shape):
         shape = sn.normalize_shadow_shape(shape) or dict(sn.SHADOW_SHAPE_DEFAULT)
         n = W * H
@@ -847,7 +872,7 @@ class FinishGPU:
     # -- the chain ---------------------------------------------------------
     def finish(self, img_buf, H, W, golden=0.0, golden_shape=None, shadow=0.0,
                shadow_shape=None, glow=0.0, glow_shape=None, glow_area=None,
-               shadow_lift=0.0, shadow_lift_shape=None):
+               shadow_lift=0.0, shadow_lift_shape=None, clean_lights=0.0):
         """Run the active tools on the main kernel's buffer (H*W x 3 float,
         0..65535), in place. Pixels no tool moved keep their exact value; on
         any error before the last step the buffer is untouched."""
@@ -856,6 +881,8 @@ class FinishGPU:
         self._run1("unpack01", n * 3, img_buf.data, rgb.data, _i(n * 3))
         moved = self.empty(n, np.uint8)
         self._run1("zero_u8", n, moved.data, _i(n))
+        if clean_lights and clean_lights > 0:
+            self.clean_lights(rgb, moved, W, H, float(clean_lights))
         if golden and golden > 0:
             self.golden(rgb, moved, W, H, float(golden), golden_shape)
         if shadow and shadow > 0:
@@ -873,7 +900,7 @@ class FinishGPU:
 
 def finish_numpy_image(ctx, queue, img01, golden=0.0, golden_shape=None, shadow=0.0,
                        shadow_shape=None, glow=0.0, glow_shape=None, glow_area=None,
-                       shadow_lift=0.0, shadow_lift_shape=None):
+                       shadow_lift=0.0, shadow_lift_shape=None, clean_lights=0.0):
     """Convenience for tests and the bench: the GPU chain on an HxWx3 float
     image in 0..1 (as the numpy tools take it). Returns HxWx3 float32."""
     a = np.ascontiguousarray(np.asarray(img01, np.float32))
@@ -881,5 +908,5 @@ def finish_numpy_image(ctx, queue, img01, golden=0.0, golden_shape=None, shadow=
     g = for_queue(ctx, queue)
     buf = cla.to_device(queue, (a * np.float32(65535.0)).reshape(-1, 3))
     g.finish(buf, H, W, golden, golden_shape, shadow, shadow_shape, glow, glow_shape,
-             glow_area, shadow_lift, shadow_lift_shape)
+             glow_area, shadow_lift, shadow_lift_shape, clean_lights)
     return buf.get().reshape(H, W, 3) / np.float32(65535.0)

@@ -223,7 +223,7 @@ def test_slider_sits_in_lab_finish_between_shadow_neutralise_and_glow(panel):
     order = [sec._content_layout.indexOf(lay) for lay in (
         panel.golden_slider_layout, panel.shadow_neutralise_slider_layout,
         panel.shadow_lift_slider_layout, panel.glow_slider_layout)]
-    assert order == [0, 1, 2, 3]
+    assert order == [1, 2, 3, 4]          # Clean Lights first (spec/clean-lights.md)
     lbl = panel._lift_label
     assert lbl.text() == "Shadow Lift"
     assert lbl.contextMenuPolicy() == Qt.CustomContextMenu and "Right-click" in lbl.toolTip()
