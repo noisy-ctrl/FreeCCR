@@ -282,12 +282,46 @@ class SoloRing(QPushButton):
 # --------------------------------------------------------------------------- #
 # the window
 # --------------------------------------------------------------------------- #
+def _shot_key(colour, exp, levels):
+    """A Measure shot's key: colour, shutter, ISO, LED levels."""
+    exp = exp or {}
+    lv = tuple(sorted((levels or {}).items())) if levels else None
+    return (colour, str(exp.get("shutter", "")), str(exp.get("iso", "")), lv)
+
+
+def _accepted_paths(files, result):
+    """The file of each colour's accepted shot, in R, G, B order (or the one
+    white-light shot); None when one is missing."""
+    keys = list(be.COLOURS) if all(c in result for c in be.COLOURS) else \
+        (["w"] if "w" in result else None)
+    if not keys:
+        return None
+    out = []
+    for c in keys:
+        r = result[c]
+        p = files.get(_shot_key(c, r, r.get("levels")))
+        if not p or not os.path.exists(p):
+            return None
+        out.append(p)
+    return out
+
+
+def _exposure_text(e):
+    """ISO-100 seconds as a shutter text: 0.5 -> '1/2 s', 2 -> '2 s'."""
+    if not e or e <= 0:
+        return "?"
+    if e >= 1:
+        return f"{e:g} s"
+    return f"1/{round(1 / e):g} s"
+
+
 class LiveCaptureMonitor(QWidget):
     """`main_window` (FreeCCR's) is used for Hot Folder Tether; `feed` and
     `light` can be injected (tests)."""
 
     closed = Signal()
     _patch_read = Signal(int, object)    # a film-base test shot's reading (or error)
+    _base_bp_read = Signal(int, object)  # (name, black point or error), from a thread
     _zoom_spot_found = Signal(int, object)   # where the magnifier looked (or None)
 
     def __init__(self, main_window=None, feed=None, light=None, usb=None, rail=None,
@@ -1112,6 +1146,10 @@ class LiveCaptureMonitor(QWidget):
             lambda on: (_settings().setValue("live/film_base_use", bool(on)),
                         self._refresh_film_bases()))
         self._patch_read.connect(self._on_patch_read)
+        self._base_bp_read.connect(self._on_base_bp_read)
+        self._base_bp_token = 0
+        self._base_bp_threaded = True       # tests read it in line
+        self._load_base_shots = None        # the decoder (None: base_black_point.load_shots)
         self.meter_btn.clicked.connect(self._on_meter_clicked)
         self.use_frame_btn.clicked.connect(self._on_use_frame)
         self.frame_auto.toggled.connect(self._on_frame_auto)
@@ -2647,6 +2685,84 @@ class LiveCaptureMonitor(QWidget):
         self._bases["selected"] = i
         self._save_film_bases()
         self._refresh_film_bases()
+        self._apply_base_black_point(self._film_base(), picked=True)
+
+    # -- the film base's black point (spec/film-base-black-point.md) ---------
+    def _base_setup(self):
+        from core import base_black_point as bbp
+        return bbp.current_setup(self._usb_model or "", self.scan_type())
+
+    def _measure_base_black_point(self, paths, rect, temp, name):
+        """Decode Measure's accepted shots as Open would, on a thread, and read
+        the black point on the patch; the temp folder goes after."""
+        from core import base_black_point as bbp
+        self._base_bp_token += 1
+        token = self._base_bp_token
+        setup = self._base_setup()
+        load = self._load_base_shots
+
+        def work():
+            import shutil
+            try:
+                out = bbp.measure_shots(paths, rect, setup, load=load)
+            except Exception as e:
+                out = e
+            finally:
+                shutil.rmtree(temp, ignore_errors=True)
+            self._base_bp_read.emit(token, (name, out))
+
+        self._measured_text = self.capture_caption.text()
+        self._note_caption(self._measured_text + "  Reading the black point…")
+        if self._base_bp_threaded:
+            import threading
+            threading.Thread(target=work, daemon=True).start()
+        else:
+            work()
+
+    def _on_base_bp_read(self, token, payload):
+        if token != self._base_bp_token:
+            return
+        name, out = payload
+        before = (getattr(self, "_measured_text", "") or "").strip()
+        before = before + "  " if before else ""
+        if isinstance(out, Exception):
+            print(f"Film base black point for {name}: {out}")
+            self._warn_caption(before + f"Its black point couldn't be read ({out}): the "
+                               "Black Point is left as it was.")
+            return
+        self._bases = be.set_black_point(self._bases, name, out)
+        self._save_film_bases()
+        self._refresh_film_bases()
+        base = next((b for b in self._bases["bases"] if b["name"] == name), None)
+        self._apply_base_black_point(base, before=before)
+
+    def _apply_base_black_point(self, base, picked=False, before=""):
+        """Make `base`'s black point the roll's Black Point, in the main window,
+        if it was measured on this setup. True when it was set."""
+        if not base:
+            return False
+        name = base["name"]
+        if not base.get("black_point"):
+            if picked:
+                self._note_caption(f"Film base “{name}” has no black point (measured before "
+                                   "FreeCCR kept one): Measure Again to add it.")
+            return False
+        ok, why = be.black_point_usable(base, self._base_setup())
+        if not ok:
+            self._warn_caption(before + f"Film base “{name}”'s black point was measured with "
+                               f"{why}: the Black Point is left as it was.")
+            return False
+        bp = base["black_point"]
+        setter = getattr(self._mw, "set_roll_black_point", None)
+        if setter is None:
+            return False
+        setter(tuple(bp["bgr"]), bp["exposure"],
+               f"Black Point set from film base “{name}”: frames convert from it at "
+               "their own exposure.")
+        self._note_caption(before + f"Black Point set from film base “{name}” (read at "
+                           f"{_exposure_text(bp['exposure'])}): each frame converts from it "
+                           "at its own exposure.")
+        return True
 
     def _film_base_menu(self, pos):
         if self._measure is not None:
@@ -3150,6 +3266,7 @@ class LiveCaptureMonitor(QWidget):
             self._measure_finish()
             return
         colour, levels, exp = shot
+        m["shot_key"] = _shot_key(colour, exp, levels)
         if colour in be.COLOURS and not self.light.is_open():
             cal.failed("The Scanlight disconnected.")
             self._measure_finish()
@@ -3222,6 +3339,18 @@ class LiveCaptureMonitor(QWidget):
         if path:
             if cal.done and cal.error not in (None, "cancelled") and m.get("kind") != "frame":
                 m["kept"] = self._keep_failed_shot(path)      # to look into
+            elif (m.get("kind") != "frame" and not isinstance(reading, Exception)
+                  and m.get("shot_key") is not None):
+                # kept under its key: the accepted ones give the roll's black
+                # point (spec/film-base-black-point.md)
+                files = m.setdefault("files", {})
+                old_path = files.get(m["shot_key"])
+                if old_path and old_path != path:
+                    try:
+                        os.remove(old_path)
+                    except OSError:
+                        pass
+                files[m["shot_key"]] = path
             else:
                 try:
                     os.remove(path)
@@ -3282,8 +3411,12 @@ class LiveCaptureMonitor(QWidget):
         self.usb.set_dest(self._usb_dest)
         self._hold_live(False)
         self.canvas.set_mark(None)
-        import shutil
-        shutil.rmtree(m["temp"], ignore_errors=True)
+        bp_paths = None
+        if m.get("kind") != "frame" and cal.error is None and cal.result:
+            bp_paths = _accepted_paths(m.get("files") or {}, cal.result)
+        if bp_paths is None:
+            import shutil
+            shutil.rmtree(m["temp"], ignore_errors=True)
         self.measure_btn.setText("Measure…")
         if m.get("kind") == "frame":
             self._frame_meter_finish(m, cal)
@@ -3300,6 +3433,8 @@ class LiveCaptureMonitor(QWidget):
             tri = self.scan_type() == "trichrome"
             self._note_caption(f"Film base “{base['name']}” measured in {cal.shots} shots: "
                                + be.summary(base, tri))
+            if bp_paths is not None:
+                self._measure_base_black_point(bp_paths, m["rect"], m["temp"], base["name"])
         else:
             self._refresh_film_bases()
             if cal.error == "cancelled":

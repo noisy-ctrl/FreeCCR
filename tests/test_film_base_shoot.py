@@ -423,6 +423,11 @@ def film_mon(tmp_path, monkeypatch):
     holder["mon"] = mon
     mon._start_hot_folder = lambda from_monitor=False: mw.enter_tethering(from_monitor)
     mon._read_patch = usb.reading
+    mon._base_bp_threaded = False             # the black point read in line ...
+
+    def _no_decode(paths):                    # ... on these fake RAFs it can't be read
+        raise ValueError("test shots")
+    mon._load_base_shots = _no_decode
     mon._timing = cs.clean_timing({"focus_ms": 0, "period_ms": 0})
     mon.resize(1300, 820)
     mon.show()
