@@ -624,7 +624,7 @@ class LiveCaptureMonitor(QWidget):
         self.addon_badge.setStyleSheet(f"color: {theme.WARN_TEXT}; font-size: {theme.FS_CAPTION}px;")
         self.addon_badge.setVisible(False)
         r.addWidget(self.addon_badge)
-        self.release_btn = QPushButton("Release Camera")
+        self.release_btn = QPushButton("Release Camera from Other Apps")
         self.release_btn.setToolTip("macOS's own camera service is holding the camera: "
                                     "end its hold so FreeCCR can open it")
         self.release_btn.setVisible(False)
@@ -3450,13 +3450,13 @@ class LiveCaptureMonitor(QWidget):
                 self.canvas.set_message(
                     f"macOS is holding the camera ({holders[0].describe()}), so FreeCCR "
                     "can't open it.\nIf Image Capture, Photos or Preview is open, quit it. "
-                    "Otherwise Release Camera ends that hold (it may come back when the "
+                    "Otherwise Release Camera from Other Apps ends that hold (it may come back when the "
                     "camera is replugged).")
             elif sys.platform == "darwin":
                 self.canvas.set_message(
                     "Another program has the camera, so FreeCCR can't open it.\nIf Image "
                     "Capture, Photos or Preview is open, quit it, then Find Cameras. "
-                    "Otherwise Release Camera ends macOS's own hold.")
+                    "Otherwise Release Camera from Other Apps ends macOS's own hold.")
             elif holders:
                 self.canvas.set_message(
                     f"{holders[0].describe()} is holding the camera, so FreeCCR can't "
@@ -3861,7 +3861,7 @@ class LiveCaptureMonitor(QWidget):
 
     def _on_release_camera(self):
         box = QMessageBox(self)
-        box.setWindowTitle("Release Camera")
+        box.setWindowTitle("Release Camera from Other Apps")
         box.setText("End macOS's hold on the camera?")
         box.setInformativeText(
             "macOS's own camera service (ptpcamerad) opens PTP cameras as soon as "
