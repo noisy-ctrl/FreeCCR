@@ -114,3 +114,10 @@ remove an entry when it ships.
   print "Capture guide for NAME (from the capture log): matched 0.xx" and
   Convert / Auto Crop should follow the guide. Shots taken before this change
   have no guide in their log lines.
+- **Film base Measure sets the roll's black point** (2026-11-09,
+  `spec/film-base-black-point.md`): tested with fake shots and on a real
+  R0001 decode (0.3 % from the border detection). On his Mac: Measure (or
+  Measure Again) a film base, then convert frames shot with "Per shot, scale
+  exposure to the frame's density": the panel should say the Black Point came
+  from the film base, and those frames should convert without a hand-sampled
+  black point. Film bases measured before this need Measure Again.

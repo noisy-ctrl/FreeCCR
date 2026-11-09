@@ -2694,6 +2694,22 @@ class MainWindow(QMainWindow):
             duration=9000)
         return True
 
+    def set_roll_black_point(self, bgr, exposure=None, note=None):
+        """The roll's Black Point from elsewhere (Capture's film base Measure,
+        spec/film-base-black-point.md): as if sampled by hand on a frame shot at
+        `exposure` (ISO-100 seconds), so each frame converts from it at its own
+        exposure (`black_point_for`)."""
+        ccr_backend.set_black_point(tuple(float(v) for v in bgr), exposure)
+        self.persist_bwpoint()
+        panel = getattr(self, "sliders_panel", None)
+        if panel is not None:
+            upd = getattr(panel, "_update_bwp_mode_label", None)
+            if upd is not None:
+                upd()
+            if note and hasattr(panel, "set_temporary_hint"):
+                panel.set_temporary_hint(note, duration=7000)
+        return True
+
     def _restore_bwpoint(self):
         """Restore a persisted global black point into the backend at startup.
         The roll-wide white point is retired: the White Point is sampled per

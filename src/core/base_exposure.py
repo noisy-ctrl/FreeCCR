@@ -592,6 +592,51 @@ def _clean_colour(e):
     return out
 
 
+SETUP_KEYS = ("camera", "profile", "demosaic", "mono", "scan_type")
+
+
+def _clean_bp(bp):
+    """A film base's black point (spec/film-base-black-point.md): {"bgr":
+    [b, g, r], "exposure": ISO-100 seconds, "setup": {...}}, or None."""
+    if not isinstance(bp, dict):
+        return None
+    try:
+        bgr = [float(v) for v in bp.get("bgr")]
+        exp = float(bp.get("exposure"))
+    except (TypeError, ValueError):
+        return None
+    if len(bgr) != 3 or not all(math.isfinite(v) and v > 0 for v in bgr) \
+            or not (math.isfinite(exp) and exp > 0):
+        return None
+    st = bp.get("setup") if isinstance(bp.get("setup"), dict) else {}
+    setup = {"camera": str(st.get("camera", "") or ""),
+             "profile": str(st.get("profile", "") or ""),
+             "demosaic": bool(st.get("demosaic", True)),
+             "mono": bool(st.get("mono", False)),
+             "scan_type": str(st.get("scan_type", "") or "")}
+    return {"bgr": bgr, "exposure": exp, "setup": setup}
+
+
+def black_point_usable(base, setup):
+    """(True, "") when the film base's black point was measured on this setup;
+    else (False, why). Cameras are compared only when both are known."""
+    bp = (base or {}).get("black_point")
+    if not bp:
+        return False, "none"
+    have = bp.get("setup") or {}
+    cam_a, cam_b = str(have.get("camera", "")), str((setup or {}).get("camera", "") or "")
+    if cam_a and cam_b and cam_a != cam_b:
+        return False, "another camera"
+    if str(have.get("profile", "")) != str((setup or {}).get("profile", "") or ""):
+        return False, "another camera profile"
+    if (bool(have.get("demosaic", True)) != bool((setup or {}).get("demosaic", True))
+            or bool(have.get("mono", False)) != bool((setup or {}).get("mono", False))):
+        return False, "another merge mode"
+    if str(have.get("scan_type", "")) != str((setup or {}).get("scan_type", "") or ""):
+        return False, "another scan type"
+    return True, ""
+
+
 def _clean_base(b):
     if not isinstance(b, dict):
         return None
@@ -605,9 +650,28 @@ def _clean_base(b):
             colours[k] = c
     if not colours:
         return None
-    return {"name": name, "when": str(b.get("when", "") or ""),
-            "camera": str(b.get("camera", "") or ""), "colours": colours,
-            "notes": [str(n) for n in (b.get("notes") or []) if str(n).strip()][:6]}
+    out = {"name": name, "when": str(b.get("when", "") or ""),
+           "camera": str(b.get("camera", "") or ""), "colours": colours,
+           "notes": [str(n) for n in (b.get("notes") or []) if str(n).strip()][:6]}
+    bp = _clean_bp(b.get("black_point"))
+    if bp:
+        out["black_point"] = bp
+    return out
+
+
+def set_black_point(data, name, bp):
+    """The film base called `name` takes the black point `bp` (spec/film-base-
+    black-point.md); the rest of the list is left as it is."""
+    d = normalise(data)
+    clean = _clean_bp(bp)
+    for b in d["bases"]:
+        if b["name"].lower() == str(name or "").lower():
+            if clean:
+                b["black_point"] = clean
+            else:
+                b.pop("black_point", None)
+            break
+    return d
 
 
 def normalise(data):
@@ -837,4 +901,6 @@ def summary(base, trichrome):
               for k in keys if cols[k].get("dimmed") and led_level(cols[k])]
     if dimmed:
         line += "; " + ", ".join(dimmed)
+    if base.get("black_point"):
+        line += " · black point"
     return line
