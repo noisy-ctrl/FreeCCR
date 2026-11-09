@@ -719,18 +719,21 @@ def test_the_light_comes_on_white_as_it_connects_and_still_sleeps(iso_settings):
     try:
         _app.processEvents()
         assert mon._levels == {"r": 0, "g": 0, "b": 0, "w": 255, "ir": 0}
-        assert dev.written[-1] == cl.colour_packet({"w": 255})
+        light.link.tick()
+        assert cl.colour_packet({"w": 255}) in dev.written
         lm._settings().setValue("live/idle_minutes", 1)
         mon._last_use -= 61
         mon._check_idle()
         assert mon._sleeping == {"r": 0, "g": 0, "b": 0, "w": 255, "ir": 0}
-        assert not any(mon._levels.values())
+        light.link._last_colour = -1e9
+        light.link.tick()
+        assert dev.written[-1] == cl.colour_packet(dict(cl.OFF))   # dark while idle
     finally:
         _close(mon)
-    # hand-set levels before connecting stay; Settings off: stays dark
+    # Settings off: stays dark
+    lm._settings().setValue("live/light_on_camera", False)   # before: it reconnects itself
     mon, feed, light, dev = _monitor(light_on=True, connect=False)
     try:
-        lm._settings().setValue("live/light_on_camera", False)
         light.open_port("/dev/cu.usbmodem1")
         light.link.tick()
         _app.processEvents()
