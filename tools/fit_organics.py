@@ -101,6 +101,10 @@ def main(argv=None):
                     help="weight cells by sample count across ALL labs (a lab with more "
                          "frames counts for more); by default each lab counts the same "
                          "(spec/colour-organics.md, revision 2026-11-09)")
+    ap.add_argument("--gap-only", action="append", default=[], metavar="LAB",
+                    help="use this lab (its folder name, or its name in --moves) only "
+                         "at hues no other lab measured, scaled to the other labs' "
+                         "strength where both measured (another film stock's lab)")
     ap.add_argument("--write", action="store_true",
                     help="write src/core/organics_measured.py")
     ap.add_argument("--moves", help="an .npz to keep the measured hue moves in: "
@@ -139,6 +143,15 @@ def main(argv=None):
     cells_by_lab = [of.cells(*stack(rows)) for _n, _f, rows in per_lab]
     if a.labs_equal:
         cells_by_lab = [of.equal_weight(c) for c in cells_by_lab]
+    gap = [i for i, (n, _f, _r) in enumerate(per_lab) if n in set(a.gap_only)]
+    if gap:
+        main_cells = np.concatenate([c for i, c in enumerate(cells_by_lab) if i not in gap])
+        for i in gap:
+            g = of.gap_cells(cells_by_lab[i], main_cells)
+            log(f"{per_lab[i][0]}: used only in the gap, {len(g)} cells at "
+                f"{', '.join(f'{h:.0f}' for h in sorted(set(g[:, 0])))} degrees, moves x "
+                f"{of.gap_scale(cells_by_lab[i], main_cells):.2f}")
+            cells_by_lab[i] = g
     all_cells = np.concatenate(cells_by_lab)
     if len(all_cells) < 6:
         sys.exit("too few coloured samples to measure a curve")
@@ -155,6 +168,8 @@ def main(argv=None):
                  f"({of.curve_rms(zero, all_cells, alike=True):.2f})")
     if len(per_lab) > 1:
         for i, (name, _f, _r) in enumerate(per_lab):
+            if i in gap:
+                continue
             rest = np.concatenate([c for j, c in enumerate(cells_by_lab) if j != i])
             kr = of.fit_curve(rest, lam=a.smooth)
             c = cells_by_lab[i]
