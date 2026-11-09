@@ -6217,13 +6217,10 @@ def apply_sharpening(img16: np.ndarray, amount: float = 0.0,
     (100 -> SHARPEN_MAX_AMOUNT), `radius` is native pixels x SHARPEN_RADIUS_DIV
     (25 -> 1.0px), `masking` restricts the effect to edges (0 -> everywhere).
 
-    `scale` exists because a 1px halo at 6000px is 0.18px at 1080px — invisible.
-    The 1080 preview passes full_long/1080 so the halo occupies roughly the
-    SCREEN size it would at 100% on the full-res file: a preview of intent, not
-    of pixels. Export and zoom tiles decode at the resolution they need and so
-    leave it at 1.0, where the radius is exact. It defaults to 1.0 deliberately —
-    deriving it from original_full_size/buffer would over-sharpen a CROPPED
-    export, whose buffer is the crop at native resolution.
+    `scale` is this buffer's pixels per full-resolution pixel: the radius is
+    always the full-resolution one, so a smaller render shows what an output at
+    its size gets (spec/sharpen-like-output.md; the old exaggerated preview is
+    gone). 1.0 = full resolution, exact.
 
     Luma-only by construction: one scalar is added to R, G and B alike, so hue
     and saturation are untouched and an inverted negative's chroma noise is never
@@ -6234,8 +6231,10 @@ def apply_sharpening(img16: np.ndarray, amount: float = 0.0,
     if min(h, w) < 4:
         return img16
     r_native = float(radius) / SHARPEN_RADIUS_DIV
-    r_eff = float(np.clip(r_native * max(float(scale), 1.0),
-                          r_native, SHARPEN_MAX_RADIUS))
+    # `scale` = this buffer's pixels per full-resolution pixel (<= 1), so the
+    # radius is the full-resolution one in this buffer's pixels and every
+    # render shows what the output gets (spec/sharpen-like-output.md).
+    r_eff = float(min(r_native * max(float(scale), 0.0), SHARPEN_MAX_RADIUS))
     if r_eff <= 0:
         return img16
 

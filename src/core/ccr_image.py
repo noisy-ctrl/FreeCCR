@@ -1454,19 +1454,9 @@ class CCRImage:
         work = self._draft_base(base, draft_long) if draft_long else base
 
         # Apply adjustments first.
-        # The preview is the ONE caller that exaggerates the sharpening radius: a
-        # 1px halo at 6000px is 0.18px here and invisible, so the preview would
-        # show nothing of a feature whose whole point is letting the user see the
-        # grain. Scaling by full/preview puts the halo at roughly the SCREEN size
-        # it occupies when inspecting the full-res file at 100%. Export and zoom
-        # tiles decode at the resolution they need and leave scale at 1.0, where
-        # the radius is exact — and the default must stay 1.0, because deriving
-        # it from original_full_size/buffer would over-sharpen a CROPPED export
-        # (whose buffer is the crop at native resolution). See spec/sharpening.md.
-        full = getattr(self, "original_full_size", None)
-        prev_long = max(work.shape[:2])
-        sharpen_scale = (max(full) / prev_long
-                         if full and prev_long else 1.0)
+        # Sharpening works out its own radius from this buffer's size against
+        # the full frame (spec/sharpen-like-output.md), so a draft and the
+        # preview show what an output at their size gets.
         kwargs = {}
         if not live:
             kwargs = dict(settings=snap["settings"],
@@ -1491,7 +1481,7 @@ class CCRImage:
             hdr_tint = snap.get("hdr_tint")
         from core.ccr_processor import hdr_capture
         with hdr_capture(hdr_tint is not None) as hdr_cap:
-            adjusted_img = self.apply_adjustments(work, sharpen_scale=sharpen_scale,
+            adjusted_img = self.apply_adjustments(work,
                                                   **kwargs)
         if work is not base:
             h, w = base.shape[:2]
@@ -2029,7 +2019,7 @@ class CCRImage:
                           color_profile=None, areas_override=None,
                           exposure_base=None, ws_windowed=None,
                           auto_gain_override=None, skip_dust=False,
-                          base_curve=None, sharpen_scale=1.0, for_export=False) -> np.ndarray:
+                          base_curve=None, sharpen_scale=None, for_export=False) -> np.ndarray:
         """Apply the slider adjustments. The optional overrides let the zoom
         hi-res worker render from a snapshot taken at request time instead of
         live state the GUI thread may be mutating concurrently — and let the
@@ -2306,8 +2296,24 @@ class CCRImage:
                                         s.get('sharpen_amount', dd.get('sharpen_amount')),
                                         s.get('sharpen_radius', dd.get('sharpen_radius')),
                                         s.get('sharpen_masking', dd.get('sharpen_masking')),
-                                        sharpen_scale)
+                                        (self._sharpen_scale_for(adjusted)
+                                         if sharpen_scale is None else sharpen_scale))
         return adjusted
+
+    def _sharpen_scale_for(self, buf) -> float:
+        """This buffer's pixels per full-resolution pixel, at most 1 (an
+        unknown full size counts as full resolution). Every buffer reaching the
+        sharpening is the whole (sliced) frame; crops are cut afterwards.
+        spec/sharpen-like-output.md."""
+        full = getattr(self, "original_full_size", None)
+        try:
+            fl = max(int(full[0]), int(full[1]))
+        except (TypeError, ValueError, IndexError):
+            return 1.0
+        bl = max(buf.shape[:2])
+        if fl <= 0 or bl <= 0:
+            return 1.0
+        return min(1.0, bl / fl)
 
     def _adjust_for_area(self, base_u16: np.ndarray, settings: dict,
                          nr_live: bool = True) -> np.ndarray:
