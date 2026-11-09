@@ -130,6 +130,97 @@ def clear():
 
 
 # --------------------------------------------------------------------------- #
+# the guide in the capture log (spec/guide-in-log.md)
+# --------------------------------------------------------------------------- #
+GUIDE_DIR = ".freeccr-guides"
+BOX_KEYS = ("cx", "cy", "w", "h", "angle")
+
+
+def save_for_log(folder, roll, shot, record):
+    """The shot's guide for its capture-log line: the box, format, live size
+    and the live picture saved as a PNG beside the log. None when there is no
+    record or it can't be written (the shot itself is never affected)."""
+    if record is None or not folder:
+        return None
+    try:
+        live = np.asarray(record["live"])
+        if live.ndim == 3:
+            live = cv2.cvtColor(live, cv2.COLOR_BGR2GRAY)
+        rel = os.path.join(GUIDE_DIR, f"{roll}_{int(shot):03d}.png")
+        os.makedirs(os.path.join(folder, GUIDE_DIR), exist_ok=True)
+        if not cv2.imwrite(os.path.join(folder, rel), live.astype(np.uint8)):
+            raise OSError("the picture could not be written")
+        g = record.get("guide") or {}
+        return {"box": {k: float(g[k]) for k in BOX_KEYS if k in g},
+                "format": record.get("format"),
+                "live_size": [int(x) for x in (record.get("live_size") or live.shape[1::-1])],
+                "following": bool(record.get("following")),
+                "live": rel.replace(os.sep, "/")}
+    except Exception as e:
+        print(f"Capture guide: couldn't save it with the shot in {folder}: {e}")
+        return None
+
+
+def _log_of(folder, logs):
+    from core import capture_log
+    if logs is None:
+        return capture_log.read_log(folder)
+    if folder not in logs:
+        logs[folder] = capture_log.read_log(folder)
+    return logs[folder]
+
+
+def record_from_log(paths, logs=None):
+    """A record (as `make_record` gives) for the first of `paths` named in its
+    folder's capture log with a guide, or None. `logs` caches the logs read
+    ({folder: entries}) across a batch."""
+    for p in paths or ():
+        if not p:
+            continue
+        folder = os.path.dirname(os.path.abspath(p))
+        name = os.path.normcase(os.path.basename(p))
+        for e in reversed(_log_of(folder, logs)):
+            files = e.get("files") or {}
+            if name not in {os.path.normcase(str(v)) for v in files.values()}:
+                continue
+            g = e.get("guide")
+            if not isinstance(g, dict) or not g.get("live"):
+                return None                       # the shot had no guide
+            live = cv2.imread(os.path.join(folder, str(g["live"])), cv2.IMREAD_GRAYSCALE)
+            box = g.get("box") or {}
+            if live is None or not all(k in box for k in ("cx", "cy", "w", "h")):
+                return None
+            return {"guide": {k: float(box[k]) for k in BOX_KEYS if k in box},
+                    "format": g.get("format"), "live": live,
+                    "live_size": tuple(g.get("live_size") or live.shape[1::-1]),
+                    "following": bool(g.get("following")), "t": 0.0,
+                    "from_log": True}
+    return None
+
+
+def attach(img, paths, raw=None, logs=None, record=None):
+    """Give `img` the guide its shot carried: `record`, else the session's
+    record for these paths, else the capture log's, lined up with the scan
+    (`raw`, default the unconverted `img.resized_raw`). True when attached."""
+    rec = record if record is not None else lookup(paths)
+    if rec is None:
+        rec = record_from_log(paths, logs)
+    if rec is None:
+        return False
+    if raw is None:
+        raw = getattr(img, "resized_raw", None)
+    g = map_guide(rec, raw)
+    name = os.path.basename(next((p for p in paths if p), "") or "?")
+    where = " (from the capture log)" if rec.get("from_log") else ""
+    if g is None:
+        print(f"Capture guide for {name}{where}: the live picture didn't line up with the scan")
+        return False
+    img.capture_guide = g
+    print(f"Capture guide for {name}{where}: {g['how']} {g['score']:.2f}")
+    return True
+
+
+# --------------------------------------------------------------------------- #
 # lining the live picture up with the RAW
 # --------------------------------------------------------------------------- #
 def _log_norm(img):

@@ -478,9 +478,33 @@ class CCRBackend:
             return False
         if stale:
             return False
+        self._attach_capture_guides(results)
         self.images = results
         self.file_paths = [img.file_path for img in results]
         return True
+
+    def _attach_capture_guides(self, images):
+        """Capture's frame guide for frames a capture log knows
+        (spec/guide-in-log.md): on the loader thread, before the batch is
+        published. Frames that have one already, or whose files no log names
+        with a guide, cost a log read per folder at most."""
+        from core import capture_guide
+        logs = {}
+        for img in images:
+            if getattr(img, "capture_guide", None):
+                continue
+            paths = list(getattr(img, "merge_sources", None) or [getattr(img, "file_path", None)])
+            paths = [p for p in paths if p]
+            try:
+                rec = capture_guide.lookup(paths) or capture_guide.record_from_log(paths, logs)
+                if rec is None:
+                    continue
+                raw = None
+                if getattr(img, "converted", False):
+                    raw = self.raw_preview(img)          # the scan, not the picture
+                capture_guide.attach(img, paths, raw=raw, record=rec)
+            except Exception as e:                       # never stop a load
+                print(f"Capture guide for {os.path.basename(paths[0]) if paths else '?'}: {e}")
 
     def _load_merged_triplets(self, file_paths: List[str], cancel_flag=None, gen=None,
                               passthrough_paths=None) -> int:

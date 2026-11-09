@@ -108,3 +108,9 @@ remove an entry when it ships.
   capture shot with a frame guide is still cropped to it), the Scanlight
   lights white as it connects and still sleeps, and the Focus readout shows
   "__" until a focus pull has taken it to 96.
+- **Capture's frame guide from the capture log** (2026-11-09,
+  `spec/guide-in-log.md`): tested on synthetic pictures. On his Mac: shoot a
+  few frames with the guide placed, quit, Open the RAWs — the Terminal should
+  print "Capture guide for NAME (from the capture log): matched 0.xx" and
+  Convert / Auto Crop should follow the guide. Shots taken before this change
+  have no guide in their log lines.
