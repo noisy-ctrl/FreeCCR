@@ -738,7 +738,8 @@ class LiveCanvas(QWidget):
         # can't flicker the way the first bar did)
         import time as _t
         from core.live_feed import focus_closeness
-        score, best = sharp
+        score, best = sharp[0], sharp[1]
+        known = sharp[2] if len(sharp) > 2 else True
         ratio = 0.0 if best <= 0 else max(0.0, min(1.0, score / best))
         now = _t.monotonic()
         if getattr(self, "_focus_shown", None) is None or now - self._focus_t >= 0.25:
@@ -748,7 +749,11 @@ class LiveCanvas(QWidget):
         f.setPixelSize(theme.FS_CAPTION)
         p.setFont(f)
         note = self.readout_note()
-        text = note or f"Focus  {self._focus_shown}"
+        # no number until focus has been seen to change since the last reset
+        # ("__"): a 100 straight after a new frame said nothing (2026-11-09);
+        # the bar is drawn as before
+        text = note or (f"Focus  {self._focus_shown}" if known else "Focus  __")
+        self._readout_text = text
         fm = QFontMetricsF(f)
         text_w = max(fm.horizontalAdvance("Focus  100"), fm.horizontalAdvance(text))
         bar_w = 0 if note else self.READOUT_BAR_W

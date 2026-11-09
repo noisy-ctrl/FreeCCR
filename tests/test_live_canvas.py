@@ -401,3 +401,19 @@ def test_a_right_click_on_the_guides_outline_opens_the_guide_menu():
     c.guide_on = False                                        # no guide shown: picture's menu
     right_click(centre.x() + w / 2, centre.y())
     assert len(picture_hits) == 3
+
+
+
+def test_the_readout_says_dashes_until_focus_has_varied():
+    """The user, 2026-11-09: '__' after a reset rather than an unearned 100;
+    the bar is drawn as before."""
+    c, render = _canvas()
+    c.sharp_on = True
+    c.result.sharp = (1.0, 1.0, False)
+    c.grab()
+    assert c._readout_text == "Focus  __"
+    assert c._readout_bar[1] == pytest.approx(c._readout_bar[0].width())   # bar full, green
+    c.result.sharp = (1.0, 1.0, True)
+    c._focus_t -= 1.0
+    c.grab()
+    assert c._readout_text == "Focus  100"

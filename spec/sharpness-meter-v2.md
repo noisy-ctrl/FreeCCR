@@ -133,3 +133,15 @@ view (two frames there correlate 0.92), and still once when the guide snaps
 the guide a fifth of the view on a still picture are not said; the Processor
 uses `frame_area`. `tests/test_frame_exposure.py`: the monitor sends the
 guide as `frame_area`, follows its moves and sends none while magnified.
+
+## Revision 4 (2026-11-09): "__" until focus has varied
+
+The user: after a new frame the readout said 100, "giving the illusion it's
+sharp, without new data of moving focus". `FocusMeter` now also keeps the
+lowest steady reading since its reset and reports `known` once that has been
+at most `KNOWN_BELOW` (0.90) of the best — a real change, well outside the
+reading's own noise (~2 %). `update` returns (steady, best, known) and
+`FrameResult.sharp` carries it; until known the readout reads "Focus  __".
+The bar is drawn as before (full and green at the best). Tests:
+`tests/test_live_feed.py::test_the_best_is_known_only_once_focus_has_varied`,
+`tests/test_live_canvas.py::test_the_readout_says_dashes_until_focus_has_varied`.
