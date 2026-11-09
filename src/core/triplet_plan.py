@@ -139,7 +139,11 @@ def rescue_weak_frames(colours, shares, pictures, reach=2):
 def natural_key(path):
     """A file name as a person reads it: 'DSCF0002_2' before 'DSCF0002_10'."""
     import re
-    name = os.path.basename(path).lower()
+    from core.capture_log import slot_order
+    so = slot_order(path)
+    # a shot FreeCCR named reads red, green, blue (by name it is B, G, R)
+    name = (f"{so[0]}_{so[1]}_{so[2]}" if so is not None
+            else os.path.basename(path).lower())
     parts = re.split(r"(\d+)", name)
     return (tuple((1, int(t), "") if t.isdigit() else (0, 0, t) for t in parts if t),
             os.path.normcase(path))
