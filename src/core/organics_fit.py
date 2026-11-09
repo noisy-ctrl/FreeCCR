@@ -101,6 +101,53 @@ def equal_weight(c, total=LAB_WEIGHT):
     return c
 
 
+GAP_NEAR = 10.0             # degrees: a hue another lab measured within this isn't a gap
+GAP_SPAN = 30.0             # degrees: the spans the strength of two sets of labs is compared in
+GAP_SCALE_RANGE = (0.25, 1.0)
+
+
+def _near(h, hs, deg):
+    d = np.abs(((np.asarray(h)[:, None] - np.asarray(hs)[None, :]) + 180.0) % 360.0 - 180.0)
+    return (d <= deg).any(axis=1) if len(hs) else np.zeros(len(h), bool)
+
+
+def gap_scale(c, others, span=GAP_SPAN):
+    """How strong the other labs' moves are against this lab's where both
+    measured, by least squares on the weighted mean move of each `span`-degree
+    span, using only spans where they agree in direction; clamped to
+    GAP_SCALE_RANGE. 1.0 with nothing to compare."""
+    c = np.asarray(c, np.float64).reshape(-1, 4)
+    o = np.asarray(others, np.float64).reshape(-1, 4)
+    num = den = 0.0
+    for s0 in np.arange(0.0, 360.0, span):
+        mc = (c[:, 0] >= s0) & (c[:, 0] < s0 + span)
+        mo = (o[:, 0] >= s0) & (o[:, 0] < s0 + span)
+        if not mc.any() or not mo.any():
+            continue
+        pc = np.average(c[mc, 1], weights=c[mc, 2])
+        po = np.average(o[mo, 1], weights=o[mo, 2])
+        if pc * po <= 0:
+            continue
+        w = min(c[mc, 3].sum(), o[mo, 3].sum())
+        num += w * pc * po
+        den += w * pc * pc
+    if den <= 0:
+        return 1.0
+    return float(np.clip(num / den, *GAP_SCALE_RANGE))
+
+
+def gap_cells(c, others, near=GAP_NEAR):
+    """The cells of `c` at hues no other lab measured (none within `near`
+    degrees), their moves scaled by `gap_scale` (spec/colour-organics.md,
+    revision 2026-11-09 b): a lab of another stock fills only the gap."""
+    c = np.array(c, np.float64, copy=True).reshape(-1, 4)
+    o = np.asarray(others, np.float64).reshape(-1, 4)
+    keep = ~_near(c[:, 0], o[:, 0], near)
+    g = c[keep]
+    g[:, 1] *= gap_scale(c, o)
+    return g
+
+
 def fit_curve(c, lam=1.0, lam0=0.3):
     """The curve's knots (degrees) from cells `c` (centre, move, weight, ...):
     weighted least squares in the render's own Catmull-Rom basis, a

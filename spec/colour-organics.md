@@ -462,3 +462,29 @@ The new table at stored 100: reds +2.1 to +2.6, skin and oranges +1.9 to
 to −2.4, violet and purple ~0, magenta-reds +0.7 to +2.2. Slope round the
 circle 0.84–1.09. A lab's own rendering (the Noritsu roll's skin and greens)
 belongs in a Film Look fitted on that lab, not here.
+
+## Revision 2026-11-09 b: another stock's lab fills only the gap
+
+To measure 240–330° (violet, purple, magenta: 16 samples in the 33 Portra 400
+pairs), the user scanned Portra 160 frames he had lab JPEGs of (R0003: the
+judges' bus and two graffiti shots; the best-matching graffiti shot is kept).
+Paired as before: 2 pairs, 319 coloured samples at 240–330°.
+
+That lab does not agree with the three Portra 400 labs well enough to count
+like them: same direction on reds/oranges (+8.5 / +5.4 vs +1.9..+5.6), blues
+(−8.5 vs −4.9..−9.2) and magenta-reds (+9.2 vs +6.6..+15.1), but 1.5–2× as
+strong, and it turns sky +4.7° where all three measure 0; predicted from the
+others it is barely better than no curve (7.52° vs 8.35°). Another stock and
+an unknown lab, two frames.
+
+So `tools/fit_organics.py --gap-only LAB` (and `organics_fit.gap_cells` /
+`gap_scale`) uses such a lab only at hues no other lab measured (no cell
+within 10°), its moves scaled by the other labs' strength where both measured
+(least squares on 30° span means, agreeing spans only, clamped 0.25–1;
+measured 0.45). Here that is 4 cells at 265, 285, 305, 315° (scaled moves
++3.9 to +7.8°), which the fit's smoothness and pull to 0 take in as +0.5 to
++0.7° at 270–320° (was 0); every other knot moves by ≤ 0.1°. Cross-lab
+prediction is unchanged (060940 1.77, 148684250 2.73, Noritsu 2.54). The gap
+is still essentially unmeasured: Portra 400 frames with violet / purple /
+magenta subjects and lab scans would measure it properly.
+Test: `tests/test_colour_organics_fit_gap.py`.
