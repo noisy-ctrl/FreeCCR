@@ -386,3 +386,24 @@ two-point base; through `adjust_image` (windowed and not, with Channel Levels
 set) a white-point conversion with the map renders as the black-point one,
 and without it differs (the cast fixed); film-stock slopes map back; OpenCL
 parity with the map; `apply_adjustments` hands the look its frame's map.
+
+## Measured 2026-11-09: the Portra 400 Lab look on two more labs
+
+The user sent a Noritsu roll of Portra 400 (16 frames paired with his own
+trichrome scans) and more pairs; 33 pairs in all (lab 060940: 10, lab
+148684250: 7, Noritsu 00003875: 16). CIEDE2000 against each lab scan, each
+frame's own six Channel Levels numbers fitted (what a user does), median of
+the per-frame medians:
+
+| | lab 060940 | lab 148684250 | Noritsu |
+|---|---|---|---|
+| "Portra 400 Lab.cube" (fitted on 9 lab-060940 frames) | 0.74 in sample, 0.87 on a new frame | 1.00 | 1.03 |
+| a look fitted on the Noritsu roll, each frame held out | | | 0.99 |
+| a look fitted on lab 060940 | | | 1.06 |
+| a look fitted on the Noritsu roll | 0.93 | | |
+
+So the labs' Portra 400 renderings agree once each frame's exposure and
+balance are set: a Noritsu look of its own would gain 0.04, under anything
+visible. The cube is left as it is. Where the labs do differ (the Noritsu
+roll leaves skin and oranges alone and turns greens towards cyan) is a few
+degrees of hue, measured in spec/colour-organics.md (revision 2026-11-09).
