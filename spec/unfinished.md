@@ -5,11 +5,11 @@ A running list of what is started but not done, or waiting on something
 remove an entry when it ships.
 
 ## Waiting on the user
-- **Portra 400 Lab look: the second lab's frames** (148684250): 2 of its 3
-  usable frames agree with the look (CIEDE2000 median 0.66, 1.00 with their
-  own Channel Levels), the third doesn't (2.16, it needs −0.5 density). Not
-  added to the fit (one lab's rendering per look); add them if the user
-  wants a both-labs look.
+- **Portra 160 pairs for Colour Organics' missing hues** (2026-11-09): the
+  user's Portra 160 lab JPEGs hold ~2,270 coloured samples at 240–330°
+  (the judges' bus and the skate-park graffiti frames), where 33 Portra 400
+  pairs hold 16. Scanning those negatives would let the curve measure
+  violets, purples and magentas.
 
 ## Parked
 - **Follow the Frame, revision 2's picture finder** (branch
