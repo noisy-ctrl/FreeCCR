@@ -102,6 +102,9 @@ arise here.
 
 ### Radius scaling — "preview simulates the full-res look"
 
+> **Superseded 2026-11-09** by `spec/sharpen-like-output.md`: every render now
+> uses the full-resolution radius in its own pixels (no exaggeration).
+
 A 1 px halo at 6000 px is 0.18 px at 1080 px, i.e. invisible. A faithful
 miniature of the export would therefore show the user nothing, which defeats the
 feature's purpose. So the preview deliberately **exaggerates**:

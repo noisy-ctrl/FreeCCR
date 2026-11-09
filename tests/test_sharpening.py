@@ -94,22 +94,49 @@ def _halo_width(out, img):
     return int((np.abs(out[32].astype(int) - img[32].astype(int)).sum(1) > 0).sum())
 
 
-def test_preview_scale_widens_the_halo_and_native_is_exact():
+def test_scale_is_buffer_pixels_per_full_pixel_with_no_lower_clamp():
+    """spec/sharpen-like-output.md: radius x scale, no exaggeration."""
     img = _edge()
-    native = apply_sharpening(img, 50, scale=1.0)
-    preview = apply_sharpening(img, 50, scale=5.55)
-    assert _halo_width(preview, img) > _halo_width(native, img)
-    # scale below 1 must never SHRINK below the native radius (clamped)
-    np.testing.assert_array_equal(apply_sharpening(img, 50, scale=0.2), native)
-
-
-def test_radius_is_clamped_so_a_small_buffer_cannot_halo_wildly():
-    img = _edge(n=256)
-    huge = apply_sharpening(img, 50, radius=100, scale=50.0)
-    capped = apply_sharpening(img, 50,
-                              radius=SHARPEN_MAX_RADIUS * SHARPEN_RADIUS_DIV,
+    native = apply_sharpening(img, 50, radius=100, scale=1.0)
+    half = apply_sharpening(img, 50, radius=100, scale=0.5)
+    np.testing.assert_array_equal(half, apply_sharpening(img, 50, radius=50, scale=1.0))
+    change = lambda o: np.abs(o.astype(int) - img.astype(int)).sum()
+    assert change(half) < change(native)
+    # a scale above 1 is never a reason to exceed the cap
+    big = apply_sharpening(img, 50, radius=100, scale=50.0)
+    capped = apply_sharpening(img, 50, radius=SHARPEN_MAX_RADIUS * SHARPEN_RADIUS_DIV,
                               scale=1.0)
-    np.testing.assert_array_equal(huge, capped)
+    np.testing.assert_array_equal(big, capped)
+
+
+def test_a_small_render_shows_what_the_full_size_output_gets():
+    """The same frame sharpened at 1/4 size (scale derived by apply_sharpening's
+    caller) matches sharpening at full size then shrinking, for a radius that
+    is several buffer pixels."""
+    import cv2
+    rng = np.random.default_rng(1)
+    base = cv2.GaussianBlur(rng.normal(0.5, 0.1, (512, 512)).astype(np.float32), (0, 0), 3)
+    img = np.repeat((np.clip(base, 0, 1) * 65535).astype(np.uint16)[..., None], 3, 2)
+    full = apply_sharpening(img, 100, radius=100, scale=1.0).astype(np.float32)
+    small_then = cv2.resize(full, (128, 128), interpolation=cv2.INTER_AREA)
+    small = cv2.resize(img, (128, 128), interpolation=cv2.INTER_AREA)
+    sharpened_small = apply_sharpening(small, 100, radius=100, scale=0.25).astype(np.float32)
+    plain = small.astype(np.float32)
+    want = np.std(small_then - plain)
+    got = np.std(sharpened_small - plain)
+    assert 0.8 * want < got < 1.2 * want
+
+
+def test_apply_adjustments_derives_the_scale_from_the_full_size(monkeypatch):
+    from core.ccr_image import CCRImage
+    import core.ccr_image as ci
+    img = CCRImage.__new__(CCRImage)
+    img.original_full_size = (4000, 6000)
+    assert img._sharpen_scale_for(np.zeros((720, 1080, 3))) == pytest.approx(0.18)
+    assert img._sharpen_scale_for(np.zeros((4000, 6000, 3))) == 1.0
+    assert img._sharpen_scale_for(np.zeros((4100, 6100, 3))) == 1.0   # rotated, padded
+    img.original_full_size = None
+    assert img._sharpen_scale_for(np.zeros((720, 1080, 3))) == 1.0
 
 
 def test_radius_slider_25_is_one_native_pixel():

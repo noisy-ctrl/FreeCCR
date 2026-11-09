@@ -1730,9 +1730,9 @@ class SlidersPanel(QWidget):
         # --- Populate Details (sharpening) ---
         # Created LAST so these map to the trailing sharpen_* keys in
         # ADJUSTMENT_KEYS. Amount/Radius default to a VISIBLE 25; Radius 25 is
-        # 1.0 native pixel. The preview exaggerates the radius so the effect is
-        # actually visible at 1080 (spec/sharpening.md); at 100% zoom and on
-        # export it is exact.
+        # 1.0 native pixel. Every render uses the full-resolution radius in its
+        # own pixels, so the view shows what the output gets
+        # (spec/sharpen-like-output.md).
         self.details_section.add_layout(
             self.create_slider("Amount", min_value=0, max_value=100,
                                default_value=self._default_for("sharpen_amount")))
