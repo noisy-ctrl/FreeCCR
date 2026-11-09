@@ -42,6 +42,9 @@ remove an entry when it ships.
   where the Shutter row shows the model the camera reports ("GFX50S II").
 
 ## To check on the user's machine
+- **2026-11-09**: tethered trichrome shots with FreeCCR's names merge again
+  (they were all rejected: name order put BLUE first); "Focus __" after a
+  reset until focus moves.
 - **Capture log and names** (2026-11-08): a USB trichrome Shoot gives
   `R…_RED/GREEN/BLUE.RAF` and a `freeccr-capture-log.jsonl` line; Open on the
   folder groups by the log; the Start window's Roll / Format / Film.
