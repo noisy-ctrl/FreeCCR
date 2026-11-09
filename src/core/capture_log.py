@@ -15,7 +15,9 @@ import time
 LOG_NAME = "freeccr-capture-log.jsonl"
 GRACE_S = 60.0                     # files this long after a shot's end still join it
 COLOUR_ORDER = ("red", "green", "blue")
-WORDS = {"red": "RED", "green": "GREEN", "blue": "BLUE", "white": "WHITE", "bw": "BW"}
+# 1RED / 2GREEN / 3BLUE: by name a shot's files then sort red, green, blue in
+# any app (the user, 2026-11-09; plain RED/GREEN/BLUE sorted blue first)
+WORDS = {"red": "1RED", "green": "2GREEN", "blue": "3BLUE", "white": "WHITE", "bw": "BW"}
 DEFAULT_ROLL = "R0001"
 
 
@@ -33,7 +35,8 @@ def clean_roll(text):
 
 
 def shot_stem(roll, fmt, film, shot, slot):
-    """'R0034_645_Portra400_013_RED'; format and film left out when not set."""
+    """'R0034_645_Portra400_013_1RED' (2GREEN, 3BLUE, WHITE, BW); format and
+    film left out when not set."""
     parts = [clean_roll(roll) or DEFAULT_ROLL]
     for p in (clean(fmt), clean(film)):
         if p:
@@ -43,12 +46,13 @@ def shot_stem(roll, fmt, film, shot, slot):
     return "_".join(parts)
 
 
-_SLOT_RE = re.compile(r"^(.*_\d{3,})_(RED|GREEN|BLUE)(?:_(\d+))?$")
+_SLOT_RE = re.compile(r"^(.*_\d{3,})_[123]?(RED|GREEN|BLUE)(?:_(\d+))?$")
 _SLOT_ORDER = {"RED": 0, "GREEN": 1, "BLUE": 2}
 
 
 def slot_order(name):
-    """For a file FreeCCR named (`..._013_RED`, `..._013_GREEN_1`): (stem up
+    """For a file FreeCCR named (`..._013_1RED`, `..._013_2GREEN_1`, or the
+    older `..._013_RED`): (stem up
     to the shot number, 0/1/2 for red/green/blue, retake number), so a shot
     sorts red, green, blue — by name it is BLUE, GREEN, RED. None for any
     other name."""
@@ -82,7 +86,7 @@ def _shot_from_name(name, roll):
     stem = os.path.splitext(os.path.basename(name))[0]
     if not stem.startswith(roll + "_"):
         return None
-    m = re.search(r"_(\d{3,})_[A-Z]+(?:_\d+)?$", stem)
+    m = re.search(r"_(\d{3,})_[123]?[A-Z]+(?:_\d+)?$", stem)
     return int(m.group(1)) if m else None
 
 
