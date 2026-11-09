@@ -255,6 +255,10 @@ class FocusMeter:
     """The median of the last MEDIAN readings, and the best of those (15 at
     30 a second: half a second, steady enough to read one number)."""
     MEDIAN = 15
+    # Until a steady reading has been this far below the best since the last
+    # reset, the best is only "where it started": the readout shows "__"
+    # rather than a 100 that nothing has earned (the user, 2026-11-09).
+    KNOWN_BELOW = 0.90
 
     def __init__(self):
         self.reset()
@@ -262,13 +266,19 @@ class FocusMeter:
     def reset(self):
         self.recent = []
         self.best = 0.0
+        self.lowest = None
+        self.known = False
 
     def update(self, score):
         self.recent.append(float(score))
         del self.recent[:-self.MEDIAN]
         steady = float(np.median(self.recent))
         self.best = max(self.best, steady)
-        return steady, self.best
+        self.lowest = steady if self.lowest is None else min(self.lowest, steady)
+        if not self.known and self.best > 0 and \
+                self.lowest <= self.KNOWN_BELOW * self.best:
+            self.known = True
+        return steady, self.best, self.known
 
 
 class AreaTracker:

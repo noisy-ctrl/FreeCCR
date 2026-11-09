@@ -188,7 +188,8 @@ def test_processor_sharpness_reads_the_fresh_frame_in_the_area():
     img = _scene(640, 360)
     r = p.process(img, lf.ViewParams(canvas_w=640, canvas_h=360, sharp=True,
                                      sharp_area=(0.25, 0.25, 0.75, 0.75)))
-    score, best = r.sharp
+    score, best, known = r.sharp
+    assert not known                                                # nothing to compare yet
     grey = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     want = lf.sharpness(grey[90:270, 160:480])
     assert score == pytest.approx(want, rel=1e-4) and best == score
@@ -202,6 +203,7 @@ def test_processor_sharpness_reads_the_fresh_frame_in_the_area():
         r = p.process(blurred, lf.ViewParams(canvas_w=640, canvas_h=360, sharp=True,
                                              sharp_area=(0.25, 0.25, 0.75, 0.75)))
     assert r.sharp[0] < 0.5 * r.sharp[1]                           # % of best fell
+    assert r.sharp[2]                                               # now it's known
 
 
 # --------------------------------------------------------------------------- #
@@ -337,8 +339,26 @@ def test_focus_closeness_spreads_the_top():
 def test_the_meter_is_steadied_and_its_best_too():
     m = lf.FocusMeter()
     for v in [10] * 10 + [100, 100] + [10] * 3:     # wild readings
-        steady, best = m.update(v)
-    assert steady == 10 and best == 10
+        steady, best, known = m.update(v)
+    assert steady == 10 and best == 10 and not known
+
+
+def test_the_best_is_known_only_once_focus_has_varied():
+    """The user, 2026-11-09: no 100 after a new frame until focus has moved."""
+    m = lf.FocusMeter()
+    for _ in range(20):
+        assert m.update(50.0)[2] is False                          # steady: unknown
+    for v in [50.5, 49.6, 51.0] * 5:                                # noise isn't a change
+        assert m.update(v)[2] is False
+    for _ in range(15):
+        m.update(40.0)                                              # focus moved
+    assert m.update(40.0)[2] is True
+    m.reset()
+    assert m.update(50.0)[2] is False
+    m = lf.FocusMeter()                                             # starting soft, focusing up
+    for v in [20.0] * 15 + [60.0] * 15:
+        known = m.update(v)[2]
+    assert known
 
 
 def test_the_area_follows_a_small_drift_and_is_capped():
