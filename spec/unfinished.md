@@ -127,3 +127,6 @@ remove an entry when it ships.
   wanted later: a Start option and Show where it acts (plumbed like
   `shadow_lift_shape`). The GPU twin is tested only where OpenCL exists (not
   in this container).
+- Instagram export preset (spec/instagram-export.md, 2026-11-10): to check on
+  his Mac and on Instagram itself: upload a 4:5 export and compare with his old
+  2000 × 2000 uploads. The 3:4 shape depends on Instagram's current grid.

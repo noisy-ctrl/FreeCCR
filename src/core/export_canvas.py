@@ -24,6 +24,12 @@ class Canvas:
     height: int
     long_edge: int
     colour: Tuple[int, int, int] = DEFAULT_COLOUR
+    # The least border round the frame, px (0 = the frame may touch the
+    # canvas's edges, as before), and screen sharpening applied to the frame
+    # after its resize as (amount, radius) in the Details sliders' units
+    # ((0, 0) = none). spec/instagram-export.md
+    margin: int = 0
+    sharpen: Tuple[int, int] = (0, 0)
 
     @property
     def neutral(self) -> bool:
@@ -50,10 +56,13 @@ def placed_size(src_w: int, src_h: int, canvas: Canvas) -> Tuple[int, int]:
     """(w, h) of the frame on the canvas: its long edge at `long_edge`, then
     shrunk to fit if either side would overflow. Never cropped, never 0."""
     src_w, src_h = max(1, int(src_w)), max(1, int(src_h))
+    m = max(0, int(canvas.margin or 0))
+    box_w = max(1, canvas.width - 2 * m)
+    box_h = max(1, canvas.height - 2 * m)
     s = float(canvas.long_edge) / max(src_w, src_h)
-    s = min(s, canvas.width / src_w, canvas.height / src_h)
-    w = max(1, min(canvas.width, int(round(src_w * s))))
-    h = max(1, min(canvas.height, int(round(src_h * s))))
+    s = min(s, box_w / src_w, box_h / src_h)
+    w = max(1, min(box_w, int(round(src_w * s))))
+    h = max(1, min(box_h, int(round(src_h * s))))
     return w, h
 
 
@@ -77,6 +86,12 @@ def compose(rgb_u16: np.ndarray, canvas: Canvas,
     frame = _resize(rgb_u16, w, h)
     if frame.dtype != np.uint16:
         frame = np.clip(frame, 0, 65535).astype(np.uint16)
+    amount, radius = (canvas.sharpen or (0, 0))
+    if amount and radius:
+        # Screen sharpening at the output size, on the frame only, so the
+        # border's edge gets no halo (spec/instagram-export.md).
+        from core.ccr_processor import apply_sharpening
+        frame = apply_sharpening(frame, float(amount), float(radius), 0.0, 1.0)
     x0 = (canvas.width - w) // 2
     y0 = (canvas.height - h) // 2
     channels = rgb_u16.shape[2] if rgb_u16.ndim == 3 else 1

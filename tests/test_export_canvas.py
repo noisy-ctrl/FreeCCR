@@ -213,7 +213,8 @@ _KEYS = ["export/destination", "export/scope", "export/filename_template",
          "export/format", "export/colorspace", "export/jpeg_quality",
          "export/resize", "export/conflict", "export/open_folder",
          "export/hdr_headroom", "export/canvas_on", "export/canvas_w",
-         "export/canvas_h", "export/canvas_long_edge", "export/canvas_colour"]
+         "export/canvas_h", "export/canvas_long_edge", "export/canvas_colour",
+         "export/preset", "export/canvas_margin"]
 
 
 @pytest.fixture

@@ -48,6 +48,20 @@ class ExportPlan:
     canvas: Optional[object] = None
 
 
+# Instagram presets (spec/instagram-export.md): canvas size per shape, JPEG
+# quality, screen sharpening (amount, radius in the Details sliders' units)
+# and the border width a preset starts at.
+INSTAGRAM_PRESETS = (
+    ("instagram_45", "Instagram 4:5 (1080 × 1350)", 1080, 1350),
+    ("instagram_34", "Instagram 3:4 (1080 × 1440)", 1080, 1440),
+    ("instagram_11", "Instagram square (1080 × 1080)", 1080, 1080),
+)
+INSTAGRAM_QUALITY = 95
+INSTAGRAM_SHARPEN = (25, 35)
+INSTAGRAM_MARGIN = 32
+MARGIN_MAX = 500
+
+
 class ExportSettingsDialog(QDialog):
     """
     Modal export configuration dialog. On accept, `self.plan` holds the
@@ -162,6 +176,23 @@ class ExportSettingsDialog(QDialog):
         form = QFormLayout()
         form.setHorizontalSpacing(theme.GAP_BTN)
         form.setVerticalSpacing(theme.GAP_ROW)
+        # Preset (spec/instagram-export.md): an Instagram shape sets and locks
+        # the format, colour space, quality and canvas; "None" = your own.
+        self.preset_combo = QComboBox()
+        self.preset_combo.addItem("None", "")
+        for key, label, _w, _h in INSTAGRAM_PRESETS:
+            self.preset_combo.addItem(label, key)
+        self.preset_combo.setToolTip(
+            "Instagram: a JPEG in sRGB at quality 95, 1080 px wide on a canvas "
+            "of the post's shape (a frame is never cropped), with light "
+            "sharpening for the screen size. Instagram then only recompresses "
+            "it instead of resizing it.")
+        form.addRow("Preset:", self.preset_combo)
+        self.preset_hint = QLabel(
+            "1080 px wide, sRGB, sharpened for the screen.")
+        self.preset_hint.setStyleSheet(f"color: {theme.TEXT_MUTED};")
+        self.preset_hint.setWordWrap(True)
+        form.addRow("", self.preset_hint)
         self.format_combo = QComboBox()
         self.format_combo.addItem("TIFF 16-bit (lossless)", "tiff")
         self.format_combo.addItem("JPEG", "jpeg")
@@ -268,6 +299,14 @@ class ExportSettingsDialog(QDialog):
             "frame's ratio. A frame that would not fit the canvas is shrunk "
             "to fit.")
         canvas_form.addRow("Image long edge:", self.canvas_edge_spin)
+        self.canvas_margin_spin = QSpinBox()
+        self.canvas_margin_spin.setRange(0, MARGIN_MAX)
+        self.canvas_margin_spin.setSuffix(" px")
+        self.canvas_margin_spin.setToolTip(
+            "The least border round the frame. 0 lets the frame reach the "
+            "canvas's edges.")
+        self.canvas_margin_spin.valueChanged.connect(self._schedule_estimate)
+        canvas_form.addRow("Border width:", self.canvas_margin_spin)
         self._canvas_colour = tuple(export_canvas.DEFAULT_COLOUR)
         self.canvas_colour_btn = QPushButton()
         self.canvas_colour_btn.setToolTip("Choose the border colour")
@@ -282,7 +321,8 @@ class ExportSettingsDialog(QDialog):
         canvas_layout.addWidget(canvas_hint)
         layout.addWidget(self.canvas_group)
         self._canvas_inputs = (self.canvas_w_spin, self.canvas_h_spin,
-                               self.canvas_edge_spin, self.canvas_colour_btn)
+                               self.canvas_edge_spin, self.canvas_colour_btn,
+                               self.canvas_margin_spin)
         self._show_canvas_colour()
 
         self.open_folder_checkbox = QCheckBox("Open folder when done")
@@ -363,9 +403,15 @@ class ExportSettingsDialog(QDialog):
         self._canvas_colour = export_canvas.colour_from_hex(
             s.value("export/canvas_colour", "#ffffff", type=str))
         self._show_canvas_colour()
+        self.canvas_margin_spin.setValue(
+            s.value("export/canvas_margin", 0, type=int))
         self.canvas_check.setChecked(s.value("export/canvas_on", False, type=bool))
         self._update_canvas_controls()
         self._update_quality_visibility()
+        preset = self.preset_combo.findData(s.value("export/preset", "", type=str))
+        self.preset_combo.setCurrentIndex(max(0, preset))
+        self.preset_combo.currentIndexChanged.connect(self._on_preset_changed)
+        self._apply_preset()
 
     def _save_settings(self):
         s = self._settings
@@ -378,6 +424,14 @@ class ExportSettingsDialog(QDialog):
             scope = "all"
         s.setValue("export/scope", scope)
         s.setValue("export/filename_template", self.filename_edit.text())
+        s.setValue("export/preset", self._preset_key())
+        s.setValue("export/canvas_margin", self.canvas_margin_spin.value())
+        s.setValue("export/canvas_colour", export_canvas.colour_to_hex(self._canvas_colour))
+        s.setValue("export/conflict", self.conflict_combo.currentData())
+        s.setValue("export/open_folder", self.open_folder_checkbox.isChecked())
+        if self._preset_key():
+            # The preset's values are locked in, not yours: keep your own.
+            return
         s.setValue("export/format", self.format_combo.currentData())
         # Linear merge hides the colour space and forces Original size — don't
         # let those forced values clobber the user's normal-format preferences.
@@ -390,9 +444,6 @@ class ExportSettingsDialog(QDialog):
         s.setValue("export/canvas_w", self.canvas_w_spin.value())
         s.setValue("export/canvas_h", self.canvas_h_spin.value())
         s.setValue("export/canvas_long_edge", self.canvas_edge_spin.value())
-        s.setValue("export/canvas_colour", export_canvas.colour_to_hex(self._canvas_colour))
-        s.setValue("export/conflict", self.conflict_combo.currentData())
-        s.setValue("export/open_folder", self.open_folder_checkbox.isChecked())
 
     # ---------- helpers ----------
 
@@ -411,7 +462,60 @@ class ExportSettingsDialog(QDialog):
         return export_canvas.Canvas(self.canvas_w_spin.value(),
                                     self.canvas_h_spin.value(),
                                     self.canvas_edge_spin.value(),
-                                    tuple(self._canvas_colour))
+                                    tuple(self._canvas_colour),
+                                    margin=self.canvas_margin_spin.value(),
+                                    sharpen=(INSTAGRAM_SHARPEN if self._preset_key()
+                                             else (0, 0)))
+
+    # ---------- preset (spec/instagram-export.md) ----------
+
+    def _preset_key(self) -> str:
+        return self.preset_combo.currentData() or ""
+
+    def _preset(self):
+        key = self._preset_key()
+        return next((p for p in INSTAGRAM_PRESETS if p[0] == key), None)
+
+    def _on_preset_changed(self, _index=0):
+        if not self._preset_key():
+            self._restore_own_settings()
+        self._apply_preset()
+
+    def _restore_own_settings(self):
+        """Back to "None": your own format, colour space, quality and canvas,
+        which a preset never saves over."""
+        s = self._settings
+        for combo, key, default in ((self.format_combo, "export/format", "tiff"),
+                                    (self.colorspace_combo, "export/colorspace", "srgb")):
+            i = combo.findData(s.value(key, default, type=str))
+            if i >= 0:
+                combo.setCurrentIndex(i)
+        self.quality_slider.setValue(s.value("export/jpeg_quality", 92, type=int))
+        self.canvas_w_spin.setValue(s.value("export/canvas_w", export_canvas.DEFAULT_WIDTH, type=int))
+        self.canvas_h_spin.setValue(s.value("export/canvas_h", export_canvas.DEFAULT_HEIGHT, type=int))
+        self.canvas_edge_spin.setValue(
+            s.value("export/canvas_long_edge", export_canvas.DEFAULT_LONG_EDGE, type=int))
+        self.canvas_check.setChecked(s.value("export/canvas_on", False, type=bool))
+
+    def _apply_preset(self):
+        p = self._preset()
+        self.preset_hint.setVisible(p is not None)
+        if p is not None:
+            _key, _label, w, h = p
+            i = self.format_combo.findData("jpeg")
+            if i >= 0:
+                self.format_combo.setCurrentIndex(i)
+            self.colorspace_combo.setCurrentIndex(self.colorspace_combo.findData("srgb"))
+            self.quality_slider.setValue(INSTAGRAM_QUALITY)
+            self.canvas_w_spin.setValue(w)
+            self.canvas_h_spin.setValue(h)
+            self.canvas_edge_spin.setValue(max(w, h))
+            if self.canvas_margin_spin.value() == 0:
+                self.canvas_margin_spin.setValue(INSTAGRAM_MARGIN)
+            self.canvas_check.setChecked(True)
+        self._update_canvas_controls()
+        self._update_quality_visibility()
+        self._schedule_estimate()
 
     def _show_canvas_colour(self):
         hexcode = export_canvas.colour_to_hex(self._canvas_colour)
@@ -443,6 +547,15 @@ class ExportSettingsDialog(QDialog):
         for w in self._canvas_inputs:
             w.setEnabled(on)
         self.resize_combo.setEnabled(not linear and not on)
+        # An Instagram preset locks what it sets; colour and border width
+        # stay yours (spec/instagram-export.md).
+        locked = bool(self._preset_key()) if hasattr(self, "preset_combo") else False
+        for w in (self.format_combo, self.colorspace_combo, self.quality_slider,
+                  self.canvas_check):
+            w.setEnabled(not locked)
+        if locked:
+            for w in (self.canvas_w_spin, self.canvas_h_spin, self.canvas_edge_spin):
+                w.setEnabled(False)
 
     def _is_jpeg_family(self) -> bool:
         return self.format_combo.currentData() in ("jpeg", "hdr_jpeg")
