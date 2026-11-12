@@ -1425,7 +1425,10 @@ class SlidersPanel(QWidget):
         # (ADJUSTMENT_KEYS zip).
         self.highlights_x_slider_layout = self.create_slider("Highlights ⅃")
         self.shadows_x_slider_layout = self.create_slider("Shadows L")
-        self.punch_x_slider_layout = self.create_slider("Contrast L \u2143")
+        # Contrast L ⅃ reaches +-150: beyond 100 the measured table runs a
+        # second pass (x_tones._apply_chunk).
+        self.punch_x_slider_layout = self.create_slider(
+            "Contrast L \u2143", min_value=-150, max_value=150)
         self._xtone_shape = None         # active layer's options (None = default)
         self._xtone_popup = None
         self._xtone_labels = {}
