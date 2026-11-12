@@ -69,15 +69,21 @@ def test_a_preset_sets_and_locks_and_builds_the_plan(tmp_path, monkeypatch, sett
     assert dlg.colorspace_combo.currentData() == "srgb" and not dlg.colorspace_combo.isEnabled()
     assert dlg.quality_slider.value() == 95 and not dlg.quality_slider.isEnabled()
     assert dlg.canvas_check.isChecked() and not dlg.canvas_w_spin.isEnabled()
-    assert dlg.canvas_colour_btn.isEnabled() and dlg.canvas_margin_spin.isEnabled()
-    assert dlg.canvas_margin_spin.value() == ed.INSTAGRAM_MARGIN
+    # the long edge is yours, starting at INSTAGRAM_EDGE_PCT % of the side
+    # it runs along; there is no separate border width
+    assert dlg.canvas_colour_btn.isEnabled() and dlg.canvas_edge_unit.isEnabled()
+    assert dlg.canvas_edge_unit.currentData() == "%"
+    assert dlg.canvas_edge_pct_spin.value() == pytest.approx(ed.INSTAGRAM_EDGE_PCT)
+    assert not hasattr(dlg, "canvas_margin_spin")
     dlg.dest_edit.setText(str(tmp_path / "out"))
     dlg._on_export_clicked()
     p = dlg.plan
     assert p.jpg_output and p.jpg_quality == 95 and p.output_colorspace == "srgb"
     assert p.hdr_headroom is None and p.max_long_side is None
-    assert p.canvas == ec.Canvas(1080, 1350, 1350, (255, 255, 255), margin=32,
-                                 sharpen=ed.INSTAGRAM_SHARPEN)
+    assert p.canvas.long_edge_pct == pytest.approx(ed.INSTAGRAM_EDGE_PCT)
+    assert p.canvas.margin == 0 and p.canvas.sharpen == ed.INSTAGRAM_SHARPEN
+    assert (p.canvas.width, p.canvas.height) == (1080, 1350)
+    assert ec.placed_size(6000, 4000, p.canvas) == (1015, 677)   # 94% of 1080
     # remembered, and your own settings were not overwritten
     s = settings_guard
     assert s.value("export/preset") == "instagram_45"

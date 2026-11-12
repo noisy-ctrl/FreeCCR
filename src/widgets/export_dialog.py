@@ -58,8 +58,11 @@ INSTAGRAM_PRESETS = (
 )
 INSTAGRAM_QUALITY = 95
 INSTAGRAM_SHARPEN = (25, 35)
-INSTAGRAM_MARGIN = 32
-MARGIN_MAX = 500
+# A preset's long edge starts at this % of the canvas side it runs along
+# (about the old 32 px border on a 1080 px side).
+INSTAGRAM_EDGE_PCT = 94.0
+# The % a plain canvas offers when switched to %: the default 1946 on 2000.
+DEFAULT_EDGE_PCT = 97.3
 
 
 class ExportSettingsDialog(QDialog):
@@ -293,20 +296,35 @@ class ExportSettingsDialog(QDialog):
         size_row.addWidget(self.canvas_h_spin)
         size_row.addStretch(1)
         canvas_form.addRow("Canvas:", size_row)
+        # Image long edge, in px or as % of the canvas side it runs along
+        # (spec/export-canvas-border.md, revision 2026-11-12 (2)). One value
+        # box shows at a time; switching the unit converts the value.
         self.canvas_edge_spin = _px_spin(export_canvas.DEFAULT_LONG_EDGE)
-        self.canvas_edge_spin.setToolTip(
-            "The frame's longer side in pixels; the other side follows the "
-            "frame's ratio. A frame that would not fit the canvas is shrunk "
-            "to fit.")
-        canvas_form.addRow("Image long edge:", self.canvas_edge_spin)
-        self.canvas_margin_spin = QSpinBox()
-        self.canvas_margin_spin.setRange(0, MARGIN_MAX)
-        self.canvas_margin_spin.setSuffix(" px")
-        self.canvas_margin_spin.setToolTip(
-            "The least border round the frame. 0 lets the frame reach the "
-            "canvas's edges.")
-        self.canvas_margin_spin.valueChanged.connect(self._schedule_estimate)
-        canvas_form.addRow("Border width:", self.canvas_margin_spin)
+        self.canvas_edge_pct_spin = QDoubleSpinBox()
+        self.canvas_edge_pct_spin.setRange(1.0, 100.0)
+        self.canvas_edge_pct_spin.setDecimals(1)
+        self.canvas_edge_pct_spin.setSingleStep(0.5)
+        self.canvas_edge_pct_spin.setSuffix(" %")
+        self.canvas_edge_pct_spin.setValue(DEFAULT_EDGE_PCT)
+        self.canvas_edge_pct_spin.valueChanged.connect(self._schedule_estimate)
+        self.canvas_edge_unit = QComboBox()
+        self.canvas_edge_unit.addItem("px", "px")
+        self.canvas_edge_unit.addItem("%", "%")
+        self.canvas_edge_unit.currentIndexChanged.connect(self._on_edge_unit_changed)
+        tip = ("The frame's longer side, in pixels or as a percentage of the "
+               "canvas side it runs along (the width for a landscape frame, "
+               "the height for an upright one). The other side follows the "
+               "frame's ratio. A frame that would not fit is shrunk to fit.")
+        for wdg in (self.canvas_edge_spin, self.canvas_edge_pct_spin, self.canvas_edge_unit):
+            wdg.setToolTip(tip)
+        edge_row = QHBoxLayout()
+        edge_row.setSpacing(theme.GAP_BTN)
+        edge_row.addWidget(self.canvas_edge_spin, 1)
+        edge_row.addWidget(self.canvas_edge_pct_spin, 1)
+        edge_row.addWidget(self.canvas_edge_unit)
+        canvas_form.addRow("Image long edge:", edge_row)
+        self._edge_unit_shown = "px"
+        self._show_edge_unit("px")
         self._canvas_colour = tuple(export_canvas.DEFAULT_COLOUR)
         self.canvas_colour_btn = QPushButton()
         self.canvas_colour_btn.setToolTip("Choose the border colour")
@@ -327,8 +345,8 @@ class ExportSettingsDialog(QDialog):
         canvas_layout.addWidget(self.canvas_border_label)
         layout.addWidget(self.canvas_group)
         self._canvas_inputs = (self.canvas_w_spin, self.canvas_h_spin,
-                               self.canvas_edge_spin, self.canvas_colour_btn,
-                               self.canvas_margin_spin)
+                               self.canvas_edge_spin, self.canvas_edge_pct_spin,
+                               self.canvas_edge_unit, self.canvas_colour_btn)
         self._show_canvas_colour()
 
         self.open_folder_checkbox = QCheckBox("Open folder when done")
@@ -404,13 +422,11 @@ class ExportSettingsDialog(QDialog):
         self.open_folder_checkbox.setChecked(s.value("export/open_folder", False, type=bool))
         self.canvas_w_spin.setValue(s.value("export/canvas_w", export_canvas.DEFAULT_WIDTH, type=int))
         self.canvas_h_spin.setValue(s.value("export/canvas_h", export_canvas.DEFAULT_HEIGHT, type=int))
-        self.canvas_edge_spin.setValue(
-            s.value("export/canvas_long_edge", export_canvas.DEFAULT_LONG_EDGE, type=int))
+        self._restore_edge("export/canvas_long_edge", "px",
+                           export_canvas.DEFAULT_LONG_EDGE, DEFAULT_EDGE_PCT)
         self._canvas_colour = export_canvas.colour_from_hex(
             s.value("export/canvas_colour", "#ffffff", type=str))
         self._show_canvas_colour()
-        self.canvas_margin_spin.setValue(
-            s.value("export/canvas_margin", 0, type=int))
         self.canvas_check.setChecked(s.value("export/canvas_on", False, type=bool))
         self._update_canvas_controls()
         self._update_quality_visibility()
@@ -431,14 +447,13 @@ class ExportSettingsDialog(QDialog):
         s.setValue("export/scope", scope)
         s.setValue("export/filename_template", self.filename_edit.text())
         s.setValue("export/preset", self._preset_key())
-        s.setValue("export/canvas_margin", self.canvas_margin_spin.value())
         s.setValue("export/canvas_colour", export_canvas.colour_to_hex(self._canvas_colour))
         s.setValue("export/conflict", self.conflict_combo.currentData())
         s.setValue("export/open_folder", self.open_folder_checkbox.isChecked())
         if self._preset_key():
             # The preset's values are locked in, not yours: keep your own.
             # Its long edge is yours, though, kept per preset.
-            s.setValue(self._preset_edge_key(), self.canvas_edge_spin.value())
+            self._save_edge(self._preset_edge_key())
             return
         s.setValue("export/format", self.format_combo.currentData())
         # Linear merge hides the colour space and forces Original size — don't
@@ -451,7 +466,7 @@ class ExportSettingsDialog(QDialog):
         s.setValue("export/canvas_on", self.canvas_check.isChecked())
         s.setValue("export/canvas_w", self.canvas_w_spin.value())
         s.setValue("export/canvas_h", self.canvas_h_spin.value())
-        s.setValue("export/canvas_long_edge", self.canvas_edge_spin.value())
+        self._save_edge("export/canvas_long_edge")
 
     # ---------- helpers ----------
 
@@ -471,9 +486,62 @@ class ExportSettingsDialog(QDialog):
                                     self.canvas_h_spin.value(),
                                     self.canvas_edge_spin.value(),
                                     tuple(self._canvas_colour),
-                                    margin=self.canvas_margin_spin.value(),
                                     sharpen=(INSTAGRAM_SHARPEN if self._preset_key()
-                                             else (0, 0)))
+                                             else (0, 0)),
+                                    long_edge_pct=(self.canvas_edge_pct_spin.value()
+                                                   if self._edge_unit() == "%"
+                                                   else None))
+
+    # ---------- image long edge: px or % ----------
+
+    def _edge_unit(self) -> str:
+        return self.canvas_edge_unit.currentData() or "px"
+
+    def _show_edge_unit(self, unit):
+        self.canvas_edge_spin.setVisible(unit == "px")
+        self.canvas_edge_pct_spin.setVisible(unit == "%")
+        self._edge_unit_shown = unit
+
+    def _edge_along(self) -> int:
+        """The canvas side the long edge runs along, for converting px <-> %:
+        the width for a landscape frame (the first in scope), else the
+        height."""
+        w, h = self.canvas_w_spin.value(), self.canvas_h_spin.value()
+        indices = self._scope_indices()
+        if indices:
+            shape = export_canvas.frame_shape(ccr_backend.images[indices[0]])
+            if shape and shape[1] > shape[0]:
+                return h
+        return w
+
+    def _on_edge_unit_changed(self, _i=0):
+        unit = self._edge_unit()
+        if unit != self._edge_unit_shown:
+            along = max(1, self._edge_along())
+            if unit == "%":
+                self.canvas_edge_pct_spin.setValue(
+                    100.0 * self.canvas_edge_spin.value() / along)
+            else:
+                self.canvas_edge_spin.setValue(
+                    int(round(along * self.canvas_edge_pct_spin.value() / 100.0)))
+        self._show_edge_unit(unit)
+        self._schedule_estimate()
+
+    def _restore_edge(self, key, unit_default, px_default, pct_default):
+        s = self._settings
+        unit = s.value(f"{key}_unit", unit_default, type=str)
+        self.canvas_edge_spin.setValue(s.value(key, px_default, type=int))
+        self.canvas_edge_pct_spin.setValue(s.value(f"{key}_pct", pct_default, type=float))
+        self.canvas_edge_unit.blockSignals(True)
+        self.canvas_edge_unit.setCurrentIndex(max(0, self.canvas_edge_unit.findData(unit)))
+        self.canvas_edge_unit.blockSignals(False)
+        self._show_edge_unit(self._edge_unit())
+
+    def _save_edge(self, key):
+        s = self._settings
+        s.setValue(key, self.canvas_edge_spin.value())
+        s.setValue(f"{key}_pct", float(self.canvas_edge_pct_spin.value()))
+        s.setValue(f"{key}_unit", self._edge_unit())
 
     # ---------- preset (spec/instagram-export.md) ----------
 
@@ -504,8 +572,8 @@ class ExportSettingsDialog(QDialog):
         self.quality_slider.setValue(s.value("export/jpeg_quality", 92, type=int))
         self.canvas_w_spin.setValue(s.value("export/canvas_w", export_canvas.DEFAULT_WIDTH, type=int))
         self.canvas_h_spin.setValue(s.value("export/canvas_h", export_canvas.DEFAULT_HEIGHT, type=int))
-        self.canvas_edge_spin.setValue(
-            s.value("export/canvas_long_edge", export_canvas.DEFAULT_LONG_EDGE, type=int))
+        self._restore_edge("export/canvas_long_edge", "px",
+                           export_canvas.DEFAULT_LONG_EDGE, DEFAULT_EDGE_PCT)
         self.canvas_check.setChecked(s.value("export/canvas_on", False, type=bool))
 
     def _apply_preset(self):
@@ -520,11 +588,11 @@ class ExportSettingsDialog(QDialog):
             self.quality_slider.setValue(INSTAGRAM_QUALITY)
             self.canvas_w_spin.setValue(w)
             self.canvas_h_spin.setValue(h)
-            # Your long edge for this preset, else as large as fits.
-            self.canvas_edge_spin.setValue(self._settings.value(
-                self._preset_edge_key(), max(w, h), type=int))
-            if self.canvas_margin_spin.value() == 0:
-                self.canvas_margin_spin.setValue(INSTAGRAM_MARGIN)
+            # Your long edge for this preset, else INSTAGRAM_EDGE_PCT % of
+            # the canvas side it runs along.
+            self._restore_edge(self._preset_edge_key(), "%",
+                               int(round(min(w, h) * INSTAGRAM_EDGE_PCT / 100.0)),
+                               INSTAGRAM_EDGE_PCT)
             self.canvas_check.setChecked(True)
         self._update_canvas_controls()
         self._update_quality_visibility()

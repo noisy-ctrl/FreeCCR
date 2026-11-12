@@ -108,3 +108,17 @@ counted), with a note saying why it varies. `export_canvas.borders()` gives
 (left, right, top, bottom) exactly as `compose` places the frame;
 `frame_shape(img)` takes the crop rect and 90° rotation from the preview.
 Tests in `tests/test_export_canvas.py`.
+
+## Revision 2026-11-12 (2): long edge in px or %, no border width
+
+The Border section is a canvas size and an **Image long edge**, entered in
+**px** or **%** (a unit list beside the value). % is of the canvas side the
+frame's long edge runs along: the width for a landscape frame, the height
+for an upright one (`Canvas.long_edge_pct`, `Canvas.long_edge_for`).
+Switching the unit converts the value (using the first frame in scope's
+orientation); both and the unit are remembered (`export/canvas_long_edge`,
+`_pct`, `_unit`). **Border width is removed** from the window: where it sat
+was ambiguous and it fought the long edge. `Canvas.margin` stays in core
+(0 from the UI) so nothing else changes. In % mode the readout leads with the
+long edge in px; in px mode it says when a frame doesn't fit the canvas at
+that size.
