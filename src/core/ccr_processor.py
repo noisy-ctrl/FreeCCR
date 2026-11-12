@@ -425,30 +425,34 @@ def _initialize_opencl_locked():
             // Highlights / Shadows (anchored per-channel tone-region roll-off)
             // Region bumps are zero at both endpoints so pure black and pure
             // white stay anchored; highlights roll off smoothly below white.
+            // Amounts beyond +-100 (the sliders reach +-150) run as a second
+            // pass on the first one's result, so no single pass bends the
+            // curve backwards - matches _hs_passes in the numpy path.
             if (highlights != 0.0f || shadows != 0.0f) {
                 float hs_peak = 0.10546875f;  // peak of x^3*(1-x); normalizes bumps to 1.0
                 float hs_strength = 0.30f;    // max channel offset at the bump peak
-                float h_amt = highlights / 100.0f;
-                float s_amt = shadows / 100.0f;
-
+                float h1 = clamp(highlights, -100.0f, 100.0f);
+                float s1 = clamp(shadows, -100.0f, 100.0f);
                 float xr = r / 65535.0f;
-                float omr = 1.0f - xr;
-                xr = xr + h_amt * hs_strength * (xr*xr*xr) * omr / hs_peak
-                        + s_amt * hs_strength * xr * (omr*omr*omr) / hs_peak;
-
                 float xg = g / 65535.0f;
-                float omg = 1.0f - xg;
-                xg = xg + h_amt * hs_strength * (xg*xg*xg) * omg / hs_peak
-                        + s_amt * hs_strength * xg * (omg*omg*omg) / hs_peak;
-
                 float xb = b / 65535.0f;
-                float omb = 1.0f - xb;
-                xb = xb + h_amt * hs_strength * (xb*xb*xb) * omb / hs_peak
-                        + s_amt * hs_strength * xb * (omb*omb*omb) / hs_peak;
-
-                r = clamp(xr, 0.0f, 1.0f) * 65535.0f;
-                g = clamp(xg, 0.0f, 1.0f) * 65535.0f;
-                b = clamp(xb, 0.0f, 1.0f) * 65535.0f;
+                for (int hs_pass = 0; hs_pass < 2; hs_pass++) {
+                    float h_amt = (hs_pass == 0 ? h1 : highlights - h1) / 100.0f;
+                    float s_amt = (hs_pass == 0 ? s1 : shadows - s1) / 100.0f;
+                    if (h_amt == 0.0f && s_amt == 0.0f) continue;
+                    float omr = 1.0f - xr;
+                    xr = clamp(xr + h_amt * hs_strength * (xr*xr*xr) * omr / hs_peak
+                            + s_amt * hs_strength * xr * (omr*omr*omr) / hs_peak, 0.0f, 1.0f);
+                    float omg = 1.0f - xg;
+                    xg = clamp(xg + h_amt * hs_strength * (xg*xg*xg) * omg / hs_peak
+                            + s_amt * hs_strength * xg * (omg*omg*omg) / hs_peak, 0.0f, 1.0f);
+                    float omb = 1.0f - xb;
+                    xb = clamp(xb + h_amt * hs_strength * (xb*xb*xb) * omb / hs_peak
+                            + s_amt * hs_strength * xb * (omb*omb*omb) / hs_peak, 0.0f, 1.0f);
+                }
+                r = xr * 65535.0f;
+                g = xg * 65535.0f;
+                b = xb * 65535.0f;
             }
 
             // Black/White point (Adobe-like: remap input range)
@@ -3774,16 +3778,41 @@ HS_PEAK = 0.10546875     # peak of x^3 (1 - x): normalises the bumps to peak 1
 HS_STRENGTH = 0.30       # channel offset at the bump peak for a full slider
 
 
+HS_PASS_LIMIT = 100.0    # largest amount one bump pass applies (see below)
+
+
+def _hs_passes(highlights, shadows):
+    """Split Highlights / Shadows (now -150..150) into passes of at most +-100.
+
+    One pass of more than 100 bends the curve backwards: at -150 Highlights a
+    mid-grey would come out darker than a darker grey (a tone reversal around
+    x = 0.5), and +150 Shadows does the same. Applying the excess as a second
+    pass on the first pass's result keeps every pass in the range that was
+    already safe, so the curve stays monotonic, and anything within +-100 is
+    the exact single pass it always was (existing edits render identically).
+    """
+    h1 = float(np.clip(highlights, -HS_PASS_LIMIT, HS_PASS_LIMIT))
+    s1 = float(np.clip(shadows, -HS_PASS_LIMIT, HS_PASS_LIMIT))
+    passes = [(h1, s1)]
+    h2, s2 = float(highlights) - h1, float(shadows) - s1
+    if h2 != 0.0 or s2 != 0.0:
+        passes.append((h2, s2))
+    return passes
+
+
 def _apply_highlights_shadows(img, highlights, shadows):
     """Highlights / Shadows on a float image in 0..65535. Region bumps are zero
     at 0 and 1, so pure black and white stay anchored and highlights roll off
-    smoothly below white. Shared by adjust_image and the OpenCL pre-stage."""
+    smoothly below white. Shared by adjust_image and the OpenCL pre-stage.
+    Amounts beyond +-100 run as a second pass (_hs_passes)."""
     x = img / 65535.0
-    one_minus = 1.0 - x
-    wh = (x ** 3) * one_minus / HS_PEAK            # peaks at x = 0.75
-    ws = x * (one_minus ** 3) / HS_PEAK            # peaks at x = 0.25
-    x = x + (highlights / 100.0) * HS_STRENGTH * wh + (shadows / 100.0) * HS_STRENGTH * ws
-    return np.clip(x, 0.0, 1.0) * 65535.0
+    for h, s in _hs_passes(highlights, shadows):
+        one_minus = 1.0 - x
+        wh = (x ** 3) * one_minus / HS_PEAK            # peaks at x = 0.75
+        ws = x * (one_minus ** 3) / HS_PEAK            # peaks at x = 0.25
+        x = np.clip(x + (h / 100.0) * HS_STRENGTH * wh
+                    + (s / 100.0) * HS_STRENGTH * ws, 0.0, 1.0)
+    return x * 65535.0
 
 
 def _apply_xtones(img, highlights_x, shadows_x, punch_x, xtone_shape):

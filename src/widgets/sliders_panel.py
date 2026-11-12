@@ -236,6 +236,12 @@ def adjustment_label(key):
 def shown_value(key, v):
     """The number a slider SHOWS for a stored value (Colour Organics shows
     half its stored amount; spec/colour-organics.md, revision 2026-10-23)."""
+    if key == "black_point":
+        # Shown reversed: + lifts the blacks (FineSlider, sign=-1).
+        try:
+            return -float(v)
+        except (TypeError, ValueError):
+            return v
     if key == "colour_organics":
         try:
             return float(v) * 0.5
@@ -594,7 +600,7 @@ class ResettableSlider(QSlider):
         if parent_widget and old_value != default:
             for i, slider in enumerate(parent_widget.sliders):
                 if slider is self:
-                    parent_widget.slider_value_labels[i].setText(str(default))
+                    parent_widget.slider_value_labels[i].setText(self.value_text())
                     parent_widget.on_slider_changed()
                     break
         
@@ -683,6 +689,63 @@ class HalfShownSlider(ResettableSlider):
             QSlider.setValue(self, max(self.minimum(), raw - 1))
         event.accept()
 
+
+
+class FineSlider(ResettableSlider):
+    """White Point / Black Point: a narrow range (+-20) in tenths, so the
+    whole travel covers the useful range. The position is ten times the
+    SHOWN number; `sign=-1` shows the stored value reversed (Black Point:
+    the pipeline's + crushes the blacks, the slider's + lifts them, like
+    White Point's + brightens), so stored values and every existing edit
+    keep their meaning. A stored value outside the slider's range (an edit
+    from the old +-100 slider) is kept exactly until this slider itself is
+    moved, so moving another slider never changes it."""
+
+    SCALE = 10
+    WHEEL_STEP = 0.1          # shown units per wheel notch
+
+    def __init__(self, orientation, sign=1):
+        super().__init__(orientation)
+        self.sign = -1 if sign < 0 else 1
+
+    def value_range(self):
+        lo, hi = self.minimum() / self.SCALE, self.maximum() / self.SCALE
+        return (lo, hi) if self.sign > 0 else (-hi, -lo)
+
+    @staticmethod
+    def _tidy(v):
+        v = round(float(v), 1)
+        return int(v) if v.is_integer() else v
+
+    def value(self):
+        raw = QSlider.value(self)
+        exact = getattr(self, "_exact", None)
+        if exact is not None and self._pos_for(exact) == raw:
+            return exact
+        return self._tidy(self.sign * raw / self.SCALE)
+
+    def _pos_for(self, v):
+        pos = int(round(self.sign * float(v) * self.SCALE))
+        return min(max(pos, self.minimum()), self.maximum())
+
+    def setValue(self, v):
+        v = float(v)
+        self._exact = int(v) if v.is_integer() else v
+        QSlider.setValue(self, self._pos_for(v))
+
+    def value_text(self):
+        v = self._tidy(self.sign * self.value())
+        return str(v) if isinstance(v, int) else f"{v:.1f}"
+
+    def wheelEvent(self, event):
+        delta = event.angleDelta().y()
+        step = int(round(self.WHEEL_STEP * self.SCALE))
+        raw = QSlider.value(self)
+        if delta > 0:
+            QSlider.setValue(self, raw + step)
+        elif delta < 0:
+            QSlider.setValue(self, raw - step)
+        event.accept()
 
 class GradientSlider(ResettableSlider):
     """A horizontal slider whose groove is a left->right colour gradient
@@ -1330,10 +1393,17 @@ class SlidersPanel(QWidget):
         # apply_gamma_curve). Sits directly below Brightness; must be created right
         # after it to keep the ADJUSTMENT_KEYS positional zip.
         self.gamma_slider_layout = self.create_slider("Gamma")
-        self.highlights_slider_layout = self.create_slider("Highlights")
-        self.white_point_slider_layout = self.create_slider("White Point")
-        self.shadows_slider_layout = self.create_slider("Shadows")
-        self.black_point_slider_layout = self.create_slider("Black Point")
+        # Highlights / Shadows reach +-150 (beyond 100 the pipeline adds a
+        # second pass, _hs_passes); White / Black Point are fine +-20 sliders
+        # in tenths, Black Point shown reversed so + lifts the blacks.
+        self.highlights_slider_layout = self.create_slider(
+            "Highlights", min_value=-150, max_value=150)
+        self.white_point_slider_layout = self.create_slider(
+            "White Point", min_value=-20, max_value=20, fine=True)
+        self.shadows_slider_layout = self.create_slider(
+            "Shadows", min_value=-150, max_value=150)
+        self.black_point_slider_layout = self.create_slider(
+            "Black Point", min_value=-20, max_value=20, fine=True, fine_sign=-1)
         # Highlights ⅃ / Shadows L / Contrast L ⅃ (keys *_x): tone tools
         # stored as measured 3D tables. Right-click a LABEL for its options
         # (spec/x-tone-tools.md). Created right after Black Point
@@ -1826,7 +1896,7 @@ class SlidersPanel(QWidget):
 
     def create_slider(self, label_text, min_value=-100, max_value=100,
                       default_value=0, gradient=None, half_steps=False,
-                      half_shown=False):
+                      half_shown=False, fine=False, fine_sign=1):
         # `gradient` (a (left, right) colour pair) gives a custom-painted
         # gradient groove — e.g. Temperature blue->amber, Tint green->magenta.
         # `half_steps`: the value moves in halves (the Channel Levels Shift
@@ -1837,6 +1907,9 @@ class SlidersPanel(QWidget):
             slider = HalfStepSlider(Qt.Horizontal)
         elif half_shown:
             slider = HalfShownSlider(Qt.Horizontal)
+        elif fine:
+            # min/max are SHOWN values (FineSlider, White/Black Point).
+            slider = FineSlider(Qt.Horizontal, sign=fine_sign)
         else:
             slider = ResettableSlider(Qt.Horizontal)
         slider.setMinimum(int(round(min_value * slider.SCALE)))
@@ -1844,7 +1917,8 @@ class SlidersPanel(QWidget):
         slider.setValue(default_value)
         slider.reset_value = default_value     # double-click target
         slider.setOrientation(Qt.Horizontal)
-        slider.setTickInterval(max(1, int(round(10 * slider.SCALE))))
+        slider.setTickInterval(max(1, int(round(
+            (1 if fine else 10) * slider.SCALE))))
         slider.setFixedHeight(theme.CONTROL_H)
 
         label = QLabel(label_text)
