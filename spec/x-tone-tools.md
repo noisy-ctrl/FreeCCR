@@ -175,3 +175,15 @@ faint ±100 at 0), Reset. Kept on screen (`place_on_screen`).
 - Why harmonic fill and not fading the guessed region: fading the change by
   distance outside the measured colours created its own gradients and
   doubled the folds.
+
+## Revision 2026-11-12: Contrast L ⅃ to ±150
+
+The user asked for Contrast L ⅃ to reach 150. The tables are measured to
+±100 only, so nothing is extrapolated: past ±100 the rest runs as a SECOND
+pass of the same measured table on the first pass's result
+(`x_tones._apply_chunk`; 150 = 100 then 50, with the same Keep options), still
+evaluated once per setting at the grid's nodes (`_composite`), so a render is
+still one lookup and OpenCL parity is unchanged (the tools run in numpy).
+Within ±100 it is the single pass it always was. A chain of monotone passes
+is monotone; tested on the grey axis at ±120/±130/±150. Highlights ⅃ and
+Shadows L stay ±100.

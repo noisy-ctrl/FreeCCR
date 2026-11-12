@@ -290,7 +290,8 @@ def test_three_sliders_after_black_point(panel):
         # the marks in red (rich text), the name itself plain
         assert lbl.textFormat() == Qt.RichText and "#e5534b" in lbl.text()
         assert lbl.text().startswith(text.split(" ")[0] + " <span")
-        assert slider.value_range() == (-100, 100)
+        # Contrast L ⅃ reaches +-150 (a second pass past 100); the others +-100
+        assert slider.value_range() == ((-150, 150) if key == "punch_x" else (-100, 100))
         assert lbl.contextMenuPolicy() == Qt.CustomContextMenu
         assert "Right-click" in lbl.toolTip() and lbl.toolTip().startswith(text)
 
@@ -440,3 +441,32 @@ def test_an_older_catalog_keeps_its_options():
     a = _areas_from_json([{"settings": {"legacy_shape": dict(opts)}}])
     assert a[0]["settings"] == {"xtone_shape": opts}
 
+
+
+# --- Contrast L ⅃ to +-150 (revision 2026-11-12): a second pass, not an
+# extrapolation ---------------------------------------------------------------
+
+def test_contrast_l_within_100_is_unchanged_by_the_second_pass():
+    x = np.linspace(0, 1, 257, dtype=np.float32)
+    a = et.grey_curve(x, punch_x=100)
+    b = et.grey_curve(x, punch_x=60)
+    assert np.all(np.isfinite(a)) and np.all(np.isfinite(b))
+    # the chain applies exactly one pass up to 100: 60 is not 2 x 30
+    assert not np.allclose(b, et.grey_curve(et.grey_curve(x, punch_x=30), punch_x=30), atol=1e-4)
+
+
+@pytest.mark.parametrize("v", [150, -150, 130, -120])
+def test_contrast_l_past_100_stays_monotone_and_goes_further(v):
+    x = np.linspace(0, 1, 1025, dtype=np.float32)
+    y = et.grey_curve(x, punch_x=v)
+    assert np.all(np.diff(y) >= -1e-5), "tone reversal"
+    full = et.grey_curve(x, punch_x=100 if v > 0 else -100)
+    # further than 100 in the same direction (more change from identity)
+    assert np.abs(y - x).sum() > np.abs(full - x).sum()
+
+
+def test_contrast_l_150_is_100_then_50():
+    x = np.linspace(0, 1, 129, dtype=np.float32)
+    y = et.grey_curve(x, punch_x=150)
+    two = et.grey_curve(et.grey_curve(x, punch_x=100), punch_x=50)
+    assert np.allclose(y, two, atol=4e-3)      # one grid lookup vs two

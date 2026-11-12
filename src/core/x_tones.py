@@ -147,9 +147,16 @@ def _apply_chunk(u, hx, sx, px, shape, n):
         if shape["sx_keep"]:
             d *= _keep_black(luma, shape.get("_kb", KEEP_BLACK_TO))
         out += d
-    if px:
+    # Contrast L ⅃ reaches +-150 (spec/x-tone-tools.md, revision 2026-11-12):
+    # the table is measured to +-100, so the rest is a SECOND pass on the
+    # first pass's result, never an extrapolation. Within +-100 it is the one
+    # pass it always was.
+    first = float(np.clip(px, -100.0, 100.0)) if px else 0.0
+    for amount in (first, (float(px) - first) if px else 0.0):
+        if not amount:
+            continue
         v = np.clip(out, 0.0, 1.0)
-        d = _lookup(_grid("px", px), v, n)
+        d = _lookup(_grid("px", amount), v, n)
         if shape["px_keep_black"] or shape["px_keep_white"]:
             lv = (v @ _LUMA)[:, None]
             if shape["px_keep_black"]:
