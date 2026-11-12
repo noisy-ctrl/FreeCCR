@@ -1,5 +1,6 @@
-"""Auto Radius (spec/auto-sharpen-radius.md): measured on synthetic scans
-whose edge blur and grain size are known, and the Details button."""
+"""Auto Radius (spec/auto-sharpen-radius.md, revision b: sized to the grain):
+measured on synthetic scans whose grain size is known, and the Details
+button."""
 import os
 import sys
 
@@ -46,62 +47,56 @@ def test_radius_div_matches_the_sharpening():
     assert ar.RADIUS_DIV == SHARPEN_RADIUS_DIV
 
 
-@pytest.mark.parametrize("se", [0.6, 0.9, 1.3])
-def test_edge_blur_is_recovered(se):
-    res = ar.measure(scene(se, 0.7, seed=int(se * 10)))
-    assert res.sigma_edge == pytest.approx(se, rel=0.15)
-    assert res.edges >= ar.EDGES_MIN
-
-
 @pytest.mark.parametrize("sg", [0.6, 1.0, 1.6])
 def test_grain_size_is_recovered(sg):
     lum = ar.luma_region(scene(1.0, sg, seed=int(sg * 10) + 1))
-    est, noise = ar.grain_sigma(lum)
-    assert est == pytest.approx(sg, rel=0.25) and noise > 0
+    est, noise, tiles = ar.grain_sigma(lum)
+    assert est == pytest.approx(sg, rel=0.25) and noise > 0 and tiles >= ar.TILES_MIN // 2
 
 
-def test_fine_edges_set_the_radius():
-    res = ar.measure(scene(0.7, 0.8, seed=11))
-    assert res.limited_by == "edges"
-    assert res.radius_px == pytest.approx(2 * res.sigma_edge)
-    assert res.slider == int(round(res.radius_px * ar.RADIUS_DIV))
-
-
-def test_coarse_grain_holds_the_radius_back():
-    res = ar.measure(scene(1.2, 0.55, seed=12))
+@pytest.mark.parametrize("sg", [0.6, 0.9, 1.2])
+def test_radius_is_sized_to_the_grain(sg):
+    res = ar.measure(scene(1.0, sg, seed=int(sg * 10) + 2))
     assert res.limited_by == "grain"
-    assert res.radius_px == pytest.approx(3 * res.sigma_grain, rel=1e-6)
-    assert res.radius_px < 2 * res.sigma_edge
-    assert "held back by the grain" in res.reason
+    assert res.radius_px == pytest.approx(ar.RADIUS_PER_GRAIN * res.sigma_grain)
+    assert res.radius_px == pytest.approx(ar.RADIUS_PER_GRAIN * sg, rel=0.25)
+    assert res.slider == int(round(res.radius_px * ar.RADIUS_DIV))
+    assert "sized to the grain" in res.reason
 
 
-def test_sub_pixel_noise_sets_no_grain_limit():
+def test_edges_do_not_decide_it():
+    """Same grain, very different edge blur: the same radius."""
+    a = ar.measure(scene(0.6, 0.8, seed=21))
+    b = ar.measure(scene(2.5, 0.8, seed=21))
+    assert a.slider == pytest.approx(b.slider, abs=3)
+
+
+def test_sub_pixel_grain_gets_the_smallest_useful_radius():
     res = ar.measure(scene(0.8, 0, seed=13, white=True))
-    assert res.sigma_grain is None and res.limited_by == "edges"
+    assert res.limited_by == "fine"
+    assert res.slider == int(round(ar.RADIUS_MIN_PX * ar.RADIUS_DIV))
+    assert "finer than a pixel" in res.reason
 
 
-def test_soft_frame_is_capped():
-    res = ar.measure(scene(3.5, 1.6, seed=14))
-    assert res.limited_by == "cap" and res.slider == int(ar.RADIUS_MAX_PX * ar.RADIUS_DIV)
+def test_very_coarse_grain_is_capped():
+    res = ar.measure(scene(1.0, 2.6, seed=14))
+    assert res.limited_by == "cap"
+    assert res.slider == int(round(ar.RADIUS_MAX_PX * ar.RADIUS_DIV))
 
 
-def test_out_of_focus_half_does_not_pull_it_up():
-    mixed = scene(0.8, 0.7, seed=15, soft_right=3.0)
-    assert ar.measure(mixed).sigma_edge == pytest.approx(0.8, rel=0.15)
-
-
-def test_flat_frame_reports_too_few_edges():
-    rng = np.random.default_rng(1)
-    flat = np.full((1200, 1200, 3), 0.4, np.float32) + rng.normal(0, 0.01, (1200, 1200, 3)).astype(np.float32)
-    res = ar.measure(flat)
-    assert res.slider is None and "Not enough" in res.reason
+def test_no_smooth_area_changes_nothing():
+    rng = np.random.default_rng(2)
+    busy = rng.random((300, 300, 3)).astype(np.float32)   # too small for 12 tiles
+    res = ar.measure(busy)
+    assert res.slider is None and "smooth areas" in res.reason
 
 
 def test_a_smaller_decode_is_rescaled_to_full_resolution():
-    img = scene(0.8, 0.7, seed=17)
+    img = scene(1.0, 0.7, seed=17)
     a = ar.measure(img)
     b = ar.measure(img, full_long=2 * img.shape[0])
-    assert b.radius_px == pytest.approx(min(2 * a.radius_px, 2 * ar.RADIUS_MAX_PX))
+    assert b.sigma_grain == pytest.approx(2 * a.sigma_grain)
+    assert b.radius_px == pytest.approx(min(2 * a.radius_px, ar.RADIUS_MAX_PX))
 
 
 # --- the Details button ------------------------------------------------------
@@ -149,7 +144,7 @@ def _slider(p, key):
 def test_auto_sets_radius_only_as_one_undo_step(panel, monkeypatch):
     p, img = panel
     amount = _slider(p, "sharpen_amount").value()
-    res = ar.RadiusResult(1.64, 41, 0.82, 0.65, 300, "edges", "Auto Radius 41 (1.6 px): …")
+    res = ar.RadiusResult(1.64, 41, 0.82, 40, "grain", "Auto Radius 41 (1.6 px): sized to the grain (0.82 px).")
     monkeypatch.setattr(type(p), "_measure_radius", staticmethod(lambda _img: res))
     pushes = []
     monkeypatch.setattr(img, "push_undo_state", lambda *a, **k: pushes.append(1))
@@ -165,7 +160,7 @@ def test_a_failed_measure_changes_nothing(panel, monkeypatch):
     p, img = panel
     before = _slider(p, "sharpen_radius").value()
     monkeypatch.setattr(type(p), "_measure_radius",
-                        staticmethod(lambda _img: ar.RadiusResult(None, None, reason="Not enough clean edges to measure (3).")))
+                        staticmethod(lambda _img: ar.RadiusResult(None, None, reason="Not enough smooth areas to measure the grain in.")))
     p._on_auto_radius()
     assert _slider(p, "sharpen_radius").value() == before
     assert "sharpen_radius" not in img.adjustment_settings
@@ -191,5 +186,5 @@ def test_measure_image_reads_a_copy_at_full_resolution(tmp_path):
     img = CCRImage(path)
     before = dict(img.__dict__)
     res = ar.measure_image(img)
-    assert res.edges > 0
+    assert res.tiles > 0
     assert img.__dict__.keys() == before.keys()

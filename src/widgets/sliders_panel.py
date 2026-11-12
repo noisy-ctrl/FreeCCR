@@ -1848,9 +1848,10 @@ class SlidersPanel(QWidget):
         # Amount and Masking get the same gap, so the three sliders line up.
         amount_row.addSpacing(auto_w)
         self.auto_radius_btn.setToolTip(
-            "Measure this frame at full resolution and set Radius: matched to "
-            "how soft its sharpest edges are, held back where the grain is "
-            "coarse. Amount and Masking stay yours.")
+            "Measure this frame's grain at full resolution and set Radius to "
+            "its size, so the grain comes out crisp as in a lab scan. Amount "
+            "and Masking stay yours; keep Masking low, as Masking limits "
+            "sharpening to edges.")
         self.auto_radius_btn.clicked.connect(self._on_auto_radius)
         radius_row.addWidget(self.auto_radius_btn, alignment=Qt.AlignVCenter)
         self.details_section.add_layout(radius_row)

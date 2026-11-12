@@ -1,8 +1,10 @@
-"""Auto Radius for the Details sharpening (spec/auto-sharpen-radius.md).
+"""Auto Radius for the Details sharpening (spec/auto-sharpen-radius.md,
+revision 2026-11-12 b: sized to the GRAIN, so it comes out crisp as in a lab
+scan; edges no longer decide it).
 
-Measures, on a full-resolution scan, how soft the sharpest edges are (σe) and
-how large the grain is (σg), and turns them into an unsharp-mask radius in
-full-resolution pixels. numpy + OpenCV only; Qt-free.
+Measures, on a full-resolution scan, how large the grain is (σg) and turns it
+into an unsharp-mask radius in full-resolution pixels. numpy + OpenCV only;
+Qt-free.
 """
 from dataclasses import dataclass
 from typing import Optional
@@ -11,20 +13,6 @@ import cv2
 import numpy as np
 
 REGION_MAX = 3000          # px: the analysed region's side at most
-SMOOTH_SIGMA = 1.0         # px: smoothing before the gradient (removed after)
-EDGE_TOP = 0.003           # strongest share of pixels taken as edge candidates
-EDGE_MAX = 4000            # candidates examined at most
-PROFILE_HALF = 8.0         # px either side of the edge
-PROFILE_STEP = 0.5
-PLATEAU = (5.0, 8.0)       # |t| range of the plateaus
-PLATEAU_FLAT = 0.12        # plateau std <= this share of the step
-STEP_OVER_GRAIN = 8.0      # step >= this x the grain's std
-MONOTONE_TOL = 0.05        # share of the step a profile may fall back
-EDGE_LOW_PCT = 20.0        # the sharp group: edges within EDGE_GROUP x the
-EDGE_GROUP = 1.5           # 20th percentile; their median is sigma_e
-EDGES_MIN = 25
-RISE_TO_SIGMA = 2.563      # 10-90 % rise of a Gaussian-blurred step / sigma
-
 TILE = 64
 HIGHPASS_SIGMA = 6.0
 FLAT_SHARE = 0.15
@@ -37,9 +25,12 @@ GRAIN_MIN_SIGMA = 0.45     # px: below this the noise is (sub-)pixel
 GRAIN_GAIN = 1.21
 GRAIN_OFFSET = 0.07
 
-MASK_SIGMA_PER_GRAIN = 1.5  # mask sigma beyond this x grain carries clumps
+# The unsharp mask's sigma (radius / 2) is set to the grain's own sigma: the
+# high-pass then lifts detail at the grain's scale, so grain comes out crisp,
+# and adds little halo to larger edges.
+RADIUS_PER_GRAIN = 2.0
 RADIUS_MIN_PX = 0.5
-RADIUS_MAX_PX = 2.5
+RADIUS_MAX_PX = 4.0         # the Radius slider's own maximum (100)
 RADIUS_DIV = 25.0          # = ccr_processor.SHARPEN_RADIUS_DIV (tested)
 
 
@@ -47,10 +38,9 @@ RADIUS_DIV = 25.0          # = ccr_processor.SHARPEN_RADIUS_DIV (tested)
 class RadiusResult:
     radius_px: Optional[float]
     slider: Optional[int]
-    sigma_edge: Optional[float] = None
     sigma_grain: Optional[float] = None
-    edges: int = 0
-    limited_by: str = ""        # "edges" | "grain" | "cap" | "floor"
+    tiles: int = 0
+    limited_by: str = ""        # "grain" | "fine" (sub-pixel) | "cap" | "floor"
     reason: str = ""
 
 
@@ -79,8 +69,8 @@ def luma_region(raw, crop_rect=None, region_max=REGION_MAX):
 
 
 def grain_sigma(lum):
-    """(σg px or None, the grain's std) from the flattest tiles' high-pass
-    autocorrelation."""
+    """(σg px or None, the grain's std, tiles used) from the flattest tiles'
+    high-pass autocorrelation."""
     hp = lum - cv2.GaussianBlur(lum, (0, 0), HIGHPASS_SIGMA)
     low = cv2.GaussianBlur(lum, (0, 0), 4.0)
     gx = cv2.Sobel(low, cv2.CV_32F, 1, 0)
@@ -94,7 +84,7 @@ def grain_sigma(lum):
             if 0.03 < m < 0.95:
                 tiles.append((float(energy[y:y + TILE, x:x + TILE].mean()), y, x))
     if len(tiles) < TILES_MIN:
-        return None, float(hp.std())
+        return None, float(hp.std()), 0
     tiles.sort()
     keep = tiles[:max(TILES_MIN, int(len(tiles) * FLAT_SHARE))]
     win = np.outer(np.hanning(TILE), np.hanning(TILE)).astype(np.float32)
@@ -123,98 +113,44 @@ def grain_sigma(lum):
         halves.append(k - 1 + (a0 - 0.5) / max(a0 - a1, 1e-6))
     noise = float(np.median(stds)) if stds else float(hp.std())
     if len(halves) < TILES_MIN // 2:
-        return None, noise
+        return None, noise, len(halves)
     raw_sigma = float(np.median(halves)) / HALF_TO_SIGMA
-    return GRAIN_GAIN * raw_sigma + GRAIN_OFFSET, noise
-
-
-def edge_sigmas(lum, noise):
-    """σ (px) of the accepted edges, each from its 10-90 % rise."""
-    sm = cv2.GaussianBlur(lum, (0, 0), SMOOTH_SIGMA)
-    gy, gx = np.gradient(sm)
-    mag = np.hypot(gx, gy)
-    b = int(PROFILE_HALF) + 2
-    mag[:b], mag[-b:], mag[:, :b], mag[:, -b:] = 0, 0, 0, 0
-    thr = float(np.quantile(mag, 1.0 - EDGE_TOP))
-    if thr <= 0:
-        return np.array([])
-    peak = cv2.dilate(mag, np.ones((5, 5), np.uint8))
-    ys, xs = np.nonzero((mag >= thr) & (mag >= peak))
-    if not ys.size:
-        return np.array([])
-    order = np.argsort(-mag[ys, xs])[:EDGE_MAX]
-    ys, xs = ys[order], xs[order]
-    nx = gx[ys, xs] / mag[ys, xs]
-    ny = gy[ys, xs] / mag[ys, xs]
-    t = np.arange(-PROFILE_HALF, PROFILE_HALF + 1e-6, PROFILE_STEP, dtype=np.float32)
-    mx = (xs[:, None] + nx[:, None] * t[None, :]).astype(np.float32)
-    my = (ys[:, None] + ny[:, None] * t[None, :]).astype(np.float32)
-    prof = cv2.remap(sm, mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
-    lo_m = (t <= -PLATEAU[0]) & (t >= -PLATEAU[1])
-    hi_m = (t >= PLATEAU[0]) & (t <= PLATEAU[1])
-    lo, hi = prof[:, lo_m], prof[:, hi_m]
-    a, c = lo.mean(axis=1), hi.mean(axis=1)
-    step = c - a
-    ok = (step > STEP_OVER_GRAIN * max(noise, 1e-6))
-    ok &= (lo.std(axis=1) <= PLATEAU_FLAT * step) & (hi.std(axis=1) <= PLATEAU_FLAT * step)
-    mid = prof[:, (t > -PLATEAU[0]) & (t < PLATEAU[0])]
-    run_max = np.maximum.accumulate(mid, axis=1)
-    ok &= ((run_max - mid).max(axis=1) <= MONOTONE_TOL * step)
-    if not ok.any():
-        return np.array([])
-    p = (prof[ok] - a[ok, None]) / step[ok, None]
-    sig = []
-    for row in p:
-        i10 = np.flatnonzero(row >= 0.1)
-        i90 = np.flatnonzero(row >= 0.9)
-        if not i10.size or not i90.size or i10[0] == 0 or i90[0] == 0:
-            continue
-        def cross(i, lvl):
-            r0, r1 = row[i - 1], row[i]
-            return t[i - 1] + (lvl - r0) / max(r1 - r0, 1e-6) * PROFILE_STEP
-        d = cross(i90[0], 0.9) - cross(i10[0], 0.1)
-        s = d / RISE_TO_SIGMA
-        sig.append(np.sqrt(max(s * s - SMOOTH_SIGMA ** 2, 0.09)))
-    return np.asarray(sig, dtype=np.float64)
+    return GRAIN_GAIN * raw_sigma + GRAIN_OFFSET, noise, len(halves)
 
 
 def measure(raw, crop_rect=None, full_long=None) -> RadiusResult:
-    """The Auto Radius for the scan `raw` (full resolution). `full_long` is
-    the frame's full-resolution long side when `raw` was decoded at another
-    size: the radius is rescaled to full-resolution pixels."""
+    """The Auto Radius for the scan `raw` (full resolution): the grain's own
+    size. `full_long` is the frame's full-resolution long side when `raw` was
+    decoded at another size: the radius is rescaled to full-resolution
+    pixels. Grain finer than GRAIN_MIN_SIGMA gets the smallest useful radius;
+    no smooth area to measure in changes nothing (slider None)."""
     lum = luma_region(raw, crop_rect)
-    sg, noise = grain_sigma(lum)
-    if sg is not None and sg < GRAIN_MIN_SIGMA:
-        sg = None
-    sig = edge_sigmas(lum, noise)
-    if sig.size < EDGES_MIN:
-        return RadiusResult(None, None, None, sg, int(sig.size), "",
-                            f"Not enough clean edges to measure ({sig.size}).")
-    # The sharp group: one blur level spreads about its true value (single
-    # edges are noisy), so its MEDIAN is the estimate; wider, out-of-focus
-    # edges are left out by the cut at EDGE_GROUP x the 20th percentile.
-    low = float(np.percentile(sig, EDGE_LOW_PCT))
-    se = float(np.median(sig[sig <= EDGE_GROUP * low]))
-    r, limited = 2.0 * se, "edges"
-    if sg is not None and 2.0 * MASK_SIGMA_PER_GRAIN * sg < r:
-        r, limited = 2.0 * MASK_SIGMA_PER_GRAIN * sg, "grain"
-    if r > RADIUS_MAX_PX:
-        r, limited = RADIUS_MAX_PX, "cap"
-    elif r < RADIUS_MIN_PX:
-        r, limited = RADIUS_MIN_PX, "floor"
+    sg, _noise, tiles = grain_sigma(lum)
+    if sg is None:
+        return RadiusResult(None, None, None, tiles, "",
+                            "Not enough smooth areas to measure the grain in.")
     scale = 1.0
     long_side = max(np.asarray(raw).shape[:2])
     if full_long and long_side and full_long != long_side:
         scale = float(full_long) / float(long_side)
-    r *= scale
-    slider = int(round(min(max(r, RADIUS_MIN_PX), RADIUS_MAX_PX) * RADIUS_DIV))
-    grain = f"grain {sg * scale:.2f} px" if sg is not None else "grain finer than a pixel"
-    why = {"edges": "", "grain": " (held back by the grain)",
-           "cap": " (capped: the edges are very soft)", "floor": ""}[limited]
-    return RadiusResult(r, slider, se * scale, None if sg is None else sg * scale,
-                        int(sig.size), limited,
-                        f"Auto Radius {slider} ({slider / RADIUS_DIV:.1f} px): "
-                        f"edges {se * scale:.2f} px, {grain}{why}.")
+    sg_full = sg * scale
+    if sg < GRAIN_MIN_SIGMA:
+        r, limited = RADIUS_MIN_PX * scale, "fine"
+    else:
+        r, limited = RADIUS_PER_GRAIN * sg_full, "grain"
+    if r > RADIUS_MAX_PX:
+        r, limited = RADIUS_MAX_PX, "cap"
+    elif r < RADIUS_MIN_PX:
+        r, limited = RADIUS_MIN_PX, "floor"
+    slider = int(round(r * RADIUS_DIV))
+    why = {"grain": f"sized to the grain ({sg_full:.2f} px)",
+           "fine": "grain finer than a pixel at this scan resolution: the "
+                   "smallest useful radius",
+           "cap": f"capped: the grain is very coarse ({sg_full:.2f} px)",
+           "floor": f"sized to the grain ({sg_full:.2f} px), at the smallest "
+                    f"useful radius"}[limited]
+    return RadiusResult(r, slider, sg_full, tiles, limited,
+                        f"Auto Radius {slider} ({slider / RADIUS_DIV:.1f} px): {why}.")
 
 
 def measure_image(img) -> RadiusResult:
