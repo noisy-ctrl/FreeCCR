@@ -73,3 +73,34 @@ applies when grain is coarse; white noise gives no grain limit; a flat frame
 reports too few edges; the slider value rounds radius × 25; an out-of-focus
 scene is capped at 2.5 px. Panel: Auto sets Radius with one undo step and
 leaves Amount alone.
+
+
+## Revision 2026-11-12 b: sized to the grain
+
+The user: "auto radius should be optimum sizes to sharpen grain and not other
+edges … I want sharpening to resemble lab scans". The first version matched
+the radius to the edge blur and only used the grain as a ceiling, the
+opposite. Now:
+
+- **Radius = 2 · σg** (`RADIUS_PER_GRAIN`): the unsharp mask's σ (radius / 2)
+  equals the grain's own σ, so the high-pass lifts detail at the grain's
+  scale (crisp grain) and adds little halo to larger edges. Edges are no
+  longer measured; the edge section above no longer applies.
+- Grain finer than 0.45 px (not resolved at this scan resolution): the
+  smallest useful radius, 0.5 px (slider 12), said so.
+- Clamped 0.5–4 px (the slider's own range; the old 2.5 px cap guarded soft
+  edges, which no longer decide it); rescaled to full-resolution pixels.
+- No smooth area to measure in (fewer than 12 usable tiles): nothing changes.
+- `RadiusResult(radius_px, slider, sigma_grain, tiles, limited_by, reason)`,
+  limited_by "grain" | "fine" | "cap" | "floor".
+- The tooltip says Masking limits sharpening to edges, so keep it low for the
+  grain look.
+
+Tests: grain size recovered within 25 % (σ 0.6–1.6 px); radius = 2 σg within
+25 % of the truth; the same grain under very different edge blur gives the
+same radius (± 3); sub-pixel grain → 0.5 px; very coarse grain → cap; no
+smooth area → unchanged; rescaling.
+
+Follow-up (not built): fit Amount and Radius to the user's own lab scans of
+the same negatives (the grain's spectrum in the lab scan against FreeCCR's),
+so the sharpening matches a lab's, not just the grain's size.
