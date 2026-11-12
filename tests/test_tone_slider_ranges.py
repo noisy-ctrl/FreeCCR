@@ -27,23 +27,22 @@ def _single_pass(img, h, s):
 
 
 @pytest.mark.parametrize("h,s", [(100, 0), (-100, 0), (0, 100), (0, -100),
-                                 (37, -62), (-100, 100)])
-def test_within_100_is_unchanged(h, s):
+                                 (37, 0), (0, -62)])
+def test_one_slider_within_100_is_unchanged(h, s):
     img = _ramp()
     assert np.array_equal(cp._apply_highlights_shadows(img, h, s),
                           _single_pass(img, h, s))
 
 
-# Opposite-sign pairs (Highlights down + Shadows up) are left out: at full
-# strength together they already fold mid-greys at +-100, before this change.
 @pytest.mark.parametrize("h,s", [(-150, 0), (150, 0), (0, 150), (0, -150),
-                                 (150, 150), (-150, -150)])
+                                 (150, 150), (-150, -150), (-150, 150),
+                                 (150, -150), (-100, 100), (-70, 70)])
 def test_150_stays_monotonic(h, s):
     y = cp._apply_highlights_shadows(_ramp(), h, s)[0, :, 0]
     assert np.all(np.diff(y) >= -1e-3), "tone reversal"
     # The single pass at these amounts is NOT monotonic for the cases that
     # used to fold - the reason for the second pass.
-    if (h, s) in ((-150, 0), (0, 150)):
+    if (h, s) in ((-150, 0), (0, 150), (-100, 100)):
         y1 = _single_pass(_ramp(), h, s)[0, :, 0]
         assert np.any(np.diff(y1) < -1.0)
 

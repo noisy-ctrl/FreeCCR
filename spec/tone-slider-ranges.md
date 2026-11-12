@@ -9,7 +9,8 @@
 
 ## Non-goals
 - No change to Highlights ⅃ / Shadows L / Contrast L ⅃.
-- No change to what any stored value renders.
+- No change to what any stored value renders, except edits that combine
+  Highlights and Shadows (see Processing).
 
 ## Processing
 - Highlights / Shadows: one bump pass beyond ±100 folds the curve (−150
@@ -17,8 +18,11 @@
   Shadows likewise). Amounts beyond ±100 therefore run as a **second pass**
   on the first pass's result (`_hs_passes`, mirrored in the OpenCL kernel).
   Within ±100 the result is byte-identical to before.
-- Known, unchanged: Highlights −100 with Shadows +100 *together* already
-  folds mid-greys in a single pass (min slope −0.42). Not addressed here.
+- Highlights −100 with Shadows +100 *together* already folded mid-greys in
+  a single pass (min slope −0.42). Fixed by running Shadows and Highlights
+  as separate passes (Shadows first). Edits that use only one of the two
+  within ±100 are byte-identical; edits that use both render slightly
+  differently (and no longer fold).
 - White / Black Point maths unchanged; they already accept fractional values.
 
 ## UI / data model

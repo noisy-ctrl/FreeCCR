@@ -425,9 +425,9 @@ def _initialize_opencl_locked():
             // Highlights / Shadows (anchored per-channel tone-region roll-off)
             // Region bumps are zero at both endpoints so pure black and pure
             // white stay anchored; highlights roll off smoothly below white.
-            // Amounts beyond +-100 (the sliders reach +-150) run as a second
-            // pass on the first one's result, so no single pass bends the
-            // curve backwards - matches _hs_passes in the numpy path.
+            // Shadows then Highlights as separate passes, each split into
+            // steps of at most +-100, so no pass folds the curve - matches
+            // _hs_passes in the numpy path (the sliders reach +-150).
             if (highlights != 0.0f || shadows != 0.0f) {
                 float hs_peak = 0.10546875f;  // peak of x^3*(1-x); normalizes bumps to 1.0
                 float hs_strength = 0.30f;    // max channel offset at the bump peak
@@ -436,9 +436,9 @@ def _initialize_opencl_locked():
                 float xr = r / 65535.0f;
                 float xg = g / 65535.0f;
                 float xb = b / 65535.0f;
-                for (int hs_pass = 0; hs_pass < 2; hs_pass++) {
-                    float h_amt = (hs_pass == 0 ? h1 : highlights - h1) / 100.0f;
-                    float s_amt = (hs_pass == 0 ? s1 : shadows - s1) / 100.0f;
+                for (int hs_pass = 0; hs_pass < 4; hs_pass++) {
+                    float s_amt = (hs_pass == 0 ? s1 : hs_pass == 1 ? shadows - s1 : 0.0f) / 100.0f;
+                    float h_amt = (hs_pass == 2 ? h1 : hs_pass == 3 ? highlights - h1 : 0.0f) / 100.0f;
                     if (h_amt == 0.0f && s_amt == 0.0f) continue;
                     float omr = 1.0f - xr;
                     xr = clamp(xr + h_amt * hs_strength * (xr*xr*xr) * omr / hs_peak
@@ -3782,21 +3782,26 @@ HS_PASS_LIMIT = 100.0    # largest amount one bump pass applies (see below)
 
 
 def _hs_passes(highlights, shadows):
-    """Split Highlights / Shadows (now -150..150) into passes of at most +-100.
+    """Highlights / Shadows (-150..150) as a list of (h, s) bump passes, each
+    of which keeps the tone curve monotonic.
 
-    One pass of more than 100 bends the curve backwards: at -150 Highlights a
-    mid-grey would come out darker than a darker grey (a tone reversal around
-    x = 0.5), and +150 Shadows does the same. Applying the excess as a second
-    pass on the first pass's result keeps every pass in the range that was
-    already safe, so the curve stays monotonic, and anything within +-100 is
-    the exact single pass it always was (existing edits render identically).
+    A single pass folds the curve (a mid-grey comes out darker than a darker
+    grey) in two cases: one amount beyond +-100 (e.g. -150 Highlights or +150
+    Shadows), and Highlights and Shadows pulling in opposite directions at
+    full strength together (-100 / +100 already folded before the range was
+    widened). So Shadows and Highlights run as separate passes, Shadows
+    first, and each is split into steps of at most +-100. Each pass alone is
+    monotonic and a chain of monotonic passes is too. A single slider within
+    +-100 is still the exact one pass it always was; only edits that use
+    BOTH sliders render slightly differently from before.
     """
-    h1 = float(np.clip(highlights, -HS_PASS_LIMIT, HS_PASS_LIMIT))
-    s1 = float(np.clip(shadows, -HS_PASS_LIMIT, HS_PASS_LIMIT))
-    passes = [(h1, s1)]
-    h2, s2 = float(highlights) - h1, float(shadows) - s1
-    if h2 != 0.0 or s2 != 0.0:
-        passes.append((h2, s2))
+    passes = []
+    for amount, as_pass in ((float(shadows), lambda v: (0.0, v)),
+                            (float(highlights), lambda v: (v, 0.0))):
+        first = float(np.clip(amount, -HS_PASS_LIMIT, HS_PASS_LIMIT))
+        for v in (first, amount - first):
+            if v != 0.0:
+                passes.append(as_pass(v))
     return passes
 
 
