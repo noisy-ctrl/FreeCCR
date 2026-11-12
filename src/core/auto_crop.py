@@ -1108,6 +1108,49 @@ def snap_to_guide(det, box, w, h, fmt=""):
                      debug=dict(base=det))
 
 
+RATIO_MAX_TRIM = 0.08     # fit_ratio trims at most this much off a side
+
+
+def fit_ratio(fc, ratio, w, h, name="", max_trim=RATIO_MAX_TRIM):
+    """`fc` cut to the exact proportions `ratio` (long side / short side, so
+    either way round; the frame's own orientation decides which), centred on
+    the box found and at its angle: the largest such box inside it
+    (spec/auto-crop-ratio.md). Every frame of a format then exports at the
+    same shape, so a border round them is the same on every frame.
+
+    `fc` comes back unchanged when it isn't usable, when no ratio is given or
+    it already fits, and when fitting would cut more than `max_trim` off a
+    side - then the ratio is most likely the wrong format for this film, and
+    the reason says so instead."""
+    if fc is None or not getattr(fc, "usable", False) or not fc.rect or not ratio:
+        return fc
+    r = float(ratio)
+    if r <= 0:
+        return fc
+    r = max(r, 1.0 / r)
+    x1, y1, x2, y2 = fc.rect
+    bw, bh = (x2 - x1) * w, (y2 - y1) * h
+    if bw < 2 or bh < 2:
+        return fc
+    want = r if bw >= bh else 1.0 / r
+    if bw / bh >= want:
+        nw, nh = bh * want, bh
+    else:
+        nw, nh = bw, bw / want
+    trim = max(1.0 - nw / bw, 1.0 - nh / bh)
+    label = name or f"{r:.3g}:1"
+    if trim < 1e-4:
+        return fc
+    if trim > max_trim:
+        note = f"left as found: {label} would cut {trim:.0%} off a side"
+        return replace(fc, reason=f"{fc.reason}; {note}" if fc.reason else note)
+    cx, cy = (x1 + x2) / 2.0 * w, (y1 + y2) / 2.0 * h
+    rect = ((cx - nw / 2) / w, (cy - nh / 2) / h, (cx + nw / 2) / w, (cy + nh / 2) / h)
+    note = f"cut to {label}"
+    return replace(fc, rect=tuple(float(v) for v in rect),
+                   reason=f"{fc.reason}; {note}" if fc.reason else note)
+
+
 def detect_guided(raw, guide, priors=None, inset_frac=INSET_FRAC):
     """The crop from Capture's frame guide (`guide`: cx, cy, w, h in scan
     fractions, angle, as `capture_guide.map_guide` gives it): auto crop's
