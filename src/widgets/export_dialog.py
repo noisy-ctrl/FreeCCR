@@ -437,6 +437,8 @@ class ExportSettingsDialog(QDialog):
         s.setValue("export/open_folder", self.open_folder_checkbox.isChecked())
         if self._preset_key():
             # The preset's values are locked in, not yours: keep your own.
+            # Its long edge is yours, though, kept per preset.
+            s.setValue(self._preset_edge_key(), self.canvas_edge_spin.value())
             return
         s.setValue("export/format", self.format_combo.currentData())
         # Linear merge hides the colour space and forces Original size — don't
@@ -478,6 +480,9 @@ class ExportSettingsDialog(QDialog):
     def _preset_key(self) -> str:
         return self.preset_combo.currentData() or ""
 
+    def _preset_edge_key(self) -> str:
+        return f"export/{self._preset_key()}/long_edge"
+
     def _preset(self):
         key = self._preset_key()
         return next((p for p in INSTAGRAM_PRESETS if p[0] == key), None)
@@ -515,7 +520,9 @@ class ExportSettingsDialog(QDialog):
             self.quality_slider.setValue(INSTAGRAM_QUALITY)
             self.canvas_w_spin.setValue(w)
             self.canvas_h_spin.setValue(h)
-            self.canvas_edge_spin.setValue(max(w, h))
+            # Your long edge for this preset, else as large as fits.
+            self.canvas_edge_spin.setValue(self._settings.value(
+                self._preset_edge_key(), max(w, h), type=int))
             if self.canvas_margin_spin.value() == 0:
                 self.canvas_margin_spin.setValue(INSTAGRAM_MARGIN)
             self.canvas_check.setChecked(True)
@@ -560,7 +567,9 @@ class ExportSettingsDialog(QDialog):
                   self.canvas_check):
             w.setEnabled(not locked)
         if locked:
-            for w in (self.canvas_w_spin, self.canvas_h_spin, self.canvas_edge_spin):
+            # The preset fixes the canvas; the image long edge stays yours
+            # (remembered per preset, see _preset_edge_key).
+            for w in (self.canvas_w_spin, self.canvas_h_spin):
                 w.setEnabled(False)
 
     def _is_jpeg_family(self) -> bool:

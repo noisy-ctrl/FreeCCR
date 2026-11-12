@@ -117,6 +117,15 @@ def describe_borders(shapes, canvas: Canvas) -> str:
 
     text = (f"Border: sides {span(sides, canvas.width)}, "
             f"top/bottom {span(tops, canvas.height)}")
+    longest = max(max(placed_size(w, h, canvas)) for w, h in shapes)
+    if longest < canvas.long_edge:
+        from dataclasses import replace as _replace
+        bare = _replace(canvas, margin=0)
+        without = max(max(placed_size(w, h, bare)) for w, h in shapes)
+        why = ("the border width" if canvas.margin and without > longest
+               else "the canvas size")
+        text += (f"\nThe image comes out {longest} px on its long edge, "
+                 f"not {canvas.long_edge}: {why} limits it.")
     if len(shapes) > 1 and (max(sides) - min(sides) > 1 or max(tops) - min(tops) > 1):
         text += ("\nVaries because these frames' crops differ in shape; "
                  "the long edge is the same on all of them.")

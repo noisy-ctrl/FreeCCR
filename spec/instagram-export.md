@@ -65,3 +65,12 @@ of his 2000 × 2000 files; he asked for an Instagram option in Export.
   with JPEG, sRGB, 95, the canvas (size, margin, sharpen); "None" restores
   the saved custom values; saving with a preset on doesn't overwrite them;
   the preset is remembered.
+
+## Revision 2026-11-12: the long edge is yours
+
+The preset fixes the canvas size but no longer locks **Image long edge**: it
+starts as large as fits (the canvas's long side) and what you set is kept per
+preset (`export/<preset>/long_edge`), never over your own no-preset value.
+Border width stays the least border, so the frame is the smaller of the two;
+the Border readout says which one limits it ("the border width limits it" /
+"the canvas size limits it").
