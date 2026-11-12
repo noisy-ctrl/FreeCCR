@@ -2890,11 +2890,51 @@ class CCRBackend:
                 res = detect_guided(raw, guide, priors=priors)
             if res is None:
                 res = detect_frame(raw, priors=priors)
+            res = self.fit_crop_ratio(img, res, w, h)
             img.auto_crop_last, img.auto_crop_key = res, key
             return res
         except Exception as e:                    # never let a crop stop a convert
             print(f"Auto crop failed for {getattr(img, 'file_path', '?')}: {e}")
             return FrameCrop(None, reason=f"detection failed ({e})")
+
+    def crop_ratio_for(self, img):
+        """The proportions auto crop cuts `img`'s frame to, as (long/short
+        ratio, name), or (None, ""). Capture's format for the shot comes
+        first (the guide's Format list) while "Crop to Capture's frame guide"
+        is on; else the ratio locked in the Crop panel; Free / Original leave
+        the frame as found (spec/auto-crop-ratio.md)."""
+        from core import film_formats, crop_aspect
+        guide = (getattr(img, "capture_guide", None)
+                 if getattr(self, "crop_from_guide", True) else None)
+        fmt = guide.get("format") if isinstance(guide, dict) else None
+        r = film_formats.ratio(fmt) if fmt else None
+        if r:
+            return r, f"Capture's format, {film_formats.label(fmt)}"
+        try:
+            from PySide6.QtCore import QSettings
+            st = QSettings("FreeCCR", "FreeCCR")
+            key = st.value("crop/aspect_key", "free", type=str)
+            cw = st.value("crop/custom_w", 3, type=int)
+            ch = st.value("crop/custom_h", 2, type=int)
+        except Exception:
+            return None, ""
+        r = crop_aspect.saved_ratio(key, cw, ch)
+        if not r:
+            return None, ""
+        return r, f"the Crop panel's {crop_aspect.saved_ratio_label(key, cw, ch)}"
+
+    def fit_crop_ratio(self, img, frame, w, h):
+        """`frame` cut to crop_ratio_for(img) (core.auto_crop.fit_ratio).
+        Never raises: a crop that can't be fitted is returned as found."""
+        try:
+            r, name = self.crop_ratio_for(img)
+            if not r:
+                return frame
+            from core.auto_crop import fit_ratio
+            return fit_ratio(frame, r, w, h, name=name)
+        except Exception as e:
+            print(f"Could not fit the crop ratio for {getattr(img, 'file_path', '?')}: {e}")
+            return frame
 
     def learn_confirmed_crop(self, img) -> bool:
         """The Crop panel committed a crop (Done / Enter): remember it for this
@@ -2972,6 +3012,10 @@ class CCRBackend:
                 # right size: an invisible gate still goes at the roll's size
                 f2 = snap_soft_sides(f, roll_out)
                 if f2 is not f:
+                    # re-placed sides: cut back to the format's proportions
+                    sz = (f.geom or {}).get("size")
+                    if sz:
+                        f2 = self.fit_crop_ratio(imgs[i], f2, sz[0], sz[1])
                     out[i], n = f2, n + 1
                     imgs[i].auto_crop_last = f2
                 continue

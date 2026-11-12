@@ -129,3 +129,30 @@ def folded_crop_angle(crop_angle, fine_rotation_angle):
     rotates content clockwise for positive values, the crop box de-rotates
     counter-clockwise, hence the sign flip."""
     return (crop_angle or 0.0) - (fine_rotation_angle or 0) / 100.0
+
+
+def saved_ratio(key, custom_w=3, custom_h=2):
+    """The ratio a saved Crop panel choice locks crops to, as long side /
+    short side, or None (Free, Original, a heading, an unknown key or a bad
+    custom ratio). Auto crop uses it (spec/auto-crop-ratio.md); orientation
+    is left to each frame."""
+    entry = preset_for_key(key)
+    if key == "custom":
+        try:
+            r = float(custom_w) / float(custom_h)
+        except (TypeError, ValueError, ZeroDivisionError):
+            return None
+    elif entry is None or not isinstance(entry[2], (int, float)):
+        return None
+    else:
+        r = float(entry[2])
+    if r <= 0:
+        return None
+    return max(r, 1.0 / r)
+
+
+def saved_ratio_label(key, custom_w=3, custom_h=2):
+    if key == "custom":
+        return f"{custom_w}:{custom_h}"
+    entry = preset_for_key(key)
+    return entry[0] if entry else ""
