@@ -95,3 +95,16 @@ The linear-merge path ignores it.
   usual case is a downscale from a full-resolution scan.
 - Rounding: `w = round(src_w * s)`, `h = round(src_h * s)`; centring uses
   floor division, so any odd pixel of border lands on the right/bottom.
+
+## Revision 2026-11-12: border readout
+
+Borders differ from frame to frame because the **long edge** is fixed and
+each frame's crop has its own shape, so the short side (and its border)
+follows the crop. The long edge stays the control. Under the Border controls
+a muted line now shows what the border comes out at for the frames in scope:
+`Border: sides 27 px (1.4%), top/bottom 351 px (17.6%)`, % of that canvas
+side, as a range when the frames differ (a 1 px centring remainder is not
+counted), with a note saying why it varies. `export_canvas.borders()` gives
+(left, right, top, bottom) exactly as `compose` places the frame;
+`frame_shape(img)` takes the crop rect and 90° rotation from the preview.
+Tests in `tests/test_export_canvas.py`.

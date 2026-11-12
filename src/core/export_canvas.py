@@ -66,6 +66,63 @@ def placed_size(src_w: int, src_h: int, canvas: Canvas) -> Tuple[int, int]:
     return w, h
 
 
+def borders(src_w: int, src_h: int, canvas: Canvas) -> Tuple[int, int, int, int]:
+    """(left, right, top, bottom) border in px for a frame of this size,
+    exactly as compose() places it (odd remainders go right/bottom)."""
+    w, h = placed_size(src_w, src_h, canvas)
+    left, top = (canvas.width - w) // 2, (canvas.height - h) // 2
+    return left, canvas.width - w - left, top, canvas.height - h - top
+
+
+def frame_shape(img) -> Optional[Tuple[int, int]]:
+    """(w, h) of the frame an image will export - its crop, turned by its
+    90-degree rotation - at preview resolution. Only the SHAPE matters for
+    the border (placed_size rescales to the long edge), so the preview's
+    size is enough. None when unknown."""
+    base = getattr(img, "resized_raw", None)
+    if base is None:
+        return None
+    H, W = base.shape[:2]
+    rect = getattr(img, "crop_rect", None)
+    if rect:
+        fx1, fy1, fx2, fy2 = rect
+        w, h = (fx2 - fx1) * W, (fy2 - fy1) * H
+    else:
+        w, h = float(W), float(H)
+    if w < 2 or h < 2:
+        return None
+    if int(getattr(img, "rotation_angle", 0) or 0) % 180 == 90:
+        w, h = h, w
+    # Express at a fixed high resolution so rounding matches a full export.
+    k = 6000.0 / max(w, h)
+    return max(1, int(round(w * k))), max(1, int(round(h * k)))
+
+
+def describe_borders(shapes, canvas: Canvas) -> str:
+    """The Export window's border readout for a list of frame (w, h): px and
+    % of the canvas side, as a range when the frames differ."""
+    shapes = [s for s in shapes if s]
+    if not shapes:
+        return ""
+    b = [borders(w, h, canvas) for w, h in shapes]
+    sides = [min(l, r) for l, r, _, _ in b] + [max(l, r) for l, r, _, _ in b]
+    tops = [min(t, u) for _, _, t, u in b] + [max(t, u) for _, _, t, u in b]
+
+    def span(vals, total):
+        lo, hi = min(vals), max(vals)
+        pl, ph = 100.0 * lo / total, 100.0 * hi / total
+        if hi - lo <= 1:          # a centring remainder is not a difference
+            return f"{lo} px ({pl:.1f}%)"
+        return f"{lo}\u2013{hi} px ({pl:.1f}\u2013{ph:.1f}%)"
+
+    text = (f"Border: sides {span(sides, canvas.width)}, "
+            f"top/bottom {span(tops, canvas.height)}")
+    if len(shapes) > 1 and (max(sides) - min(sides) > 1 or max(tops) - min(tops) > 1):
+        text += ("\nVaries because these frames' crops differ in shape; "
+                 "the long edge is the same on all of them.")
+    return text
+
+
 def _resize(img: np.ndarray, w: int, h: int, interp_down=cv2.INTER_AREA,
             interp_up=cv2.INTER_LANCZOS4) -> np.ndarray:
     ih, iw = img.shape[:2]
