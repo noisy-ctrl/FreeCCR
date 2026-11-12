@@ -214,7 +214,9 @@ _KEYS = ["export/destination", "export/scope", "export/filename_template",
          "export/resize", "export/conflict", "export/open_folder",
          "export/hdr_headroom", "export/canvas_on", "export/canvas_w",
          "export/canvas_h", "export/canvas_long_edge", "export/canvas_colour",
-         "export/preset", "export/canvas_margin"]
+         "export/preset", "export/canvas_margin",
+         "export/instagram_45/long_edge", "export/instagram_34/long_edge",
+         "export/instagram_11/long_edge"]
 
 
 @pytest.fixture
@@ -351,3 +353,27 @@ def test_frame_shape_uses_crop_and_rotation():
     w, h = frame_shape(img)
     assert w < h and abs(w / h - (0.8 * 720) / (0.8 * 1080)) < 1e-3
     assert frame_shape(SimpleNamespace(resized_raw=None)) is None
+
+
+def test_readout_says_when_border_width_limits_the_long_edge():
+    from core.export_canvas import Canvas, describe_borders
+    c = Canvas(1080, 1080, 1060, margin=30)
+    text = describe_borders([(3000, 2000)], c)
+    assert "1020 px" in text and "border width" in text
+    ok = describe_borders([(3000, 2000)], Canvas(1080, 1080, 1000, margin=30))
+    assert "limits" not in ok
+    big = describe_borders([(2000, 3000)], Canvas(1080, 1080, 1500))
+    assert "canvas size" in big
+
+
+def test_preset_long_edge_is_editable_and_remembered(tmp_path, monkeypatch, settings_guard):
+    from widgets import export_dialog
+    d = _dialog(tmp_path, monkeypatch)
+    i = d.preset_combo.findData("instagram_11")
+    d.preset_combo.setCurrentIndex(i)
+    assert d.canvas_edge_spin.isEnabled() and not d.canvas_w_spin.isEnabled()
+    d.canvas_edge_spin.setValue(1000)
+    d._save_settings()
+    again = export_dialog.ExportSettingsDialog(current_idx=0)
+    again.preset_combo.setCurrentIndex(again.preset_combo.findData("instagram_11"))
+    assert again.canvas_edge_spin.value() == 1000
