@@ -318,3 +318,36 @@ def test_estimate_uses_the_canvas_size(tmp_path, monkeypatch, settings_guard):
     dlg.canvas_h_spin.setValue(400)
     dlg._update_estimate()
     assert seen["dims"] == [(400, 500)] and seen["kw"]["max_long_side"] is None
+
+
+# --- Border readout (px and %) --------------------------------------------
+
+def test_borders_match_compose_placement():
+    from core.export_canvas import Canvas, borders, compose
+    c = Canvas(2000, 2000, 1946)
+    l, r, t, b = borders(3000, 2000, c)
+    assert (l, r) == (27, 27) and t + b == 2000 - 1297
+    img = np.full((200, 300, 3), 1000, np.uint16)
+    out, _ = compose(img, c)
+    row = out[1000, :, 0]
+    assert row[l - 1] == 65535 and row[l] == 1000
+
+
+def test_describe_borders_single_and_range():
+    from core.export_canvas import Canvas, describe_borders
+    c = Canvas(2000, 2000, 1946)
+    one = describe_borders([(3000, 2000)], c)
+    assert "sides 27 px (1.4%)" in one and "Varies" not in one
+    many = describe_borders([(3000, 2000), (3000, 1950)], c)
+    assert "–" in many and "Varies" in many
+    assert "sides 27 px" in many          # the long edge is constant
+
+
+def test_frame_shape_uses_crop_and_rotation():
+    from types import SimpleNamespace
+    from core.export_canvas import frame_shape
+    img = SimpleNamespace(resized_raw=np.zeros((720, 1080, 3), np.uint16),
+                          crop_rect=(0.1, 0.1, 0.9, 0.9), rotation_angle=90)
+    w, h = frame_shape(img)
+    assert w < h and abs(w / h - (0.8 * 720) / (0.8 * 1080)) < 1e-3
+    assert frame_shape(SimpleNamespace(resized_raw=None)) is None

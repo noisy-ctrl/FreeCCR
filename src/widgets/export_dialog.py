@@ -319,6 +319,12 @@ class ExportSettingsDialog(QDialog):
         canvas_hint = QLabel("Each frame is centred on the canvas.")
         canvas_hint.setStyleSheet(f"color: {theme.TEXT_MUTED};")
         canvas_layout.addWidget(canvas_hint)
+        # What the border comes out at, px and %, for the frames in scope
+        # (export_canvas.describe_borders).
+        self.canvas_border_label = QLabel("")
+        self.canvas_border_label.setWordWrap(True)
+        self.canvas_border_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
+        canvas_layout.addWidget(self.canvas_border_label)
         layout.addWidget(self.canvas_group)
         self._canvas_inputs = (self.canvas_w_spin, self.canvas_h_spin,
                                self.canvas_edge_spin, self.canvas_colour_btn,
@@ -726,6 +732,9 @@ class ExportSettingsDialog(QDialog):
 
     def _update_estimate(self):
         indices = self._scope_indices()
+        # The border readout rides the same debounce; ahead of the early
+        # returns below so it never goes stale.
+        self._update_border_readout(indices, self._canvas_spec())
         if not indices:
             self.estimate_label.setText("Estimated total size: —")
             return
@@ -763,6 +772,17 @@ class ExportSettingsDialog(QDialog):
             f"Estimated total size: {export_estimator.format_size(total)}"
             f"  ({count} file{'s' if count != 1 else ''})"
         )
+
+    def _update_border_readout(self, indices, canvas):
+        if not hasattr(self, "canvas_border_label"):
+            return
+        text = ""
+        if canvas is not None and indices:
+            shapes = [export_canvas.frame_shape(ccr_backend.images[i])
+                      for i in indices]
+            text = export_canvas.describe_borders(shapes, canvas)
+        self.canvas_border_label.setText(text)
+        self.canvas_border_label.setVisible(bool(text))
 
     # ---------- accept ----------
 
