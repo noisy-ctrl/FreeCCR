@@ -796,6 +796,21 @@ class GradientSlider(ResettableSlider):
         painter.end()
 
 
+class AutoRadiusWorker(WorkerThread):
+    """Auto Radius off the GUI thread (spec/auto-sharpen-radius.md): decodes
+    the frame at full resolution and measures it; `done(img, result)`."""
+
+    done = Signal(object, object)
+
+    def __init__(self, img, measure, parent=None):
+        super().__init__(parent)
+        self._img = img
+        self._measure = measure
+
+    def run(self):
+        self.done.emit(self._img, self._measure(self._img))
+
+
 class SlidersPanel(QWidget):
     # Order must match the create_slider() call order exactly — the two
     # lists are zipped positionally.
@@ -1817,15 +1832,33 @@ class SlidersPanel(QWidget):
         # 1.0 native pixel. Every render uses the full-resolution radius in its
         # own pixels, so the view shows what the output gets
         # (spec/sharpen-like-output.md).
-        self.details_section.add_layout(
-            self.create_slider("Amount", min_value=0, max_value=100,
-                               default_value=self._default_for("sharpen_amount")))
-        self.details_section.add_layout(
-            self.create_slider("Radius", min_value=0, max_value=100,
-                               default_value=self._default_for("sharpen_radius")))
-        self.details_section.add_layout(
-            self.create_slider("Masking", min_value=0, max_value=100,
-                               default_value=self._default_for("sharpen_masking")))
+        amount_row = self.create_slider(
+            "Amount", min_value=0, max_value=100,
+            default_value=self._default_for("sharpen_amount"))
+        self.details_section.add_layout(amount_row)
+        radius_row = self.create_slider(
+            "Radius", min_value=0, max_value=100,
+            default_value=self._default_for("sharpen_radius"))
+        # Auto Radius (spec/auto-sharpen-radius.md): measured on the frame at
+        # full resolution, on a worker thread.
+        self.auto_radius_btn = QPushButton("Auto")
+        self.auto_radius_btn.setFixedHeight(theme.CONTROL_H)
+        auto_w = self.auto_radius_btn.fontMetrics().horizontalAdvance("Auto") + 16
+        self.auto_radius_btn.setFixedWidth(auto_w)
+        # Amount and Masking get the same gap, so the three sliders line up.
+        amount_row.addSpacing(auto_w)
+        self.auto_radius_btn.setToolTip(
+            "Measure this frame at full resolution and set Radius: matched to "
+            "how soft its sharpest edges are, held back where the grain is "
+            "coarse. Amount and Masking stay yours.")
+        self.auto_radius_btn.clicked.connect(self._on_auto_radius)
+        radius_row.addWidget(self.auto_radius_btn, alignment=Qt.AlignVCenter)
+        self.details_section.add_layout(radius_row)
+        masking_row = self.create_slider(
+            "Masking", min_value=0, max_value=100,
+            default_value=self._default_for("sharpen_masking"))
+        masking_row.addSpacing(auto_w)
+        self.details_section.add_layout(masking_row)
         # "Bypass until export" (spec/bypass-until-export.md): the same
         # checkbox Chroma NR has, so slower machines can skip sharpening in the
         # preview while exports always include it.
@@ -2031,6 +2064,9 @@ class SlidersPanel(QWidget):
             self.layers_container.setEnabled(enabled)
         if not enabled:
             self.curve_editor.set_curves(None)
+        if hasattr(self, "auto_radius_btn"):
+            self.auto_radius_btn.setEnabled(
+                enabled and getattr(self, "_auto_radius_worker", None) is None)
         for slider in self.sliders:
             slider.setEnabled(enabled)
             if not enabled:
@@ -3853,6 +3889,70 @@ class SlidersPanel(QWidget):
         converted frame (Settings → General algorithm) and set the sliders via
         the same path as an eyedropper pick."""
         self._run_awb(guard=True)
+
+    # --- Auto Radius (spec/auto-sharpen-radius.md) -------------------------
+    _auto_radius_threaded = True          # tests: False runs it inline
+
+    @staticmethod
+    def _measure_radius(img):
+        from core.auto_radius import measure_image
+        return measure_image(img)
+
+    def _on_auto_radius(self):
+        img = (ccr_backend.get_image_by_index(self.current_idx)
+               if self.current_idx is not None else None)
+        if img is None or getattr(self, "_auto_radius_worker", None) is not None:
+            return
+        self.auto_radius_btn.setEnabled(False)
+        QApplication.setOverrideCursor(Qt.BusyCursor)
+        self.set_temporary_hint(
+            "<b>Auto Radius:</b> measuring the frame at full resolution…",
+            duration=15000)
+        if not self._auto_radius_threaded:
+            self._auto_radius_worker = True
+            self._auto_radius_done(img, self._run_measure_radius(img))
+            return
+        worker = AutoRadiusWorker(img, self._run_measure_radius, parent=self)
+        worker.done.connect(self._auto_radius_done)
+        worker.finished.connect(worker.deleteLater)
+        self._auto_radius_worker = worker
+        worker.start()
+
+    def _run_measure_radius(self, img):
+        try:
+            return self._measure_radius(img)
+        except Exception as e:                       # never break the panel
+            from core.auto_radius import RadiusResult
+            print(f"Auto Radius failed for {getattr(img, 'file_path', '?')}: {e}")
+            return RadiusResult(None, None, reason=f"Couldn't measure this frame ({e}).")
+
+    def _auto_radius_done(self, img, res):
+        self._auto_radius_worker = None
+        QApplication.restoreOverrideCursor()
+        self.auto_radius_btn.setEnabled(True)
+        now = (ccr_backend.get_image_by_index(self.current_idx)
+               if self.current_idx is not None else None)
+        if now is not img:
+            self.set_temporary_hint(
+                "<b>Auto Radius:</b> the frame changed before it finished; "
+                "nothing was set.", duration=5000)
+            return
+        if res is None or res.slider is None:
+            reason = res.reason if res is not None else "nothing measured."
+            self.set_temporary_hint(f"<b>Auto Radius:</b> {reason} Radius is unchanged.",
+                                    duration=6000)
+            return
+        i = self.adjustment_keys.index("sharpen_radius")
+        slider = self.sliders[i]
+        self.end_undo_burst()                 # its own undo step
+        slider.blockSignals(True)
+        slider.setValue(int(res.slider))
+        slider.blockSignals(False)
+        self.slider_value_labels[i].setText(slider.value_text())
+        self.on_slider_changed()
+        self.end_undo_burst()
+        self._settle_preview()
+        self.set_temporary_hint(res.reason, duration=8000)
 
     def _run_awb(self, guard=True):
         """AWB, guarded by the roll unless `guard` is False (right-click:
