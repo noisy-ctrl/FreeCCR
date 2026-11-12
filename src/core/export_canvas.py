@@ -30,6 +30,19 @@ class Canvas:
     # ((0, 0) = none). spec/instagram-export.md
     margin: int = 0
     sharpen: Tuple[int, int] = (0, 0)
+    # The long edge as a percentage instead of px: of the canvas side the
+    # frame's long edge runs along (its width for a landscape frame, its
+    # height for a portrait one). None = `long_edge` px. spec/export-canvas-
+    # border.md, revision 2026-11-12 (2).
+    long_edge_pct: Optional[float] = None
+
+    def long_edge_for(self, src_w: int, src_h: int) -> int:
+        """The long edge, px, a frame of this shape is placed at (before any
+        shrink to fit)."""
+        if self.long_edge_pct:
+            along = self.width if src_w >= src_h else self.height
+            return max(1, int(round(along * float(self.long_edge_pct) / 100.0)))
+        return int(self.long_edge)
 
     @property
     def neutral(self) -> bool:
@@ -59,7 +72,7 @@ def placed_size(src_w: int, src_h: int, canvas: Canvas) -> Tuple[int, int]:
     m = max(0, int(canvas.margin or 0))
     box_w = max(1, canvas.width - 2 * m)
     box_h = max(1, canvas.height - 2 * m)
-    s = float(canvas.long_edge) / max(src_w, src_h)
+    s = float(canvas.long_edge_for(src_w, src_h)) / max(src_w, src_h)
     s = min(s, box_w / src_w, box_h / src_h)
     w = max(1, min(box_w, int(round(src_w * s))))
     h = max(1, min(box_h, int(round(src_h * s))))
@@ -117,15 +130,18 @@ def describe_borders(shapes, canvas: Canvas) -> str:
 
     text = (f"Border: sides {span(sides, canvas.width)}, "
             f"top/bottom {span(tops, canvas.height)}")
-    longest = max(max(placed_size(w, h, canvas)) for w, h in shapes)
-    if longest < canvas.long_edge:
-        from dataclasses import replace as _replace
-        bare = _replace(canvas, margin=0)
-        without = max(max(placed_size(w, h, bare)) for w, h in shapes)
-        why = ("the border width" if canvas.margin and without > longest
-               else "the canvas size")
-        text += (f"\nThe image comes out {longest} px on its long edge, "
-                 f"not {canvas.long_edge}: {why} limits it.")
+    edges = sorted({max(placed_size(w, h, canvas)) for w, h in shapes})
+    if canvas.long_edge_pct:
+        text = (f"Image long edge: {edges[0]} px" if edges[-1] - edges[0] <= 1
+                else f"Image long edge: {edges[0]}\u2013{edges[-1]} px "
+                     f"(landscape and portrait frames differ)") + "\n" + text
+    else:
+        short = [(max(placed_size(w, h, canvas)), canvas.long_edge_for(w, h))
+                 for w, h in shapes]
+        shrunk = [got for got, want in short if got < want]
+        if shrunk:
+            text += (f"\nThe image comes out {max(shrunk)} px on its long edge, "
+                     f"not {canvas.long_edge}: it doesn't fit the canvas at that size.")
     if len(shapes) > 1 and (max(sides) - min(sides) > 1 or max(tops) - min(tops) > 1):
         text += ("\nVaries because these frames' crops differ in shape; "
                  "the long edge is the same on all of them.")

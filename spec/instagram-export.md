@@ -74,3 +74,11 @@ preset (`export/<preset>/long_edge`), never over your own no-preset value.
 Border width stays the least border, so the frame is the smaller of the two;
 the Border readout says which one limits it ("the border width limits it" /
 "the canvas size limits it").
+
+## Revision 2026-11-12 (2): no border width
+
+Border width is gone from the Export window
+(spec/export-canvas-border.md, revision 2026-11-12 (2)). A preset's long edge
+starts at **94 %** of the canvas side it runs along (about the old 32 px
+border on a 1080 px side) and is yours to change in px or %, kept per preset
+(`export/<preset>/long_edge`, `_pct`, `_unit`).

@@ -215,8 +215,9 @@ _KEYS = ["export/destination", "export/scope", "export/filename_template",
          "export/hdr_headroom", "export/canvas_on", "export/canvas_w",
          "export/canvas_h", "export/canvas_long_edge", "export/canvas_colour",
          "export/preset", "export/canvas_margin",
-         "export/instagram_45/long_edge", "export/instagram_34/long_edge",
-         "export/instagram_11/long_edge"]
+         "export/canvas_long_edge_pct", "export/canvas_long_edge_unit"] + [
+         f"export/{p}/long_edge{x}" for p in ("instagram_45", "instagram_34", "instagram_11")
+         for x in ("", "_pct", "_unit")]
 
 
 @pytest.fixture
@@ -355,15 +356,22 @@ def test_frame_shape_uses_crop_and_rotation():
     assert frame_shape(SimpleNamespace(resized_raw=None)) is None
 
 
-def test_readout_says_when_border_width_limits_the_long_edge():
+def test_long_edge_in_percent_follows_the_side_it_runs_along():
+    from core.export_canvas import Canvas, placed_size, describe_borders
+    c = Canvas(1080, 1350, 0, long_edge_pct=90.0)
+    assert placed_size(3000, 2000, c) == (972, 648)       # 90% of the width
+    assert placed_size(2000, 3000, c) == (810, 1215)      # 90% of the height
+    sq = Canvas(2000, 2000, 0, long_edge_pct=97.3)
+    assert max(placed_size(3000, 2000, sq)) == 1946
+    text = describe_borders([(3000, 2000), (2000, 3000)], c)
+    assert text.startswith("Image long edge: 972\u20131215 px")
+
+
+def test_readout_says_when_the_canvas_is_too_small():
     from core.export_canvas import Canvas, describe_borders
-    c = Canvas(1080, 1080, 1060, margin=30)
-    text = describe_borders([(3000, 2000)], c)
-    assert "1020 px" in text and "border width" in text
-    ok = describe_borders([(3000, 2000)], Canvas(1080, 1080, 1000, margin=30))
-    assert "limits" not in ok
-    big = describe_borders([(2000, 3000)], Canvas(1080, 1080, 1500))
-    assert "canvas size" in big
+    text = describe_borders([(2000, 3000)], Canvas(1350, 1080, 1300))
+    assert "1080 px" in text and "doesn't fit" in text
+    assert "fit" not in describe_borders([(3000, 2000)], Canvas(2000, 2000, 1946))
 
 
 def test_preset_long_edge_is_editable_and_remembered(tmp_path, monkeypatch, settings_guard):
@@ -371,9 +379,29 @@ def test_preset_long_edge_is_editable_and_remembered(tmp_path, monkeypatch, sett
     d = _dialog(tmp_path, monkeypatch)
     i = d.preset_combo.findData("instagram_11")
     d.preset_combo.setCurrentIndex(i)
-    assert d.canvas_edge_spin.isEnabled() and not d.canvas_w_spin.isEnabled()
-    d.canvas_edge_spin.setValue(1000)
+    assert d.canvas_edge_unit.isEnabled() and not d.canvas_w_spin.isEnabled()
+    d.canvas_edge_unit.setCurrentIndex(d.canvas_edge_unit.findData("px"))
+    assert d.canvas_edge_spin.isVisibleTo(d) and not d.canvas_edge_pct_spin.isVisibleTo(d)
+    assert d.canvas_edge_spin.value() == round(1080 * 0.94)      # converted
+    d.canvas_edge_spin.setValue(1060)
     d._save_settings()
     again = export_dialog.ExportSettingsDialog(current_idx=0)
     again.preset_combo.setCurrentIndex(again.preset_combo.findData("instagram_11"))
-    assert again.canvas_edge_spin.value() == 1000
+    assert again.canvas_edge_unit.currentData() == "px"
+    assert again.canvas_edge_spin.value() == 1060
+
+
+def test_unit_switch_converts_and_is_remembered(tmp_path, monkeypatch, settings_guard):
+    from widgets import export_dialog
+    d = _dialog(tmp_path, monkeypatch)
+    d.canvas_w_spin.setValue(2000)
+    d.canvas_h_spin.setValue(2000)
+    d.canvas_edge_spin.setValue(1946)
+    d.canvas_edge_unit.setCurrentIndex(d.canvas_edge_unit.findData("%"))
+    assert d.canvas_edge_pct_spin.value() == pytest.approx(97.3)
+    d.canvas_check.setChecked(True)
+    assert d._canvas_spec().long_edge_pct == pytest.approx(97.3)
+    d._save_settings()
+    again = export_dialog.ExportSettingsDialog(current_idx=0)
+    assert again.canvas_edge_unit.currentData() == "%"
+    assert again.canvas_edge_pct_spin.value() == pytest.approx(97.3)
