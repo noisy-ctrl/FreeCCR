@@ -130,3 +130,8 @@ remove an entry when it ships.
 - Instagram export preset (spec/instagram-export.md, 2026-11-10): to check on
   his Mac and on Instagram itself: upload a 4:5 export and compare with his old
   2000 × 2000 uploads. The 3:4 shape depends on Instagram's current grid.
+- Film bases per scan type / B&W light / roll format → guide
+  (spec/film-base-per-scan-type.md, 2026-11-18): to check on his Mac with the
+  GFX: B&W shows only B&W bases; Green as B&W light lights green alone and
+  Measure records it; a 6×4.5 roll reshapes the guide. A green-vs-white B&W
+  comparison (crispness) is still to be measured.

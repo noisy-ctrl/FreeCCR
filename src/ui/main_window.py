@@ -1978,6 +1978,9 @@ class MainWindow(QMainWindow):
             mon = LiveCaptureMonitor(main_window=self)
             mon.closed.connect(self._on_live_monitor_closed)
             self._live_monitor = mon
+            sess = getattr(self, "capture_session", None) or {}
+            if sess.get("format"):
+                mon.apply_roll_format(sess["format"])
         mon.show()
         mon.raise_()
         mon.activateWindow()
@@ -2527,6 +2530,9 @@ class MainWindow(QMainWindow):
         roll = capture_log.clean_roll(roll) or capture_log.DEFAULT_ROLL
         fmt, film = str(fmt or ""), str(film or "").strip()
         self.capture_session = {"roll": roll, "format": fmt, "film": film}
+        mon = getattr(self, "_live_monitor", None)
+        if mon is not None and fmt:
+            mon.apply_roll_format(fmt)      # spec/film-base-per-scan-type.md §4
         st = self._settings
         st.setValue("capture/last_roll", roll)
         st.setValue("capture/format", fmt)
