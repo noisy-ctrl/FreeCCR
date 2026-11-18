@@ -797,6 +797,25 @@ class LiveCaptureMonitor(QWidget):
         r.addWidget(self.scan_combo, 1)
         r.addWidget(self.timing_btn)
         lay.addLayout(r)
+        # B&W light (spec/film-base-per-scan-type.md): white, or one colour
+        # alone, which can't show colour fringing
+        self.bw_light_row = QWidget()
+        r = QHBoxLayout(self.bw_light_row)
+        r.setContentsMargins(0, 0, 0, 0)
+        theme.apply_button_row(r)
+        r.addWidget(QLabel("B&W light"))
+        self.bw_light_combo = QComboBox()
+        for key, label in (("w", "White"), ("r", "Red"), ("g", "Green"), ("b", "Blue")):
+            self.bw_light_combo.addItem(label, key)
+        self.bw_light_combo.setToolTip(
+            "The light Black & white is scanned under. One colour alone can't show "
+            "colour fringing, so edges and grain come out a little crisper; green has "
+            "the most photosites. Measure uses it, and a film base remembers it.")
+        i = self.bw_light_combo.findData(_settings().value("live/bw_light", "w", type=str))
+        self.bw_light_combo.setCurrentIndex(max(0, i))
+        theme.shrinkable_combo(self.bw_light_combo)
+        r.addWidget(self.bw_light_combo, 1)
+        lay.addWidget(self.bw_light_row)
         r = QHBoxLayout()
         theme.apply_button_row(r)
         lab = QLabel("Shutter")
@@ -1174,6 +1193,9 @@ class LiveCaptureMonitor(QWidget):
         self._frame_timer.start()
         self.timing_btn.clicked.connect(self._timing_popup)
         self.scan_combo.activated.connect(self._on_scan_type_chosen)
+        self.bw_light_combo.activated.connect(
+            lambda i: self.set_bw_light(self.bw_light_combo.itemData(i)))
+        self.bw_light_row.setVisible(self.scan_type() == "bw")
         self.tether_btn.clicked.connect(self._on_tether_button)
         self.rail.state_changed.connect(self._on_rail_state)
         self.rail.info_changed.connect(lambda _i: self._refresh_rail())
@@ -1684,7 +1706,19 @@ class LiveCaptureMonitor(QWidget):
         if self._settle.update(frame):
             self._snap_guide()                   # the picture moved and settled
 
-    def _set_guide_format(self, key):
+    def apply_roll_format(self, key):
+        """The roll's format (Start Hot Folder Tether) sets the frame guide's,
+        which crops each capture; "Not set" leaves it alone. A hidden guide is
+        reshaped without being shown (spec/film-base-per-scan-type.md §4)."""
+        from core.film_formats import ratio
+        if not key or not ratio(key) or self.canvas.guide.get("format") == key:
+            return
+        if self.actions["guide"].isChecked():
+            self._set_guide_format(key)
+        else:
+            self._set_guide_format(key, show=False)
+
+    def _set_guide_format(self, key, show=True):
         g = dict(self.canvas.guide)
         g["format"] = key
         r = None
@@ -1701,7 +1735,12 @@ class LiveCaptureMonitor(QWidget):
             nw = math.sqrt(area * want)
             nh = nw / want
             g["w"], g["h"] = nw / fw, nh / fh
-        self._set_guide(g)
+        if show:
+            self._set_guide(g)
+        else:
+            self.canvas.set_guide(g)
+            self._sync_format_combo()
+            self._save_view_state()
 
     def _nudge_guide(self, scale=None, dx=0.0, dy=0.0, dangle=0.0, angle=None):
         g = dict(self.canvas.guide)
@@ -2655,18 +2694,68 @@ class LiveCaptureMonitor(QWidget):
         _settings().setValue("live/film_bases", be.dumps(self._bases))
 
     def _film_base(self):
-        return be.selected(self._bases)
+        """The film base in use: the selected one, if it is for this scan type
+        (spec/film-base-per-scan-type.md)."""
+        base = be.selected(self._bases)
+        return base if be.fits(base, self.scan_type()) else None
+
+    def _base_picks(self):
+        import json
+        try:
+            d = json.loads(_settings().value("live/film_base_pick", "", type=str) or "{}")
+        except ValueError:
+            d = {}
+        return d if isinstance(d, dict) else {}
+
+    def _remember_base_pick(self):
+        import json
+        base = self._film_base()
+        if base is None:
+            return
+        d = self._base_picks()
+        d[self.scan_type()] = base["name"]
+        _settings().setValue("live/film_base_pick", json.dumps(d))
+
+    def set_bw_light(self, key):
+        """B&W light: remember it and, with the light free, light it alone."""
+        key = key if key in be.BW_LIGHTS else "w"
+        i = self.bw_light_combo.findData(key)
+        if i >= 0 and i != self.bw_light_combo.currentIndex():
+            self.bw_light_combo.setCurrentIndex(i)
+        _settings().setValue("live/bw_light", key)
+        if (self.light.is_open() and self._measure is None and not self.sequence.running
+                and self._sleeping is None):
+            self.set_levels(cl.solo({key: 255}, key))
+
+    def bw_light(self):
+        return self.bw_light_combo.currentData() or "w"
 
     def _refresh_film_bases(self):
         d = self._bases = be.normalise(self._bases)
+        t = self.scan_type()
+        shown = [i for i, b in enumerate(d["bases"]) if be.fits(b, t)]
+        switched = getattr(self, "_bases_type", None) != t
+        self._bases_type = t
+        if shown and (switched or d["selected"] not in shown):
+            # a new scan type brings back its own pick; else keep a fitting
+            # selection; else the type's first film base
+            want = (self._base_picks().get(t) or "").lower()
+            pick = next((i for i in shown if d["bases"][i]["name"].lower() == want), None)
+            if pick is None:
+                pick = d["selected"] if d["selected"] in shown else shown[0]
+            d["selected"] = pick
         self.film_base_combo.blockSignals(True)
         self.film_base_combo.clear()
-        if d["bases"]:
-            self.film_base_combo.addItems([b["name"] for b in d["bases"]])
-            self.film_base_combo.setCurrentIndex(d["selected"])
+        if shown:
+            for i in shown:
+                self.film_base_combo.addItem(d["bases"][i]["name"], i)
+            self.film_base_combo.setCurrentIndex(shown.index(d["selected"]))
         else:
-            self.film_base_combo.addItem("No film base yet")
-        self.film_base_combo.setEnabled(bool(d["bases"]) and self._measure is None)
+            from core import scan_type as st
+            what = {"trichrome": "trichrome", "colour": "white light",
+                    "bw": "black & white"}.get(t, st.LABELS.get(t, t))
+            self.film_base_combo.addItem(f"No film base for {what} yet")
+        self.film_base_combo.setEnabled(bool(shown) and self._measure is None)
         self.film_base_combo.blockSignals(False)
         self._refresh_edit_enabled()
         tri = self.scan_type() == "trichrome"
@@ -2676,16 +2765,24 @@ class LiveCaptureMonitor(QWidget):
 
     def _refresh_edit_enabled(self):
         seq = getattr(self, "sequence", None)
-        self.edit_btn.setEnabled(bool(self._bases["bases"]) and self._measure is None
+        self.edit_btn.setEnabled(self._film_base() is not None and self._measure is None
                                  and not (seq is not None and seq.running))
 
     def _on_film_base_selected(self, i):
-        if i < 0 or not self._bases["bases"]:
+        real = self.film_base_combo.itemData(i) if i >= 0 else None
+        if real is None or not self._bases["bases"]:
             return
-        self._bases["selected"] = i
+        self._bases["selected"] = int(real)
         self._save_film_bases()
+        self._remember_base_pick()
         self._refresh_film_bases()
-        self._apply_base_black_point(self._film_base(), picked=True)
+        base = self._film_base()
+        if base is not None and self.scan_type() == "bw" and base.get("light"):
+            i = self.bw_light_combo.findData(base["light"])
+            if i >= 0:
+                self.bw_light_combo.setCurrentIndex(i)
+                _settings().setValue("live/bw_light", base["light"])
+        self._apply_base_black_point(base, picked=True)
 
     # -- the film base's black point (spec/film-base-black-point.md) ---------
     def _base_setup(self):
@@ -2768,7 +2865,7 @@ class LiveCaptureMonitor(QWidget):
         if self._measure is not None:
             return
         m = QMenu(self)
-        has = bool(self._bases["bases"])
+        has = self._film_base() is not None
         a = m.addAction("Measure Again", lambda: self.start_measure(
             self._film_base()["name"], self._bases["selected"]))
         a.setEnabled(has)
@@ -3173,18 +3270,9 @@ class LiveCaptureMonitor(QWidget):
                              or (self.actions["guide"].isChecked()
                                  and fm.inside_guide(dict(self.canvas.guide), fx, fy, w, h))):
                 return be.patch_around(fx, fy, w, h), "where you clicked"
-        if getattr(self, "_ask_where", False):
-            return None, ""                          # the last Measure failed: ask where
-        frame = self.feed.last_full_frame()
-        if frame is None:
-            return None, ""
-        try:
-            from core.auto_black_point import find_rebate
-            res = find_rebate(frame)
-        except Exception:
-            return None, ""
-        if res.rect and res.confidence == "high":
-            return be.patch_inset(res.rect), f"the {res.side} border"
+        # Nothing picked: ask. Measure never picks a border by itself any more
+        # (spec/film-base-per-scan-type.md §3: on a 120 frame it took "the top
+        # border", which was picture, and drew a patch nobody asked for).
         return None, ""
 
     def start_measure(self, name, index=None):
@@ -3228,6 +3316,11 @@ class LiveCaptureMonitor(QWidget):
             # balancing, so no colour is slowed by a preset's dimmed LED
             colours = list(be.COLOURS)
             start = {c: cl.solo({c: 255}, c) for c in colours}
+        elif self.scan_type() == "bw" and self.light.is_open():
+            # B&W: the chosen light alone, from full (spec/film-base-per-scan-type.md)
+            colours = ["w"]
+            k = self.bw_light()
+            start = {"w": cl.solo({k: 255}, k)}
         else:
             colours = ["w"]
             start = {"w": dict(self._levels) if self.light.is_open() else None}
@@ -3422,12 +3515,16 @@ class LiveCaptureMonitor(QWidget):
             self._frame_meter_finish(m, cal)
         elif cal.error is None and cal.result:
             camera = self._usb_model or ""
+            scan = self.scan_type()
+            light = self.bw_light() if scan == "bw" else None
             if m["index"] is not None:
-                self._bases = be.replace(self._bases, m["index"], cal.result, camera, cal.notes)
+                self._bases = be.replace(self._bases, m["index"], cal.result, camera,
+                                         cal.notes, scan=scan, light=light)
             else:
                 self._bases = be.add(self._bases, be.entry(m["name"], cal.result, camera,
-                                                           cal.notes))
+                                                           cal.notes, scan=scan, light=light))
             self._save_film_bases()
+            self._remember_base_pick()
             self._refresh_film_bases()
             base = self._film_base()
             tri = self.scan_type() == "trichrome"
@@ -4041,6 +4138,8 @@ class LiveCaptureMonitor(QWidget):
             self.scan_combo.setCurrentIndex(i)
             self.scan_combo.blockSignals(False)
         self.neg_bw.setChecked(t == "bw")
+        if hasattr(self, "bw_light_row"):
+            self.bw_light_row.setVisible(t == "bw")
         self._refresh_capture_caption()
         self._refresh_shoot_enabled()
         if hasattr(self, "film_base_note"):

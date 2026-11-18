@@ -514,6 +514,7 @@ def test_expose_each_frame_for_itself_uses_the_suggestion_every_shoot(film_mon):
     img[fm.guide_mask(GUIDE, 800, 600) == 0] = 20
     mon.feed.full = _noisy(img)
     mon._frame_est = []
+    mon._remembered_base = None     # the 1 s guide tick may have remembered the first one
     mon._update_frame_estimate()
     usb.fires.clear()
     mon.shoot()
@@ -569,8 +570,8 @@ def test_meter_stays_clickable_and_says_what_it_needs(film_mon):
     mon._bases = be.add(mon._bases, entry)
     mon._refresh_film_bases()
     mon._refresh_frame_line()
-    assert "“Ektar W” was measured for one exposure; Measure Again for trichrome" in \
-        mon.use_frame_btn.toolTip()
+    # a one-exposure base is hidden in trichrome (spec/film-base-per-scan-type.md)
+    assert "needs a film base measured for trichrome first" in mon.use_frame_btn.toolTip()
     _with_base(mon)
     mon.actions["guide"].setChecked(False)
     mon._refresh_frame_line()

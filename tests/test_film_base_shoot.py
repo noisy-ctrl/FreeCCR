@@ -447,7 +447,7 @@ def film_mon(tmp_path, monkeypatch):
 def test_the_film_base_rows_come_with_the_exposure_row(film_mon):
     mon, usb, light, lm, path = film_mon
     assert mon.film_base_box.isVisibleTo(mon)
-    assert mon.film_base_combo.currentText() == "No film base yet"
+    assert mon.film_base_combo.currentText() == "No film base for trichrome yet"
     assert mon.film_base_note.text().startswith("No film base yet")
     assert not mon.film_base_use.isEnabled()
     usb.exposure_choices.emit({})
@@ -588,8 +588,10 @@ def test_measuring_one_exposure_uses_the_light_as_it_is(film_mon):
     assert set(base["colours"]) == {"w"}
     assert base["colours"]["w"]["shutter"] == "1/3"           # red, the brightest
     assert mon.film_base_note.text() == "1/3, ISO 100 (base 83 %)"
-    mon._apply_scan_type("trichrome")
-    assert mon.film_base_note.text().startswith("Measured for one exposure")
+    assert base.get("scan") == mon.scan_type()               # recorded with the base
+    mon._apply_scan_type("trichrome")                          # not a trichrome base:
+    assert mon._film_base() is None                            # hidden, not offered
+    assert mon.film_base_combo.currentText() == "No film base for trichrome yet"
     assert not mon.film_base_use.isEnabled()
 
 
@@ -604,21 +606,17 @@ def test_measure_waits_while_shoot_runs(film_mon):
     assert mon.measure_btn.isEnabled()
 
 
-def test_only_a_confident_border_is_read_without_a_click(film_mon, monkeypatch):
+def test_measure_never_picks_a_border_by_itself(film_mon, monkeypatch):
+    """spec/film-base-per-scan-type.md §3: even a confident border is not
+    read without a click; a click is."""
     mon, usb, light, lm, path = film_mon
     import numpy as np
     from core import auto_black_point as abp
     mon.feed.full = np.zeros((480, 640, 3), np.uint8)
-    found = {"res": abp.RebateResult((200.0, 150.0, 100.0), "medium", "right",
-                                     (0.98, 0.2, 1.0, 0.8))}
-    monkeypatch.setattr(abp, "find_rebate", lambda frame: found["res"])
-    assert mon._film_base_patch() == (None, "")          # one bright edge: maybe bare light
-    found["res"] = abp.RebateResult((200.0, 150.0, 100.0), "high", "top",
-                                    (0.1, 0.0, 0.9, 0.05))
-    rect, where = mon._film_base_patch()
-    assert where == "the top border"
-    assert rect == pytest.approx(be.patch_inset((0.1, 0.0, 0.9, 0.05)))
-    mon._neg_base_pos = (0.3, 0.6, 640, 480)               # a click wins
+    monkeypatch.setattr(abp, "find_rebate", lambda frame: abp.RebateResult(
+        (200.0, 150.0, 100.0), "high", "top", (0.1, 0.0, 0.9, 0.05)))
+    assert mon._film_base_patch() == (None, "")
+    mon._neg_base_pos = (0.3, 0.6, 640, 480)
     assert mon._film_base_patch()[1] == "where you clicked"
 
 

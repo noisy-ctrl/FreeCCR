@@ -104,7 +104,7 @@ On the RAW of each test shot, inside a patch fixed on the live view before the
 first test shot:
 1. The **Film Base** point last clicked in Negative Preview: a square of
    `PATCH_SIDE` (3 %) of the frame's short side around it.
-2. Else the **rebate** `auto_black_point.find_rebate` finds on the last full
+2. *(Withdrawn 2026-11-18, spec/film-base-per-scan-type.md §3: Measure always asks.)* Else the **rebate** `auto_black_point.find_rebate` finds on the last full
    live frame (what Negative Preview's Auto uses), its rect inset by 20 % each
    side, but only at HIGH confidence (two edges agreeing). Checked on a real
    35mm negative's live picture: it took the right edge at medium confidence,

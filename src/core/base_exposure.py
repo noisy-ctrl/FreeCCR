@@ -653,6 +653,14 @@ def _clean_base(b):
     out = {"name": name, "when": str(b.get("when", "") or ""),
            "camera": str(b.get("camera", "") or ""), "colours": colours,
            "notes": [str(n) for n in (b.get("notes") or []) if str(n).strip()][:6]}
+    # the scan type it was measured in, and B&W's light (spec/film-base-per-
+    # scan-type.md); older entries have neither
+    scan = str(b.get("scan", "") or "")
+    if scan in SCANS:
+        out["scan"] = scan
+    light = str(b.get("light", "") or "")
+    if light in BW_LIGHTS:
+        out["light"] = light
     bp = _clean_bp(b.get("black_point"))
     if bp:
         out["black_point"] = bp
@@ -726,9 +734,40 @@ def default_name(today=None):
     return f"Film base · {d.day} {d.strftime('%b')}"
 
 
-def entry(name, colours, camera="", notes=(), when=None):
-    return {"name": name, "when": when or datetime.date.today().isoformat(),
-            "camera": camera or "", "colours": dict(colours), "notes": list(notes)}
+SCANS = ("trichrome", "colour", "bw")
+BW_LIGHTS = ("w", "r", "g", "b")
+LIGHT_NAMES = {"w": "white", "r": "red", "g": "green", "b": "blue"}
+
+
+def entry(name, colours, camera="", notes=(), when=None, scan=None, light=None):
+    e = {"name": name, "when": when or datetime.date.today().isoformat(),
+         "camera": camera or "", "colours": dict(colours), "notes": list(notes)}
+    if scan:
+        e["scan"] = scan
+    if light:
+        e["light"] = light
+    return e
+
+
+def scan_of(base):
+    """The scan type a film base was measured in: its own record, else three
+    colours = trichrome, else None (one exposure: colour or B&W)."""
+    if not base:
+        return None
+    if base.get("scan") in SCANS:
+        return base["scan"]
+    cols = base.get("colours") or {}
+    return "trichrome" if all(k in cols for k in COLOURS) else None
+
+
+def fits(base, scan_type):
+    """Is this film base for the scan type `scan_type`?"""
+    if not base:
+        return False
+    s = scan_of(base)
+    if scan_type == "trichrome":
+        return s == "trichrome"
+    return "w" in (base.get("colours") or {}) and s in (None, scan_type)
 
 
 def add(data, new):
@@ -740,12 +779,14 @@ def add(data, new):
     return d
 
 
-def replace(data, index, colours, camera="", notes=(), when=None):
+def replace(data, index, colours, camera="", notes=(), when=None, scan=None, light=None):
     """Measure Again: new exposures under the same name."""
     d = normalise(data)
     if 0 <= index < len(d["bases"]):
         old = d["bases"][index]
-        c = _clean_base(entry(old["name"], colours, camera or old["camera"], notes, when))
+        c = _clean_base(entry(old["name"], colours, camera or old["camera"], notes, when,
+                              scan=scan or old.get("scan"),
+                              light=light or old.get("light")))
         if c:
             d["bases"][index] = c
             d["selected"] = index
@@ -901,6 +942,8 @@ def summary(base, trichrome):
               for k in keys if cols[k].get("dimmed") and led_level(cols[k])]
     if dimmed:
         line += "; " + ", ".join(dimmed)
+    if not trichrome and base.get("light") in ("r", "g", "b"):
+        line += f"; {LIGHT_NAMES[base['light']]} light"
     if base.get("black_point"):
         line += " · black point"
     return line
