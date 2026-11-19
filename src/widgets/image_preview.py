@@ -266,6 +266,9 @@ class GraphicsImageView(QGraphicsView):
             elif event.button() == Qt.RightButton:
                 self.parent_widget.slice_delete_at(self.mapToScene(event.pos()))
             return
+        if event.button() == Qt.LeftButton and self._sampling_owns_mouse():
+            self.parent_widget.sample_press(self.mapToScene(event.pos()))
+            return
         if event.button() == Qt.LeftButton and self.wb_pick_mode and self.parent_widget.pixmap_item is not None:
             scene_pos = self.mapToScene(event.pos())
             self.wb_pick_mode = False
@@ -340,6 +343,9 @@ class GraphicsImageView(QGraphicsView):
             return
         if self.parent_widget.slice_mode:
             self.parent_widget.slice_move(self.mapToScene(event.pos()))
+            return
+        if self._sampling_owns_mouse():
+            self.parent_widget.sample_move(self.mapToScene(event.pos()))
             return
         if self.bwpoint_mode and self._bw_drag_start is not None:
             self._bw_drag_end = self.mapToScene(event.pos())
@@ -466,6 +472,10 @@ class GraphicsImageView(QGraphicsView):
         if self.parent_widget.slice_mode:
             if event.button() == Qt.LeftButton:
                 self.parent_widget.slice_release()
+            return
+        if (event.button() == Qt.LeftButton and self._sampling_owns_mouse()
+                and self.parent_widget._sample_drag is not None):
+            self.parent_widget.sample_release(self.mapToScene(event.pos()))
             return
         if self.bwpoint_mode and event.button() == Qt.LeftButton and self._bw_drag_start is not None:
             drag_start_scene = self._bw_drag_start
@@ -676,8 +686,18 @@ class GraphicsImageView(QGraphicsView):
             self.setCursor(_eyedropper_cursor())
         elif self.bwpoint_mode:
             self.setCursor(Qt.CrossCursor)
+        elif pw is not None and getattr(pw, "sample_mode", False):
+            self.setCursor(Qt.CrossCursor)        # the sample circle
         else:
             self.setCursor(Qt.ArrowCursor)
+
+    def _sampling_owns_mouse(self, event=None):
+        """The sample circle takes the left button when it is on and no
+        other tool has the mouse (spec/scope-sample-circle.md)."""
+        pw = self.parent_widget
+        return (getattr(pw, "sample_mode", False) and pw.pixmap_item is not None
+                and not (pw.dust_mode or pw.crop_mode or pw.area_mode or pw.slice_mode
+                         or self.wb_pick_mode or self.bwpoint_mode))
 
     def _end_space_pan(self):
         self._space_pan = False
@@ -1056,6 +1076,20 @@ class ImagePreview(QWidget):
             _fc_btn.setContextMenuPolicy(Qt.CustomContextMenu)
             _fc_btn.customContextMenuRequested.connect(
                 lambda pos, b=_fc_btn: self._show_fc_menu(b.mapToGlobal(pos)))
+        # Sample circle: points the scopes and the histogram at one round
+        # area; a measuring tool only (spec/scope-sample-circle.md)
+        self.sample_action = QAction(
+            theme.load_tinted_icon(resource_path("icons/scope-sample-icon.png"),
+                                   on_color=theme.ICON_ON),
+            "Sample circle", self)
+        self.sample_action.setCheckable(True)
+        self.sample_action.setToolTip(
+            "Sample circle: drag on the picture to draw a circle; the scopes and "
+            "the histogram then read only what is inside it (skin tones, a grey "
+            "card, a sky). Drag inside to move it, on its rim to resize it. "
+            "Measuring only: the picture is not changed.")
+        self.sample_action.triggered.connect(self.set_sample_mode)
+        self.toolbar.addAction(self.sample_action)
         add_spacer()
 
         # Un-convert, Convert and Export sit at the far right, next to the
@@ -1246,6 +1280,11 @@ class ImagePreview(QWidget):
         self._dust_selected = None
 
         # Coalesce a fine-rotation drag into a single undo step
+        # the scope sample circle (spec/scope-sample-circle.md)
+        self.sample_mode = False
+        self.sample_circle = None          # (cx, cy, r) as shares of the picture
+        self._sample_item = None
+        self._sample_drag = None
         self._straighten_dirty = False
         self._straighten_refresh = QTimer(self)        # coalesces display re-crops
         self._straighten_refresh.setSingleShot(True)
@@ -1379,6 +1418,7 @@ class ImagePreview(QWidget):
         self._glow_item = None           # scene.clear() above deleted it
         self._glow_cache = None
         self._fc_item = None
+        self._sample_item = None
         self._fc_cache = None
         self._gm_item = None
         self._gm_cache = None
@@ -1597,6 +1637,7 @@ class ImagePreview(QWidget):
         self._fc_item = None
         self._gm_item = None
         self._clip_item = None
+        self._sample_item = None
         for _slice_line in self._slice_lines:
             _slice_line["item"] = None
 
@@ -1816,6 +1857,7 @@ class ImagePreview(QWidget):
         self._refresh_gold_mask()
         self._refresh_glow_overlay()
         self._refresh_clip_overlay()
+        self._refresh_sample_item()
 
         # The displayed image content/orientation may have changed (rotate,
         # flip, fine rotation, hi-res pixmap swap) — refresh the scopes.
@@ -3565,7 +3607,9 @@ class ImagePreview(QWidget):
 
     def _update_scopes_now(self):
         self._scopes_dirty = False
-        frame = self._capture_display_image(region=self._reference_sample_region())
+        region = self._reference_sample_region()
+        frame = self._capture_display_image(
+            region=region, circle=region is not None and self._sample_circle_scene() is not None)
         if frame is None:
             self.scopes_panel.clear()
         else:
@@ -3585,6 +3629,10 @@ class ImagePreview(QWidget):
         inside the red box, so a fine rotation is reflected exactly as seen.
         None also when no frame is drawn (e.g. under a rotated crop, where the
         frame isn't displayed)."""
+        circle = self._sample_circle_scene()
+        if circle is not None:
+            (cx, cy), r = circle
+            return QRectF(cx - r, cy - r, 2 * r, 2 * r)
         if not self.scopes_panel.samples_reference():
             return None
         item = self.reference_rect_item
@@ -3600,6 +3648,10 @@ class ImagePreview(QWidget):
 
     def _sampling_status(self):
         """(histogram caption, scopes note) for the current sample area."""
+        if self.sample_mode:
+            if self._sample_circle_scene() is not None:
+                return "Sample", "sample circle"
+            return "", "sample circle (drag to draw)"
         if not self.scopes_panel.samples_reference():
             return "", ""
         if self._reference_sample_region() is not None:
@@ -3613,8 +3665,9 @@ class ImagePreview(QWidget):
         histogram = ccr_backend.get_histogram_data_by_index(idx)
         region = self._reference_sample_region()
         if region is not None:
-            frame = self._capture_display_image(region=region,
-                                                max_w=self.HIST_SAMPLE_MAX_W)
+            frame = self._capture_display_image(
+                region=region, max_w=self.HIST_SAMPLE_MAX_W,
+                circle=self._sample_circle_scene() is not None)
             if frame is not None:
                 rgb, mask = frame
                 px = rgb[mask]
@@ -3629,6 +3682,155 @@ class ImagePreview(QWidget):
             hist_widget.set_caption(caption)
         self.scopes_panel.set_sampling_note(note)
 
+    # --- the sample circle (spec/scope-sample-circle.md) --------------------
+    SAMPLE_RIM_PX = 7          # a press this close to the rim resizes it (view px)
+    SAMPLE_CLICK_PX = 4        # a drag shorter than this is a click
+    SAMPLE_MIN_R = 0.004       # the smallest radius, a share of the width
+
+    def set_sample_mode(self, on):
+        on = bool(on)
+        self.sample_mode = on
+        if self.sample_action.isChecked() != on:
+            was = self.sample_action.blockSignals(True)
+            self.sample_action.setChecked(on)
+            self.sample_action.blockSignals(was)
+        self._sample_drag = None
+        self._refresh_sample_item()
+        if hasattr(self.view, "_restore_mode_cursor"):
+            self.view._restore_mode_cursor()
+        self._on_sample_area_changed()
+
+    def _picture_scene_rect(self):
+        if self.pixmap_item is None:
+            return None
+        br = self.pixmap_item.mapToScene(self.pixmap_item.boundingRect()).boundingRect()
+        return br if br.width() > 0 and br.height() > 0 else None
+
+    def _sample_circle_scene(self):
+        """((cx, cy), r) of the circle in scene coordinates, or None (off, or
+        none drawn yet)."""
+        if not self.sample_mode or self.sample_circle is None:
+            return None
+        br = self._picture_scene_rect()
+        if br is None:
+            return None
+        cx, cy, r = self.sample_circle
+        return (br.left() + cx * br.width(), br.top() + cy * br.height()), r * br.width()
+
+    def _set_sample_scene(self, centre, radius):
+        br = self._picture_scene_rect()
+        if br is None:
+            return
+        cx = min(max((centre.x() - br.left()) / br.width(), 0.0), 1.0)
+        cy = min(max((centre.y() - br.top()) / br.height(), 0.0), 1.0)
+        r = max(radius / br.width(), self.SAMPLE_MIN_R)
+        self.sample_circle = (cx, cy, r)
+        self._refresh_sample_item()
+        self._on_sample_area_changed()
+
+    def sample_press(self, scene_pos):
+        circle = self._sample_circle_scene()
+        scale = max(self._view_scale(), 1e-6)
+        mode = "new"
+        if circle is not None:
+            (cx, cy), r = circle
+            d = math.hypot(scene_pos.x() - cx, scene_pos.y() - cy)
+            if abs(d - r) <= self.SAMPLE_RIM_PX / scale:
+                mode = "resize"
+            elif d < r:
+                mode = "move"
+        self._sample_drag = {"mode": mode, "start": QPointF(scene_pos), "circle": circle,
+                             "moved": False}
+
+    def sample_move(self, scene_pos):
+        drag = self._sample_drag
+        if drag is None:
+            self._sample_hover_cursor(scene_pos)
+            return
+        start = drag["start"]
+        scale = max(self._view_scale(), 1e-6)
+        if not drag["moved"]:
+            if math.hypot(scene_pos.x() - start.x(),
+                          scene_pos.y() - start.y()) * scale < self.SAMPLE_CLICK_PX:
+                return
+            drag["moved"] = True
+        if drag["mode"] == "move":
+            (cx, cy), r = drag["circle"]
+            self._set_sample_scene(QPointF(cx + scene_pos.x() - start.x(),
+                                           cy + scene_pos.y() - start.y()), r)
+        elif drag["mode"] == "resize":
+            (cx, cy), _r = drag["circle"]
+            self._set_sample_scene(QPointF(cx, cy),
+                                   math.hypot(scene_pos.x() - cx, scene_pos.y() - cy))
+        else:
+            self._set_sample_scene(start, math.hypot(scene_pos.x() - start.x(),
+                                                     scene_pos.y() - start.y()))
+
+    def sample_release(self, scene_pos):
+        drag = self._sample_drag
+        if drag is None:
+            return
+        self.sample_move(scene_pos)
+        self._sample_drag = None
+        if not drag["moved"]:
+            # a click: the circle's centre there (a first click: a small one)
+            circle = drag["circle"]
+            br = self._picture_scene_rect()
+            r = circle[1] if circle is not None else (0.06 * br.width() if br else 10.0)
+            self._set_sample_scene(drag["start"], r)
+
+    def _sample_hover_cursor(self, scene_pos):
+        circle = self._sample_circle_scene()
+        cur = Qt.CrossCursor
+        if circle is not None:
+            (cx, cy), r = circle
+            d = math.hypot(scene_pos.x() - cx, scene_pos.y() - cy)
+            if abs(d - r) <= self.SAMPLE_RIM_PX / max(self._view_scale(), 1e-6):
+                cur = Qt.SizeFDiagCursor
+            elif d < r:
+                cur = Qt.SizeAllCursor
+        self.view.setCursor(cur)
+
+    def _refresh_sample_item(self):
+        """The dotted circle over the picture (never in its pixels)."""
+        circle = self._sample_circle_scene()
+        if circle is None:
+            if self._sample_item is not None:
+                for it in self._sample_item:
+                    try:
+                        it.setVisible(False)
+                    except RuntimeError:
+                        pass
+            return
+        (cx, cy), r = circle
+        rect = QRectF(cx - r, cy - r, 2 * r, 2 * r)
+        items = self._sample_item
+        alive = items is not None and all(self._item_alive(it) for it in items)
+        if not alive:
+            dark = QGraphicsEllipseItem()
+            light = QGraphicsEllipseItem()
+            pd = QPen(QColor(0, 0, 0, 200), 3)
+            pd.setCosmetic(True)
+            pl = QPen(QColor(255, 255, 255, 235), 1.6, Qt.DotLine)
+            pl.setCosmetic(True)
+            dark.setPen(pd)
+            light.setPen(pl)
+            for it, z in ((dark, 3.0), (light, 3.1)):
+                it.setBrush(Qt.NoBrush)
+                it.setZValue(z)
+                self.scene.addItem(it)
+            items = self._sample_item = (dark, light)
+        for it in items:
+            it.setRect(rect)
+            it.setVisible(True)
+
+    @staticmethod
+    def _item_alive(item):
+        try:
+            return item.scene() is not None
+        except RuntimeError:
+            return False
+
     def _on_sample_area_changed(self, _checked=None):
         """Toggle flipped: re-sample both without re-rendering the image."""
         if self.current_idx is not None and self.pixmap_item is not None:
@@ -3637,7 +3839,7 @@ class ImagePreview(QWidget):
             self.scopes_panel.set_sampling_note(self._sampling_status()[1])
         self._schedule_scope_update()
 
-    def _capture_display_image(self, region=None, max_w=None):
+    def _capture_display_image(self, region=None, max_w=None, circle=False):
         """Render the displayed image (crop applied, orientation as shown,
         hi-res prescale included — zoom/pan excluded) into a small RGBA image;
         returns (rgb (h,w,3) uint8, mask (h,w) bool) or None. Alpha stays 0 in
@@ -3673,6 +3875,12 @@ class ImagePreview(QWidget):
         rows = buf.reshape(h, img.bytesPerLine())[:, :w * 4].reshape(h, w, 4)
         rgb = np.ascontiguousarray(rows[:, :, :3])
         mask = rows[:, :, 3] >= 250
+        if circle:
+            # the sample circle: only what is inside the circle inscribed in
+            # the captured square (spec/scope-sample-circle.md)
+            yy, xx = np.mgrid[0:h, 0:w]
+            rx, ry = w / 2.0, h / 2.0
+            mask &= ((xx + 0.5 - rx) / rx) ** 2 + ((yy + 0.5 - ry) / ry) ** 2 <= 1.0
         return rgb, mask
 
     def probe_color_at(self, vp_pos):
