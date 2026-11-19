@@ -362,6 +362,32 @@ def canister():
     return img
 
 
+def scope_sample():
+    """The scope sample circle (spec/scope-sample-circle.md): a circle of
+    round dots with a ruler standing straight up in it (the user's pick of
+    the drafts, 2026-11-19: "C round dots", the ruler upright)."""
+    img, p = canvas()
+    pn = QPen(BLACK, 1.9, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+    pn.setDashPattern([0.01, 2.6 / 1.9])
+    p.setPen(pn)
+    p.setBrush(Qt.NoBrush)
+    p.drawEllipse(QPointF(12.0, 12.0), 10.2, 10.2)
+    # the ruler, upright: its outline, ticks along its left edge
+    length, width = 13.4, 4.2
+    r = QRectF(12.0 - width / 2, 12.0 - length / 2, width, length)
+    p.setPen(pen(1.4, cap=Qt.SquareCap, join=Qt.MiterJoin))
+    p.drawRoundedRect(r, 0.5, 0.5)
+    p.setPen(pen(1.1, cap=Qt.FlatCap))
+    ticks = 7
+    step = length / (ticks + 1)
+    for i in range(1, ticks + 1):
+        y = r.top() + i * step
+        tick = 1.9 if i % 2 == 0 else 1.15
+        p.drawLine(QPointF(r.left(), y), QPointF(r.left() + tick, y))
+    p.end()
+    return img
+
+
 # (file in src/icons, drawing): the names the app loads
 ICONS = [
     ("rotate-left-icon-size_512.png", lambda: rotate(True)),
@@ -376,6 +402,7 @@ ICONS = [
     ("hdr-icon.png", hdr),
     ("false-colour-icon.png", false_colour_coloured),
     ("film-canister-icon.png", canister),
+    ("scope-sample-icon.png", scope_sample),
 ]
 # Capture keeps its camera (camera-icon.png, the user's choice, 2026-11-19).
 

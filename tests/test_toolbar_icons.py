@@ -20,12 +20,12 @@ def test_every_left_hand_button_is_a_picture_in_order():
     left = names[:names.index("Capture")]
     assert left == ["Rotate Left", "Rotate Right", "Mirror Vertical", "Mirror Horizontal",
                     "Crop", "Sprocket Holes White", "Area", "Gradient", "Dust removal",
-                    "HDR", "False colour", "Film Presets"]
+                    "HDR", "False colour", "Sample circle", "Film Presets"]
     by = {a.text(): a for a in ip.toolbar.actions()}
     for n in left + ["Capture"]:
         assert not by[n].icon().isNull(), n
     for n in ("Area", "Gradient", "Dust removal", "HDR", "False colour", "Crop",
-              "Film Presets"):
+              "Sample circle", "Film Presets"):
         assert by[n].toolTip().startswith(n + ":"), n      # no words on the button
     for n in ("Auto Crop", "Un-convert", "Convert", "Export…"):
         assert by[n].icon().isNull(), n                     # these stay words
