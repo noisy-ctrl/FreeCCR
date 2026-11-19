@@ -1,8 +1,9 @@
 """Contact sheet (spec/contact-sheet.md): the whole roll as ONE image, the way
-a lab prints it. Every frame, uncropped and as scanned, in roll order on
-black (rows of 6 for 35mm, 4 for medium format), numbered like edge print,
-with each crop overlaid: the outside dimmed and a line round the crop,
-coloured by where the crop came from.
+a lab prints it. Every frame, turned and mirrored as the main window shows it
+(revision 2026-11-19; whole, or as its crop keeps it with Respect crop), in
+roll order on black (rows of 6 for 35mm, 4 for medium format), numbered like
+edge print, with each crop overlaid: the outside dimmed and a line round the
+crop, coloured by where the crop came from.
 
 `ContactSheet` keeps that image up to date: it compares a small signature per
 frame on a timer and redraws only the frames that changed into the composite,
@@ -27,7 +28,7 @@ from PySide6.QtGui import (QColor, QFont, QImage, QPainter, QPainterPath, QPen,
 from PySide6.QtWidgets import (QApplication, QCheckBox, QFileDialog,
                                QGraphicsPixmapItem, QGraphicsScene,
                                QGraphicsView, QHBoxLayout, QLabel, QMenu,
-                               QPushButton, QVBoxLayout, QWidget)
+                               QPushButton, QSizePolicy, QVBoxLayout, QWidget)
 
 from core import film_formats
 from core.ccr_backend import ccr_backend
@@ -53,6 +54,17 @@ NEG_LONG = 480             # long side of a background-decoded scan
 DIM = (0, 0, 0, 125)
 BG = (14, 14, 14)
 EDGE_TEXT = (226, 196, 120)    # a warm edge-print tone for the frame numbers
+NAME_TEXT = (205, 205, 205)
+FOOT_TEXT = (150, 150, 150)
+# Text… → Colour (revision 2026-11-19): "edge" is the old look (warm numbers,
+# light grey names); the others colour every caption and the footer's words
+TEXT_COLOURS = (("edge", "Edge print", None), ("white", "White", (240, 240, 240)),
+                ("light", "Light grey", (200, 200, 200)), ("mid", "Mid grey", (140, 140, 140)),
+                ("warm", "Warm", EDGE_TEXT))
+# Text… → Show: what the captions carry
+TEXT_INFO = (("number", "Frame number"), ("name", "File name"), ("film", "Film"),
+             ("format", "Film format"), ("status", "Crop status"))
+DEFAULT_INFO = ("number", "name", "format", "status")
 
 
 def _same_rect(a, b, tol=1e-6):
@@ -110,38 +122,106 @@ def _caption(source, detail):
     return label
 
 
-def draw_frame(p, target, source_img, crop_rect, crop_angle, source, overlay=True):
-    """One frame, uncropped and as scanned, fitted and centred in `target`,
+def orientation_of(img):
+    """(quarter turns in degrees, fine rotation in degrees, mirror left-right,
+    mirror top-bottom): the frame as the main window shows it."""
+    return (int(getattr(img, "rotation_angle", 0) or 0) % 360,
+            float(getattr(img, "fine_rotation_angle", 0) or 0) / 100.0,
+            bool(getattr(img, "horizontal_mirrored", False)),
+            bool(getattr(img, "vertical_mirrored", False)))
+
+
+def _turned_size(w, h, degrees):
+    """The bounding box of a w x h rectangle turned by `degrees`."""
+    t = math.radians(degrees)
+    c, s = abs(math.cos(t)), abs(math.sin(t))
+    return w * c + h * s, w * s + h * c
+
+
+def shown_size(sw, sh, crop_rect=None, orient=None, respect_crop=False):
+    """The frame's size as the sheet shows it, in source pixels: the crop's
+    box with Respect crop, else the whole scan, turned."""
+    w, h = float(sw), float(sh)
+    if respect_crop and crop_rect is not None:
+        x1, y1, x2, y2 = crop_rect
+        w, h = abs(x2 - x1) * sw, abs(y2 - y1) * sh
+    rot, fine = (orient[0], orient[1]) if orient else (0, 0.0)
+    return _turned_size(w, h, rot + fine)
+
+
+def draw_frame(p, target, source_img, crop_rect, crop_angle, source, overlay=True,
+               orient=None, respect_crop=False):
+    """One frame fitted and centred in `target`, turned and mirrored as the
+    main window shows it (`orient`, see orientation_of; None = as scanned),
     with its crop overlay: the outside dimmed and the crop outlined in the
     source colour (a red dashed outline round a frame auto crop wasn't sure
-    of). With `overlay` False, just the frame. Returns the frame's rect."""
+    of). With `respect_crop` only what the crop keeps is shown (the crop box
+    and its angle, then the turns: what an export gives) and the overlay is a
+    line round the frame. With `overlay` False, just the frame. Returns the
+    frame's bounding rect in `target`'s coordinates."""
     if isinstance(source_img, QPixmap):
         source_img = source_img.toImage()
     sw, sh = source_img.width(), source_img.height()
-    scale = min(target.width() / sw, target.height() / sh)
-    w, h = sw * scale, sh * scale
-    x, y = target.x() + (target.width() - w) / 2, target.y() + (target.height() - h) / 2
-    p.save()
-    p.translate(x, y)
-    p.drawImage(QRectF(0, 0, w, h), source_img)
+    rot, fine, hflip, vflip = orient or (0, 0.0, False, False)
+    cropped = bool(respect_crop and crop_rect is not None)
+    W, H = shown_size(sw, sh, crop_rect, (rot, fine), respect_crop)
+    scale = min(target.width() / W, target.height() / H)
     colour = QColor(*SOURCES.get(source, SOURCES["none"])[0])
-    if overlay and crop_rect is not None:
-        poly = QPolygonF(crop_polygon(crop_rect, crop_angle, w, h))
-        outside = QPainterPath()
-        outside.addRect(QRectF(0, 0, w, h))
-        inside = QPainterPath()
-        inside.addPolygon(poly)
-        inside.closeSubpath()
-        p.fillPath(outside.subtracted(inside), QColor(*DIM))
-        p.setPen(QPen(colour, 2.5))
+    p.save()
+    # the canvas's order (image_preview.apply_transformations /
+    # ccr_processor.apply_orientation): turns about the centre, mirrors last
+    p.translate(target.center())
+    p.scale(scale, scale)
+    if vflip:
+        p.scale(1, -1)
+    if hflip:
+        p.scale(-1, 1)
+    p.rotate(rot + fine)
+    if cropped:
+        # crop-box coordinates, centred: the source point C + R(angle) q is
+        # shown at q (apply_crop_to_image)
+        x1, y1, x2, y2 = crop_rect
+        bw, bh = abs(x2 - x1) * sw, abs(y2 - y1) * sh
+        box = QRectF(-bw / 2, -bh / 2, bw, bh)
+        p.setClipRect(box)
+        p.save()
+        p.rotate(-(crop_angle or 0.0))
+        p.translate(-(x1 + x2) / 2 * sw, -(y1 + y2) / 2 * sh)
+        p.drawImage(QRectF(0, 0, sw, sh), source_img)
+        p.restore()
+        if overlay:
+            pen = QPen(colour, 2.5)
+            pen.setCosmetic(True)
+            p.setPen(pen)
+            p.setBrush(Qt.NoBrush)
+            inset = 1.25 / scale
+            p.drawRect(box.adjusted(inset, inset, -inset, -inset))
+    else:
+        p.translate(-sw / 2, -sh / 2)
+        p.drawImage(QRectF(0, 0, sw, sh), source_img)
+        if overlay and crop_rect is not None:
+            poly = QPolygonF(crop_polygon(crop_rect, crop_angle, sw, sh))
+            outside = QPainterPath()
+            outside.addRect(QRectF(0, 0, sw, sh))
+            inside = QPainterPath()
+            inside.addPolygon(poly)
+            inside.closeSubpath()
+            p.fillPath(outside.subtracted(inside), QColor(*DIM))
+            pen = QPen(colour, 2.5)
+            pen.setCosmetic(True)
+            p.setPen(pen)
+            p.setBrush(Qt.NoBrush)
+            p.drawPolygon(poly)
+    if overlay and source == "unsure" and not (cropped or crop_rect is not None):
+        pen = QPen(colour, 2.5, Qt.DashLine)
+        pen.setCosmetic(True)
+        p.setPen(pen)
         p.setBrush(Qt.NoBrush)
-        p.drawPolygon(poly)
-    elif overlay and source == "unsure":
-        p.setPen(QPen(colour, 2.5, Qt.DashLine))
-        p.setBrush(Qt.NoBrush)
-        p.drawRect(QRectF(1.5, 1.5, w - 3, h - 3))
+        inset = 1.5 / scale
+        p.drawRect(QRectF(inset, inset, sw - 2 * inset, sh - 2 * inset))
     p.restore()
-    return QRectF(x, y, w, h)
+    w, h = W * scale, H * scale
+    return QRectF(target.center().x() - w / 2, target.center().y() - h / 2, w, h)
 
 
 def frame_format(img):
@@ -287,6 +367,16 @@ class ContactSheet(QObject):
         self.negatives = self._settings.value("sheet/negatives", False, type=bool)
         # the crop overlay (dimmed outside + outline); on unless turned off
         self.overlay = self._settings.value("sheet/overlay", True, type=bool)
+        # revision 2026-11-19: crops applied, and the captions' colour and info
+        self.respect_crop = self._settings.value("sheet/respect_crop", False, type=bool)
+        self.text_colour = self._settings.value("sheet/text_colour", "edge", type=str) or "edge"
+        info = self._settings.value("sheet/text_info", None)
+        if isinstance(info, str):
+            info = [k for k in info.split(",") if k]
+        keys = {k for k, _l in TEXT_INFO}
+        self.text_info = (tuple(k for k in info if k in keys) if info is not None
+                          else DEFAULT_INFO)
+        self.roll_film = ""           # the roll's film (MainWindow sets it)
         self._image = None
         self._layout = None
         self._sigs = []
@@ -327,6 +417,51 @@ class ContactSheet(QObject):
         self._settings.setValue("sheet/overlay", self.overlay)
         self.update(force=True)
 
+    def set_respect_crop(self, on):
+        """Show each cropped frame as its crop keeps it."""
+        self.respect_crop = bool(on)
+        self._settings.setValue("sheet/respect_crop", self.respect_crop)
+        self.update(force=True)
+
+    def set_text_colour(self, key):
+        """A TEXT_COLOURS key or "#rrggbb"."""
+        key = str(key or "edge")
+        if not (key in {k for k, _l, _c in TEXT_COLOURS}
+                or QColor(key).isValid() and key.startswith("#")):
+            key = "edge"
+        self.text_colour = key
+        self._settings.setValue("sheet/text_colour", key)
+        self.update(force=True)
+
+    def set_text_info(self, keys):
+        keys = set(keys or ())
+        self.text_info = tuple(k for k, _l in TEXT_INFO if k in keys)
+        self._settings.setValue("sheet/text_info", ",".join(self.text_info))
+        self.update(force=True)
+
+    def set_roll_film(self, name):
+        name = str(name or "")
+        if name != self.roll_film:
+            self.roll_film = name
+            if "film" in self.text_info:
+                self.update(force=True)
+
+    def _colours(self):
+        """(number, words, footer, legend words) as QColors."""
+        named = {k: c for k, _l, c in TEXT_COLOURS}
+        if self.text_colour == "edge" or (self.text_colour not in named
+                                          and not QColor(self.text_colour).isValid()):
+            return (QColor(*EDGE_TEXT), QColor(*NAME_TEXT), QColor(*FOOT_TEXT),
+                    QColor(190, 190, 190))
+        c = (QColor(*named[self.text_colour]) if self.text_colour in named
+             else QColor(self.text_colour))
+        return c, c, c, c
+
+    def _film_of(self, img, presets):
+        from core import film_presets as fp
+        p = fp.find(presets, getattr(img, "film_preset", None))
+        return fp.label(p) if p is not None else self.roll_film
+
     def update(self, force=False):
         """Redraw the frames whose signature changed (all with `force`, or
         when the layout changes). Emits `changed` and returns True when the
@@ -342,9 +477,15 @@ class ContactSheet(QObject):
         for img in imgs:
             if not getattr(img, "converted", False):
                 self._remember_negative(img)
-        aspects = [p.width() / p.height() for p in
-                   (getattr(i, "resized_preview", None) for i in imgs)
-                   if p is not None and not p.isNull() and p.height()]
+        aspects = []
+        for i in imgs:
+            pv = getattr(i, "resized_preview", None)
+            if pv is None or pv.isNull() or not pv.height():
+                continue
+            w, h = shown_size(pv.width(), pv.height(), getattr(i, "crop_rect", None),
+                              orientation_of(i), self.respect_crop)
+            if h > 0:
+                aspects.append(w / h)       # the frame as shown: turned, cropped
         aspect = float(np.median(aspects)) if aspects else 1.5
         cell_w = CELL_W_LONG_ROLL if len(imgs) > 48 else CELL_W
         layout = SheetLayout(len(imgs), film_columns(imgs), cell_w, aspect)
@@ -358,21 +499,28 @@ class ContactSheet(QObject):
         p.setRenderHint(QPainter.Antialiasing)
         p.setRenderHint(QPainter.SmoothPixmapTransform)
         p.setRenderHint(QPainter.TextAntialiasing)
+        presets = None
+        if "film" in self.text_info:
+            from core import film_presets as fp
+            presets = fp.load(self._settings)
+        look = (self.respect_crop, self.text_colour, self.text_info, self.overlay)
         for i, img in enumerate(imgs):
             src, detail = crop_source(img)
             fmt = frame_format(img)
+            film = self._film_of(img, presets) if presets is not None else ""
             sig = (id(img), getattr(img, "_render_epoch", 0),
                    tuple(img.crop_rect) if img.crop_rect else None,
                    round(float(getattr(img, "crop_angle", 0.0) or 0.0), 4),
                    src, detail, _name(img), fmt, self.negatives,
-                   self._neg_state(img) if self.negatives else None, self.overlay)
+                   self._neg_state(img) if self.negatives else None,
+                   orientation_of(img), film, look)
             if self._sigs[i] == sig:
                 continue
             self._sigs[i] = sig
-            self._draw_cell(p, i, img, src, detail, fmt)
+            self._draw_cell(p, i, img, src, detail, fmt, film)
             self.redrawn.append(i)
         p.end()
-        summary = format_summary(imgs)
+        summary = (format_summary(imgs), self.text_colour, self.overlay)
         if summary != self._footer:
             self._draw_footer(summary)
             if not self.redrawn:
@@ -383,7 +531,7 @@ class ContactSheet(QObject):
             return True
         return False
 
-    def _draw_cell(self, p, i, img, src, detail, fmt=None):
+    def _draw_cell(self, p, i, img, src, detail, fmt=None, film=""):
         lay = self._layout
         cell = lay.cell(i)
         p.fillRect(cell.adjusted(-2, -2, 2, 2), QColor(*BG))
@@ -391,56 +539,67 @@ class ContactSheet(QObject):
         area = lay.image_rect(i)
         if source is not None and not source.isNull():
             draw_frame(p, area, source, img.crop_rect,
-                       getattr(img, "crop_angle", 0.0), src, self.overlay)
+                       getattr(img, "crop_angle", 0.0), src, self.overlay,
+                       orient=orientation_of(img), respect_crop=self.respect_crop)
         else:
             p.setPen(QColor(110, 110, 110))
             p.drawText(area, Qt.AlignCenter, "reading scan…")
+        num_c, word_c, _foot, _leg = self._colours()
+        info = self.text_info
         u = lay.cell_w / 100.0                     # type scales with the cell
         f = QFont()
         f.setPixelSize(max(10, int(6.0 * u)))
         f.setBold(True)
         p.setFont(f)
-        p.setPen(QColor(*EDGE_TEXT))
-        num = f"{i + 1}"
-        num_w = p.fontMetrics().horizontalAdvance(num) + 2.5 * u
         top = QRectF(cell.x(), area.bottom() + 1.0 * u, cell.width(), 7.0 * u)
-        p.drawText(top, Qt.AlignLeft | Qt.AlignVCenter, num)
+        num_w = 0.0
+        if "number" in info:
+            p.setPen(num_c)
+            num = f"{i + 1}"
+            num_w = p.fontMetrics().horizontalAdvance(num) + 2.5 * u
+            p.drawText(top, Qt.AlignLeft | Qt.AlignVCenter, num)
         f.setBold(False)
         f.setPixelSize(max(9, int(4.4 * u)))
         p.setFont(f)
-        p.setPen(QColor(205, 205, 205))
-        name_rect = QRectF(top.x() + num_w, top.y(), top.width() - num_w, top.height())
-        p.drawText(name_rect, Qt.AlignLeft | Qt.AlignVCenter,
-                   p.fontMetrics().elidedText(_name(img), Qt.ElideMiddle, int(name_rect.width())))
+        if "name" in info:
+            p.setPen(word_c)
+            name_rect = QRectF(top.x() + num_w, top.y(), top.width() - num_w, top.height())
+            p.drawText(name_rect, Qt.AlignLeft | Qt.AlignVCenter,
+                       p.fontMetrics().elidedText(_name(img), Qt.ElideMiddle,
+                                                  int(name_rect.width())))
         f.setPixelSize(max(9, int(3.9 * u)))
         p.setFont(f)
         cap = QRectF(cell.x(), top.bottom(), cell.width(), 6.0 * u)
+        # line 2: film · format · status, each only when shown; the status
+        # (in its source colour) only with the overlay, whose colours it names
+        words = []
+        if "film" in info and film:
+            words.append(film)
+        if "format" in info and fmt:
+            words.append(film_formats.label(fmt))
+        status = "status" in info and self.overlay
+        text = "  ·  ".join(words)
         x = cap.x()
-        if not self.overlay:
-            # Overlay off: the frames as they are - no crop status (it
-            # describes the overlay's outline); the film format stays.
-            if fmt:
-                p.setPen(QColor(205, 205, 205))
-                p.drawText(cap, Qt.AlignLeft | Qt.AlignVCenter,
-                           p.fontMetrics().elidedText(film_formats.label(fmt),
-                                                      Qt.ElideRight, int(cap.width())))
-            return
-        if fmt:
-            # the film format, then where the crop came from in its colour
-            text = film_formats.label(fmt) + "  ·  "
-            p.setPen(QColor(205, 205, 205))
+        if text:
+            if status:
+                text += "  ·  "
+            p.setPen(word_c)
             p.drawText(QRectF(x, cap.y(), cap.width(), cap.height()),
-                       Qt.AlignLeft | Qt.AlignVCenter, text)
-            x += p.fontMetrics().horizontalAdvance(text)
-        p.setPen(QColor(*SOURCES[src][0]))
-        rest = QRectF(x, cap.y(), cap.right() - x, cap.height())
-        p.drawText(rest, Qt.AlignLeft | Qt.AlignVCenter,
-                   p.fontMetrics().elidedText(_caption(src, detail), Qt.ElideRight,
-                                              int(rest.width())))
+                       Qt.AlignLeft | Qt.AlignVCenter,
+                       p.fontMetrics().elidedText(text, Qt.ElideRight, int(cap.width())))
+            x += min(cap.width(), p.fontMetrics().horizontalAdvance(text))
+        if status and x < cap.right():
+            p.setPen(QColor(*SOURCES[src][0]))
+            rest = QRectF(x, cap.y(), cap.right() - x, cap.height())
+            p.drawText(rest, Qt.AlignLeft | Qt.AlignVCenter,
+                       p.fontMetrics().elidedText(_caption(src, detail), Qt.ElideRight,
+                                                  int(rest.width())))
 
-    def _draw_footer(self, summary=""):
+    def _draw_footer(self, summary=("", None, None)):
         lay = self._layout
         self._footer = summary
+        summary = summary[0] if isinstance(summary, tuple) else summary
+        _num, _word, foot_c, legend_c = self._colours()
         p = QPainter(self._image)
         band = QRectF(0, lay.height - MARGIN - lay.foot_h, lay.width, lay.foot_h)
         p.fillRect(band, QColor(*BG))
@@ -454,7 +613,7 @@ class ContactSheet(QObject):
         sw = 3.0 * u                                # legend swatch
         n = lay.n
         th = 6.0 * u
-        p.setPen(QColor(150, 150, 150))
+        p.setPen(foot_c)
         p.drawText(QRectF(MARGIN, y - th / 2, lay.width * 0.6, th), Qt.AlignLeft | Qt.AlignVCenter,
                    f"{n} frame{'s' if n != 1 else ''} · "
                    + (summary + " · " if summary else "") + time.strftime("%d %b %Y"))
@@ -466,7 +625,7 @@ class ContactSheet(QObject):
             label = SOURCES[key][1]
             tw = p.fontMetrics().horizontalAdvance(label)
             x -= tw
-            p.setPen(QColor(190, 190, 190))
+            p.setPen(legend_c)
             p.drawText(QRectF(x, y - th / 2, tw, th), Qt.AlignVCenter, label)
             x -= sw + 1.5 * u
             p.fillRect(QRectF(x, y - sw / 2, sw, sw), QColor(*SOURCES[key][0]))
@@ -605,7 +764,10 @@ class ContactSheetView(QWidget):
         b.addWidget(self.title)
         hint = QLabel("Double-click a frame to open it")
         hint.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 11px;")
+        # it never widens the bar: hidden when there is no room (_fit_bar)
+        hint.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         b.addWidget(hint)
+        self.hint, self.bar = hint, bar
         b.addStretch(1)
         self.neg_check = QCheckBox("Negatives")
         self.neg_check.setToolTip(
@@ -623,13 +785,28 @@ class ContactSheetView(QWidget):
         self.overlay_check.setChecked(self.sheet.overlay)
         self.overlay_check.toggled.connect(self.sheet.set_overlay)
         b.addWidget(self.overlay_check)
+        self.crop_check = QCheckBox("Respect crop")
+        self.crop_check.setToolTip(
+            "Show each cropped frame as its crop keeps it (turned and mirrored "
+            "as in the main window, as an export gives it). Frames with no crop "
+            "show whole. Also what Export writes.")
+        self.crop_check.setChecked(self.sheet.respect_crop)
+        self.crop_check.toggled.connect(self.sheet.set_respect_crop)
+        b.addWidget(self.crop_check)
+        self.text_btn = QPushButton("Text…")
+        self.text_btn.setToolTip("The captions' colour, and what they show.")
+        self.text_btn.clicked.connect(self._show_text_menu)
         self.fit_btn = QPushButton("Fit")
         self.full_btn = QPushButton("100%")
         self.export_btn = QPushButton("Export…")
-        self.back_btn = QPushButton("Back to frame")
-        for w in (self.fit_btn, self.full_btn, self.export_btn, self.back_btn):
+        for w in (self.text_btn, self.fit_btn, self.full_btn, self.export_btn):
             theme.style_button(w, "secondary")
             b.addWidget(w)
+        # the way out stands out: the bar's one light button (revision 2026-11-19)
+        self.back_btn = QPushButton("Back to Frame")
+        self.back_btn.setToolTip("Back to the frame you were on (Esc).")
+        theme.style_button(self.back_btn, "inverse")
+        b.addWidget(self.back_btn)
         lay.addWidget(bar)
 
         self.scene = QGraphicsScene(self)
@@ -657,6 +834,7 @@ class ContactSheetView(QWidget):
         img = self.sheet.image()
         n = len(ccr_backend.images)
         self.title.setText(f"Contact sheet · {n} frame{'s' if n != 1 else ''}")
+        self._fit_bar()
         if img is None:
             self.item.setPixmap(QPixmap())
             return
@@ -673,6 +851,73 @@ class ContactSheetView(QWidget):
             self.closeRequested.emit()
             return
         super().keyPressEvent(event)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._fit_bar()
+
+    def _fit_bar(self):
+        """The hint gives way when the bar is too narrow for everything."""
+        lay = self.bar.layout()
+        lay.invalidate()
+        rest = lay.sizeHint().width() - (self.hint.sizeHint().width() + lay.spacing()
+                                         if self.hint.isVisible() else 0)
+        self.hint.setVisible(rest + self.hint.sizeHint().width() + lay.spacing()
+                             <= max(self.width(), 1))
+
+    # --- Text… ---------------------------------------------------------------------
+    def text_menu(self):
+        """Text…'s menu (the test seam): Colour (the choices, Custom…), then
+        Show (what the captions carry)."""
+        from PySide6.QtGui import QActionGroup
+        sheet = self.sheet
+        m = QMenu(self)
+        head = m.addAction("Colour")
+        head.setEnabled(False)
+        group = QActionGroup(m)
+        group.setExclusive(True)
+        named = {k for k, _l, _c in TEXT_COLOURS}
+        for key, label, _c in TEXT_COLOURS:
+            a = m.addAction(label)
+            a.setCheckable(True)
+            a.setChecked(sheet.text_colour == key)
+            group.addAction(a)
+            a.triggered.connect(lambda _=False, k=key: sheet.set_text_colour(k))
+        custom = m.addAction("Custom…")
+        custom.setCheckable(True)
+        custom.setChecked(sheet.text_colour not in named)
+        group.addAction(custom)
+        custom.triggered.connect(self._pick_text_colour)
+        m.addSeparator()
+        head = m.addAction("Show")
+        head.setEnabled(False)
+        for key, label in TEXT_INFO:
+            a = m.addAction(label)
+            a.setCheckable(True)
+            a.setChecked(key in sheet.text_info)
+
+            def flip(on, k=key):
+                keys = set(sheet.text_info)
+                (keys.add if on else keys.discard)(k)
+                sheet.set_text_info(keys)
+            a.toggled.connect(flip)
+        m._group = group
+        return m
+
+    def _choose_colour(self, current):
+        """The colour picker's answer, a QColor (invalid on Cancel). The seam."""
+        from PySide6.QtWidgets import QColorDialog
+        return QColorDialog.getColor(current, self, "Caption colour")
+
+    def _pick_text_colour(self):
+        cur = self.sheet._colours()[1]
+        c = self._choose_colour(cur)
+        if c is not None and c.isValid():
+            self.sheet.set_text_colour(c.name())
+
+    def _show_text_menu(self):
+        m = self.text_menu()
+        m.exec(self.text_btn.mapToGlobal(self.text_btn.rect().bottomLeft()))
 
     # --- handlers --------------------------------------------------------------
     def _on_double_click(self, x, y):

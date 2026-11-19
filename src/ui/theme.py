@@ -545,6 +545,18 @@ _BTN_ROLE_QSS = {
         " QPushButton:disabled { background-color: %(surface)s; color: %(disabled)s;"
         " border-color: %(border)s; }"
     ),
+    # Inverse = the one way out of a full-screen view (the contact sheet's Back
+    # to Frame): light with dark bold text, still no hue
+    # (spec/contact-sheet.md, revision 2026-11-19).
+    "inverse": (
+        "QPushButton { background-color: #e6e6e6; color: #111111;"
+        " border: 1px solid #f4f4f4; border-radius: %(r)dpx;"
+        " padding: 5px 14px; font-weight: bold; }"
+        " QPushButton:hover { background-color: #ffffff; }"
+        " QPushButton:pressed { background-color: #c4c4c4; }"
+        " QPushButton:disabled { background-color: %(surface)s; color: %(disabled)s;"
+        " border-color: %(border)s; }"
+    ),
     # Danger = irreversible data loss. The only saturated colour in normal UI;
     # restrained at rest (red text + border), fills red on hover.
     "danger": (
@@ -574,6 +586,8 @@ def style_button(btn, role, *, default=False, glyph_only=False) -> None:
       Convert Current, Sync, Export, Done.
     - ``"danger"``  — irreversible data loss (red): Reset, Reset Curve, Clear all.
       Pass ``glyph_only=True`` for a glyph button like a ✕ remove.
+    - ``"inverse"`` — light with dark bold text: the way out of a full-screen
+      view (the contact sheet's Back to Frame).
     - ``"secondary"`` / ``None`` — the default neutral button (clears any role).
 
     ``default=True`` also makes it the dialog's default button (focus ring). Plain
@@ -587,8 +601,8 @@ def style_button(btn, role, *, default=False, glyph_only=False) -> None:
         "text": TEXT, "disabled": TEXT_DISABLED,
         "danger": DANGER, "danger_pressed": DANGER_PRESSED,
     }
-    if role == "primary":
-        btn.setStyleSheet(_BTN_ROLE_QSS["primary"] % vals)
+    if role in ("primary", "inverse"):
+        btn.setStyleSheet(_BTN_ROLE_QSS[role] % vals)
     elif role == "danger":
         btn.setStyleSheet(_BTN_ROLE_QSS["danger_glyph" if glyph_only else "danger"] % vals)
     else:

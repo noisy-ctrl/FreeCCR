@@ -122,3 +122,51 @@ format. Revision 2026-10-23: the crop status ("Confirmed", "Auto crop", ...)
 and the footer's colour legend go with the overlay too: they name the
 outline's colours, so with no outline they only cluttered the sheet. It is part of each frame's
 signature, so toggling redraws every cell, and Export writes what is shown.
+
+## Revision 2026-11-19: the right way round, Respect crop, text, Back to frame
+
+The user: "In the contact sheet, can we make sure the frames are the way
+round of the crop in the main window. Can we have a 'respect crop' box that
+crops thumbnails. Can we have the option to change text colour and info. Can
+the back to frame button stand out more."
+
+- **Turned as in the main window.** Every frame is drawn with its quarter
+  turns, fine rotation and mirrors (`rotation_angle`, `fine_rotation_angle`,
+  `horizontal_mirrored`, `vertical_mirrored`), in the canvas's order: the
+  turns about the centre, the mirrors last, in screen space
+  (`ccr_processor.apply_orientation`). The crop overlay turns with it. This
+  replaces "as scanned": a roll scanned sideways and turned now reads
+  upright. Cells take the median shape of the frames as shown, so turned
+  frames get upright cells.
+- **Respect crop** (a box after Overlay, `sheet/respect_crop`, default off):
+  each cropped frame shows only what its crop keeps (the crop box, its own
+  angle, then the turns and mirrors: what an export gives); a frame with no
+  crop shows whole. Overlay then draws a thin line round the frame in its
+  crop's colour (there is nothing outside to dim); "not sure" keeps its
+  dashed box.
+- **Text…** (a button with a menu in the bar): **Colour** — Edge print (the
+  old look: warm numbers, light grey names), White, Light grey, Mid grey,
+  Warm (everything in the edge-print tone), Custom… (a colour picker);
+  **Show** — Frame number, File name, Film (the frame's film preset, else the
+  roll's film), Film format, Crop status. Remembered as `sheet/text_colour`
+  ("edge" | "white" | "light" | "mid" | "warm" | "#rrggbb") and
+  `sheet/text_info` (the shown keys). The colour is used for every caption
+  and the footer's words; the crop status keeps its source colours (it names
+  the outline's colour) and still shows only with Overlay on. Line 1 is the
+  number and name, line 2 film · format · status, each only when ticked.
+- **Back to Frame** stands out: a light button with dark, bold text (the
+  `inverse` button role in `ui/theme.py`), the only light thing in the bar.
+- The frame signature gains the orientation, Respect crop, the text colour,
+  the shown info and the film name, so any of them redraws the cell.
+
+### Tests
+
+- A frame turned 90° is drawn upright: its scan's left edge ends up at the
+  cell's top; a mirrored frame is mirrored; the crop overlay follows the
+  turn.
+- Respect crop shows only the crop's content, turned; a frame with no crop
+  whole.
+- The cell shape follows the turned frames.
+- The text colour and each info switch change the caption (and are
+  remembered); custom colours are kept as #rrggbb.
+- Back to Frame has the inverse role.

@@ -503,6 +503,8 @@ def test_the_window_title_names_the_film_and_format(mw):
     assert mw.windowTitle() == "FreeCCR"
     mw._set_capture_session("R0001", "35mm", "", preset=a["id"])
     assert mw.windowTitle() == "FreeCCR · Portra400 V1 · 35mm"
+    # the contact sheet's Film caption falls back to the roll's film
+    assert mw.contact_sheet_model.roll_film == "Portra400 V1"
     mw.set_roll_format("645")
     assert mw.windowTitle() == "FreeCCR · Portra400 V1 · 6x4.5"
     lst, _p = fp.update(lst, a["id"], notes="Lisbon 2026")       # renamed in Settings

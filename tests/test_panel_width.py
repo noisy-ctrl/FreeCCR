@@ -443,3 +443,34 @@ def test_preview_toolbar_fits_at_the_smallest_window():
         assert ip.fc_action.toolTip().startswith("False colour: the picture in greyscale")
     finally:
         _app.setFont(base)
+
+
+@needs_ui_font
+def test_the_contact_sheet_bar_fits_its_narrowest_width():
+    """The sheet's bar (spec/contact-sheet.md, revision 2026-11-19: Respect
+    crop, Text…, Back to Frame) fits the sheet's 900 px minimum at the
+    stressed font; the hint gives way first."""
+    from PySide6.QtCore import QSettings
+    from widgets import contact_sheet as cs
+    base = _app.font()
+    stressed = QFont(base)
+    stressed.setPointSizeF(base.pointSizeF() * FONT_STRESS)
+    keep = QSettings.setValue
+    try:
+        QSettings.setValue = lambda self, k, v: None
+        _app.setFont(stressed)
+        view = cs.ContactSheetView(cs.ContactSheet())
+        view.title.setText("Contact sheet · 36 frames")
+        view.resize(900, 500)
+        view.show()
+        _app.processEvents()
+        view._fit_bar()
+        need = view.bar.layout().sizeHint().width()
+        assert need <= 900, f"the contact sheet's bar needs {need}px of 900"
+        view.resize(2000, 500)
+        _app.processEvents()
+        assert view.hint.isVisible()
+        view.close()
+    finally:
+        QSettings.setValue = keep
+        _app.setFont(base)
