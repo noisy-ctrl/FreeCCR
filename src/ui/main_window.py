@@ -472,6 +472,10 @@ class MainWindow(QMainWindow):
         # Restore the active field-correction profile (independent of the camera
         # profile; also applied to every decode). A vanished or unreadable file
         # falls back to no correction and clears the setting.
+        try:
+            ccr_backend.refresh_field_library()   # flats chosen per frame (§5)
+        except Exception as e:
+            print(f"Field profile library: {e}")
         saved_ff = self._settings.value("import/field_profile_path", "", type=str)
         if saved_ff and saved_ff != "none" and os.path.exists(saved_ff):
             try:
@@ -1002,6 +1006,8 @@ class MainWindow(QMainWindow):
                                current_merge=current_merge)
         if dlg.exec() != QDialog.Accepted or not dlg.saved_path:
             return
+        ccr_backend.refresh_field_library()      # a flat of a set is used at once
+        self._refresh_profile_mismatch()
         base = os.path.basename(dlg.saved_path)
         # Ensure the freshly-saved profile is in the library (the wizard saves there
         # by default; a custom save location is copied in), then refresh the picker.
@@ -1052,6 +1058,7 @@ class MainWindow(QMainWindow):
         ccr_backend.delete_field_profile(path)
         if was_active:
             self._settings.remove("import/field_profile_path")
+        ccr_backend.refresh_field_library()
         self._refresh_profile_mismatch()
 
     def create_field_correction_profile(self):
@@ -1067,6 +1074,8 @@ class MainWindow(QMainWindow):
         dlg = FieldCorrectionDialog(self, current_path=current_path)
         if dlg.exec() != QDialog.Accepted or not dlg.saved_path:
             return
+        ccr_backend.refresh_field_library()      # a flat of a set is used at once
+        self._refresh_profile_mismatch()
         base = os.path.basename(dlg.saved_path)
         if dlg.apply_now and self.set_active_field_profile(dlg.saved_path):
             self.sliders_panel.set_temporary_hint(

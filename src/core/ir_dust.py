@@ -318,9 +318,31 @@ def can_find(img) -> Optional[str]:
     return None
 
 
+def ir_flat_for(img, shape) -> Optional[np.ndarray]:
+    """The library's IR flat for the frame's format, as a light map on the
+    block grid (1 / gain), moved with the carrier opening when both know it
+    (spec/ir-dust-and-flat-sets.md §5); None when there is none."""
+    try:
+        from core import flat_field as ff
+        probe = type("IRFrame", (), {})()
+        probe.scan_light = "ir"
+        probe.merge_sources = None
+        probe.film_format = ff.frame_format(img)
+        prof = ff.profile_for(probe)
+        if prof is None or ff.profile_light(prof) != "ir":
+            return None
+        move = ff.track(prof, getattr(img, "flat_opening", None))
+        gain = ff.gain_for_size(ff.tracked_profile(prof, move), shape[1], shape[0])
+        return (1.0 / np.maximum(gain.mean(axis=2), 1e-3)).astype(np.float32)
+    except Exception:
+        return None
+
+
 def frame_dust_map(img, flat: Optional[np.ndarray] = None) -> DustMap:
     """The IR dust map of a frame (reads its IR shot and its own shots)."""
     ir = read_blocks(img.ir_source)
+    if flat is None:
+        flat = ir_flat_for(img, ir.shape)
     vis = []
     for p in visible_paths(img):
         try:

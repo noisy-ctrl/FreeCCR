@@ -627,6 +627,9 @@ class SettingsDialog(QDialog):
         gf.addLayout(ff_row)
         self._field_detail = self._muted("")
         gf.addWidget(self._field_detail)
+        # flat-field sets (spec/ir-dust-and-flat-sets.md §5)
+        self._field_sets_note = self._muted("")
+        gf.addWidget(self._field_sets_note)
         ff_btns = QHBoxLayout()
         theme.apply_button_row(ff_btns)
         btn_create = QPushButton("Create Field Correction Profile…")
@@ -794,6 +797,13 @@ class SettingsDialog(QDialog):
         finally:
             self._loading_field_combo = False
         self._update_field_detail()
+        tagged = [p for p in self._field_entries if p.get("light")]
+        self._field_sets_note.setText(
+            f"{len(tagged)} flat{'s' if len(tagged) != 1 else ''} with a light set: each "
+            "frame gets the flat of its light (an RGB flat for a trichrome merge) "
+            "and format, moved with the carrier's opening. The profile chosen "
+            "above is for frames none of them fits." if tagged else "")
+        self._field_sets_note.setVisible(bool(tagged))
 
     # --- Staged toggles: apply on Done (accept), discard on close ---------- #
     def _init_toggles(self):

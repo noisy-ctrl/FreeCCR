@@ -1,6 +1,6 @@
 # IR dust removal and flat-field sets
 
-Status: §2–§4 BUILT 2026-11-19; §5 (flat-field sets) next.
+Status: BUILT 2026-11-19 (§2–§5); Capture → Shoot Flat Fields… (end of §5) not yet.
 
 Decisions (the user, 2026-11-19): the IR shot is part of each Shoot; dust
 found in it is FLAGGED, not healed ("the dust removal tool button changing
@@ -131,7 +131,7 @@ On 2×2 photosite blocks of both RAWs (no demosaic, camera-native linear):
   removes every spot it touches, healed of any kind or flagged; one undo
   step; drawn light blue).
 
-## 5. Flat-field sets (next)
+## 5. Flat-field sets
 
 **What a flat holds.** A field profile (`.ffc`, as now) records in `meta`:
 `light` (white / rgb / red / green / blue / ir), `format` (a
@@ -171,7 +171,36 @@ own fall-off stays with the sensor, so it is moved slightly wrongly with
 the light's; for the rail's few per cent that error is far below the
 flat's own variation (to measure on his flats).
 
-**Capture → Shoot Flat Fields…** (USB camera + Scanlight): asks the format
+**Built** (`core/flat_field.py` §7): `build_tagged_profile` (finds the
+opening with `guide_tracker.find_opening` on an 8-bit view of the decode,
+fills the mask from the inside with `fill_outside` — the edge rows/columns of
+the opening carried outward — and records `light`, `format`, `opening`);
+`profile_for(img)` (light: a merge → rgb, `img.scan_light`, else white;
+format: `img.film_format` → the capture guide's; exact format, else a
+format-less flat, else any of that light; with no tagged flat in the library
+the active profile, byte for byte); `track` = `guide_tracker.solve` from the
+flat's opening to the frame's, refused outside scale 0.85–1.15 or a shift
+over 15 %; `tracked_profile` warps the map (cached per move);
+`CCRImage._apply_field_correction` is now per frame and keeps the frame's
+opening (`_flat_opening_memo`, `img.flat_opening`), found once per scan;
+`library_signature` joins `active_field_signature`, so adding or removing a
+flat flags the frames (⚠, Replace…). The backend loads the library at start
+and after a save/delete (`refresh_field_library`). The wizard (Settings →
+Create Field Correction Profile…) has **Light** and **Format**; RGB takes
+the three shots (ordered by the light each was lit by, `order_rgb`) and
+merges them with `it8_profile.decode_target_merged`. The library row says
+"White light · 6x4.5 · follows the carrier"; Settings notes how many flats
+are chosen per frame. The IR flat, when there is one for the frame's
+format, is divided out of the IR shot before the dust search
+(`ir_dust.ir_flat_for`).
+Measured on a synthetic rig (an off-centre hotspot × fall-off, the camera
+moved by scale 0.95–1.06 and shifts of 2–4 %): unevenness inside the opening
+0.185 raw, 0.036–0.045 with the flat untracked, 0.009 tracked (the flat on
+its own shot: 0.009); the move found within 0.0007.
+Not yet: `img.scan_light` is set by nothing (a B&W frame under one LED uses
+the white flat); Capture → Shoot Flat Fields… below.
+
+**Capture → Shoot Flat Fields…** (not built; USB camera + Scanlight): asks the format
 (the roll's by default) and which lights (white, RGB, IR); with the film out
 and the empty carrier in, for each light it finds an exposure that puts the
 brightest part of the opening at ~60 % of the RAW's range (the film-base

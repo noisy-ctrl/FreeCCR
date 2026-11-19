@@ -1439,7 +1439,7 @@ class CCRBackend:
         Unreadable files are skipped rather than breaking the list."""
         import glob
         from core import flat_field
-        out = []
+        out, profiles = [], []
         for p in glob.glob(os.path.join(self.field_profiles_dir(),
                                         "*" + flat_field.EXTENSION)):
             try:
@@ -1449,8 +1449,27 @@ class CCRBackend:
             except Exception as e:      # never let one bad file break the list
                 print(f"Skipping unreadable field profile {p}: {e}")
                 continue
-            out.append({"name": name, "path": p, "summary": summary})
+            profiles.append(prof)
+            light = flat_field.profile_light(prof)
+            fmt = flat_field.profile_format(prof)
+            if light:
+                # a flat of a set (spec/ir-dust-and-flat-sets.md §5)
+                from core import film_formats
+                tag = flat_field.LIGHT_LABELS.get(light, light)
+                if fmt:
+                    tag += " · " + film_formats.short_label(fmt)
+                if flat_field.profile_opening(prof):
+                    tag += " · follows the carrier"
+                summary = f"{tag} · {summary}"
+            out.append({"name": name, "path": p, "summary": summary,
+                        "light": light, "format": fmt})
+        # the per-frame choice reads the library (flat_field.profile_for)
+        flat_field.set_library(profiles)
         return sorted(out, key=lambda x: x["name"].lower())
+
+    def refresh_field_library(self) -> int:
+        """Load the library for the per-frame choice; how many flats are in it."""
+        return len(self.list_field_profiles())
 
     def set_active_field_profile(self, path: Optional[str]) -> Optional[str]:
         """Activate the field-correction profile at `path`, or None for no field

@@ -14,7 +14,7 @@ import numpy as np
 from PySide6.QtCore import Qt, QSettings
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QDialog, QFileDialog, QHBoxLayout, QLabel,
+    QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QHBoxLayout, QLabel,
     QLineEdit, QMessageBox, QPushButton, QStackedWidget, QVBoxLayout, QWidget,
 )
 
@@ -24,6 +24,21 @@ from utils.unicode_path_utils import normalize_unicode_path, validate_unicode_pa
 
 _RAW_EXTS = (".dng", ".arw", ".nef", ".cr2", ".cr3", ".raf", ".rw2", ".orf",
              ".srw", ".pef", ".3fr", ".fff")
+
+
+def order_rgb(paths):
+    """Three flat shots as (red, green, blue), by the light each was lit by
+    (read off the RAW); name order when that can't tell them apart."""
+    from core import ccr_merge, scan_type
+    try:
+        shares = [scan_type.read_light(p).shares for p in paths]
+        if all(s is not None for s in shares):
+            ks = [int(np.argmax(s)) for s in shares]
+            if sorted(ks) == [0, 1, 2]:
+                return [paths[ks.index(c)] for c in range(3)]
+    except Exception:
+        pass
+    return ccr_merge.sort_for_merge(paths)
 
 
 def _gamma_stretch_qimage(arr_u16: np.ndarray, norm: Optional[float] = None):
@@ -173,6 +188,37 @@ class FieldCorrectionDialog(QDialog):
             "panel or height).")
         guide.setWordWrap(True)
         lay.addWidget(guide)
+        # a flat of a set (spec/ir-dust-and-flat-sets.md §5): its light and
+        # format; FreeCCR then picks it for each frame scanned that way and
+        # moves it with the carrier's opening
+        sets = QHBoxLayout()
+        sets.addWidget(QLabel("Light:"))
+        self.light_combo = QComboBox()
+        self.light_combo.addItem("Any (one profile for everything)", "")
+        for k in ff.LIGHTS:
+            self.light_combo.addItem(ff.LIGHT_LABELS[k], k)
+        self.light_combo.setToolTip(
+            "A flat for one light is chosen for each frame scanned under it "
+            "(an RGB flat for trichrome merges, White for white-light frames, "
+            "Infrared for the IR shot). RGB takes the three shots, red, green "
+            "and blue.")
+        self.light_combo.currentIndexChanged.connect(self._on_light)
+        sets.addWidget(self.light_combo, 1)
+        sets.addWidget(QLabel("Format:"))
+        self.format_combo = QComboBox()
+        self.format_combo.addItem("Any", "")
+        from core import film_formats
+        for f in film_formats.FILM_FORMATS:
+            self.format_combo.addItem(f.label, f.key)
+        sets.addWidget(self.format_combo, 1)
+        lay.addLayout(sets)
+        self.carrier_note = QLabel(
+            "For a set, shoot through the <b>empty carrier</b> at that format's "
+            "height: FreeCCR measures inside its opening and moves the flat with "
+            "the opening on every frame.")
+        self.carrier_note.setWordWrap(True)
+        self.carrier_note.setStyleSheet("color: #9a9a9a;")
+        lay.addWidget(self.carrier_note)
         row = QHBoxLayout()
         self.use_current_btn = QPushButton("Use current image")
         self.use_current_btn.setEnabled(bool(self._current_path))
@@ -193,19 +239,55 @@ class FieldCorrectionDialog(QDialog):
         if self._current_path:
             self._set_source(self._current_path)
 
-    def _browse_source(self):
+    def _light(self):
+        return self.light_combo.currentData() or ""
+
+    def _on_light(self, _i=None):
+        rgb = self._light() == "rgb"
+        self.use_current_btn.setEnabled(bool(self._current_path) and not rgb)
+        if rgb != isinstance(self._source_path, list):
+            self._source_path = None
+            self._decoded = None
+            self.source_label.setText("<i>No calibration shot selected.</i>")
+        self._update_nav()
+
+    def _ask_sources(self, rgb):
+        """The test seam: a path, or for RGB the three paths."""
         start = self._settings.value("files/last_open_dir", "", type=str)
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Select the calibration shot", start,
-            "Images (*.dng *.tif *.tiff *.arw *.nef *.cr2 *.cr3 *.raf *.png "
-            "*.jpg *.jpeg *.rw2 *.orf *.srw *.pef *.3fr *.fff);;All Files (*)")
-        if path:
-            self._set_source(path)
+        filt = ("Images (*.dng *.tif *.tiff *.arw *.nef *.cr2 *.cr3 *.raf *.png "
+                "*.jpg *.jpeg *.rw2 *.orf *.srw *.pef *.3fr *.fff);;All Files (*)")
+        if rgb:
+            paths, _ = QFileDialog.getOpenFileNames(
+                self, "Select the red, green and blue flat shots", start, filt)
+            return paths or None
+        path, _ = QFileDialog.getOpenFileName(self, "Select the calibration shot", start, filt)
+        return path or None
+
+    def _browse_source(self):
+        rgb = self._light() == "rgb"
+        got = self._ask_sources(rgb)
+        if not got:
+            return
+        if rgb:
+            from core import ccr_merge
+            if len(got) != 3:
+                QMessageBox.information(self, "RGB flat",
+                                        "Select the three flat shots: red, green and blue.")
+                return
+            self._set_source(order_rgb(list(got)))
+            return
+        self._set_source(got)
 
     def _set_source(self, path):
         self._source_path = path
         self._decoded = None                 # force a re-decode on Next
         self._profile = None
+        if isinstance(path, list):
+            self.source_label.setText(
+                "Selected (red, green, blue): <b>" +
+                ", ".join(os.path.basename(p) for p in path) + "</b>")
+            self._update_nav()
+            return
         is_raw = os.path.splitext(path)[1].lower() in _RAW_EXTS
         warn = ("" if is_raw else
                 "<br><span style='color:#cc7a00'>Note: not a RAW file. The "
@@ -217,6 +299,27 @@ class FieldCorrectionDialog(QDialog):
 
     def _decode_source(self) -> bool:
         if self._decoded is not None:
+            return True
+        if isinstance(self._source_path, list):
+            # an RGB flat: the three shots merged like a trichrome scan, each
+            # channel from its own light (bare device data, no correction)
+            from core import it8_profile
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            try:
+                arr = it8_profile.decode_target_merged(
+                    self._source_path, demosaic=getattr(ccr_backend, "merge_demosaic", True),
+                    sample_max=1024)
+            except Exception as e:
+                QMessageBox.critical(self, "Decode Error",
+                                     f"Could not merge the three flat shots:\n\n{e}")
+                return False
+            finally:
+                if QApplication.overrideCursor() is not None:
+                    QApplication.restoreOverrideCursor()
+            if arr is None or arr.ndim != 3:
+                QMessageBox.critical(self, "Decode Error", "Could not merge the three shots.")
+                return False
+            self._decoded = arr
             return True
         norm = normalize_unicode_path(self._source_path)
         if not validate_unicode_path(norm):
@@ -273,12 +376,25 @@ class FieldCorrectionDialog(QDialog):
         return w
 
     def _build_and_show(self) -> bool:
-        meta = ff.source_metadata(self._source_path)
+        first = (self._source_path[0] if isinstance(self._source_path, list)
+                 else self._source_path)
+        meta = ff.source_metadata(first)
+        light = self._light()
+        fmt = self.format_combo.currentData() or None
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            profile = ff.build_profile(
-                self._decoded, self.name_edit.text().strip()
-                or ff.suggested_name(meta), meta=meta)
+            name = self.name_edit.text().strip() or ff.suggested_name(meta)
+            if light:
+                if not self.name_edit.text().strip():
+                    from core import film_formats
+                    name = " ".join(b for b in (
+                        ff.LIGHT_LABELS[light].split(" (")[0], "flat",
+                        film_formats.short_label(fmt) if fmt else "",
+                        ff.suggested_name(meta)) if b)
+                profile = ff.build_tagged_profile(self._decoded, name, light=light,
+                                                  fmt=fmt, meta=meta)
+            else:
+                profile = ff.build_profile(self._decoded, name, meta=meta)
         except ff.FieldProfileError as e:
             QApplication.restoreOverrideCursor()
             QMessageBox.warning(self, "Calibration shot", str(e))

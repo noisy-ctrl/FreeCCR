@@ -536,9 +536,11 @@ def field_profile_active() -> bool:
 def active_field_signature() -> str:
     """Stable id of the field correction a decode would get now — composed into
     the per-image grading signature so a change flags the affected thumbnails."""
+    lib = library_signature()
     if _active_profile is None:
-        return "none"
-    return "ff:" + (_active_profile.content_id or _active_profile.name or "?")
+        return lib or "none"
+    base = "ff:" + (_active_profile.content_id or _active_profile.name or "?")
+    return f"{base}|{lib}" if lib else base
 
 
 # --------------------------------------------------------------------------- #
@@ -585,3 +587,210 @@ def suggested_name(meta: Dict[str, Any]) -> str:
     head = " ".join(b for b in (body, lens) if b).strip()
     return f"Field {head} {datetime.now():%Y-%m-%d}".replace("  ", " ").strip() \
         if head else f"Field correction {datetime.now():%Y-%m-%d}"
+
+
+# --------------------------------------------------------------------------- #
+# 7. Flat-field sets: by light and format, tracked by the carrier opening
+#    (spec/ir-dust-and-flat-sets.md §5)
+# --------------------------------------------------------------------------- #
+LIGHTS = ("white", "rgb", "red", "green", "blue", "ir")
+LIGHT_LABELS = {"white": "White light", "rgb": "RGB (trichrome)", "red": "Red",
+                "green": "Green", "blue": "Blue", "ir": "Infrared"}
+OPENING_INSET = 0.015      # the flat is measured this far inside its opening
+TRACK_S = (0.85, 1.15)     # a scale outside this is a mis-find: untracked
+TRACK_SHIFT = 0.15         # nor a shift over this (of the frame)
+
+_library: List[FieldProfile] = []
+
+
+def profile_light(p: Optional[FieldProfile]) -> Optional[str]:
+    v = (p.meta or {}).get("light") if p is not None else None
+    return v if v in LIGHTS else None
+
+
+def profile_format(p: Optional[FieldProfile]) -> Optional[str]:
+    return ((p.meta or {}).get("format") or None) if p is not None else None
+
+
+def profile_opening(p: Optional[FieldProfile]) -> Optional[Dict[str, float]]:
+    o = (p.meta or {}).get("opening") if p is not None else None
+    return dict(o) if isinstance(o, dict) and o else None
+
+
+def set_library(profiles: List[FieldProfile]) -> None:
+    """Every profile in the library, for the per-frame choice."""
+    global _library
+    _library = list(profiles or [])
+
+
+def library() -> List[FieldProfile]:
+    return list(_library)
+
+
+def _tagged() -> List[FieldProfile]:
+    return [p for p in _library if profile_light(p)]
+
+
+def frame_light(img) -> str:
+    """The light a frame was scanned under: a 3-way merge is RGB, a frame
+    with a recorded light (`img.scan_light`) that light, otherwise white."""
+    if getattr(img, "is_merged", False) or getattr(img, "merge_sources", None):
+        return "rgb"
+    v = getattr(img, "scan_light", None)
+    return v if v in LIGHTS else "white"
+
+
+def frame_format(img) -> Optional[str]:
+    """The frame's film format: set in the Crop panel, else its capture
+    guide's."""
+    f = getattr(img, "film_format", None)
+    if f:
+        return f
+    g = getattr(img, "capture_guide", None)
+    if isinstance(g, dict) and g.get("format"):
+        return g["format"]
+    return None
+
+
+def profile_for(img) -> Optional[FieldProfile]:
+    """The flat for a frame: a tagged library flat of its light and format,
+    else of its light, else the active profile (with no tagged flat in the
+    library: always the active profile, as before)."""
+    tagged = _tagged()
+    if not tagged or img is None:
+        return _active_profile
+    light = frame_light(img)
+    cands = [p for p in tagged if profile_light(p) == light]
+    if not cands:
+        return _active_profile
+    fmt = frame_format(img)
+    exact = [p for p in cands if fmt and profile_format(p) == fmt]
+    pool = exact or [p for p in cands if not profile_format(p)] or cands
+    return max(pool, key=lambda p: str((p.meta or {}).get("created", "")))
+
+
+def _to_view8(arr_u16: np.ndarray) -> np.ndarray:
+    """A linear decode as an 8-bit grey picture the opening finder reads."""
+    a = np.asarray(arr_u16)
+    small = _resize_long_side(a, 640) if max(a.shape[:2]) > 640 else a
+    g = small.astype(np.float32)
+    if g.ndim == 3:
+        g = g.mean(axis=2)
+    top = float(np.percentile(g, 99.5)) or 1.0
+    return (np.clip(g / top, 0, 1) ** (1 / 2.2) * 255).astype(np.uint8)
+
+
+def opening_of(arr_u16: np.ndarray) -> Optional[Dict[str, float]]:
+    """The carrier opening's sides (fractions of the frame) in a decode, or
+    None when no mask is in view."""
+    from core import guide_tracker
+    try:
+        op = guide_tracker.find_opening(_to_view8(arr_u16))
+    except Exception:
+        return None
+    if op is None or not op.sides:
+        return None
+    return {k: float(v) for k, v in op.sides.items()}
+
+
+def opening_mask(sides: Dict[str, float], w: int, h: int,
+                 inset: float = OPENING_INSET) -> np.ndarray:
+    """Inside the opening (missing sides = the frame's edge), inset a little."""
+    x0 = (sides.get("left", 0.0) + inset) * w
+    x1 = (sides.get("right", 1.0) - inset) * w
+    y0 = (sides.get("top", 0.0) + inset) * h
+    y1 = (sides.get("bottom", 1.0) - inset) * h
+    m = np.zeros((h, w), bool)
+    m[max(0, int(np.ceil(y0))):min(h, int(y1)), max(0, int(np.ceil(x0))):min(w, int(x1))] = True
+    return m
+
+
+def fill_outside(arr_u16: np.ndarray, sides: Dict[str, float]) -> np.ndarray:
+    """A flat shot through the empty carrier: outside the opening is the
+    black mask. Fill it from the inside (each pixel takes the nearest inside
+    value, smoothed), so the measurement sees only the opening and the map
+    carries on smoothly past it."""
+    a = np.asarray(arr_u16)
+    h, w = a.shape[:2]
+    m = opening_mask(sides, w, h)
+    if m.all() or not m.any():
+        return a
+    ys, xs = np.nonzero(m)
+    y0, y1, x0, x1 = ys.min(), ys.max() + 1, xs.min(), xs.max() + 1
+    inner = a[y0:y1, x0:x1]
+    out = cv2.copyMakeBorder(inner, y0, h - y1, x0, w - x1, cv2.BORDER_REPLICATE)
+    return out.astype(a.dtype)
+
+
+def build_tagged_profile(arr_u16: np.ndarray, name: str, *, light: str,
+                         fmt: Optional[str] = None,
+                         meta: Optional[Dict[str, Any]] = None,
+                         max_gain: float = DEFAULT_MAX_GAIN) -> FieldProfile:
+    """`build_profile` for a flat of a set: finds the carrier opening (if one
+    is in view), measures only inside it, and records light, format and the
+    opening in the profile."""
+    if light not in LIGHTS:
+        raise FieldProfileError(f"Unknown light: {light}")
+    sides = opening_of(arr_u16)
+    src = fill_outside(arr_u16, sides) if sides else arr_u16
+    meta = dict(meta or {})
+    meta.update({"light": light, "format": fmt or None, "opening": sides or None})
+    return build_profile(src, name, meta=meta, max_gain=max_gain)
+
+
+def track(profile: Optional[FieldProfile], frame_sides: Optional[Dict[str, float]]):
+    """(s, dx, dy) taking the flat's opening to the frame's (scale about the
+    centre, shift in fractions), or None to apply the flat untracked: no
+    opening on either side, or an answer too big to be the rail moving."""
+    ref = profile_opening(profile)
+    if not ref or not frame_sides:
+        return None
+    from core import guide_tracker
+    sol = guide_tracker.solve(ref, frame_sides)
+    if sol is None:
+        return None
+    s, dx, dy, _n = sol
+    if not (TRACK_S[0] <= s <= TRACK_S[1]) or max(abs(dx), abs(dy)) > TRACK_SHIFT:
+        return None
+    if abs(s - 1) < 1e-4 and max(abs(dx), abs(dy)) < 1e-4:
+        return None
+    return float(s), float(dx), float(dy)
+
+
+def warp_gain(gain: np.ndarray, move) -> np.ndarray:
+    """The gain map moved as the opening moved: a point at fraction x of the
+    flat lands at 0.5 + s(x - 0.5) + dx of the frame."""
+    if move is None:
+        return gain
+    s, dx, dy = move
+    h, w = gain.shape[:2]
+    m = np.float32([[s, 0, 0.5 * w * (1 - s) + dx * w],
+                    [0, s, 0.5 * h * (1 - s) + dy * h]])
+    out = cv2.warpAffine(gain, m, (w, h), flags=cv2.INTER_LINEAR,
+                         borderMode=cv2.BORDER_REPLICATE)
+    return out.reshape(gain.shape).astype(np.float32)
+
+
+def tracked_profile(profile: FieldProfile, move) -> FieldProfile:
+    """The profile with its map moved (a copy; the library's is untouched)."""
+    if move is None:
+        return profile
+    key = ("_tracked",) + tuple(round(v, 5) for v in move)
+    hit = profile._cache.get(key)
+    if hit is None:
+        hit = FieldProfile(name=profile.name, gain=warp_gain(profile.gain, move),
+                           aspect=profile.aspect, meta=profile.meta,
+                           path=profile.path, content_id=profile.content_id)
+        if len(profile._cache) >= 8:
+            profile._cache.pop(next(iter(profile._cache)), None)
+        profile._cache[key] = hit
+    return hit
+
+
+def library_signature() -> str:
+    """Stable id of the tagged library (a change flags the frames)."""
+    tagged = _tagged()
+    if not tagged:
+        return ""
+    ids = sorted(p.content_id or p.name or "?" for p in tagged)
+    return "set:" + hashlib.sha1("|".join(ids).encode()).hexdigest()[:10]

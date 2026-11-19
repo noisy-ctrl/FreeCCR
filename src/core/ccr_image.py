@@ -727,15 +727,20 @@ class CCRImage:
             logging.warning(f"Input ICC profile could not be applied: {e}")
             return arr
 
-    @staticmethod
-    def _apply_field_correction(arr: Optional[np.ndarray], *,
+    def _apply_field_correction(self, arr: Optional[np.ndarray], *,
                                 encoded: bool = False,
                                 mono: bool = False) -> Optional[np.ndarray]:
-        """Multiply a freshly-decoded frame by the active field-correction gain
-        map (lens vignetting + sensor colour shading + light-source unevenness),
+        """Multiply a freshly-decoded frame by its field-correction gain map
+        (lens vignetting + sensor colour shading + light-source unevenness),
         before slicing, the camera profile, and the negative conversion — the one
         place every consumer (preview, zoom, slice, merge, export) inherits it
-        from. No-op when no field profile is active.
+        from. No-op when no field profile applies.
+
+        The flat is the frame's own (`flat_field.profile_for`: a library flat of
+        its light and format, else the active profile), moved as the carrier's
+        opening moved between the flat and this frame (`flat_field.track`; the
+        frame's opening is found once and kept on the frame,
+        spec/ir-dust-and-flat-sets.md §5).
 
         Called at the FULL-FRAME point of each decode branch (before
         _apply_source_ops) so the map always lines up with the whole sensor frame
@@ -743,14 +748,32 @@ class CCRImage:
         if arr is None:
             return arr
         from core import flat_field
-        profile = flat_field.get_active_profile()
+        profile = flat_field.profile_for(self)
         if profile is None:
             return arr
         try:
+            if flat_field.profile_opening(profile):
+                profile = flat_field.tracked_profile(
+                    profile, flat_field.track(profile, self._carrier_opening(arr)))
             return flat_field.apply_field(arr, profile, encoded=encoded, mono=mono)
         except Exception as e:
             logging.warning(f"Field correction could not be applied: {e}")
             return arr
+
+    def _carrier_opening(self, arr):
+        """The carrier opening in this frame's scan (sides as fractions),
+        found once per scan and kept (a full-size decode for an export
+        reuses the preview's)."""
+        from core import flat_field
+        key = (tuple(getattr(self, "merge_sources", None) or ()) or
+               (getattr(self, "file_path", None),))
+        memo = getattr(self, "_flat_opening_memo", None)
+        if memo is not None and memo[0] == key:
+            return memo[1]
+        sides = flat_field.opening_of(arr)
+        self._flat_opening_memo = (key, sides)
+        self.flat_opening = sides
+        return sides
 
     def _input_icc_will_apply(self) -> bool:
         """Whether read_image will burn an external camera profile into this scan
