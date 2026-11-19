@@ -23,7 +23,7 @@ class BarSlider(QWidget):
     DRAG_PX = 3               # a press that moves less than this is a click
 
     def __init__(self, label, minimum, maximum, step=1.0, key_steps=(1.0, 4.0),
-                 left=None, right=None, fmt=None, tick=None, parent=None):
+                 left=None, right=None, fmt=None, tick=None, height=None, parent=None):
         super().__init__(parent)
         self._label = label
         self._min, self._max = float(minimum), float(maximum)
@@ -37,13 +37,17 @@ class BarSlider(QWidget):
         self._press = None
         self._dragging = False
         self._hover = False
-        self.setFixedHeight(theme.CONTROL_H - 2)
+        self.setFixedHeight(int(height) if height else theme.CONTROL_H - 2)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setMinimumWidth(80)
         self.setFocusPolicy(Qt.StrongFocus)
         self.setMouseTracking(True)
         self.setCursor(Qt.SizeHorCursor)
         self.setAccessibleName(label)
+
+    def set_key_steps(self, steps):
+        """(click / key step, Shift step)."""
+        self._keys = tuple(float(k) for k in steps)
 
     # --- value --------------------------------------------------------------
     def value(self):

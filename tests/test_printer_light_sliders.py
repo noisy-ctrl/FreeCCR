@@ -162,3 +162,44 @@ def test_a_click_steps_towards_the_side_clicked():
     _mouse(g, QEvent.MouseButtonPress, 150)
     _mouse(g, QEvent.MouseButtonRelease, 150)
     assert g.value() == 2
+
+
+def test_right_click_switches_the_view_and_sets_the_step(panel):
+    """The user, 2026-11-19: right-click Printer Lights to change to sliders
+    and back, and keep choosing the increment."""
+    from PySide6.QtWidgets import QMenu
+    sp = panel
+    menu = sp._fill_printer_menu(QMenu())
+    texts = [a.text() for a in menu.actions() if a.text()]
+    assert texts == ["Reset printer lights to 0", "Show as Buttons", "Show as Sliders",
+                     "Each Click ½ point (γ 2)", "Each Click 1 point (γ 4)",
+                     "Each Click 2 points (γ 8)"]
+    by = {a.text(): a for a in menu.actions()}
+    assert by["Show as Buttons"].isChecked() and by["Each Click ½ point (γ 2)"].isChecked()
+    by["Show as Sliders"].trigger()
+    assert sp.printer_style() == "sliders"
+    assert sp._settings.value(sp.PRINTER_STYLE_KEY) == "sliders"
+    by["Each Click 1 point (γ 4)"].trigger()
+    assert sp.printer_step() == 1.0 and float(sp._settings.value(sp.PRINTER_STEP_KEY)) == 1.0
+    # the pad moves a whole point a click now, Gamma 4
+    sp._printer_light("C", "+")
+    assert sp._pl_slider("C").value() == -3
+    sp._printer_light("G", "+")
+    assert sp._pl_slider("G").value() == 4
+    # and the bars step the same, Shift twice it
+    _key(sp._pl_bars["Y"], Qt.Key_Right)
+    assert sp._pl_slider("Y").value() == -3
+    _key(sp._pl_bars["Y"], Qt.Key_Right, Qt.ShiftModifier)
+    assert sp._pl_slider("Y").value() == -9
+    assert "one point per click" in sp._pl_buttons[("C", "+")].toolTip()
+    sp.set_printer_step(0.5)
+
+
+def test_the_header_menu_has_them_too_and_bars_are_taller(panel):
+    sp = panel
+    menu = sp.printer_section.header_menu()
+    texts = [a.text() for a in menu.actions() if a.text()]
+    assert texts[0] == "Reset printer lights to 0" and "Show as Sliders" in texts
+    assert texts[-1].startswith("Hide")
+    from ui import theme
+    assert sp._pl_bars["C"].height() == sp.PL_BAR_H > theme.CONTROL_H

@@ -2832,6 +2832,10 @@ class SlidersPanel(QWidget):
             fill = (lambda menu, s=sid: menu.addAction(
                 f"Hide “{self._section_name(s)}”…",
                 lambda: self.hide_section_asked(s)))
+            if sid == "printer_lights":
+                # its own entries first: reset, buttons or sliders, the step
+                fill = (lambda menu, f=fill: (self._fill_printer_menu(menu),
+                                              menu.addSeparator(), f(menu)))
             if isinstance(w, CollapsibleSection):
                 w.set_header_menu(fill)
             elif sid == "layers" and getattr(self, "_layers_title", None) is not None:
@@ -2917,6 +2921,7 @@ class SlidersPanel(QWidget):
                     "M": ("Magenta", "#12a83c", "#e3168c"),
                     "Y": ("Yellow", "#1f58ea", "#ffd000")}
     PRINTER_STYLE_KEY = "panel/printer_style"
+    PL_BAR_H = 34          # taller than a slider row, easier to click (2026-11-19)
 
     def _build_printer_lights(self):
         from PySide6.QtWidgets import QGridLayout
@@ -2941,28 +2946,6 @@ class SlidersPanel(QWidget):
                     f"QPushButton:pressed {{ background: {pressed}; }}"
                     f"QPushButton:disabled {{ background: {theme.SURFACE}; "
                     f"color: {theme.TEXT_DISABLED}; }}")
-                if ch == "G":
-                    step = f"{self.PL_GAMMA_CLICK} per click, Shift-click {self.PL_GAMMA_SHIFT}"
-                    tip = ((f"γ+: lifts the midtones (Gamma slider +{step})"
-                            if sign == "+" else
-                            f"γ−: lowers the midtones (Gamma slider −{step})")
-                           + ". Black and white stay put.\n"
-                           "Right-click: reset all printer lights to 0.")
-                elif ch == "D":
-                    tip = ("Darker: more density, as on a printer's D key"
-                           if sign == "+" else "Lighter: less density")
-                else:
-                    more, less, chan = self._PL_TIPS[ch]
-                    tip = (f"More {more} (less {less})" if sign == "+"
-                           else f"Less {more} (more {less})")
-                if ch != "G":
-                    tip = (f"{tip}, half a printer point per click "
-                           "(Shift-click: one point). One point is about "
-                           "1/12 stop; it moves the Channel Levels "
-                           f"{'Master' if ch == 'D' else chan.capitalize()} Shift "
-                           f"slider by {self.PRINTER_POINT_UNITS}.\n"
-                           "Right-click: reset all printer lights to 0.")
-                b.setToolTip(tip)
                 b.clicked.connect(lambda _=False, c=ch, sg=sign: self._printer_light(c, sg))
                 b.setContextMenuPolicy(Qt.CustomContextMenu)
                 b.customContextMenuRequested.connect(
@@ -2976,9 +2959,116 @@ class SlidersPanel(QWidget):
         self._pl_readout.setAlignment(Qt.AlignCenter)
         pad_lay.addWidget(self._pl_readout)
         self.printer_section.add_widget(self._pl_pad_widget)
+        try:
+            step = float(self._settings.value(self.PRINTER_STEP_KEY, self.PL_CLICK_POINTS))
+        except (TypeError, ValueError):
+            step = self.PL_CLICK_POINTS
+        self._pl_step = step if step in self.PL_STEPS else self.PL_CLICK_POINTS
         self._build_printer_bars()
         self.set_printer_style(self._settings.value(self.PRINTER_STYLE_KEY, "buttons",
                                                     type=str) or "buttons")
+        self._apply_printer_step()
+
+    # --- the step, and the right-click menu (revision 2026-11-19) ------------
+    PL_STEPS = (0.5, 1.0, 2.0)          # printer points a click can move
+    PRINTER_STEP_KEY = "panel/printer_step"
+    _PL_STEP_WORDS = {0.5: "half a point", 1.0: "one point", 2.0: "two points"}
+
+    def printer_step(self):
+        return getattr(self, "_pl_step", self.PL_CLICK_POINTS)
+
+    def _pl_steps(self, ch):
+        """(click, Shift-click) for column `ch`, in its slider's units of
+        the bar: printer points, or Gamma units (4 a point: ½ point = 2)."""
+        s = self.printer_step()
+        if ch == "G":
+            k = self.PL_GAMMA_CLICK / self.PL_CLICK_POINTS
+            return s * k, 2 * s * k
+        return s, 2 * s
+
+    def set_printer_step(self, points, save=True):
+        """How far one click moves a printer light (Shift-click: twice it)."""
+        if points not in self.PL_STEPS:
+            return
+        self._pl_step = points
+        if save:
+            self._settings.setValue(self.PRINTER_STEP_KEY, points)
+        self._apply_printer_step()
+
+    def _apply_printer_step(self):
+        """The bars' key and click steps and every tooltip follow the step."""
+        words = self._PL_STEP_WORDS
+        s = self.printer_step()
+        g1, g2 = self._pl_steps("G")
+        for (ch, sign), b in getattr(self, "_pl_buttons", {}).items():
+            if ch == "G":
+                step = f"{g1:g} per click, Shift-click {g2:g}"
+                tip = ((f"γ+: lifts the midtones (Gamma slider +{step})"
+                        if sign == "+" else
+                        f"γ−: lowers the midtones (Gamma slider −{step})")
+                       + ". Black and white stay put.")
+            else:
+                if ch == "D":
+                    tip = ("Darker: more density, as on a printer's D key"
+                           if sign == "+" else "Lighter: less density")
+                else:
+                    more, less, chan = self._PL_TIPS[ch]
+                    tip = (f"More {more} (less {less})" if sign == "+"
+                           else f"Less {more} (more {less})")
+                chan = "Master" if ch == "D" else self._PL_TIPS[ch][2].capitalize()
+                tip = (f"{tip}, {words[s]} per click (Shift-click: {words[2 * s]}"
+                       if 2 * s in words else f"{tip}, {words[s]} per click (Shift-click: "
+                       f"{2 * s:g} points")
+                tip += ("). One point is about 1/12 stop; it moves the Channel Levels "
+                        f"{chan} Shift slider by {self.PRINTER_POINT_UNITS}.")
+            b.setToolTip(tip + "\nRight-click: reset, buttons or sliders, the step.")
+        for ch, bar in getattr(self, "_pl_bars", {}).items():
+            click, big = self._pl_steps(ch)
+            bar.set_key_steps((click, big))
+            if ch == "G":
+                bar.setToolTip("Gamma: right lifts the midtones, left lowers them; black "
+                               "and white stay put (the tone Gamma slider).\n"
+                               f"Click right / left of 0: {click:g} up / down (Shift: "
+                               f"{big:g}). Drag (Shift: finer), double-click: 0.\n"
+                               "Right-click: reset, buttons or sliders, the step.")
+            else:
+                name = self._PL_BAR_LOOK[ch][0]
+                what = ("Density: right is darker (more density), as a printer's D key"
+                        if ch == "D" else
+                        f"{name}: right adds {name.lower()}, left adds "
+                        f"{self._PL_TIPS[ch][1]}")
+                chan = "Master" if ch == "D" else self._PL_TIPS[ch][2].capitalize()
+                bar.setToolTip(
+                    f"{what}; in printer points (one is about 1/12 stop, "
+                    f"{self.PRINTER_POINT_UNITS} units of the Channel Levels {chan} Shift "
+                    f"slider).\nClick right / left of 0: {words.get(click, f'{click:g} points')} "
+                    f"(Shift: {words.get(big, f'{big:g} points')}). Drag (Shift: finer), "
+                    "double-click: 0.\nRight-click: reset, buttons or sliders, the step.")
+
+    def _fill_printer_menu(self, menu):
+        """Reset; Buttons / Sliders; the step: on the pad, the bars and the
+        section's header."""
+        from PySide6.QtGui import QActionGroup
+        menu.addAction("Reset printer lights to 0", self._printer_lights_reset)
+        menu.addSeparator()
+        look = QActionGroup(menu)
+        for style, text in (("buttons", "Show as Buttons"), ("sliders", "Show as Sliders")):
+            a = menu.addAction(text, lambda st=style: self.set_printer_style(st, save=True))
+            a.setCheckable(True)
+            a.setChecked(self.printer_style() == style)
+            look.addAction(a)
+        menu.addSeparator()
+        steps = QActionGroup(menu)
+        for pts in self.PL_STEPS:
+            g = pts * self.PL_GAMMA_CLICK / self.PL_CLICK_POINTS
+            frac = "\u00bd" if pts == 0.5 else f"{pts:g}"
+            unit = "point" if pts <= 1 else "points"
+            a = menu.addAction(f"Each Click {frac} {unit} (\u03b3 {g:g})",
+                               lambda v=pts: self.set_printer_step(v))
+            a.setCheckable(True)
+            a.setChecked(self.printer_step() == pts)
+            steps.addAction(a)
+        return menu
 
     def _build_printer_bars(self):
         """Printer Lights as five bar sliders (spec/printer-light-sliders.md):
@@ -2995,30 +3085,14 @@ class SlidersPanel(QWidget):
             sl = self._pl_slider(ch)
             lo, hi = sl.value_range() if sl is not None else (-100, 100)
             if ch == "G":
-                bar = BarSlider(name, lo, hi, step=1, key_steps=(self.PL_GAMMA_CLICK,
-                                                                  self.PL_GAMMA_SHIFT),
-                                left=left, right=right, tick=10,
+                bar = BarSlider(name, lo, hi, step=1, key_steps=self._pl_steps("G"),
+                                left=left, right=right, tick=10, height=self.PL_BAR_H,
                                 fmt=lambda v: (f"{'+' if v > 0 else '−' if v < 0 else ''}"
                                                f"{abs(int(round(v)))}"))
-                bar.setToolTip("Gamma: right lifts the midtones, left lowers them; black "
-                               "and white stay put (the tone Gamma slider).\n"
-                               "Drag (Shift: finer), double-click: 0, arrow keys step.\n"
-                               "Right-click: reset all printer lights to 0.")
             else:
                 bar = BarSlider(name, -hi / u, -lo / u, step=self.PL_CLICK_POINTS,
-                                key_steps=(self.PL_CLICK_POINTS, self.PL_SHIFT_POINTS),
+                                key_steps=self._pl_steps(ch), height=self.PL_BAR_H,
                                 left=left, right=right, tick=1, fmt=self._fmt_points)
-                what = ("Density: right is darker (more density), as a printer's D key"
-                        if ch == "D" else
-                        f"{name}: right adds {name.lower()}, left adds "
-                        f"{self._PL_TIPS[ch][1]}")
-                bar.setToolTip(f"{what}; in printer points (one is about 1/12 stop, "
-                               f"{u} units of the Channel Levels "
-                               f"{'Master' if ch == 'D' else self._PL_TIPS[ch][2].capitalize()}"
-                               " Shift slider).\n"
-                               "Drag (Shift: finer), double-click: 0, arrow keys: half a "
-                               "point (Shift: one).\nRight-click: reset all printer lights "
-                               "to 0.")
             bar.valueChanged.connect(lambda v, c=ch: self._on_pl_bar(c, v))
             bar.released.connect(self._settle_now)
             bar.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -3056,9 +3130,7 @@ class SlidersPanel(QWidget):
 
     def _printer_lights_menu(self, button, pos):
         from PySide6.QtWidgets import QMenu
-        menu = QMenu(self)
-        act = menu.addAction("Reset printer lights to 0")
-        act.triggered.connect(self._printer_lights_reset)
+        menu = self._fill_printer_menu(QMenu(self))
         menu.exec(button.mapToGlobal(pos))
 
     def _pl_slider(self, ch):
@@ -3074,14 +3146,14 @@ class SlidersPanel(QWidget):
             return
         from PySide6.QtWidgets import QApplication
         big = bool(QApplication.keyboardModifiers() & Qt.ShiftModifier)
+        click, shift = self._pl_steps(ch)          # the chosen step (right-click)
         if ch == "G":
             # γ follows the Gamma slider's own sign: + lifts the midtones.
-            delta = self.PL_GAMMA_SHIFT if big else self.PL_GAMMA_CLICK
+            delta = shift if big else click
             step = delta if sign == "+" else -delta
         else:
             # "+" adds that colour / density = a NEGATIVE Shift.
-            delta = self.PRINTER_POINT_UNITS * (self.PL_SHIFT_POINTS if big
-                                                else self.PL_CLICK_POINTS)
+            delta = self.PRINTER_POINT_UNITS * (shift if big else click)
             step = -delta if sign == "+" else delta
         lo, hi = sl.value_range()
         new = max(lo, min(hi, sl.value() + step))
