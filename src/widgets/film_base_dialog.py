@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QGridLayout, QHBoxLayout, QLa
                                QLineEdit, QPushButton, QSpinBox, QVBoxLayout)
 
 from core import base_exposure as be
+from core import film_presets as fp
 from ui import theme
 
 ROW_NAMES = {"r": "Red", "g": "Green", "b": "Blue", "w": "One exposure"}
@@ -67,20 +68,37 @@ class FilmBaseEditDialog(QDialog):
     def restyle(qss):
         return qss
 
-    def __init__(self, base, shutters=(), isos=(), parent=None):
+    def __init__(self, base, shutters=(), isos=(), parent=None, preset=None):
         super().__init__(parent)
         self.setWindowTitle("Edit Film Base")
         self._base = base
+        self._preset = preset
         self.action = None
         self.rows = {}
         lay = QVBoxLayout(self)
 
+        # Name = the film preset's film, with its push/pull beside it
+        # (spec/film-presets.md §2; the user's mock-up, 2026-11-19)
+        ident = (dict(preset) if preset else fp.parse_label(base["name"]))
         name_row = QHBoxLayout()
         name_row.addWidget(QLabel("Name"))
-        self.name_edit = QLineEdit(base["name"])
+        self.name_edit = QLineEdit(ident["film"])
         self.name_edit.setMinimumWidth(260)
         name_row.addWidget(self.name_edit, 1)
+        from widgets.film_preset_id_dialog import push_combo
+        self.push_combo = push_combo(ident.get("push", 0))
+        name_row.addWidget(self.push_combo)
         lay.addLayout(name_row)
+        self._version = int(ident.get("version") or 1)
+        self._notes = str(ident.get("notes") or "")
+        self.preset_note = QLabel()
+        self.preset_note.setWordWrap(True)
+        self.preset_note.setStyleSheet(
+            f"color: {theme.TEXT_MUTED}; font-size: {theme.FS_CAPTION}px;")
+        lay.addWidget(self.preset_note)
+        self.name_edit.textChanged.connect(self._update_preset_note)
+        self.push_combo.currentIndexChanged.connect(self._update_preset_note)
+        self._update_preset_note()
 
         grid = QGridLayout()
         grid.setHorizontalSpacing(theme.GAP_BTN)
@@ -163,16 +181,33 @@ class FilmBaseEditDialog(QDialog):
         self.accept()
 
     def values(self):
-        """(name, {k: {"shutter", "iso", "level"}})."""
+        """(name, {k: {"shutter", "iso", "level"}, "_id": {film, push}})."""
         out = {}
         for k, r in self.rows.items():
             out[k] = {"shutter": r["shutter"].currentData(), "iso": r["iso"].currentData(),
                       "level": r["led"].value() if r["level"] is not None else None}
+        out["_id"] = {"film": self.name_edit.text().strip(),
+                      "push": self.push_combo.currentData() or 0}
         return self.name_edit.text().strip(), out
+
+    def _update_preset_note(self, *_):
+        film = self.name_edit.text().strip()
+        push = self.push_combo.currentData() or 0
+        p = self._preset
+        if p and fp.id_key(film, push, 1)[:2] == fp.key_of(p)[:2]:
+            text = f"Film preset: {fp.label(p)}. Version and notes are in Settings → Film Presets."
+        elif p:
+            text = (f"Save moves this film base to {fp.label({'film': film, 'push': push, 'version': self._version})} "
+                    f"(from {fp.label(p)}); Save as New makes the next version.")
+        else:
+            text = (f"Save makes this film base part of the film preset "
+                    f"{fp.label({'film': film or 'Film', 'push': push, 'version': 1})}.")
+        self.preset_note.setText(text)
 
     def _update(self, *_):
         cols = self._base.get("colours") or {}
         _name, vals = self.values()
+        vals.pop("_id", None)
         for k, r in self.rows.items():
             col, v = cols[k], vals[k]
             changed = (v["shutter"] != col["shutter"] or v["iso"] != col["iso"]

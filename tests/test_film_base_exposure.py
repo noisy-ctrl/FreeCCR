@@ -481,7 +481,9 @@ def test_save_renames_and_keeps_the_rest():
     assert (b["when"], b["camera"], b["notes"]) == ("2026-10-30", "Fujifilm GFX50S II",
                                                     ["a note"])
     assert b["colours"]["g"]["edited"] and not b["colours"]["r"].get("edited")
-    assert be.edit(d, 0, "portra", cols)["bases"][0]["name"] == "portra 2"   # taken
+    # a trichrome base may share a one-exposure base's name: they are never
+    # listed together (spec/film-presets.md §2)
+    assert be.edit(d, 0, "portra", cols)["bases"][0]["name"] == "portra"
     assert be.edit(d, 0, "", cols)["bases"][0]["name"] == "Ektar"            # kept
     assert be.edit(d, 0, "EKTAR", cols)["bases"][0]["name"] == "EKTAR"       # its own
     assert be.edit(d, 9, "x", cols) == be.normalise(d)                       # no such

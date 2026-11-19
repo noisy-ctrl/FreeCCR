@@ -42,7 +42,7 @@ class TetherStartDialog(QDialog):
 
     def __init__(self, parent=None, n_open=0, folder="", scan_type="colour",
                  from_monitor=False, chooser=None, roll="", film_format="", film="",
-                 films=()):
+                 films=(), presets=(), preset=""):
         super().__init__(parent)
         self.setWindowTitle("Start Hot Folder Tether")
         self._n_open = int(n_open or 0)
@@ -91,11 +91,25 @@ class TetherStartDialog(QDialog):
         self.film_combo = QComboBox()
         self.film_combo.setEditable(True)
         self.film_combo.setInsertPolicy(QComboBox.NoInsert)
+        # film presets first (spec/film-presets.md §3), then plain film names
+        from core import film_presets as fp
+        labels = set()
+        for p in presets or ():
+            self.film_combo.addItem(fp.label(p), p["id"])
+            labels.add(fp.label(p))
         for f in films or ():
-            if f:
-                self.film_combo.addItem(str(f))
-        self.film_combo.setEditText(film or "")
-        self.film_combo.lineEdit().setPlaceholderText("e.g. Portra 400 (optional)")
+            if f and str(f) not in labels:
+                self.film_combo.addItem(str(f), "")
+        chosen = self.film_combo.findData(preset) if preset else -1
+        if chosen >= 0:
+            self.film_combo.setCurrentIndex(chosen)
+        else:
+            self.film_combo.setEditText(film or "")
+        self.film_combo.lineEdit().setPlaceholderText("a film preset, or a film's name "
+                                                      "(optional)")
+        self.film_combo.setToolTip(
+            "Pick a film preset (Settings → Film Presets) to carry its film base, look "
+            "and settings to this roll, or type a film's name for the file names only.")
         self.film_combo.setMinimumWidth(200)
         grid.addWidget(self.film_combo, 4, 1, Qt.AlignLeft)
         lay.addLayout(grid)
@@ -119,6 +133,12 @@ class TetherStartDialog(QDialog):
         self.buttons.rejected.connect(self.reject)
         lay.addWidget(self.buttons)
         self._refresh_folder()
+
+    def preset_value(self):
+        """The film preset's id when the Film text is a preset's label, else ""."""
+        text = self.film_combo.currentText().strip()
+        i = self.film_combo.findText(text, Qt.MatchExactly)
+        return (self.film_combo.itemData(i) or "") if i >= 0 else ""
 
     def roll_value(self):
         from core import capture_log
@@ -149,6 +169,7 @@ class TetherStartDialog(QDialog):
                 "roll": self.roll_value(),
                 "format": self.format_combo.currentData() or "",
                 "film": self.film_combo.currentText().strip(),
+                "preset": self.preset_value(),
                 "close_open": self._n_open > 0 and self.close_box.isChecked(),
                 "import_existing": (not self.import_box.isHidden()) and self.import_box.isChecked(),
                 "dont_ask": (not self.dont_ask_box.isHidden()) and self.dont_ask_box.isChecked()}

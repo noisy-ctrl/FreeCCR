@@ -259,6 +259,8 @@ def serialize_image(img) -> dict:
         "film_format": getattr(img, "film_format", None),
         # How it was scanned (spec/scan-type.md): colour / trichrome / bw / None
         "capture_type": getattr(img, "capture_type", None),
+        # Its film preset (spec/film-presets.md). Additive: absent = none.
+        "film_preset": getattr(img, "film_preset", None),
         # Capture's frame guide on this scan, for its crop
         # (spec/guide-follow-and-crop.md §3). Additive: absent = none.
         "capture_guide": getattr(img, "capture_guide", None),
@@ -330,7 +332,8 @@ def _is_pristine(state: dict) -> bool:
             and state["rotation_angle"] == 0 and state["fine_rotation_angle"] == 0
             and not state["horizontal_mirrored"] and not state["vertical_mirrored"]
             and state["reference_frame"] is None
-            and not state.get("capture_guide"))
+            and not state.get("capture_guide")
+            and not state.get("film_preset"))
 
 
 def _prune(catalog: dict) -> None:
@@ -753,6 +756,7 @@ def _restore_image(file_path: str, state: dict, live_merge_sources=None,
     img.auto_crop_example = state.get("auto_crop_example")
     img.film_format = state.get("film_format")
     img.capture_type = state.get("capture_type")
+    img.film_preset = state.get("film_preset")
     img.capture_guide = state.get("capture_guide")
     img.wp_choice = state.get("wp_choice")
     ws = state.get("wp_sample")

@@ -890,11 +890,13 @@ class MainWindow(QMainWindow):
         help_action.triggered.connect(self.open_help_website)
 
     # --- Color management (global input profile, lives in Settings) -------
-    def open_settings(self):
+    def open_settings(self, page=None):
         """Open the Settings dialog (Color Management tab holds the input
-        ICC/DCP, the IT8 wizard, and Positive mode)."""
+        ICC/DCP, the IT8 wizard, and Positive mode), at `page` if named."""
         from widgets.settings_dialog import SettingsDialog
         dlg = SettingsDialog(self)
+        if page:
+            dlg.show_page(page)
         self._settings_dialog = dlg
         try:
             dlg.exec()
@@ -1981,6 +1983,8 @@ class MainWindow(QMainWindow):
             sess = getattr(self, "capture_session", None) or {}
             if sess.get("format"):
                 mon.apply_roll_format(sess["format"])
+            if sess.get("preset"):
+                mon.apply_roll_preset(sess["preset"])
         if mon.isMinimized():
             mon.showNormal()
         else:
@@ -1988,6 +1992,24 @@ class MainWindow(QMainWindow):
         mon.raise_()
         mon.activateWindow()
         return mon
+
+    # --- film bases, shared with Settings → Film Presets (spec/film-presets.md)
+    def film_bases_data(self):
+        """Capture's film bases: its own list when it is open, else stored."""
+        from core import base_exposure as be
+        mon = getattr(self, "_live_monitor", None)
+        if mon is not None and getattr(mon, "_bases", None) is not None:
+            return be.normalise(mon._bases)
+        return be.normalise(self._settings.value("live/film_bases", "", type=str))
+
+    def set_film_bases_data(self, d):
+        """Store film bases changed outside Capture and reload an open Capture,
+        so its own list never writes the old one back."""
+        from core import base_exposure as be
+        self._settings.setValue("live/film_bases", be.dumps(d))
+        mon = getattr(self, "_live_monitor", None)
+        if mon is not None and hasattr(mon, "reload_film_bases"):
+            mon.reload_film_bases()
 
     def _on_live_monitor_closed(self):
         mon, self._live_monitor = self._live_monitor, None
@@ -2058,7 +2080,8 @@ class MainWindow(QMainWindow):
         folder = os.path.normpath(normalized)
         if opts.get("scan_type"):
             self.set_scan_type(opts["scan_type"])
-        self._set_capture_session(opts.get("roll"), opts.get("format"), opts.get("film"))
+        self._set_capture_session(opts.get("roll"), opts.get("format"), opts.get("film"),
+                                  preset=opts.get("preset"))
 
         # Snapshot the folder's current supported files. They are seeded into the
         # scanner (so the poller never re-imports them); optionally import them now.
@@ -2349,6 +2372,10 @@ class MainWindow(QMainWindow):
         # or B&W by the scan type (a single file of a trichrome scan, loaded
         # on its own, is neither).
         st = getattr(ccr_backend, "scan_type", "colour")
+        sess = getattr(self, "capture_session", None) or {}
+        if (sess.get("preset") and self._tether_active
+                and os.path.normpath(img.file_path) not in self._tether_import_existing):
+            img.film_preset = sess["preset"]          # spec/film-presets.md §4
         if getattr(img, "is_merged", False):
             img.capture_type = "trichrome"
         else:
@@ -2401,13 +2428,37 @@ class MainWindow(QMainWindow):
         Tint stays behind). None when there is no current image or its look
         is all default."""
         idx = self.image_preview.current_idx
-        if idx is None:
-            return None
-        src = ccr_backend.get_image_by_index(idx)
+        src = ccr_backend.get_image_by_index(idx) if idx is not None else None
+        # A roll with a film preset starts from it: the first capture, and any
+        # made while a frame of another film is on screen
+        # (spec/film-presets.md §4, the user's choice).
+        sess = getattr(self, "capture_session", None) or {}
+        pid = sess.get("preset")
+        if pid and (src is None or getattr(src, "film_preset", None) != pid):
+            t = self._preset_template(pid)
+            if t is not None:
+                return t
         if src is None:
             return None
         from core.tether_watcher import look_template
         return look_template(src)
+
+    def _preset_template(self, pid):
+        """The look a capture inherits from the film preset `pid`: its
+        settings pasted on defaults exactly as Paste would, its colour profile,
+        nothing else (no crop, rotation or areas). None when it carries none."""
+        from core import film_presets as fp
+        p = fp.find(fp.load(self._settings), pid)
+        if p is None or not p.get("clip") or not p.get("chosen"):
+            return None
+        sp = self.sliders_panel
+        chosen = set(p["chosen"])
+        adj = sp.paste_into({}, p["clip"], chosen) or {}
+        profile = p["clip"].get("profile", "color") if "profile" in chosen else "color"
+        return {"adjustment_settings": adj, "area_layers": [], "rotation_angle": 0,
+                "fine_rotation_angle": 0, "horizontal_mirrored": False,
+                "vertical_mirrored": False, "crop_rect": None, "crop_angle": 0.0,
+                "crop_is_auto": False, "color_profile": profile}
 
     @staticmethod
     def _apply_tether_template(img, t):
@@ -2523,22 +2574,37 @@ class MainWindow(QMainWindow):
         from core import capture_log
         st = self._settings
         films = st.value("capture/films", [], type=list) or []
+        from core import film_presets as fp
         return {"roll": capture_log.next_roll(st.value("capture/last_roll", "", type=str)),
                 "format": st.value("capture/format", "", type=str) or "",
                 "film": st.value("capture/film", "", type=str) or "",
-                "films": [f for f in films if f][:10]}
+                "films": [f for f in films if f][:10],
+                "presets": fp.ordered(fp.load(st)),
+                "preset": st.value("capture/preset", "", type=str) or ""}
 
-    def _set_capture_session(self, roll, fmt, film):
+    def _set_capture_session(self, roll, fmt, film, preset=None):
+        """The roll being captured. `preset` (a film preset's id,
+        spec/film-presets.md §3) names the film: its file-name film and label."""
         from core import capture_log
+        from core import film_presets as fp
         roll = capture_log.clean_roll(roll) or capture_log.DEFAULT_ROLL
         fmt, film = str(fmt or ""), str(film or "").strip()
+        p = fp.find(fp.load(self._settings), preset) if preset else None
         self.capture_session = {"roll": roll, "format": fmt, "film": film}
+        if p is not None:
+            self.capture_session.update(film=fp.file_film(p), film_label=fp.label(p),
+                                        preset=p["id"])
         mon = getattr(self, "_live_monitor", None)
         if mon is not None and fmt:
             mon.apply_roll_format(fmt)      # spec/film-base-per-scan-type.md §4
+        if mon is not None and p is not None:
+            mon.apply_roll_preset(p["id"])
         st = self._settings
         st.setValue("capture/last_roll", roll)
         st.setValue("capture/format", fmt)
+        st.setValue("capture/preset", p["id"] if p is not None else "")
+        if p is not None:
+            return
         st.setValue("capture/film", film)
         if film:
             films = [f for f in (st.value("capture/films", [], type=list) or []) if f != film]
@@ -2554,7 +2620,8 @@ class MainWindow(QMainWindow):
                                 scan_type=getattr(ccr_backend, "scan_type", "colour"),
                                 from_monitor=from_monitor, roll=sess["roll"],
                                 film_format=sess["format"], film=sess["film"],
-                                films=sess["films"])
+                                films=sess["films"], presets=sess["presets"],
+                                preset=sess["preset"])
         if hasattr(parent, "light_dialog"):
             parent.light_dialog(dlg)
         started = dlg.exec() == QDialog.Accepted
@@ -2643,7 +2710,8 @@ class MainWindow(QMainWindow):
             # a new roll gets the next roll id (format and film kept)
             from core import capture_log
             self._set_capture_session(capture_log.next_roll(sess.get("roll")),
-                                      sess.get("format"), sess.get("film"))
+                                      sess.get("format"), sess.get("film"),
+                                      preset=sess.get("preset"))
         if self._tether_active:
             self._tether_count = 0
             self._tether_prompted = False

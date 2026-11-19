@@ -518,7 +518,7 @@ def test_with_no_patch_it_asks_for_a_click_then_measures(film_mon):
     mon._ask_film_base_name = lambda default: "HP5"
     mon.feed.full = None
     mon.measure_btn.click()
-    assert mon._measure is None and mon._pending_measure == ("HP5", None)
+    assert mon._measure is None and mon._pending_measure == ("HP5", None, None)
     assert mon.canvas.mode == "pick" and "Click the film base" in mon.capture_caption.text()
     assert mon.canvas.pick_box == be.PATCH_SIDE                 # revision 5: the box
     assert "the box is what's measured" in mon.canvas.pick_hint
@@ -639,7 +639,7 @@ def test_an_old_click_inside_the_frame_guide_asks_again(film_mon):
     mon._ask_film_base_name = lambda default: "Gold"
     mon._neg_base_pos = (0.5, 0.5, 640, 480)
     mon.measure_btn.click()
-    assert mon._measure is None and mon._pending_measure == ("Gold", None)
+    assert mon._measure is None and mon._pending_measure == ("Gold", None, None)
     mon.feed.full = np.zeros((480, 640, 3), np.uint8)
     mon.feed.samples["any"] = (200.0, 150.0, 120.0)
     mon._on_picked(352.0, 230.0)                             # in the gap, inside the guide

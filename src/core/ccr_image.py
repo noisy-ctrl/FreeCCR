@@ -336,6 +336,9 @@ class CCRImage:
         # How it was scanned, when known (spec/scan-type.md): "colour",
         # "trichrome", "bw"; None for anything not loaded by Hot Folder Tether.
         self.capture_type = None
+        # The film preset it was captured or graded with (spec/film-presets.md),
+        # a preset id; None when none.
+        self.film_preset = None
         # How this merge extracts each frame's channel — captured at import
         # (like merge_sources) so every re-read (zoom, export, linear TIFF,
         # slice, duplicate) reproduces the same decode at the same canonical

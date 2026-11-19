@@ -2234,6 +2234,7 @@ class CCRBackend:
             # duplicate (whole-image copy), not transferred cross-image.
             dup.area_layers = copy.deepcopy(img.area_layers)
             dup.capture_type = getattr(img, "capture_type", None)
+            dup.film_preset = getattr(img, "film_preset", None)
             dup.is_duplicate = True
             # A duplicated slice becomes its OWN one-image round: a fresh
             # group means resetting the source's round never reaches into

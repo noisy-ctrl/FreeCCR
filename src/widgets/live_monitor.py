@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (QWidget, QFrame, QHBoxLayout, QVBoxLayout, QLabel
 
 from core import base_exposure as be
 from core import camera_backends as cb
+from core import film_presets as fp
 from core import capture_light as cl
 from core import capture_sequence as cs
 from core import capture_guide
@@ -359,7 +360,7 @@ class LiveCaptureMonitor(QWidget):
         # film bases (spec/film-base-exposure.md)
         self._measure = None             # the measuring in progress
         self._measure_token = 0          # voids a finished measuring's timers / reads
-        self._pending_measure = None     # (name, index) waiting for a Film Base click
+        self._pending_measure = None     # (name, index, preset) waiting for a Film Base click
         self._neg_base_pos = None        # the last Film Base click, frame fractions
         self._new_frame_quiet = 0.0      # no "new frame" note before this
         self._cam_zoom = "1"             # the camera's magnifier (spec/live-magnifier.md)
@@ -2043,10 +2044,10 @@ class LiveCaptureMonitor(QWidget):
                 self._neg_base_pos = (sx / max(1, w), sy / max(1, h), w, h)
                 self._base_click_used = False         # a new click: Measure may use it
             if self._pending_measure is not None:
-                name, index = self._pending_measure
+                name, index, preset = self._pending_measure
                 self._pending_measure = None
                 self._fresh_base_click = True
-                QTimer.singleShot(0, lambda: self.start_measure(name, index))
+                QTimer.singleShot(0, lambda: self.start_measure(name, index, preset))
         self._neg[target] = bgr
         if target == "base" and self._neg.get("hi") is None:
             self._rebuild_negative(force_auto=True, keep_base=True)
@@ -2436,6 +2437,7 @@ class LiveCaptureMonitor(QWidget):
         entry = {"roll": roll, "shot": shot, "scan_type": scan,
                  "format": sess.get("format") or "", "film": sess.get("film") or "",
                  "route": "usb" if p["usb"] else "cable",
+                 "preset": sess.get("preset") or None,
                  "exposures": ({k: {f: v.get(f) for f in ("shutter", "iso") if v.get(f)}
                                 for k, v in exps.items() if isinstance(v, dict)}
                                if exps else None)}
@@ -2469,8 +2471,8 @@ class LiveCaptureMonitor(QWidget):
         if sess.get("format"):
             from core import film_formats
             bits.append(film_formats.label(sess["format"]) or sess["format"])
-        if sess.get("film"):
-            bits.append(str(sess["film"]))
+        if sess.get("film_label") or sess.get("film"):
+            bits.append(str(sess.get("film_label") or sess["film"]))
         bits.append(f"next shot {int(next_shot):03d}")
         self.roll_note.setText(" · ".join(bits))
 
@@ -2740,7 +2742,11 @@ class LiveCaptureMonitor(QWidget):
             # a new scan type brings back its own pick; else keep a fitting
             # selection; else the type's first film base
             want = (self._base_picks().get(t) or "").lower()
-            pick = next((i for i in shown if d["bases"][i]["name"].lower() == want), None)
+            roll = self._roll_preset()
+            pick = next((i for i in shown if roll and d["bases"][i].get("preset") == roll),
+                        None)
+            if pick is None:
+                pick = next((i for i in shown if d["bases"][i]["name"].lower() == want), None)
             if pick is None:
                 pick = d["selected"] if d["selected"] in shown else shown[0]
             d["selected"] = pick
@@ -2797,6 +2803,7 @@ class LiveCaptureMonitor(QWidget):
         token = self._base_bp_token
         setup = self._base_setup()
         load = self._load_base_shots
+        scan = self.scan_type()
 
         def work():
             import shutil
@@ -2806,7 +2813,7 @@ class LiveCaptureMonitor(QWidget):
                 out = e
             finally:
                 shutil.rmtree(temp, ignore_errors=True)
-            self._base_bp_read.emit(token, (name, out))
+            self._base_bp_read.emit(token, (name, out, scan))
 
         self._measured_text = self.capture_caption.text()
         self._note_caption(self._measured_text + "  Reading the black point…")
@@ -2819,7 +2826,8 @@ class LiveCaptureMonitor(QWidget):
     def _on_base_bp_read(self, token, payload):
         if token != self._base_bp_token:
             return
-        name, out = payload
+        name, out = payload[0], payload[1]
+        scan = payload[2] if len(payload) > 2 else None
         before = (getattr(self, "_measured_text", "") or "").strip()
         before = before + "  " if before else ""
         if isinstance(out, Exception):
@@ -2827,10 +2835,11 @@ class LiveCaptureMonitor(QWidget):
             self._warn_caption(before + f"Its black point couldn't be read ({out}): the "
                                "Black Point is left as it was.")
             return
-        self._bases = be.set_black_point(self._bases, name, out)
+        self._bases = be.set_black_point(self._bases, name, out, scan=scan)
         self._save_film_bases()
         self._refresh_film_bases()
-        base = next((b for b in self._bases["bases"] if b["name"] == name), None)
+        base = next((b for b in self._bases["bases"] if b["name"] == name
+                     and (scan is None or be.fits(b, scan))), None)
         self._apply_base_black_point(base, before=before)
 
     def _apply_base_black_point(self, base, picked=False, before=""):
@@ -2877,17 +2886,28 @@ class LiveCaptureMonitor(QWidget):
         self._popup = m
 
     def _ask_film_base_name(self, default):
-        """The test seam: a name, or None for cancel."""
-        name, ok = QInputDialog.getText(self, "Measure Film Base", "Name this film base "
-                                        "(stock, batch):", text=default)
-        return name.strip() if ok and name.strip() else None
+        """The test seam: the film preset's ID ({film, push, version, notes}),
+        a plain name (an unlinked base, as before presets), or None for
+        cancel. `default` is an ID dict (or a name)."""
+        from widgets.film_preset_id_dialog import FilmPresetIdDialog
+        if not isinstance(default, dict):
+            default = fp.parse_label(default) if default else {}
+        dlg = FilmPresetIdDialog(fp.load(_settings()), default, title="Measure Film Base",
+                                 prompt="Which film is this? Its film base joins that film "
+                                        "preset (made if new).", parent=self)
+        self.light_dialog(dlg)
+        if dlg.exec() != QDialog.Accepted:
+            return None
+        v = dlg.values()
+        return v if v["film"] else None
 
     def _edit_film_base_dialog(self, base):
         """The test seam: (action, name, values) with action "save", "new",
         "delete" or None (cancelled)."""
         from widgets.film_base_dialog import FilmBaseEditDialog
         dlg = FilmBaseEditDialog(base, self._exp_choices.get("shutter") or [],
-                                 self._exp_choices.get("iso") or [], self)
+                                 self._exp_choices.get("iso") or [], self,
+                                 preset=fp.find(fp.load(_settings()), base.get("preset")))
         self.light_dialog(dlg)
         if dlg.exec() != QDialog.Accepted or dlg.action is None:
             return None, "", {}
@@ -2905,12 +2925,17 @@ class LiveCaptureMonitor(QWidget):
             return
         if action not in ("save", "new"):
             return
+        values = dict(values or {})
+        ident = values.pop("_id", None)
         colours = be.edited_colours(base["colours"], values)
-        if action == "save":
+        if ident is not None:
+            self._edit_linked(action, base, ident, colours)
+        elif action == "save":
             self._bases = be.edit(self._bases, self._bases["selected"], name, colours)
         else:
             self._bases = be.add(self._bases, be.entry(
-                name or base["name"], colours, base.get("camera", ""), base.get("notes", ())))
+                name or base["name"], colours, base.get("camera", ""), base.get("notes", ()),
+                scan=base.get("scan"), light=base.get("light")))
         self._save_film_bases()
         self._refresh_film_bases()
         new = self._film_base()
@@ -2918,9 +2943,76 @@ class LiveCaptureMonitor(QWidget):
             self._note_caption(f"Film base “{new['name']}” saved: "
                                f"{be.summary(new, self.scan_type() == 'trichrome')}")
 
+    def _edit_linked(self, action, base, ident, colours):
+        """Edit Film Base with a film preset's film and push/pull
+        (spec/film-presets.md §2): Save moves this base to that ID's preset
+        (renaming its own preset when it holds nothing else); Save as New
+        adds a base on the next free version, with the old preset's settings."""
+        st = _settings()
+        presets = fp.load(st)
+        idx = self._bases["selected"]
+        old = fp.find(presets, base.get("preset"))
+        film = str(ident.get("film") or "").strip() or (old or {}).get("film") \
+            or fp.parse_label(base["name"])["film"]
+        push = fp.clamp_push(ident.get("push", 0))
+        scan = be.scan_of(base) or self.scan_type()
+        if action == "save":
+            same = old is not None and fp.id_key(film, push, 1)[:2] == fp.key_of(old)[:2]
+            if same:
+                p = old
+            else:
+                version = old["version"] if old else 1
+                alone = (old is not None and not old["clip"]
+                         and len(be.bases_of(self._bases, old["id"])) == 1)
+                p = None
+                if alone and not fp.taken(presets, film, push, version, but=old["id"]):
+                    presets, p = fp.update(presets, old["id"], film=film, push=push)
+                if p is None:
+                    presets, p = fp.ensure(presets, film, push, version)
+                    j = be.base_for(self._bases, p["id"], scan)[0]
+                    if j is not None and j != idx:
+                        # that preset already has this scan type's base
+                        presets, p = fp.ensure(presets, film, push,
+                                               fp.next_version(presets, film, push))
+            self._bases = be.edit(self._bases, idx, base["name"], colours)
+            self._bases = be.link(self._bases, idx, p["id"], fp.label(p))
+            self._bases = be.relabel(self._bases, p["id"], fp.label(p))
+        else:
+            v = fp.next_version(presets, film, push)
+            presets, p = fp.add(presets, fp.make(
+                film, push, v, "", (old or {}).get("clip"), (old or {}).get("chosen") or ()))
+            self._bases = be.add(self._bases, be.entry(
+                fp.label(p), colours, base.get("camera", ""), base.get("notes", ()),
+                scan=base.get("scan"), light=base.get("light"), preset=p["id"]))
+        fp.save(st, presets)
+
+    def _ask_preset_rename(self, preset):
+        """The test seam: the preset's new ID, or None."""
+        from widgets.film_preset_id_dialog import FilmPresetIdDialog
+        dlg = FilmPresetIdDialog(fp.load(_settings()), preset, title="Rename Film Preset",
+                                 own_id=preset["id"], parent=self)
+        self.light_dialog(dlg)
+        return dlg.values() if dlg.exec() == QDialog.Accepted else None
+
     def _on_rename_film_base(self):
         base = self._film_base()
         if base is None:
+            return
+        presets = fp.load(_settings())
+        p = fp.find(presets, base.get("preset"))
+        if p is not None:
+            # a linked base is the preset's label: rename the preset
+            v = self._ask_preset_rename(p)
+            if not v:
+                return
+            presets, new = fp.update(presets, p["id"], **v)
+            if new is None:
+                self._warn_caption("That film, push and version are another preset already.")
+                return
+            fp.save(_settings(), presets)
+            self._bases = be.relabel(self._bases, new["id"], fp.label(new))
+            self._save_film_bases()
+            self._refresh_film_bases()
             return
         name, ok = QInputDialog.getText(self, "Rename Film Base", "Name:", text=base["name"])
         if ok and name.strip():
@@ -3242,9 +3334,80 @@ class LiveCaptureMonitor(QWidget):
         if self._measure is not None:
             self._measure_stop()
             return
-        name = self._ask_film_base_name(be.default_name())
-        if name:
-            self.start_measure(name)
+        answer = self._ask_film_base_name(self._measure_default_id())
+        if not answer:
+            return
+        if not isinstance(answer, dict):           # a plain name: an unlinked base
+            self.start_measure(answer)
+            return
+        # a film preset's ID (spec/film-presets.md §2): link it, made if new
+        presets, p = fp.ensure(fp.load(_settings()), answer.get("film"), answer.get("push"),
+                               answer.get("version"), answer.get("notes", ""))
+        if p is None:
+            return
+        fp.save(_settings(), presets)
+        i, b = be.base_for(self._bases, p["id"], self.scan_type())
+        if i is not None:
+            # one film base per preset and scan type: measure that one again
+            self.start_measure(b["name"], i)
+            return
+        self.start_measure(fp.label(p), preset=p["id"])
+
+    def _roll_preset(self):
+        """The film preset of the roll being captured (the Start window's
+        Film), or None."""
+        sess = getattr(self._mw, "capture_session", None) or {}
+        return sess.get("preset") if isinstance(sess, dict) else None
+
+    def _measure_default_id(self):
+        """Measure's starting ID: the roll's preset when it has no film base
+        of this scan type yet, else the next version of it (or of the film
+        base on screen)."""
+        presets = fp.load(_settings())
+        p = fp.find(presets, self._roll_preset())
+        if p is None:
+            base = self._film_base()
+            p = fp.find(presets, (base or {}).get("preset"))
+        if p is None:
+            return {"film": "", "push": 0, "version": 1, "notes": ""}
+        if be.base_for(self._bases, p["id"], self.scan_type())[0] is None:
+            return {"film": p["film"], "push": p["push"], "version": p["version"],
+                    "notes": p["notes"]}
+        return {"film": p["film"], "push": p["push"],
+                "version": fp.next_version(presets, p["film"], p["push"]), "notes": ""}
+
+    def apply_roll_preset(self, pid):
+        """The roll's film preset: select its film base for the scan type, or
+        say there is none yet (spec/film-presets.md §3)."""
+        p = fp.find(fp.load(_settings()), pid)
+        if p is None:
+            return False
+        i, b = be.base_for(self._bases, pid, self.scan_type())
+        if i is None:
+            what = {"trichrome": "trichrome", "colour": "white-light",
+                    "bw": "B&W"}.get(self.scan_type(), "")
+            self._note_caption(f"No {what} film base for {fp.label(p)} yet: Measure to "
+                               "add one.")
+            return False
+        if self._measure is not None:
+            return False
+        self._bases["selected"] = i
+        self._save_film_bases()
+        self._remember_base_pick()
+        self._refresh_film_bases()
+        self._on_film_base_selected(self.film_base_combo.currentIndex())
+        return True
+
+    def reload_film_bases(self):
+        """Film bases changed outside Capture (Settings → Film Presets): read
+        them again so this window never writes an old list over them."""
+        if self._measure is not None:
+            return
+        sel = self._bases.get("selected", -1)
+        self._bases = be.normalise(_settings().value("live/film_bases", ""))
+        if 0 <= sel < len(self._bases["bases"]):
+            self._bases["selected"] = sel
+        self._refresh_film_bases()
 
     def _film_base_patch(self):
         """(rect in frame fractions, where) for reading the base: the Film Base
@@ -3275,8 +3438,9 @@ class LiveCaptureMonitor(QWidget):
         # border", which was picture, and drew a patch nobody asked for).
         return None, ""
 
-    def start_measure(self, name, index=None):
-        """Measure a film base: `index` set = Measure Again on that entry."""
+    def start_measure(self, name, index=None, preset=None):
+        """Measure a film base: `index` set = Measure Again on that entry;
+        `preset` = the film preset a new one joins (spec/film-presets.md)."""
         if self._measure is not None or self.sequence.running:
             return False
         if self._rail_busy():
@@ -3299,7 +3463,7 @@ class LiveCaptureMonitor(QWidget):
             return False
         rect, where = self._film_base_patch()
         if rect is None:
-            self._pending_measure = (name, index)
+            self._pending_measure = (name, index, preset)
             self._pick_target = "base"
             # revision 5: the pointer carries the patch, so the click shows
             # exactly what will be read
@@ -3334,6 +3498,7 @@ class LiveCaptureMonitor(QWidget):
         self._measure_token += 1
         self._measure = {
             "cal": cal, "name": name, "index": index, "rect": rect, "where": where,
+            "preset": preset,
             "temp": tempfile.mkdtemp(prefix="freeccr-film-base-"),
             "levels": dict(self._levels),
             "exposure": {f: self._exposure.get(f) for f in ("shutter", "iso")
@@ -3522,7 +3687,8 @@ class LiveCaptureMonitor(QWidget):
                                          cal.notes, scan=scan, light=light)
             else:
                 self._bases = be.add(self._bases, be.entry(m["name"], cal.result, camera,
-                                                           cal.notes, scan=scan, light=light))
+                                                           cal.notes, scan=scan, light=light,
+                                                           preset=m.get("preset")))
             self._save_film_bases()
             self._remember_base_pick()
             self._refresh_film_bases()

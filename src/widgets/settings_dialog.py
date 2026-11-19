@@ -84,6 +84,10 @@ class SettingsDialog(QDialog):
         if getattr(main_window, "sliders_panel", None) is not None and hasattr(
                 main_window.sliders_panel, "HIDEABLE_SECTIONS"):
             self._add_category("Panel", self._build_panel_page())
+        # Settings -> Film Presets (spec/film-presets.md §6)
+        from widgets.film_presets_page import FilmPresetsPage
+        self.film_presets_page = FilmPresetsPage(main_window)
+        self._add_category("Film Presets", self.film_presets_page)
 
         # Wheel scrolls the page, never the value under the cursor.
         self._wheel_filter = _WheelScrollsPage(self)
@@ -106,6 +110,14 @@ class SettingsDialog(QDialog):
         theme.apply_windows_dark_titlebar(self)
         self.refresh_color_management()
         self._init_toggles()        # seed staged toggles from the live backend
+
+    def show_page(self, name):
+        """Open at the category called `name` (True if found)."""
+        for i in range(self._sidebar.count()):
+            if self._sidebar.item(i).text() == name:
+                self._sidebar.setCurrentRow(i)
+                return True
+        return False
 
     def _stack_set(self, i):
         if i >= 0:

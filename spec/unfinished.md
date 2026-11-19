@@ -139,3 +139,8 @@ remove an entry when it ships.
   measured on synthetic specks only. To check on his XP2 frames: a small dab
   over a speck now heals it with its halo (the dotted outline grows on
   release); "Fit each click to the speck" off gives the old dab.
+- Film presets (spec/film-presets.md, 2026-11-19): to check on his Mac:
+  Measure asks for Film / push / version and links the base; the Start
+  window's Film lists presets and the roll's first capture starts from the
+  preset's settings; Write to Preset and Apply Preset; Settings → Film
+  Presets. Not done: Process/chemistry field (his choice: version + notes).
