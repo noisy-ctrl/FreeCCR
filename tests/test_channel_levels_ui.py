@@ -186,6 +186,11 @@ def test_no_slider_spans_the_old_gain_range(panel):
         # In value units: the Shift sliders step in halves, so their integer
         # positions span +-200 for +-100 (spec/printer-lights.md, half points).
         lo, hi = slider.value_range()
+        # Highlights / Shadows / Contrast L ⅃ reach ±150 by design (tone
+        # sliders revision); the old Gain's ±200 is what must not come back
+        if key in ("highlights", "shadows", "punch_x"):
+            assert -150 <= lo and hi <= 150, key
+            continue
         assert lo >= -100, key
         # Colour Organics STORES 0..200 but shows 0..100 (spec/colour-
         # organics.md, 2026-10-23: stored in the old units); it is the shown

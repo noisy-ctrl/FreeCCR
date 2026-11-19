@@ -734,7 +734,7 @@ _KERNELS = ("zero_u8", "chunk_max", "unpack01", "pack16", "lab_planes", "glow_L"
             "box_h", "box_v", "mul", "gf_self_ab", "gf_ab", "gf_out", "matte_tail", "golden_weight",
             "golden_apply", "shadow_weight", "shadow_apply", "glow_area_h",
             "glow_area_v", "gauss_h", "gauss_v", "gauss3k_h", "gauss3k_v", "glow_mix",
-            "glow_apply", "glow_mask", "med3", "max3",
+            "glow_apply", "glow_mask", "med3", "max3", "clean_weight",
             "lift_apply")
 
 _last = None
