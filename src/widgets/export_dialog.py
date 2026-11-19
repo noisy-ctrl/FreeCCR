@@ -256,6 +256,7 @@ class ExportSettingsDialog(QDialog):
         self.resize_combo = QComboBox()
         self.resize_combo.addItem("Original size", 0)
         self.resize_combo.addItem("4000 px long edge", 4000)
+        self.resize_combo.addItem("3000 px long edge", 3000)   # the user, 2026-11-19
         self.resize_combo.addItem("2000 px long edge", 2000)
         self.resize_combo.addItem("1080 px long edge", 1080)
         self.resize_combo.currentIndexChanged.connect(self._schedule_estimate)
