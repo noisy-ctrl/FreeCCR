@@ -5,11 +5,10 @@ A running list of what is started but not done, or waiting on something
 remove an entry when it ships.
 
 ## Started
-- **Flat-field sets by format and light, following the carrier's edge**
-  (2026-11-19, `spec/ir-dust-and-flat-sets.md` §5): IR dust (§2–§4) is
-  built; the flat sets (white / RGB / IR per format, the RGB flat applied
-  per channel in the merge, mapped onto each frame by the carrier opening,
-  and Capture → Shoot Flat Fields…) are next.
+- **Capture → Shoot Flat Fields…** (2026-11-19, `spec/ir-dust-and-flat-sets.md`
+  §5): the flat sets are built (made in Settings' wizard with a Light and a
+  Format); Capture doesn't shoot them by itself yet. Also nothing records a
+  B&W frame's LED (`img.scan_light`), so B&W under one LED uses the white flat.
 
 ## Waiting on the user
 - **The right-hand panel needing a horizontal scroll** (2026-11-19): not
