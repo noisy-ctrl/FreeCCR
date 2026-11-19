@@ -4,7 +4,20 @@ A running list of what is started but not done, or waiting on something
 (the user, 2026-11-01: "Keep a list on unfinished things"). Newest first;
 remove an entry when it ships.
 
+## Started
+- **Flat-field sets by format and light, following the carrier's edge**
+  (2026-11-19, `spec/ir-dust-and-flat-sets.md` §5): IR dust (§2–§4) is
+  built; the flat sets (white / RGB / IR per format, the RGB flat applied
+  per channel in the merge, mapped onto each frame by the carrier opening,
+  and Capture → Shoot Flat Fields…) are next.
+
 ## Waiting on the user
+- **The right-hand panel needing a horizontal scroll** (2026-11-19): not
+  reproduced here (main panel, Capture's panel and every Settings page fit,
+  also at a 15 % wider font); waiting on his screenshot.
+- **IR dust on real shots** (2026-11-19): the threshold was judged on his
+  3 s / 8 s / 5 s IR tests and his circled 008 frame; its default
+  sensitivity (7σ) may move once he has used it on a roll with Heal / Erase.
 - **Glow's halation on his own frames** (2026-11-19, `spec/highlight-glow.md`
   revision 4): the default mix (Halation 75 %, Rim 0.12 %) and the Auto
   rules were judged on three of his lab scans and synthetic edges only; his

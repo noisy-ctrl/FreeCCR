@@ -264,6 +264,11 @@ def serialize_image(img) -> dict:
         # Capture's frame guide on this scan, for its crop
         # (spec/guide-follow-and-crop.md §3). Additive: absent = none.
         "capture_guide": getattr(img, "capture_guide", None),
+        # Its IR shot and the dust found in it, not yet healed
+        # (spec/ir-dust-and-flat-sets.md). Additive: absent = none.
+        "ir_source": getattr(img, "ir_source", None),
+        "ir_dust_pending": copy.deepcopy(getattr(img, "ir_dust_pending", None)),
+        "ir_dust_sens": getattr(img, "ir_dust_sens", None),
         # The frame's white point choice and its hand-sampled White Point
         # (spec/white-point-choice.md). Additive: absent = the defaults.
         "wp_choice": getattr(img, "wp_choice", None),
@@ -333,6 +338,7 @@ def _is_pristine(state: dict) -> bool:
             and not state["horizontal_mirrored"] and not state["vertical_mirrored"]
             and state["reference_frame"] is None
             and not state.get("capture_guide")
+            and not state.get("ir_source")
             and not state.get("film_preset"))
 
 
@@ -759,6 +765,9 @@ def _restore_image(file_path: str, state: dict, live_merge_sources=None,
     img.capture_type = state.get("capture_type")
     img.film_preset = state.get("film_preset")
     img.capture_guide = state.get("capture_guide")
+    img.ir_source = state.get("ir_source")
+    img.ir_dust_pending = copy.deepcopy(state.get("ir_dust_pending"))
+    img.ir_dust_sens = state.get("ir_dust_sens")
     img.wp_choice = state.get("wp_choice")
     ws = state.get("wp_sample")
     img.wp_sample = tuple(ws) if ws else None

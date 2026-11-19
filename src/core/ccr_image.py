@@ -450,6 +450,12 @@ class CCRImage:
         # time (resolution-independent). [] = no dust removal. See
         # spec/dust-removal.md.
         self.dust_spots: List[Dict[str, Any]] = []
+        # The frame's IR shot (a RAW path), the dust found in it that hasn't
+        # been healed yet (spots of kind "ir", None = none waiting) and the
+        # IR Sensitivity it was found at. spec/ir-dust-and-flat-sets.md.
+        self.ir_source: Optional[str] = None
+        self.ir_dust_pending: Optional[List[Dict[str, Any]]] = None
+        self.ir_dust_sens: Optional[int] = None
         # Edge fade width for the dust heal, as a fraction of each hole's own
         # half-thickness so it scales with the brush (user-set via the dust
         # panel's Feather slider; render parameter, deliberately NOT in undo
@@ -2560,6 +2566,9 @@ class CCRImage:
             # the heal plan, so a re-picked dust source is one undo step
             # (spec/dust-spot-editing.md); records are tuples, kept as they are
             "dust_plan": self._dust_plan_snapshot(),
+            # IR dust waiting to be healed: undoing a Heal or an erase brings
+            # it back (spec/ir-dust-and-flat-sets.md)
+            "ir_dust_pending": copy.deepcopy(getattr(self, "ir_dust_pending", None)),
         }
 
     def _dust_plan_snapshot(self):
@@ -2595,6 +2604,8 @@ class CCRImage:
         self.vertical_mirrored = state["vertical_mirrored"]
         self.area_layers = copy.deepcopy(state.get("area_layers", []))
         self.dust_spots = copy.deepcopy(state.get("dust_spots", []))
+        if "ir_dust_pending" in state:
+            self.ir_dust_pending = copy.deepcopy(state["ir_dust_pending"])
         if "dust_plan" in state:
             plan = state["dust_plan"]
             self._dust_plan_cache = (plan[0], list(plan[1])) if plan else None

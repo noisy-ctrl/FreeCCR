@@ -927,6 +927,32 @@ class LiveCaptureMonitor(QWidget):
         r.addWidget(self.use_frame_btn, 2)
         self.meter_btn.setVisible(self._meter_shots_on())
         fb.addLayout(r)
+        # the IR shot for dust, after the colour shot(s) (spec/ir-dust-and-flat-sets.md)
+        r = QHBoxLayout()
+        r.setContentsMargins(0, 0, 0, 0)
+        r.setSpacing(theme.GAP_TIGHT)
+        self.ir_shot_cb = QCheckBox("IR for dust")
+        self.ir_shot_cb.setToolTip(
+            "After the colour shot(s), one more with only the IR LED on, at its own "
+            "shutter speed and ISO: dust shows in it and the picture hardly does. "
+            "Saved as …_4IR, paired with its frame, never loaded as a frame. The "
+            "light and the camera are put back after it.")
+        self.ir_shot_cb.setChecked(_settings().value("live/ir_shot", False)
+                                   in (True, "true", "1", 1))
+        self.ir_shot_cb.toggled.connect(
+            lambda on: _settings().setValue("live/ir_shot", bool(on)))
+        self.ir_shutter_combo = QComboBox()
+        self.ir_iso_combo = QComboBox()
+        for c, key, tip in ((self.ir_shutter_combo, "live/ir_shutter", "The IR shot's shutter speed."),
+                            (self.ir_iso_combo, "live/ir_iso", "The IR shot's ISO.")):
+            theme.shrinkable_combo(c)
+            c.setToolTip(tip)
+            c.activated.connect(lambda _i, c=c, key=key:
+                                _settings().setValue(key, c.currentData() or ""))
+        r.addWidget(self.ir_shot_cb)
+        r.addWidget(self.ir_shutter_combo, 1)
+        r.addWidget(self.ir_iso_combo, 1)
+        fb.addLayout(r)
         self.film_base_box.setVisible(False)
         lay.addWidget(self.film_base_box)
         self.shoot_btn = QPushButton("Shoot   (S)")
@@ -2372,7 +2398,11 @@ class LiveCaptureMonitor(QWidget):
             exposures = self._shoot_exposures(tri)
         elif not self.light.is_open():
             return None
-        return {"tri": tri, "usb": usb, "exposures": exposures, "rearm": rearm,
+        ir = self._ir_shot() if usb else None
+        if ir is not None and not self.light.is_open():
+            self._warn_caption("The IR shot needs the Scanlight connected: it lights the IR LED.")
+            return None
+        return {"tri": tri, "usb": usb, "exposures": exposures, "rearm": rearm, "ir": ir,
                 "guide": self._shot_guide_record(),
                 "note": getattr(self, "_frame_shot_note", "")}
 
@@ -2380,15 +2410,19 @@ class LiveCaptureMonitor(QWidget):
         """Start the sequence with what `_prepare_shot` took. True when it
         started."""
         tri, exposures = p["tri"], p["exposures"]
+        ir = p.get("ir")
         if p["usb"]:
-            if exposures:
+            if exposures or ir:
+                # the camera is put back after the shot (the IR shot's 8 s
+                # mustn't stay for the next frame)
                 self._shoot_exp_before = {f: self._exposure.get(f) for f in ("shutter", "iso")
                                           if self._exposure.get(f)}
                 self._hold_live(True)
             capture_guide.begin_shot(p["guide"])
             started = self.sequence.start(self._timing, self._preset(), tri,
-                                          shutter=self._usb_shutter, exposures=exposures)
-            if not started and exposures:
+                                          shutter=self._usb_shutter, exposures=exposures,
+                                          ir=ir)
+            if not started and (exposures or ir):
                 self._hold_live(False)
                 self._shoot_exp_before = None
         else:
@@ -2434,7 +2468,11 @@ class LiveCaptureMonitor(QWidget):
         shot = capture_log.next_shot(folder, roll)
         scan = "trichrome" if p["tri"] else self.scan_type()
         exps = p.get("exposures")
-        entry = {"roll": roll, "shot": shot, "scan_type": scan,
+        exps = dict(exps or {}) or None
+        if p.get("ir"):
+            exps = dict(exps or {})
+            exps["ir"] = {"shutter": p["ir"]["shutter"], "iso": p["ir"]["iso"]}
+        entry = {"roll": roll, "shot": shot, "scan_type": scan, "ir": bool(p.get("ir")),
                  "format": sess.get("format") or "", "film": sess.get("film") or "",
                  "route": "usb" if p["usb"] else "cable",
                  "preset": sess.get("preset") or None,
@@ -2455,7 +2493,7 @@ class LiveCaptureMonitor(QWidget):
         e = self._log_shot
         if not e:
             return None
-        slot = {"r": "red", "g": "green", "b": "blue"}.get(channel) \
+        slot = {"r": "red", "g": "green", "b": "blue", "ir": "ir"}.get(channel) \
             or capture_log.single_slot(e["scan_type"])
         return capture_log.shot_stem(e["roll"], e["format"], e["film"], e["shot"], slot)
 
@@ -4008,7 +4046,40 @@ class LiveCaptureMonitor(QWidget):
             combo.setVisible(bool(vals))
         self.exposure_row.setVisible(bool(self._exp_choices))
         self.film_base_box.setVisible(bool(self._exp_choices.get("shutter")))
+        self._fill_ir_exposure()
         self._select_exposure()
+
+    IR_SHUTTER_DEFAULT = 8.0       # s: the user's tests, 2026-11-19
+    IR_ISO_DEFAULT = 3200.0
+
+    def _fill_ir_exposure(self):
+        """The IR shot's pickers from the camera's own lists, on the remembered
+        values or the nearest to 8 s, ISO 3200."""
+        for combo, field, key, want, conv in (
+                (self.ir_shutter_combo, "shutter", "live/ir_shutter",
+                 self.IR_SHUTTER_DEFAULT, be.seconds),
+                (self.ir_iso_combo, "iso", "live/ir_iso", self.IR_ISO_DEFAULT, be.iso_number)):
+            vals = [str(v) for v in (self._exp_choices.get(field) or []) if conv(v)]
+            combo.blockSignals(True)
+            combo.clear()
+            for v in vals:
+                combo.addItem(self.exposure_label(field, v), v)
+            saved = str(_settings().value(key, "") or "")
+            i = combo.findData(saved) if saved else -1
+            if i < 0 and vals:
+                i = min(range(len(vals)), key=lambda j: abs(math.log(conv(vals[j]) / want)))
+            if i >= 0:
+                combo.setCurrentIndex(i)
+            combo.blockSignals(False)
+
+    def _ir_shot(self):
+        """The IR shot's exposure and levels for Shoot, or None."""
+        if not self.ir_shot_cb.isChecked():
+            return None
+        sh, iso = self.ir_shutter_combo.currentData(), self.ir_iso_combo.currentData()
+        if not sh or not iso:
+            return None
+        return {"shutter": sh, "iso": iso, "levels": dict(cl.OFF, ir=255)}
 
     def _select_exposure(self):
         """The pickers show what the camera reports, except a field whose
@@ -4827,6 +4898,9 @@ class _SequenceLight:
 
     def set_levels(self, lv):
         self.win.set_levels(lv)
+
+    def levels(self):
+        return dict(self.win._levels)
 
     def focus(self, on):
         self.win.light.focus(on)

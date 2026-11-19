@@ -12,7 +12,7 @@ import os
 import sys
 import tempfile
 
-from PySide6.QtCore import Qt, QObject, QEvent
+from PySide6.QtCore import Qt, QObject, QEvent, QRectF
 from PySide6.QtGui import QColor, QPalette, QIcon, QPixmap, QPainter, QPen
 from PySide6.QtWidgets import QComboBox, QLabel, QWidget
 
@@ -471,6 +471,30 @@ def load_tinted_icon(abs_path: str, color: str = ICON,
         icon.addPixmap(_tint(base, on_color), QIcon.Normal, QIcon.On)
         icon.addPixmap(_tint(base, disabled_color), QIcon.Disabled, QIcon.On)
     return icon
+
+
+def with_badge(icon: QIcon, color: str = "#ff3b30",
+               sizes=(16, 18, 20, 22, 24, 28, 32, 48)) -> QIcon:
+    """The icon with a small dot in its top-right corner: something waits
+    behind that button (IR dust to heal, spec/ir-dust-and-flat-sets.md)."""
+    out = QIcon()
+    for mode in (QIcon.Normal, QIcon.Disabled, QIcon.Active, QIcon.Selected):
+        for state in (QIcon.Off, QIcon.On):
+            for n in sizes:
+                pm = icon.pixmap(n, n, mode, state)
+                if pm.isNull():
+                    continue
+                pm = QPixmap(pm)
+                p = QPainter(pm)
+                p.setRenderHint(QPainter.Antialiasing)
+                w = pm.width()
+                d = max(4.0, w * 0.36)
+                p.setPen(Qt.NoPen)
+                p.setBrush(qcolor(color) if mode != QIcon.Disabled else qcolor(ICON_DISABLED))
+                p.drawEllipse(QRectF(w - d - 0.5, 0.5, d, d))
+                p.end()
+                out.addPixmap(pm, mode, state)
+    return out
 
 
 def load_colour_icon(abs_path: str, disabled_color: str = ICON_DISABLED) -> QIcon:

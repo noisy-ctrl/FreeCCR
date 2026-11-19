@@ -5,6 +5,7 @@ from PySide6.QtWidgets import (
     QLabel, QPushButton, QStyle, QSizePolicy, QApplication, QComboBox, QToolButton
 )
 from PySide6.QtGui import (QPixmap, QIcon, QTransform, QPen, QColor, QAction, QPainter,
+                           QPainterPathStroker,
                            QCursor, QDesktopServices, QPainterPath,
                            QBrush, QPolygonF,
                            QImage)
@@ -1278,6 +1279,15 @@ class ImagePreview(QWidget):
         # the stroke painted last: its source rings show (and left-drag) even
         # with 'Show heal sources' off (spec/dust-spot-editing.md, Brush part)
         self._dust_selected = None
+        # IR dust (spec/ir-dust-and-flat-sets.md): the tool on the canvas
+        # ("brush" or "erase"), the flagged spots' outlines, the picture as it
+        # was before Heal (image, preview pixmap, hi-res pixmap) and whether
+        # it is shown, and the toolbar badge's state
+        self._dust_tool = "brush"
+        self._ir_pending_items = []
+        self._dust_before = None
+        self._dust_before_on = False
+        self._dust_badge = None
 
         # Coalesce a fine-rotation drag into a single undo step
         # the scope sample circle (spec/scope-sample-circle.md)
@@ -1638,6 +1648,7 @@ class ImagePreview(QWidget):
         self._gm_item = None
         self._clip_item = None
         self._sample_item = None
+        self._ir_pending_items = []
         for _slice_line in self._slice_lines:
             _slice_line["item"] = None
 
@@ -1721,6 +1732,8 @@ class ImagePreview(QWidget):
         # refresh (slider tick, undo, commit) must not reset the panel.
         if dust_rebind and self.dust_panel is not None:
             self.dust_panel.bind_image()
+        elif self.dust_mode and hasattr(self.dust_panel, "refresh_ir_section"):
+            self.dust_panel.refresh_ir_section()   # an undo may bring IR dust back
         self._sync_zoom_combo()
         self._schedule_scope_update()
 
@@ -1858,6 +1871,8 @@ class ImagePreview(QWidget):
         self._refresh_glow_overlay()
         self._refresh_clip_overlay()
         self._refresh_sample_item()
+        self._draw_ir_pending()
+        self.refresh_dust_badge()
 
         # The displayed image content/orientation may have changed (rotate,
         # flip, fine rotation, hi-res pixmap swap) — refresh the scopes.
@@ -3564,6 +3579,13 @@ class ImagePreview(QWidget):
             self._item_prescale = 1.0
             return
         pm = self._hires_display_pixmap()
+        before = self._dust_before_pixmaps()
+        if before is not None:
+            prev, hi = before
+            pm = hi if (hi is not None and pm is not None) else prev
+            self._item_prescale = self.current_pixmap.width() / max(1, pm.width())
+            self.pixmap_item.setPixmap(pm)
+            return
         if pm is not None and pm.width() > 0:
             self._item_prescale = self.current_pixmap.width() / pm.width()
             self.pixmap_item.setPixmap(pm)
@@ -4457,6 +4479,7 @@ class ImagePreview(QWidget):
         self.dust_mode = False
         self._dust_painting = False
         self._dust_pts = []
+        self._dust_before_on = False        # Before is a dust-mode view only
         self._clear_dust_items()
         self.view.setCursor(Qt.ArrowCursor)
         if self.current_idx is not None:
@@ -4522,7 +4545,7 @@ class ImagePreview(QWidget):
         n = self._dust_scene_to_norm(scene_pos)
         if n is None:
             return
-        if self._dust_grab_source(n):
+        if self._dust_tool != "erase" and self._dust_grab_source(n):
             return                     # left-drag a source ring: re-pick it
         self._dust_painting = True
         self._dust_pts = [n]
@@ -4532,7 +4555,8 @@ class ImagePreview(QWidget):
     def dust_move(self, scene_pos):
         if not self.dust_mode:
             return
-        if not self._dust_painting and self._dust_hover_source(scene_pos):
+        if (not self._dust_painting and self._dust_tool != "erase"
+                and self._dust_hover_source(scene_pos)):
             return                      # over a source ring: a hand, no brush
         self._update_dust_cursor(scene_pos)
         if not self._dust_painting:
@@ -4553,6 +4577,9 @@ class ImagePreview(QWidget):
             return
         img = ccr_backend.get_image_by_index(self.current_idx)
         if img is None:
+            return
+        if self._dust_tool == "erase":
+            self._dust_erase(img, pts)
             return
         img.push_undo_state()
         spot = {"kind": "brush", "pts": pts,
@@ -4843,6 +4870,164 @@ class ImagePreview(QWidget):
         img.dust_spots = []
         self._commit_dust_change(img)
         return True
+
+    # --- IR dust (spec/ir-dust-and-flat-sets.md) ---------------------------
+    IR_PENDING_COLOUR = QColor(255, 176, 32, 150)    # amber: flagged, not healed
+
+    def set_dust_tool(self, tool: str):
+        """"brush" paints spots; "erase" removes every spot it touches."""
+        self._dust_tool = "erase" if tool == "erase" else "brush"
+
+    def _dust_erase(self, img, pts):
+        """Remove the spots an eraser stroke touched (healed ones of any kind,
+        and flagged IR ones): one undo step."""
+        from core import ir_dust
+        size = self._dust_full_frame_size()
+        if size is None or size[0] <= 0:
+            return
+        aspect = size[1] / size[0]
+        r = float(self._dust_brush_r)
+        trial = type("T", (), {})()
+        trial.dust_spots = list(img.dust_spots or [])
+        trial.ir_dust_pending = getattr(img, "ir_dust_pending", None)
+        n_h, n_f = ir_dust.erase(trial, pts, r, aspect)
+        if not (n_h or n_f):
+            return
+        img.push_undo_state()
+        ir_dust.erase(img, pts, r, aspect)
+        if n_h:
+            self._commit_dust_change(img)
+        else:
+            self._draw_ir_pending()
+            self.refresh_dust_badge()
+        if hasattr(getattr(self, "dust_panel", None), "refresh_ir_section"):
+            self.dust_panel.refresh_ir_section()
+
+    def heal_ir_dust(self) -> int:
+        """Heal the frame's flagged IR dust (one undo step), keeping the
+        picture as it was so Before can show it."""
+        from core import ir_dust
+        img = ccr_backend.get_image_by_index(self.current_idx)
+        if img is None or not ir_dust.pending(img):
+            return 0
+        hi = None
+        try:
+            hi = self._hires_display_pixmap()
+        except Exception:
+            hi = None
+        if self.current_pixmap is not None:
+            self._dust_before = (img, self.current_pixmap.copy(),
+                                 hi.copy() if hi is not None else None)
+        img.push_undo_state()
+        n = ir_dust.heal(img)
+        self._dust_before_on = False
+        self._commit_dust_change(img)
+        return n
+
+    def has_dust_before(self) -> bool:
+        img = (ccr_backend.get_image_by_index(self.current_idx)
+               if self.current_idx is not None else None)
+        return (self._dust_before is not None and self._dust_before[0] is img
+                and img is not None)
+
+    def _dust_before_pixmaps(self):
+        """(preview, hi-res) as they were before Heal, while Before is shown
+        on the same frame at the same framing; else None."""
+        if not (self._dust_before_on and self.dust_mode and self.has_dust_before()):
+            return None
+        _img, prev, hi = self._dust_before
+        if (self.current_pixmap is None or prev.size() != self.current_pixmap.size()):
+            return None
+        return prev, hi
+
+    def set_dust_before(self, on: bool):
+        """Show the picture as it was before Heal (display only)."""
+        self._dust_before_on = bool(on) and self.has_dust_before()
+        if self.pixmap_item is not None:
+            self._refresh_item_pixmap()
+            self.apply_transformations()
+
+    def refresh_dust_badge(self):
+        """A red dot on Dust removal while the frame on screen has IR dust
+        flagged and not healed."""
+        if not hasattr(self, "dust_action"):
+            return
+        from core import ir_dust
+        img = (ccr_backend.get_image_by_index(self.current_idx)
+               if self.current_idx is not None else None)
+        n = len(ir_dust.pending(img)) if img is not None else 0
+        state = n > 0
+        if state == self._dust_badge:
+            return
+        self._dust_badge = state
+        if not hasattr(self, "_dust_icon_plain"):
+            self._dust_icon_plain = self.dust_action.icon()
+            self._dust_icon_badge = theme.with_badge(self._dust_icon_plain)
+        self.dust_action.setIcon(self._dust_icon_badge if state else self._dust_icon_plain)
+        tip = self.dust_action.toolTip().split("\n\n")[0]
+        if state:
+            tip += f"\n\nIR dust found and waiting to be healed: open Dust removal."
+        self.dust_action.setToolTip(tip)
+
+    def _draw_ir_pending(self):
+        """Outline the flagged IR spots in amber (dust mode only)."""
+        for item in self._ir_pending_items:
+            try:
+                self.scene.removeItem(item)
+            except (RuntimeError, ValueError):
+                pass
+        self._ir_pending_items = []
+        if not self.dust_mode or self.current_pixmap is None or self._dust_before_on:
+            return
+        from core import ir_dust
+        img = ccr_backend.get_image_by_index(self.current_idx)
+        spots = ir_dust.pending(img) if img is not None else []
+        if not spots:
+            return
+        t = self._base_transform()
+        size = self._dust_full_frame_size()
+        if t is None or size is None:
+            return
+        w, h = size
+        to_display = None
+        if self._crop_display_transform is not None:
+            to_display, ok = self._crop_display_transform.inverted()
+            if not ok:
+                return
+
+        def scene_pt(p):
+            pt = QPointF(p[0] * w, p[1] * h)
+            if to_display is not None:
+                pt = to_display.map(pt)
+            return t.map(pt)
+
+        path = QPainterPath()
+        for sp in spots:
+            pts = sp.get("pts") or []
+            if not pts:
+                continue
+            r = float(sp.get("r", 0.0)) * w
+            if len(pts) == 1:
+                c = scene_pt(pts[0])
+                path.addEllipse(c, r, r)
+            else:
+                sub = QPainterPath()
+                sub.moveTo(scene_pt(pts[0]))
+                for p in pts[1:]:
+                    sub.lineTo(scene_pt(p))
+                stroker = QPainterPathStroker()
+                stroker.setWidth(2.0 * r)
+                stroker.setCapStyle(Qt.RoundCap)
+                stroker.setJoinStyle(Qt.RoundJoin)
+                path.addPath(stroker.createStroke(sub))
+        item = QGraphicsPathItem(path.simplified())
+        pen = QPen(self.IR_PENDING_COLOUR, 1.6)
+        pen.setCosmetic(True)
+        item.setPen(pen)
+        item.setBrush(QColor(255, 176, 32, 40))
+        item.setZValue(4)
+        self.scene.addItem(item)
+        self._ir_pending_items = [item]
 
     @staticmethod
     def dust_detect_source_for(img):
@@ -5191,7 +5376,9 @@ class ImagePreview(QWidget):
         item = QGraphicsPathItem(path)
         # The crop extraction is isometric (translate/rotate only), so a
         # brush width in full-frame pixels is the same length on the display.
-        pen = QPen(QColor(255, 40, 40, 150), 2.0 * self._dust_brush_r * w,
+        col = (QColor(90, 170, 255, 130) if self._dust_tool == "erase"
+               else QColor(255, 40, 40, 150))
+        pen = QPen(col, 2.0 * self._dust_brush_r * w,
                    Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
         item.setPen(pen)
         self.scene.addItem(item)

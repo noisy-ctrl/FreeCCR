@@ -664,6 +664,12 @@ class ThumbnailList(QWidget):
                         reveal_paths.append(p)
         reveal_action = menu.addAction(reveal_files.menu_label())
         reveal_action.setEnabled(bool(reveal_paths))
+        # spec/ir-dust-and-flat-sets.md: pair this frame with its IR shot
+        ir_action = None
+        if len(indices) == 1:
+            ir_img = ccr_backend.get_image_by_index(indices[0])
+            has_ir = bool(getattr(ir_img, "ir_source", None))
+            ir_action = menu.addAction("Change IR Shot…" if has_ir else "Attach IR Shot…")
         menu.addSeparator()
         export_action = menu.addAction("Export…")
         reset_action = menu.addAction(f"Reset{suffix}")
@@ -697,6 +703,10 @@ class ThumbnailList(QWidget):
             self.remove_images(indices)
         elif action == reveal_action:
             reveal_files.reveal(reveal_paths)
+        elif ir_action is not None and action == ir_action:
+            dp = getattr(self._main_window(), "dust_panel", None)
+            if dp is not None:
+                dp.attach_ir(ccr_backend.get_image_by_index(indices[0]))
         elif action == export_action:
             # Open the export dialog pre-scoped to the right-clicked selection.
             self._main_window().image_preview.open_export_dialog(default_scope="selected")
