@@ -135,3 +135,7 @@ remove an entry when it ships.
   GFX: B&W shows only B&W bases; Green as B&W light lights green alone and
   Measure records it; a 6×4.5 roll reshapes the guide. A green-vs-white B&W
   comparison (crispness) is still to be measured.
+- Dust: a click fits itself to the speck (spec/dust-fit-spot.md, 2026-11-19):
+  measured on synthetic specks only. To check on his XP2 frames: a small dab
+  over a speck now heals it with its halo (the dotted outline grows on
+  release); "Fit each click to the speck" off gives the old dab.

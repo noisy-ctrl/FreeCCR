@@ -4049,10 +4049,52 @@ class ImagePreview(QWidget):
         if img is None:
             return
         img.push_undo_state()
-        spot = {"kind": "brush", "pts": pts, "r": float(self._dust_brush_r)}
+        spot = {"kind": "brush", "pts": pts,
+                "r": self._dust_fitted_r(pts, float(self._dust_brush_r))}
         img.dust_spots.append(spot)
         self._dust_selected = spot
         self._commit_dust_change(img)
+
+    dust_fit_spot = True     # Dust panel → Fit each click to the speck
+
+    def _dust_fitted_r(self, pts, r_norm):
+        """A click (a dab) grows to cover the speck under it, measured on the
+        picture on screen (spec/dust-fit-spot.md); strokes keep the brush."""
+        if not self.dust_fit_spot or not pts or self.current_pixmap is None:
+            return r_norm
+        size = self._dust_full_frame_size()
+        if size is None or size[0] <= 0:
+            return r_norm
+        fw, fh = size
+        x0, y0 = pts[0][0] * fw, pts[0][1] * fh
+        r_full = r_norm * fw
+        if any(((p[0] * fw - x0) ** 2 + (p[1] * fh - y0) ** 2) ** 0.5 > r_full
+               for p in pts[1:]):
+            return r_norm                              # a stroke, not a dab
+        try:
+            import numpy as np
+            from core import dust_fit
+            # full-frame px -> displayed px (through a shown crop)
+            if self._crop_display_transform is not None:
+                inv, ok = self._crop_display_transform.inverted()
+                if not ok:
+                    return r_norm
+                c = inv.map(QPointF(x0, y0))
+                e = inv.map(QPointF(x0 + r_full, y0))
+                cx, cy = c.x(), c.y()
+                scale = ((e.x() - cx) ** 2 + (e.y() - cy) ** 2) ** 0.5 / max(r_full, 1e-9)
+            else:
+                cx, cy, scale = x0, y0, 1.0
+            qi = self.current_pixmap.toImage().convertToFormat(QImage.Format.Format_RGB888)
+            w, h = qi.width(), qi.height()
+            buf = np.frombuffer(qi.constBits(), np.uint8, count=qi.sizeInBytes())
+            rgb = buf.reshape(h, qi.bytesPerLine())[:, :w * 3].reshape(h, w, 3)
+            gray = rgb.astype(np.float32) @ np.array([0.299, 0.587, 0.114], np.float32)
+            r_disp = r_full * scale
+            fit = dust_fit.fit_radius(gray, cx, cy, r_disp)
+            return float(r_norm * (fit / r_disp)) if r_disp > 0 else r_norm
+        except Exception:
+            return r_norm
 
     def _dust_selected_index(self, img):
         """Index of the stroke whose sources show without the overlay (the
