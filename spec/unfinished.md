@@ -144,3 +144,7 @@ remove an entry when it ships.
   window's Film lists presets and the roll's first capture starts from the
   preset's settings; Write to Preset and Apply Preset; Settings → Film
   Presets. Not done: Process/chemistry field (his choice: version + notes).
+- Printer Lights as sliders (spec/printer-light-sliders.md, 2026-11-19): to
+  check on his Mac (drag feel, tints). Toolbar icons: drafts sent for sign-off
+  (scratch `icons/make_icons.py`), NOT in the app until he approves; then a
+  Crop button joins the toolbar and the icons go in `src/icons/`.

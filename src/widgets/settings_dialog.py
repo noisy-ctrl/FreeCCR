@@ -519,6 +519,27 @@ class SettingsDialog(QDialog):
             "defaults. Master Gain, the tone sliders and the black/white point "
             "controls are always shown."))
         lay.addWidget(grp)
+        # Printer Lights as buttons or sliders (spec/printer-light-sliders.md)
+        grp2 = QGroupBox("Printer Lights")
+        g2 = QVBoxLayout(grp2)
+        g2.setSpacing(theme.GAP_ROW)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Show as"))
+        self._combo_printer_style = QComboBox()
+        self._combo_printer_style.addItem("Buttons", "buttons")
+        self._combo_printer_style.addItem("Sliders", "sliders")
+        cur = panel.printer_style() if hasattr(panel, "printer_style") else "buttons"
+        self._combo_printer_style.setCurrentIndex(
+            max(0, self._combo_printer_style.findData(cur)))
+        row.addWidget(self._combo_printer_style)
+        row.addStretch(1)
+        g2.addLayout(row)
+        g2.addWidget(self._muted(
+            "Buttons: the D / γ / C / M / Y pad, half a printer point a click. Sliders: "
+            "one bar each for Density, Gamma, Cyan, Magenta and Yellow; drag it, "
+            "double-click for 0. Both move the same Channel Levels Shift and Gamma "
+            "sliders."))
+        lay.addWidget(grp2)
         lay.addStretch(1)
         return page
 
@@ -981,6 +1002,11 @@ class SettingsDialog(QDialog):
             staged = self._staged_hidden_sections()
             if staged != panel.hidden_sections():
                 panel.set_hidden_sections(staged)
+            combo = getattr(self, "_combo_printer_style", None)
+            if combo is not None and hasattr(panel, "set_printer_style"):
+                style = combo.currentData() or "buttons"
+                if style != panel.printer_style():
+                    panel.set_printer_style(style, save=True)
 
     def accept(self):
         """Done: commit the staged toggles, then close. (Escape/close → reject,
