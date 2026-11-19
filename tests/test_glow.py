@@ -106,18 +106,23 @@ def test_a_ramp_stays_monotone_and_smooth(tint):
 
 
 @pytest.mark.parametrize("ground", [0.06, 0.25, 0.5])
-def test_grain_is_never_stretched(ground):
+@pytest.mark.parametrize("shape, ring_px, least", [
+    ({"halo": 0}, (64, 160), 0.004),            # the bloom, where it spreads
+    (None, (61, 100), 0.004),                   # the default mix
+    ({"halo": 100}, (60.5, 63), 0.001)])        # halation alone, its rim
+def test_grain_is_never_stretched(ground, shape, ring_px, least):
     """The glow is a smooth field screened on: grain round a light comes
-    through at most as strong as it went in (the field doesn't follow it)."""
+    through at most as strong as it went in (the field doesn't follow it),
+    the halation rim included."""
     rng = np.random.default_rng(7)
     clean = _lamp(ground=ground, r=60)
     noise = rng.normal(0, 0.01, clean.shape).astype(np.float32)
     noisy = np.clip(clean + noise, 0, 1)
-    a, b = gl.apply_glow(clean, 100), gl.apply_glow(noisy, 100)
+    a, b = gl.apply_glow(clean, 100, shape), gl.apply_glow(noisy, 100, shape)
     yy, xx = np.mgrid[0:540, 0:1080]
     d = np.hypot(yy - 269.5, xx - 539.5)
-    ring = (d > 64) & (d < 160)                                     # where it glows
-    assert (a - clean)[ring].mean() > 0.004
+    ring = (d > ring_px[0]) & (d < ring_px[1])                      # where it glows
+    assert (a - clean)[ring].mean() > least
     grain_in = (noisy - clean)[ring].std()
     grain_out = (b - a)[ring].std()
     assert grain_out <= grain_in * 1.001
@@ -182,11 +187,18 @@ def test_options_are_normalised():
     # options saved under the old keys (size / start) mean the defaults now
     assert gl.normalize_glow_shape({"size": 90, "start": 60}) is None
     assert gl.normalize_glow_shape("junk") is None
+    # revision 4: shapes saved before halation take its defaults
+    assert gl.normalize_glow_shape({"reach": 70, "above": 90}) == dict(
+        gl.GLOW_SHAPE_DEFAULT, reach=70, above=90)
+    assert gl.normalize_glow_shape({"halo": 400, "rim": 0}) == dict(
+        gl.GLOW_SHAPE_DEFAULT, halo=100, rim=3)
 
 
 def test_weight_map_shows_where_it_lands():
     w = gl.weight_map(_lamp())
-    assert w[270, 540 + 30] > 0.3 and w[5, 5] < 0.01
+    assert w[270, 540 + 22] > 0.3 and w[5, 5] < 0.01
+    w = gl.weight_map(_lamp(), {"halo": 0})
+    assert w[270, 540 + 30] > 0.3
 
 
 @pytest.mark.parametrize("ws", [False, True])
@@ -256,7 +268,8 @@ def test_popup_writes_options_with_one_undo(panel, monkeypatch):
     pop = panel._glow_popup
     pop.sliders["reach"].setValue(70)
     pop.sliders["above"].setValue(90)
-    assert img.adjustment_settings["glow_shape"] == {"reach": 70, "above": 90}
+    assert img.adjustment_settings["glow_shape"] == dict(gl.GLOW_SHAPE_DEFAULT,
+                                                         reach=70, above=90)
     assert panel._glow_label.font().underline()
     pop.close()
     assert img.undo == 1
@@ -457,3 +470,188 @@ def test_gpu_matches_cpu_inside_a_rotated_crop(monkeypatch):
                                     img, glow=100, glow_shape=shape, glow_area=area)
         d = np.abs(cpu.astype(np.float64) - gpu) * 65535
         assert d.max() <= 3 and np.mean(d <= 1) > 0.999
+
+
+# --------------------------------------------------------------------------- #
+# halation and Auto (revision 4)
+# --------------------------------------------------------------------------- #
+
+def _edge(W=2160, H=40, ground=0.2):
+    """A white half-plane on a grey ground (the edge at W / 2)."""
+    img = np.full((H, W, 3), ground, np.float32)
+    img[:, :W // 2] = 1.0
+    return img
+
+
+def _lin(x):
+    x = np.asarray(x, np.float64)
+    return np.where(x <= 0.04045, x / 12.92, ((x + 0.055) / 1.055) ** 2.4)
+
+
+def test_halation_off_is_the_old_glow():
+    """halo 0 never builds the halation field: the bloom alone."""
+    img = _lamp(lamp=(1.0, 0.85, 0.6))
+    called = []
+    real = gl.halo_field
+    try:
+        gl.halo_field = lambda *a, **k: called.append(1) or real(*a, **k)
+        gl.apply_glow(img, 100, {"halo": 0, "above": 85})
+        assert not called
+        gl.apply_glow(img, 100, {"halo": 50, "above": 85})
+        assert called
+    finally:
+        gl.halo_field = real
+
+
+def test_the_rim_is_warm_and_redder_further_out():
+    """Measured on the user's lab scans: a red-orange rim, R > G > B past a
+    white edge, R / G rising with distance."""
+    img = _edge()
+    ex = _lin(gl.apply_glow(img, 100, {"halo": 100})[20]) - _lin(img[20])
+    rim = 2160 * 0.0012                                  # its sigma here, px
+    near, far = ex[1080 + 1], ex[1080 + int(2 * rim)]
+    assert near[0] > near[1] > near[2] > 0
+    assert near[0] / near[1] > 1.5
+    assert far[0] / far[1] > near[0] / near[1]           # redder further out
+    # the default mix: warm at the edge, the light's own colour further out
+    ex = _lin(gl.apply_glow(img, 100)[20]) - _lin(img[20])
+    assert ex[1081, 0] / ex[1081, 1] > 1.4
+    assert abs(ex[1080 + 64, 0] / ex[1080 + 64, 1] - 1.0) < 0.02
+
+
+def test_the_rim_is_tight_and_follows_the_option():
+    img = _edge(W=4320)
+    def ex(shape):
+        return (_lin(gl.apply_glow(img, 100, shape)[20]) - _lin(img[20]))[:, 0]
+    e = ex({"halo": 100})
+    rim = 4320 * 0.0012
+    assert e[2160 + int(4 * rim)] < 0.05 * e[2161]
+    wide = ex({"halo": 100, "rim": 36})
+    assert wide[2160 + int(3 * rim)] > 5 * e[2160 + int(3 * rim)]
+
+
+@pytest.mark.parametrize("ground", [0.06, 0.3])
+def test_the_rim_is_the_same_at_preview_and_export_size(ground):
+    """The rim is ~1.3 px at a 1080 px preview: the preview is the export
+    scaled down (the same picture), and its rim matches the export's scaled
+    down - within 20 % at the edge pixel (whose glow no render resolves),
+    within 0.02 beyond it (measured 15 % and 0.014)."""
+    big = _lamp(H=2160, W=4320, r=160, ground=ground)
+    small = cv2.resize(big, (1080, 540), interpolation=cv2.INTER_AREA)
+    shape = {"halo": 100}
+    a = gl.apply_glow(small, 100, shape) - small
+    b = cv2.resize(gl.apply_glow(big, 100, shape) - big, (1080, 540),
+                   interpolation=cv2.INTER_AREA)
+    yy, xx = np.mgrid[0:540, 0:1080]
+    d = np.hypot(yy - 269.5, xx - 539.5)
+    edge, beyond = (d > 40) & (d < 41.5), (d > 41.5) & (d < 60)
+    assert a[edge].mean() > 0.02
+    assert abs(a[edge].mean() / b[edge].mean() - 1) < 0.2
+    assert abs(a[beyond].sum() / b[beyond].sum() - 1) < 0.2
+    assert np.abs(a[beyond] - b[beyond]).max() < 0.02
+
+
+def test_halation_never_darkens_and_a_ramp_stays_monotone():
+    rng = np.random.default_rng(3)
+    img = rng.random((200, 300, 3)).astype(np.float32)
+    img[60:120, 100:180] = 1.0
+    out = gl.apply_glow(img, 100, {"halo": 100, "rim": 40, "above": 85})
+    assert out.min() >= 0.0 and out.max() <= 1.0
+    assert np.all(out >= img - 1e-6)
+    x = np.linspace(0, 1, 2160, dtype=np.float32)
+    ramp = np.repeat(np.repeat(x[None, :, None], 3, axis=2), 30, axis=0)
+    o = gl.apply_glow(ramp, 100, {"halo": 100})
+    L = _lab(o[15]).reshape(-1, 3)[:, 0]
+    assert np.all(np.diff(L) > -1e-5)
+
+
+def test_halation_stays_inside_the_crop():
+    img, area = _framed()
+    dark = np.full_like(img, 0.10)
+    shape = {"halo": 100, "rim": 40}
+    a = gl.apply_glow(img, 100, shape, area)[60:-60, 60:-60]
+    b = gl.apply_glow(dark, 100, shape, area)[60:-60, 60:-60]
+    np.testing.assert_allclose(a, b, atol=2e-6)
+
+
+def _disc(r, H=540, W=1080, level=1.0, ground=0.1):
+    yy, xx = np.mgrid[0:H, 0:W]
+    img = np.full((H, W, 3), ground, np.float32)
+    img[np.hypot(yy - H / 2, xx - W / 2) < r] = level
+    return img
+
+
+def test_auto_start_follows_the_lightest_percentile():
+    sky = np.full((540, 1080, 3), 0.3, np.float32)
+    sky[:200] = 0.97
+    assert gl.auto_shape(sky)["above"] == 97
+    assert gl.auto_shape(_disc(5))["above"] == 85          # a tiny lamp: the lowest Start
+    # a saturated red is not near white, however bright its red channel
+    red = np.full((540, 1080, 3), 0.3, np.float32)
+    red[:300] = (0.98, 0.15, 0.1)
+    assert gl.auto_shape(red)["above"] < 90
+
+
+def test_auto_reach_grows_with_the_light_but_a_big_sky_glows_gently():
+    lamp = gl.auto_shape(_disc(5))["reach"]
+    bulb = gl.auto_shape(_disc(20))["reach"]
+    window = gl.auto_shape(_disc(60))["reach"]
+    assert lamp == 20 and lamp < bulb < window <= 100
+    sky = np.full((540, 1080, 3), 0.3, np.float32)
+    sky[:200] = 0.98
+    assert gl.auto_shape(sky)["reach"] < bulb              # 37 % of the frame bright
+    # nothing light in the picture: Reach as it was
+    assert gl.auto_shape(np.full((60, 90, 3), 0.2, np.float32), {"reach": 77})["reach"] == 77
+
+
+def test_auto_rim_from_the_format_and_halation_kept():
+    from core import film_formats as ff
+    assert gl.rim_for(ff.long_mm("35mm")) == 12
+    assert gl.rim_for(ff.long_mm("645")) == 8
+    assert gl.rim_for(ff.long_mm("6x7")) == 6
+    assert gl.rim_for(ff.long_mm("8x10")) == 3              # the narrowest
+    assert ff.long_mm("35mm 3:2") == 36.0 and ff.long_mm(None) is None
+    got = gl.auto_shape(_disc(20), {"halo": 30, "rim": 25}, None)
+    assert got["halo"] == 30 and got["rim"] == 25
+    assert gl.auto_shape(_disc(20), {"halo": 30}, 56.0)["rim"] == 8
+
+
+def test_popup_auto_sets_the_sliders_and_shows_the_rim(panel, monkeypatch):
+    from widgets.glow_popup import GlowPopup, _edge_pixmap
+    from PySide6.QtGui import QImage
+    got = []
+    pop = GlowPopup(None, 60, auto_source=lambda: (_disc(20), 56.0))
+    pop.changed.connect(got.append)
+    assert pop.auto_btn.isEnabled() and pop.auto()
+    assert got[-1] == gl.auto_shape(_disc(20), None, 56.0)
+    assert pop.values()["rim"] == 8
+    pop.close()
+    assert not GlowPopup(None, 60).auto_btn.isEnabled()
+    # the close-up of an edge shows a warm rim
+    q = _edge_pixmap(100, {"halo": 100}).toImage().convertToFormat(QImage.Format_RGB888)
+    px = np.frombuffer(q.constBits(), np.uint8).reshape(q.height(), q.bytesPerLine())[
+        :, :q.width() * 3].reshape(q.height(), q.width(), 3).astype(int)
+    row = px[20, 60:]
+    lit = row[row.sum(axis=1).argmax()]
+    assert lit[0] > lit[1] > lit[2]
+
+
+def test_panel_auto_measures_the_frame_without_its_glow(panel, monkeypatch):
+    from core.ccr_backend import ccr_backend
+    seen = {}
+
+    class _F:
+        adjustment_settings = {"glow": 80, "contrast": 5}
+        resized_raw = np.zeros((40, 60, 3), np.uint16)
+        crop_rect = (0.25, 0.25, 0.75, 0.75)
+        film_format = "6x7"
+
+        def apply_adjustments(self, image, settings=None, **kw):
+            seen["settings"] = settings
+            return np.full(image.shape, 65535, np.uint16)
+    monkeypatch.setattr(ccr_backend, "images", [_F()])
+    panel.current_idx = 0
+    rgb, mm = panel._glow_auto_inputs()
+    assert seen["settings"]["glow"] == 0 and seen["settings"]["contrast"] == 5
+    assert rgb.shape == (20, 30, 3) and rgb.max() == 1.0
+    assert mm == 69.0

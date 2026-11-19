@@ -26,7 +26,15 @@ handled in LINEAR light (glow is light adding up):
   to the crop box and the spread normalised by the spread of the mask
   (normalised convolution), so the white holder or sprocket holes outside a
   crop can't bloom into the picture's edges, and the edges don't dim either.
-  No crop: exactly as before."""
+  No crop: exactly as before.
+
+Revision 4 (2026-11-19, spec/highlight-glow.md): the glow is mixed with
+HALATION, film's thin warm rim round a bright area (light reflected off the
+film base back into the red-sensitive layer): measured on the user's lab
+scans as a rim of sigma 0.09-0.15 % of the long side, R : G : B about
+1 : 0.3 : 0.1, redder further out. Its source is the light's luminance; each
+channel spreads it with its own Gaussian (R widest); `halo` mixes it with the
+bloom, `rim` sets its width. halo 0 = the old glow, byte for byte."""
 import cv2
 import numpy as np
 
@@ -37,8 +45,17 @@ from core.oklab import _lin, _enc, _M1, _M2, guided_smooth, guided_filter, scale
 # ("size" 0..100, "start" OKLab L x 100) fall back to the defaults.
 #   reach: how far the glow spreads, tenths of a percent of the long side
 #   above: the display level (%) the glow starts from; full at white
-GLOW_SHAPE_DEFAULT = {"reach": 50, "above": 95}
-GLOW_LIMITS = {"reach": (20, 100), "above": (85, 99)}
+#   halo: how much of the glow is halation, the red rim (%)
+#   rim: the halation's sigma, hundredths of a percent of the long side
+GLOW_SHAPE_DEFAULT = {"reach": 50, "above": 95, "halo": 75, "rim": 12}
+GLOW_LIMITS = {"reach": (20, 100), "above": (85, 99), "halo": (0, 100), "rim": (3, 40)}
+# halation (measured, spec revision 4): per channel, sigma x rim and weight
+HALO_SIGMA_X = (1.0, 0.75, 0.5)
+HALO_W = (1.0, 0.40, 0.12)
+HALO_GAIN = 0.8
+Y_W = (0.2126, 0.7152, 0.0722)       # Rec.709 luminance of linear RGB
+HALO_MM = 0.043                      # the rim's sigma on the film (35 mm: 0.12 %)
+HALO_DILATE = np.ones((3, 3), np.uint8)   # the knee's neighbourhood (see glow_field)
 GAIN = 0.6                # glow field x this at amount 100
 CORE_W, TAIL_W, TAIL_X = 0.65, 0.35, 3.0
 REACH_SIGMAS = 2.0 * TAIL_X   # reach = this many core sigmas (twice the tail's)
@@ -98,6 +115,63 @@ def _lightness(lin, chunk=1 << 20):
         L[s:s + chunk] = np.cbrt(flat[s:s + chunk] @ _M1.T) @ _M2[0]
     return guided_smooth(L.reshape(H, W), scaled_radius(DENOISE_R, lin.shape),
                          DENOISE_EPS[0])
+
+
+def _halo_lightness(L, mask=None):
+    """The lightness the halation's knee reads: the brightest of each pixel's
+    3x3 after a 3x3 median. The brightest, so a pixel the edge of a
+    highlight only partly covers counts with its luminance (its share of the
+    light) instead of falling under the steep knee: at preview size that
+    moved the source a whole pixel inward and showed the 1-2 px rim ~40 %
+    weaker than an export (measured; now within ~5 % on a dark ground). The
+    median first, because the knee is steep and the edge-preserving denoise
+    leaves grain at edges: the brightest of noisy values made the rim carry
+    grain (x1.18 in its first pixel; x0.84 with the median). With a crop,
+    the lightness outside it reads 0, so the holder can't reach in."""
+    x = L if mask is None else L * mask
+    x = np.ascontiguousarray(x, np.float32)
+    return cv2.dilate(cv2.medianBlur(x, 3), HALO_DILATE)
+
+
+def halo_sigmas(shape, long_px):
+    """The halation's per-channel sigmas in render pixels."""
+    r = shape["rim"] / 10000.0 * long_px
+    return tuple(r * k for k in HALO_SIGMA_X)
+
+
+def _blur_channels(y, sigmas):
+    """A scalar map blurred into 3 channels, channel c at sigmas[c], on a
+    copy reduced so the narrowest sigma stays >= MIN_SIGMA_PX (Gaussian,
+    BORDER_REFLECT; scaled back up bilinearly)."""
+    H, W = y.shape[:2]
+    f = max(1, int(min(sigmas) // MIN_SIGMA_PX))
+    if f > 1:
+        small = cv2.resize(y, (max(1, round(W / f)), max(1, round(H / f))),
+                           interpolation=cv2.INTER_AREA)
+    else:
+        small = y
+    k = small.shape[1] / float(W)
+    out = np.stack([cv2.GaussianBlur(small, (0, 0), s * k, borderType=cv2.BORDER_REFLECT)
+                    for s in sigmas], axis=-1)
+    if f > 1:
+        out = cv2.resize(out, (W, H), interpolation=cv2.INTER_LINEAR)
+    return np.maximum(out, 0.0)
+
+
+def halo_field(lin, src, shape, mask=None):
+    """Halation before the amount and the hold: the light's luminance times
+    the source knee, each channel spread at its own sigma and weighted, so
+    the rim is orange at the edge and redder further out. With a crop
+    `mask`, normalised by the mask's spread per channel."""
+    H, W = lin.shape[:2]
+    y = (lin @ np.asarray(Y_W, np.float32)).astype(np.float32) * src
+    sig = halo_sigmas(shape, max(H, W))
+    if mask is None:
+        h = _blur_channels(np.ascontiguousarray(y), sig)
+    else:
+        h = _blur_channels(np.ascontiguousarray(y * mask), sig)
+        h = h / np.maximum(_blur_channels(mask, sig), np.float32(MASK_EPS))
+    return (h * (np.asarray(HALO_W, np.float32) * np.float32(HALO_GAIN))).astype(np.float32)
 
 
 def _spread(b, sigma_px):
@@ -173,6 +247,7 @@ def glow_field(img01, amount, shape, with_lin=False, area=None):
     b = lin * src[..., None]
     sigma_px = sigma_frac(shape) * max(H, W)
     area = normalize_glow_area(area)
+    m = None
     if area is None:
         g = _spread(np.ascontiguousarray(b), sigma_px)
     else:
@@ -180,6 +255,12 @@ def glow_field(img01, amount, shape, with_lin=False, area=None):
         g = _spread(np.ascontiguousarray(b * m[..., None]), sigma_px)
         gm = _spread(m, sigma_px)
         g = g / np.maximum(gm, np.float32(MASK_EPS))[..., None]
+    h = shape.get("halo", 0) / 100.0
+    if h > 0:
+        # bloom and halation mixed (revision 4); h = 0 leaves the old glow
+        src_h = smooth((_halo_lightness(L, m) - lo) / width).astype(np.float32)
+        g = (np.float32(1.0 - h) * g + np.float32(h) * halo_field(lin, src_h, shape, m)
+             ).astype(np.float32)
     Lh = guided_filter(L, L, max(1, int(round(HOLD_R * sigma_px))), HOLD_EPS)
     hold = 1.0 - HOLD * smooth((Lh - h_lo) / h_w)
     k = np.float32(min(float(amount), 100.0) / 100.0 * GAIN) * hold.astype(np.float32)
@@ -187,6 +268,77 @@ def glow_field(img01, amount, shape, with_lin=False, area=None):
     g *= k[..., None]
     np.clip(g, 0.0, 1.0, out=g)
     return (g, lin) if with_lin else g
+
+
+# --- Auto (revision 4) ------------------------------------------------------
+AUTO_LONG = 512           # measured on a copy this long (all shares of the frame)
+AUTO_Q = 99.0             # Start: this percentile of the brightest channel
+AUTO_MIN_PX = 3           # bright specks smaller than this (at AUTO_LONG) are grain
+AUTO_REF = 0.06           # Reach = sqrt(typical radius x this), shares of the long side
+AUTO_SHARE = 0.05         # more of the frame bright than this: Reach shortened
+
+
+def rim_for(long_mm):
+    """The halation rim (hundredths of a percent of the long side) for a
+    frame whose long side is `long_mm` on the film: HALO_MM is fixed on the
+    film, so 35 mm 0.12 %, 6x4.5 0.08 %, 6x7 0.06 %, 4x5 0.04 %."""
+    lo, hi = GLOW_LIMITS["rim"]
+    return int(np.clip(round(HALO_MM / float(long_mm) * 10000.0), lo, hi))
+
+
+def auto_shape(rgb01, shape=None, long_mm=None):
+    """Options measured on a picture (HxWx3 display values 0..1, the picture
+    without its glow, cropped): Start so the lightest ~1 % glows; Reach from
+    how big the bright areas are (sqrt of their area-weighted median inner
+    radius x AUTO_REF, shortened when much of the frame is bright, so a
+    bright sky glows gently rather than fogging the frame); Rim from the
+    frame's size
+    on the film (`long_mm`, None = keep). Halation is left as it is. Returns
+    a full options dict."""
+    out = dict(normalize_glow_shape(shape) or GLOW_SHAPE_DEFAULT)
+    a = np.asarray(rgb01, np.float32)
+    if a.ndim != 3 or a.shape[0] < 2 or a.shape[1] < 2:
+        return out
+    H, W = a.shape[:2]
+    s = AUTO_LONG / float(max(H, W))
+    if s < 1.0:
+        a = cv2.resize(a, (max(1, round(W * s)), max(1, round(H * s))),
+                       interpolation=cv2.INTER_AREA)
+    # each pixel's lightness as the display level of a grey as light: the
+    # scale Start is set in (a saturated red at 98 % red is not near white)
+    lin = _lin(np.clip(a, 0.0, 1.0)).reshape(-1, 3)
+    L = np.cbrt(np.maximum(lin @ _M1.T, 0.0)) @ _M2[0]
+    br = _enc(np.clip(L, 0.0, 1.0) ** 3).reshape(a.shape[:2]).astype(np.float32)
+    lo, hi = GLOW_LIMITS["above"]
+    above = int(np.clip(round(float(np.percentile(br, AUTO_Q)) * 100.0), lo, hi))
+    out["above"] = above
+    mask = (br >= (above - 0.5) / 100.0).astype(np.uint8)    # (Start is rounded)
+    n, lab, stats, _c = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    # each bright area's radius: the largest circle inside it (a band of sky
+    # is as thick as it is tall, not as big as its area), the frame's edge
+    # counting as its edge
+    dist = cv2.distanceTransform(np.pad(mask, 1), cv2.DIST_L2, 5)[1:-1, 1:-1]
+    inner = np.zeros(n, np.float64)
+    np.maximum.at(inner, lab.ravel(), dist.ravel().astype(np.float64))
+    areas = stats[:, cv2.CC_STAT_AREA].astype(np.float64)
+    keep = np.arange(n) > 0
+    keep &= areas >= AUTO_MIN_PX
+    if keep.any():
+        areas, radius = areas[keep], inner[keep] / float(max(br.shape))
+        order = np.argsort(radius)
+        cum = np.cumsum(areas[order])
+        typical = float(radius[order][np.searchsorted(cum, cum[-1] / 2.0)])
+        # a bigger light glows further, but less than in proportion (the
+        # default 5 % for a highlight about 4 % of the frame across)
+        reach = float(np.sqrt(typical * AUTO_REF))
+        share = float(areas.sum()) / br.size
+        if share > AUTO_SHARE:
+            reach *= float(np.sqrt(AUTO_SHARE / share))
+        lo, hi = GLOW_LIMITS["reach"]
+        out["reach"] = int(np.clip(round(reach * 1000.0), lo, hi))
+    if long_mm:
+        out["rim"] = rim_for(long_mm)
+    return out
 
 
 def _cmax(x):

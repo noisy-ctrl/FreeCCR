@@ -406,7 +406,7 @@ __kernel void glow_area_h(__global const float* lin_rgb, __global const float* L
                           __global const int* xsrc, __global const float* xw,
                           float s_lo, float s_span, int W, int H, int Ws,
                           int masked, __global const float* mask,
-                          __global float* hbuf_m) {{
+                          __global float* hbuf_m, int luma) {{
     int dx = get_global_id(0);
     int y = get_global_id(1);
     if (dx >= Ws || y >= H) return;
@@ -415,12 +415,17 @@ __kernel void glow_area_h(__global const float* lin_rgb, __global const float* L
     for (int k = xoff[dx]; k < xoff[dx + 1]; k++) {{
         size_t p = (size_t)y * W + xsrc[k];
         float src = sstep((Ls[p] - s_lo) / s_span);
+        float3 l = vload3(p, lin_rgb);
+        /* luma: the halation's source, the light's luminance (glow.Y_W) */
+        float3 v = luma ? (float3)(({_f(gw.Y_W[0])} * l.x + {_f(gw.Y_W[1])} * l.y
+                                    + {_f(gw.Y_W[2])} * l.z) * src)
+                        : l * src;
         if (masked) {{
             float mk = mask[p];
-            acc += ((vload3(p, lin_rgb) * src) * mk) * xw[k];
+            acc += (v * mk) * xw[k];
             macc += mk * xw[k];
         }} else {{
-            acc += (vload3(p, lin_rgb) * src) * xw[k];
+            acc += v * xw[k];
         }}
     }}
     vstore3(acc, (size_t)y * Ws + dx, hbuf);
@@ -437,6 +442,53 @@ __kernel void glow_area_v(__global const float* hbuf, __global float* small,
     for (int k = yoff[dy]; k < yoff[dy + 1]; k++)
         acc += yw[k] * vload3((size_t)ysrc[k] * Ws + dx, hbuf);
     vstore3(acc, (size_t)dy * Ws + dx, small);
+}}
+
+/* cv2.medianBlur(ksize 3) (BORDER_REPLICATE) of L, or of L x mask:
+   glow._halo_lightness. The median of nine by the usual exchange network. */
+#define MSORT(a, b) {{ float t_ = fmin(a, b); b = fmax(a, b); a = t_; }}
+__kernel void med3(__global const float* src, __global float* dst, int W, int H,
+                   int masked, __global const float* mask) {{
+    int x = get_global_id(0);
+    int y = get_global_id(1);
+    if (x >= W || y >= H) return;
+    float p[9];
+    int k = 0;
+    for (int dy = -1; dy <= 1; dy++) {{
+        int yy = clamp(y + dy, 0, H - 1);
+        for (int dx = -1; dx <= 1; dx++) {{
+            int xx = clamp(x + dx, 0, W - 1);
+            size_t q = (size_t)yy * W + xx;
+            p[k++] = masked ? src[q] * mask[q] : src[q];
+        }}
+    }}
+    MSORT(p[1], p[2]); MSORT(p[4], p[5]); MSORT(p[7], p[8]);
+    MSORT(p[0], p[1]); MSORT(p[3], p[4]); MSORT(p[6], p[7]);
+    MSORT(p[1], p[2]); MSORT(p[4], p[5]); MSORT(p[7], p[8]);
+    MSORT(p[0], p[3]); MSORT(p[5], p[8]); MSORT(p[4], p[7]);
+    MSORT(p[3], p[6]); MSORT(p[1], p[4]); MSORT(p[2], p[5]);
+    MSORT(p[4], p[7]); MSORT(p[4], p[2]); MSORT(p[6], p[4]);
+    MSORT(p[4], p[2]);
+    dst[(size_t)y * W + x] = p[4];
+}}
+
+/* cv2.dilate with a 3x3 square: the largest of the pixel's neighbours
+   inside the picture (the halation's knee, glow._halo_lightness). */
+__kernel void max3(__global const float* src, __global float* dst, int W, int H) {{
+    int x = get_global_id(0);
+    int y = get_global_id(1);
+    if (x >= W || y >= H) return;
+    float m = src[(size_t)y * W + x];
+    for (int dy = -1; dy <= 1; dy++) {{
+        int yy = y + dy;
+        if (yy < 0 || yy >= H) continue;
+        for (int dx = -1; dx <= 1; dx++) {{
+            int xx = x + dx;
+            if (xx < 0 || xx >= W) continue;
+            m = fmax(m, src[(size_t)yy * W + xx]);
+        }}
+    }}
+    dst[(size_t)y * W + x] = m;
 }}
 
 /* Separable Gaussian with OpenCV's kernel, BORDER_REFLECT, 3 channels. */
@@ -464,6 +516,54 @@ __kernel void gauss_v(__global const float* src, __global float* dst,
     vstore3(acc, (size_t)y * Wd + x, dst);
 }}
 
+/* The same with a kernel per channel (3 x ks, zero-padded to one size):
+   the halation's red, green and blue spread at their own sigmas. */
+__kernel void gauss3k_h(__global const float* src, __global float* dst,
+                        __global const float* kern, int ks, int Wd, int Hd) {{
+    int x = get_global_id(0);
+    int y = get_global_id(1);
+    if (x >= Wd || y >= Hd) return;
+    int anchor = ks / 2;
+    float3 acc = (float3)(0.0f);
+    for (int k = 0; k < ks; k++)
+        acc += (float3)(kern[k], kern[ks + k], kern[2 * ks + k])
+             * vload3((size_t)y * Wd + refl(x + k - anchor, Wd), src);
+    vstore3(acc, (size_t)y * Wd + x, dst);
+}}
+
+__kernel void gauss3k_v(__global const float* src, __global float* dst,
+                        __global const float* kern, int ks, int Wd, int Hd) {{
+    int x = get_global_id(0);
+    int y = get_global_id(1);
+    if (x >= Wd || y >= Hd) return;
+    int anchor = ks / 2;
+    float3 acc = (float3)(0.0f);
+    for (int k = 0; k < ks; k++)
+        acc += (float3)(kern[k], kern[ks + k], kern[2 * ks + k])
+             * vload3((size_t)refl(y + k - anchor, Hd) * Wd + x, src);
+    vstore3(acc, (size_t)y * Wd + x, dst);
+}}
+
+/* A field at full size: bilinear from its reduced copy (OpenCV's
+   INTER_LINEAR tables) or the field itself, floored at 0. */
+float3 field_at(__global const float* f, int reduced, __global const int* xs0,
+                __global const int* xs1, __global const float* xa,
+                __global const int* ys0, __global const int* ys1,
+                __global const float* yb, int x, int y, int W, int Ws) {{
+    float3 g;
+    if (reduced) {{
+        float a1 = xa[x], a0 = 1.0f - a1, b1 = yb[y], b0 = 1.0f - b1;
+        float3 r0 = vload3((size_t)ys0[y] * Ws + xs0[x], f) * a0
+                  + vload3((size_t)ys0[y] * Ws + xs1[x], f) * a1;
+        float3 r1 = vload3((size_t)ys1[y] * Ws + xs0[x], f) * a0
+                  + vload3((size_t)ys1[y] * Ws + xs1[x], f) * a1;
+        g = r0 * b0 + r1 * b1;
+    }} else {{
+        g = vload3((size_t)y * W + x, f);
+    }}
+    return fmax(g, (float3)(0.0f));
+}}
+
 __kernel void glow_mix(__global const float* core, __global const float* tail,
                        __global float* out, float cw, float tw, int n3) {{
     int i = get_global_id(0);
@@ -482,7 +582,13 @@ __kernel void glow_apply(__global float* rgb, __global const float* lin_rgb,
                          __global const int* ys1, __global const float* yb,
                          int W, int H, int Ws, float kamt, float hold_c,
                          float h_lo, float h_span, float geps,
-                         int masked, __global const float* field_m, float meps) {{
+                         int masked, __global const float* field_m, float meps,
+                         int halo, __global const float* hfield,
+                         __global const float* hfield_m, int hreduced,
+                         __global const int* hxs0, __global const int* hxs1,
+                         __global const float* hxa, __global const int* hys0,
+                         __global const int* hys1, __global const float* hyb,
+                         int Whs, float bloom_w, float hw0, float hw1, float hw2) {{
     int x = get_global_id(0);
     int y = get_global_id(1);
     if (x >= W || y >= H) return;
@@ -513,6 +619,15 @@ __kernel void glow_apply(__global float* rgb, __global const float* lin_rgb,
         }}
         gm = fmax(gm, 0.0f);
         g = g / fmax(gm, meps);
+    }}
+    if (halo) {{
+        /* glow.halo_field, mixed with the bloom (revision 4) */
+        float3 h = field_at(hfield, hreduced, hxs0, hxs1, hxa, hys0, hys1, hyb,
+                            x, y, W, Whs);
+        if (masked)
+            h = h / fmax(field_at(hfield_m, hreduced, hxs0, hxs1, hxa, hys0, hys1,
+                                  hyb, x, y, W, Whs), (float3)(meps));
+        g = bloom_w * g + h * (float3)(hw0, hw1, hw2);
     }}
     float hold = 1.0f - hold_c * sstep((Lh[i] - h_lo) / h_span);
     g = g * (kamt * hold);
@@ -618,7 +733,8 @@ def gaussian_kernel(sigma):
 _KERNELS = ("zero_u8", "chunk_max", "unpack01", "pack16", "lab_planes", "glow_L",
             "box_h", "box_v", "mul", "gf_self_ab", "gf_ab", "gf_out", "matte_tail", "golden_weight",
             "golden_apply", "shadow_weight", "shadow_apply", "glow_area_h",
-            "glow_area_v", "gauss_h", "gauss_v", "glow_mix", "glow_apply", "glow_mask",
+            "glow_area_v", "gauss_h", "gauss_v", "gauss3k_h", "gauss3k_v", "glow_mix",
+            "glow_apply", "glow_mask", "med3", "max3",
             "lift_apply")
 
 _last = None
@@ -746,6 +862,25 @@ class FinishGPU:
                           _i(kern.size), _i(W), _i(H))
         return out
 
+    def gauss3k(self, src, W, H, sigmas):
+        """gauss3 with channel c at sigmas[c] (glow._blur_channels): OpenCV's
+        kernel per sigma, zero-padded to the longest (a zero tap adds
+        nothing, so each channel is exactly its own blur)."""
+        q = self.queue
+        ks = [gaussian_kernel(s) for s in sigmas]
+        n = max(k.size for k in ks)
+        kern = np.zeros((3, n), np.float32)
+        for c, k in enumerate(ks):
+            pad = (n - k.size) // 2
+            kern[c, pad:pad + k.size] = k
+        kb = self.upload(kern.ravel())
+        tmp, out = self.empty(H * W * 3), self.empty(H * W * 3)
+        self.k["gauss3k_h"](q, (W, H), None, src.data, tmp.data, kb.data,
+                            _i(n), _i(W), _i(H))
+        self.k["gauss3k_v"](q, (W, H), None, tmp.data, out.data, kb.data,
+                            _i(n), _i(W), _i(H))
+        return out
+
     # -- the tools ---------------------------------------------------------
     def golden(self, rgb, moved, W, H, amount, shape):
         shape = gd.normalize_golden_shape(shape) or dict(gd.GOLDEN_SHAPE_DEFAULT)
@@ -832,7 +967,7 @@ class FinishGPU:
                               xoff.data, xsrc.data, xw.data,
                               _fl(lo), _fl(width),
                               _i(W), _i(H), _i(Ws), _i(1 if area else 0),
-                              mask.data, hbuf_m.data)
+                              mask.data, hbuf_m.data, _i(0))
         s = sigma_px * Ws / float(W)
 
         def spread(hb):
@@ -855,13 +990,67 @@ class FinishGPU:
             xs0 = xs1 = ys0 = ys1 = np.zeros(1, np.int32)
             xa = yb = np.zeros(1, np.float32)
         bufs = [self.upload(a) for a in (xs0, xs1, xa, ys0, ys1, yb)]
+        h = shape.get("halo", 0) / 100.0
+        if h > 0:
+            halo = self._halo(lin, Ls, mask, area, shape, lo, width, W, H)
+        else:
+            one = self.empty(1)
+            zi, zf = np.zeros(1, np.int32), np.zeros(1, np.float32)
+            halo = (one, one, 0, [self.upload(a) for a in (zi, zi, zf, zi, zi, zf)], 1)
+        hfield, hfield_m, hred, hbufs, Whs = halo
+        hw = np.float32(h) * (np.asarray(gw.HALO_W, np.float32) * np.float32(gw.HALO_GAIN))
         self.k["glow_apply"](q, (W, H), None, rgb.data, lin.data, moved.data, Lh.data,
                              field.data,
                              _i(1 if f > 1 else 0), *[b.data for b in bufs],
                              _i(W), _i(H), _i(Ws),
                              _fl(min(float(amount), 100.0) / 100.0 * gw.GAIN),
                              _fl(gw.HOLD), _fl(h_lo), _fl(h_w), _fl(gw.G_EPS),
-                             _i(1 if area else 0), field_m.data, _fl(gw.MASK_EPS))
+                             _i(1 if area else 0), field_m.data, _fl(gw.MASK_EPS),
+                             _i(1 if h > 0 else 0), hfield.data, hfield_m.data,
+                             _i(hred), *[b.data for b in hbufs], _i(Whs),
+                             _fl(1.0 - h), *[_fl(v) for v in hw])
+
+    def _halo(self, lin, Ls, mask, area, shape, lo, width, W, H):
+        """glow.halo_field before its weights: the luminance sources (and the
+        crop mask) AREA-reduced as glow._blur_channels does, each channel
+        blurred at its own sigma. (field, mask field, reduced?, the 6
+        upsampling tables, reduced width)."""
+        q = self.queue
+        sig = gw.halo_sigmas(shape, max(H, W))
+        f = max(1, int(min(sig) // gw.MIN_SIGMA_PX))
+        if f > 1:
+            Ws, Hs = max(1, round(W / f)), max(1, round(H / f))
+            xt, yt = area_table(W, Ws), area_table(H, Hs)
+        else:
+            Ws, Hs = W, H
+            xt, yt = identity_table(W), identity_table(H)
+        xoff, xsrc, xw = (self.upload(a) for a in xt)
+        yoff, ysrc, yw = (self.upload(a) for a in yt)
+        hbuf = self.empty(H * Ws * 3)
+        hbuf_m = self.empty(H * Ws * 3) if area is not None else self.empty(1)
+        Lm, Ld = self.empty(W * H), self.empty(W * H)   # glow._halo_lightness
+        self.k["med3"](q, (W, H), None, Ls.data, Lm.data, _i(W), _i(H),
+                       _i(1 if area is not None else 0), mask.data)
+        self.k["max3"](q, (W, H), None, Lm.data, Ld.data, _i(W), _i(H))
+        self.k["glow_area_h"](q, (Ws, H), None, lin.data, Ld.data, hbuf.data,
+                              xoff.data, xsrc.data, xw.data, _fl(lo), _fl(width),
+                              _i(W), _i(H), _i(Ws), _i(1 if area else 0),
+                              mask.data, hbuf_m.data, _i(1))
+        k = Ws / float(W)
+
+        def spread(hb):
+            small = self.empty(Hs * Ws * 3)
+            self.k["glow_area_v"](q, (Ws, Hs), None, hb.data, small.data,
+                                  yoff.data, ysrc.data, yw.data, _i(Ws), _i(Hs))
+            return self.gauss3k(small, Ws, Hs, [s_ * k for s_ in sig])
+        field = spread(hbuf)
+        field_m = spread(hbuf_m) if area is not None else self.empty(1)
+        if f > 1:
+            tabs = linear_table_x(Ws, W) + linear_table_y(Hs, H)
+        else:
+            zi, zf = np.zeros(1, np.int32), np.zeros(1, np.float32)
+            tabs = (zi, zi, zf, zi, zi, zf)
+        return field, field_m, 1 if f > 1 else 0, [self.upload(a) for a in tabs], Ws
 
     def shadow_lift(self, rgb, moved, W, H, amount, shape):
         v0, Vf = lf.params(amount, shape)

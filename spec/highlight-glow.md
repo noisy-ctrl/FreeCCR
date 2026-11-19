@@ -148,3 +148,113 @@ itself fills the frame.
 Tests: the old ones on the new options, plus "only near-white glows by
 default, and it stays tight" (an 85 % wall is returned exactly; the fall-off
 by Reach).
+
+
+## Revision 4 (2026-11-19): halation, and Auto
+
+The user: "Can you add an auto button to the glow settings? It looks at the
+spread of the brightest areas and more to set size. It looks a bit
+artificial too. Can you research how glow/halation looks on film? And make
+it more organic?"
+
+### What film does (research, then measured)
+
+- Halation is light that passes through the emulsion, reflects off the back
+  of the film base and re-exposes the emulsion from behind round a bright
+  area. The layer nearest the base is the red-sensitive one, so the halo is
+  red-orange: orange right at the edge, redder further out. An anti-halation
+  layer weakens it but doesn't stop it, so very bright lamps, specular
+  highlights and sunlit edges against dark keep a thin warm rim
+  (sources in the reply).
+- Measured on the user's lab scans (35 mm, 6774 px long side), across
+  clipped-highlight edges into dark, in linear light, fitting the light past
+  the edge with Gaussian edge profiles:
+  - a sunlit patch on asphalt (`060940030037`): the image's own edge
+    (sigma 4 px), a **red-orange rim, sigma 10 px = 0.15 % of the long side,
+    R : G : B = 1 : 0.29 : 0.09**, and a weak neutral bloom (sigma ~60 px,
+    0.9 %, about 1/17 of the rim's strength); R/G rises outward (1.9 at 4 px,
+    2.6 at 8 px): orange then red;
+  - sky over a dark arch (`060940010002`): the rim at **sigma 6 px = 0.09 %,
+    R : G : B = 1 : 0.34 : 0.35** (the bloom there is hidden by palm fronds).
+- So film's glow is mostly a **thin warm rim**, about 0.1 % of the frame on
+  35 mm: about 0.04 mm on the film, so a smaller share of a larger format.
+  The old Glow was only the wide neutral bloom (reach 5 %), a soft veil in
+  the light's own colour, which is what looked artificial.
+
+### The change
+
+- Glow = **bloom** (the old field, unchanged) mixed with **halation**:
+  `g = (1 − h)·bloom + h·halo`, then the hold and the amount as before. With
+  `h = 0` the halation is never built and the picture is the old Glow.
+- **Halation** (`core.glow.halo_field`): its source is the light's
+  luminance, not its colour (the rim is the film's colour): `y = Y(lin)·s`,
+  Rec.709 Y. Each channel spreads it with its own Gaussian, `sigma_c =
+  rim · (1, 0.75, 0.5)` and weight `(1, 0.40, 0.12) · HALO_GAIN` (0.8), so
+  the rim is orange at the edge and red further out: past a white edge on a
+  20 % grey, at the defaults, R/G is 1.7 at 1 px, 1.5 at 8 px, 1.0 by 32 px
+  (where only the bloom is left); measured on the scans 1.9 at 4 px, 2.6 at
+  8 px with the halation alone. `rim` is a share of the long side. With a
+  crop, normalised by the mask's spread per channel, as the bloom.
+- **The halation's knee** reads `_halo_lightness(L)`: the 3×3 brightest of a
+  3×3 median of the decision lightness (× the crop mask when there is one).
+  The brightest, because the knee is steep (Start to white): a pixel a
+  highlight's edge only partly covers fell under it, which at a 1080 px
+  preview moved the source a whole pixel inward and showed the 1–2 px rim
+  ~40 % weaker than the export scaled down; now 15 % at the edge pixel and
+  12 % beyond it (the bloom itself differs by 7 % at its edge pixel). The
+  median first, because the edge-preserving denoise leaves grain at edges
+  and the brightest of noisy values made the rim carry grain (×1.18 in its
+  first pixel; ×0.84–0.95 with the median).
+- Options (right-click), new keys added to the old ones; shapes saved
+  before take their defaults:
+  - **Halation** `halo` 0–100 %, default 75: how much of the glow is the red
+    rim ("Soft bloom" ↔ "Red rim").
+  - **Rim** `rim` 0.03–0.40 % of the long side (hundredths of a percent),
+    default 0.12 % (35 mm).
+  - Reach (the bloom) and Start as before.
+  - The popup gains a close-up strip: a bright edge in a 4000 px picture at
+    5×, so the rim (5 px there) can be judged.
+- **Auto** (`core.glow.auto_shape(rgb01, shape, long_mm)`), a button in the
+  popup, measured on the frame on screen rendered WITHOUT its glow, inside
+  its crop (`SlidersPanel._glow_auto_inputs`), on a copy 512 px long:
+  - **Start** so the lightest ~1 % glows: the 99th percentile of each
+    pixel's lightness as the display level of a grey as light (the scale
+    Start is set in; a saturated red at 98 % red is not near white), 85–99 %;
+  - **Reach** from how big the light areas are (those at Start): each
+    area's inner radius (the largest circle inside it, the frame's edge
+    counting as an edge, so a band of sky is as big as it is tall), the
+    area-weighted median, `Reach = sqrt(radius × 0.06)` (a bigger light
+    glows further, less than in proportion: 2 % for a lamp, 3 % for a bulb
+    2 % of the frame across, ~6 % for a window), shortened by
+    `sqrt(0.05 / share)` when more than 5 % of the frame is light (a band of
+    sky over 37 % of the frame: 2.7 %), 2–10 %; nothing light: Reach kept;
+  - **Rim** from the film format, a fixed 0.043 mm on the film
+    (`film_formats.long_mm`): 35 mm 0.12 %, half frame 0.18 %, 6×4.5 / 6×6
+    0.08 %, 6×7 0.06 %, 4×5 0.04 %, 8×10 0.03 % (the frame's Crop-panel
+    format, else its capture guide's, else what auto crop found or its
+    crop's proportions say; unknown keeps the Rim);
+  - Halation and the amount are left as they are.
+  - On three of the user's lab scans: the sunlit patch → Start 89 %, Reach
+    2.3 %; the arch → 98 %, 4.3 %; the court → 93 %, 2.4 %.
+- GPU: `finish_gpu` gains the halation field (`med3` + `max3` for the knee,
+  the source in luminance through `glow_area_h`'s `luma` flag, one
+  separable pass with a kernel per channel, `gauss3k_h/v`, OpenCV's kernels
+  zero-padded to one length) and mixes it in `glow_apply` (`field_at`).
+  CPU == GPU within 0.02 of a 16-bit code on the test scenes (pocl).
+- Cost (numpy, this machine): 30 MP export 7.4 → 9.1 s; a 2400 px render
+  0.49 → 0.77 s.
+
+### Tests
+
+- `halo = 0` never builds the halation; the rim is warm (R > G > B past a
+  white edge, R/G > 1.5) and redder further out; the default is warm at the
+  edge and neutral 64 px out; it is tight (by 4 rims < 5 % of its edge
+  value) and widens with Rim; the preview is the export scaled down (above);
+  never darker, in range, a ramp stays monotone; grain doesn't grow (bloom
+  ring, default ring, the rim's own first pixels); the crop keeps the holder
+  out; options normalise (old shapes take the new defaults); GPU == CPU with
+  halation on, reduced and cropped; Auto: Start follows the lightest
+  percentile and ignores a saturated red, Reach grows with the light but a
+  big sky is shortened, nothing light keeps Reach, Rim from the format and
+  Halation kept; the popup's Auto sets the sliders and the close-up shows a
+  warm rim; the panel measures the frame without its glow, inside its crop.

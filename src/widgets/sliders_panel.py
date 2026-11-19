@@ -3462,13 +3462,15 @@ class SlidersPanel(QWidget):
             self.end_undo_burst()
 
     # --- Glow options (spec/highlight-glow.md) -------------------------------
-    GLOW_HINT = ("Glow: a soft highlight glow. The near-white highlights (above "
-                 "95 % by default) bloom gently into their surroundings, like a "
-                 "diffusion filter on the enlarger, in their own colour, and the "
-                 "glow fades out within about 5 % of the frame. The highlights "
-                 "keep their own detail, nothing clips, and tones away from any "
-                 "highlight are left exactly as they were.")
-    GLOW_LABEL_TIP = "Right-click: reach, start"
+    GLOW_HINT = ("Glow: light spilling round the highlights, as on film. The "
+                 "near-white highlights (above 95 % by default) leave a thin warm "
+                 "rim, film's halation (light bounced off the back of the base "
+                 "into the red layer: orange at the edge, redder further out), "
+                 "and a gentle bloom in their own colour that fades out within "
+                 "about 5 % of the frame. The highlights keep their own detail, "
+                 "nothing clips, and tones away from any highlight are left "
+                 "exactly as they were.")
+    GLOW_LABEL_TIP = "Right-click: reach, start, halation, rim, Auto"
 
     def _update_glow_label(self):
         lbl = getattr(self, "_glow_label", None)
@@ -3491,7 +3493,8 @@ class SlidersPanel(QWidget):
         from widgets.glow_popup import GlowPopup
         self.end_undo_burst()
         i = self.adjustment_keys.index("glow")
-        pop = GlowPopup(self._glow_shape, self.sliders[i].value(), self)
+        pop = GlowPopup(self._glow_shape, self.sliders[i].value(), self,
+                        auto_source=self._glow_auto_inputs)
         pop.changed.connect(self._on_glow_shape_changed)
         pop.show_mask.connect(self._on_glow_show_mask)
         pop.closed.connect(self._on_glow_popup_closed)
@@ -3500,6 +3503,57 @@ class SlidersPanel(QWidget):
         from utils.popup_placement import place_on_screen
         place_on_screen(pop, global_pos)
         pop.show()
+
+    def _glow_auto_inputs(self):
+        """What Glow's Auto measures (spec/highlight-glow.md revision 4): the
+        frame on screen rendered WITHOUT its glow, inside its crop, as
+        display values 0..1, and its long side on the film in mm (None when
+        the format is unknown: Auto keeps the Rim). None with no frame."""
+        import numpy as np
+        from core import film_formats
+        idx = self.current_idx
+        if idx is None or not (0 <= idx < len(ccr_backend.images)):
+            return None
+        img = ccr_backend.images[idx]
+        base = getattr(img, "resized_raw", None)
+        if base is None:
+            return None
+        st = dict(img.adjustment_settings)
+        st["glow"] = 0
+        try:
+            out = img.apply_adjustments(base.copy(), settings=st, skip_dust=True)
+        except Exception as e:                    # a measure, never a crash
+            print(f"Glow Auto: render failed: {e}")
+            return None
+        out = np.asarray(out)
+        scale = float(np.iinfo(out.dtype).max) if out.dtype.kind in "ui" else 1.0
+        rgb = out[..., :3].astype(np.float32) / np.float32(scale)
+        rect = getattr(img, "crop_rect", None)
+        if rect:
+            h, w = rgb.shape[:2]
+            x1, y1, x2, y2 = (float(v) for v in rect)
+            c0, c1 = int(round(min(x1, x2) * w)), int(round(max(x1, x2) * w))
+            r0, r1 = int(round(min(y1, y2) * h)), int(round(max(y1, y2) * h))
+            if c1 - c0 >= 8 and r1 - r0 >= 8:
+                rgb = rgb[r0:r1, c0:c1]
+        return rgb, film_formats.long_mm(self._frame_film_format(img))
+
+    @staticmethod
+    def _frame_film_format(img):
+        """The frame's film format: the Crop panel's, Capture's guide's, what
+        auto crop found, what its crop's proportions say; else None."""
+        from core import film_formats
+        fmt = film_formats.film_key(getattr(img, "film_format", None))
+        guide = getattr(img, "capture_guide", None)
+        if not fmt and isinstance(guide, dict):
+            fmt = film_formats.film_key(guide.get("format"))
+        if not fmt:
+            try:
+                from widgets.contact_sheet import frame_format
+                fmt = frame_format(img)
+            except Exception:
+                fmt = None
+        return fmt
 
     def _on_glow_show_mask(self, on):
         ip = self._golden_preview()
