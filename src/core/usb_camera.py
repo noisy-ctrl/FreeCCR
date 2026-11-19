@@ -290,6 +290,8 @@ class UsbCamera(WorkerThread):
         elif kind == "open":
             self._open(cmd[1])
         elif kind == "close":
+            if self.backend is not None:
+                print(f"usb camera: closing {self.model or 'the camera'} (asked by Capture)")
             self._shut()
             self.status = "closed"
             self.state.emit("closed", "")
@@ -360,16 +362,20 @@ class UsbCamera(WorkerThread):
                 self.holders = camera_holder.find(parts[1], model)
             except Exception:
                 self.holders = []
+            print(f"usb camera: {key} is busy: {e}")
             self.state.emit("busy", str(e))
             return
         except Exception as e:
             self.status = "error"
+            print(f"usb camera: {key} didn't open: {e}")
             self.state.emit("error", str(e))
             return
         self.backend = backend
         self.model = model or ""
         self.holders = []
         self.status = "open"
+        print(f"usb camera: opened {self.model or key}"
+              + (" with live view" if self._live else ""))
         if self._live:
             try:
                 backend.start_live()
@@ -517,6 +523,9 @@ class UsbCamera(WorkerThread):
             self._frame_cv.notify_all()
 
     def _lose(self, text):
+        # why, in the Terminal: "connects and disconnects at once" (the user,
+        # 2026-11-19) had nothing to go on
+        print(f"usb camera: lost {self.model or 'the camera'}: {text or 'no reason given'}")
         self._shut()
         self.status = "lost"
         self.state.emit("lost", text)

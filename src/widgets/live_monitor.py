@@ -3883,8 +3883,9 @@ class LiveCaptureMonitor(QWidget):
                 "(Shutter); choose a capture device for the picture.")
             return
         elif kind == "lost":
-            self.canvas.set_message("The USB camera disconnected.\nFind Cameras to "
-                                    "reconnect.")
+            why = f" ({text})" if text and text != "not open" else ""
+            self.canvas.set_message(f"The USB camera disconnected{why}.\nFind Cameras "
+                                    "to reconnect.")
         if kind in ("lost", "closed", "error", "busy", "open"):
             self.addon_badge.setVisible(False)       # an open camera is checked afresh
         if kind in ("lost", "closed", "error", "busy"):

@@ -854,6 +854,8 @@ class LiveFeed(WorkerThread):
                     continue
                 fails_since = fails_since or now
                 if now - fails_since >= LOST_AFTER_S:
+                    print(f"live feed: no picture for {LOST_AFTER_S:g} s; the view "
+                          "counts the camera as lost")
                     cap = self._release(cap)
                     self.status.emit("lost", "")
                 else:
