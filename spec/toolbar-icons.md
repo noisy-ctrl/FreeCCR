@@ -34,3 +34,10 @@ words. The row needs ~764 px of the canvas's 900 at the smallest window
 `tests/test_toolbar_icons.py`: order and pictures, tooltips lead with the
 name, the words stay words, False colour coloured and grey when disabled,
 Crop follows the panel's button. `test_panel_width` still guards the fit.
+
+## Revision 2026-11-19: the film canister
+
+A **Film Presets** button, a 35 mm cassette with its leader out
+(`film-canister-icon.png`, square corners, a real cassette's proportions
+after the first draft "looked weird"), just left of Capture in the middle:
+`film_presets_action` → `open_film_presets` → Settings at Film Presets.
