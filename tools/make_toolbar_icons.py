@@ -323,6 +323,45 @@ def crop():
     return img
 
 
+def canister():
+    """A 35 mm cassette, upright, its film coming out of the light trap at
+    full width, then the leader's half-width tongue: square-cornered, in a
+    real cassette's proportions (body ~0.6 as wide as tall, the film nearly
+    the body's height)."""
+    img, p = canvas()
+    body = QRectF(2.2, 5.2, 9.0, 14.8)
+    p.setPen(pen(1.6, cap=Qt.SquareCap, join=Qt.MiterJoin))
+    p.setBrush(Qt.NoBrush)
+    p.drawRoundedRect(body, 0.4, 0.4)
+    p.setPen(Qt.NoPen)
+    p.setBrush(QBrush(BLACK))
+    p.drawRoundedRect(QRectF(1.6, 3.9, 10.2, 1.5), 0.3, 0.3)       # top lip
+    p.drawRoundedRect(QRectF(1.6, 19.8, 10.2, 1.5), 0.3, 0.3)      # bottom lip
+    p.drawRoundedRect(QRectF(5.1, 1.8, 3.2, 2.3), 0.3, 0.3)        # spool end
+    # the film: full width out of the trap, then the leader's tongue
+    top, bot, mid = 6.0, 19.2, 12.6
+    film = QPainterPath()
+    film.moveTo(11.2, top)
+    film.lineTo(22.6, top)
+    film.lineTo(22.6, mid)
+    film.lineTo(18.6, mid)
+    film.cubicTo(16.9, mid, 16.0, 15.0, 15.7, bot)
+    film.lineTo(11.2, bot)
+    film.closeSubpath()
+    p.drawPath(film)
+    # perforations, cut out: along the top edge all the way, along the
+    # bottom only where the film is full width
+    p.save()
+    p.setCompositionMode(QPainter.CompositionMode_Clear)
+    for x in (12.4, 14.5, 16.6, 18.7, 20.8):
+        p.drawRoundedRect(QRectF(x, top + 0.75, 1.15, 1.3), 0.2, 0.2)
+    for x in (12.4, 14.3):
+        p.drawRoundedRect(QRectF(x, bot - 2.05, 1.15, 1.3), 0.2, 0.2)
+    p.restore()
+    p.end()
+    return img
+
+
 # (file in src/icons, drawing): the names the app loads
 ICONS = [
     ("rotate-left-icon-size_512.png", lambda: rotate(True)),
@@ -336,6 +375,7 @@ ICONS = [
     ("dust-icon.png", blower),
     ("hdr-icon.png", hdr),
     ("false-colour-icon.png", false_colour_coloured),
+    ("film-canister-icon.png", canister),
 ]
 # Capture keeps its camera (camera-icon.png, the user's choice, 2026-11-19).
 

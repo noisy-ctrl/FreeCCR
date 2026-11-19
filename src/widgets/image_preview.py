@@ -1066,6 +1066,16 @@ class ImagePreview(QWidget):
         self.capture_push = QWidget()
         self.capture_push.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.toolbar.addWidget(self.capture_push)
+        # the film presets, beside Capture (spec/film-presets.md §6, the
+        # user 2026-11-19): Settings at its Film Presets page
+        self.film_presets_action = QAction(
+            theme.load_tinted_icon(resource_path("icons/film-canister-icon.png")),
+            "Film Presets", self)
+        self.film_presets_action.setToolTip(
+            "Film Presets: each film's ID, its film bases, Film Look and settings "
+            "(Settings → Film Presets).")
+        self.film_presets_action.triggered.connect(self.open_film_presets)
+        self.toolbar.addAction(self.film_presets_action)
         self.toolbar.addAction(self.capture_action)
         self.export_push = QWidget()
         self.export_push.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -2595,6 +2605,14 @@ class ImagePreview(QWidget):
                 font.setBold(True)
             btn.setFixedWidth(QFontMetrics(font).horizontalAdvance(act.text())
                               + TEXT_BUTTON_PAD)
+
+    def open_film_presets(self):
+        """The toolbar's film canister: Settings at the Film Presets page."""
+        opener = getattr(self.window(), "open_settings", None)
+        if opener is None:
+            return False
+        opener(page="Film Presets")
+        return True
 
     def open_crop(self):
         """The toolbar's Crop: what the panel's Crop button does."""
