@@ -17,7 +17,10 @@ GRACE_S = 60.0                     # files this long after a shot's end still jo
 COLOUR_ORDER = ("red", "green", "blue")
 # 1RED / 2GREEN / 3BLUE: by name a shot's files then sort red, green, blue in
 # any app (the user, 2026-11-09; plain RED/GREEN/BLUE sorted blue first)
-WORDS = {"red": "1RED", "green": "2GREEN", "blue": "3BLUE", "white": "WHITE", "bw": "BW"}
+WORDS = {"red": "1RED", "green": "2GREEN", "blue": "3BLUE", "white": "WHITE", "bw": "BW",
+         # the IR shot for dust (spec/ir-dust-and-flat-sets.md): after the
+         # colour shot(s), sorting last; never merged, paired with its shot
+         "ir": "4IR"}
 DEFAULT_ROLL = "R0001"
 
 
@@ -86,7 +89,7 @@ def _shot_from_name(name, roll):
     stem = os.path.splitext(os.path.basename(name))[0]
     if not stem.startswith(roll + "_"):
         return None
-    m = re.search(r"_(\d{3,})_[123]?[A-Z]+(?:_\d+)?$", stem)
+    m = re.search(r"_(\d{3,})_[1234]?[A-Z]+(?:_\d+)?$", stem)
     return int(m.group(1)) if m else None
 
 
@@ -226,8 +229,9 @@ def begin_shot(folder, entry):
 
 
 def slots_of(entry):
-    return COLOUR_ORDER if entry.get("scan_type") == "trichrome" \
+    base = COLOUR_ORDER if entry.get("scan_type") == "trichrome" \
         else (single_slot(entry.get("scan_type")),)
+    return tuple(base) + (("ir",) if entry.get("ir") else ())
 
 
 def add_file(path, now=None):
@@ -282,3 +286,94 @@ def active_entry():
 def clear():
     with _lock:
         _shot["folder"], _shot["entry"], _shot["until"] = None, None, None
+
+
+# --------------------------------------------------------------------------- #
+# IR shots and the frames they belong to (spec/ir-dust-and-flat-sets.md)
+# --------------------------------------------------------------------------- #
+_SHOT_KEY_RE = re.compile(
+    r"^(.*_\d{3,})_(?:[123]?(?:RED|GREEN|BLUE)|WHITE|BW|4IR)(?:_\d+)?$", re.I)
+_IR_RE = re.compile(r"_\d{3,}_4IR(?:_\d+)?$", re.I)
+
+
+def shot_key(path):
+    """(folder, '<roll>_<format>_<film>_<shot>' lower case) for a file FreeCCR
+    named, else None."""
+    stem = os.path.splitext(os.path.basename(str(path)))[0]
+    m = _SHOT_KEY_RE.match(stem)
+    if not m:
+        return None
+    return os.path.normcase(os.path.dirname(os.path.abspath(str(path)))), m.group(1).lower()
+
+
+def _logged_ir(folder):
+    """{basename of an IR file: [its shot's other basenames]} from a log."""
+    out = {}
+    for e in read_log(folder):
+        files = e.get("files") or {}
+        ir = files.get("ir")
+        if ir:
+            out[os.path.normcase(str(ir))] = [os.path.normcase(str(v))
+                                              for k, v in files.items() if k != "ir" and v]
+    return out
+
+
+def is_ir_file(path, logs=None):
+    """True for a shot's IR file: named `..._NNN_4IR`, or logged as one."""
+    name = os.path.basename(str(path))
+    if _IR_RE.search(os.path.splitext(name)[0]):
+        return True
+    folder = os.path.dirname(os.path.abspath(str(path)))
+    logs = {} if logs is None else logs
+    if folder not in logs:
+        logs[folder] = _logged_ir(folder)
+    return os.path.normcase(name) in logs[folder]
+
+
+def split_ir(paths):
+    """(the files that aren't IR shots, the IR shots)."""
+    logs = {}
+    keep, ir = [], []
+    for p in paths:
+        (ir if is_ir_file(p, logs) else keep).append(p)
+    return keep, ir
+
+
+def ir_for(frame_paths, candidates=(), look_in_folder=True, logs=None):
+    """The IR file of the shot `frame_paths` (a frame's own files) came from:
+    the log's `ir` for that shot, else a `..._4IR` file with the same shot
+    name among `candidates` or (look_in_folder) beside the frame. None."""
+    frame_paths = [p for p in frame_paths if p]
+    if not frame_paths:
+        return None
+    logs = {} if logs is None else logs
+    cands = list(candidates)
+    folder = os.path.dirname(os.path.abspath(str(frame_paths[0])))
+    if folder not in logs:
+        logs[folder] = _logged_ir(folder)
+    mine = {os.path.normcase(os.path.basename(p)) for p in frame_paths}
+    for ir_name, others in logs[folder].items():
+        if mine & set(others):
+            for c in cands:
+                if os.path.normcase(os.path.basename(c)) == ir_name:
+                    return c
+            p = os.path.join(folder, ir_name)
+            if look_in_folder and os.path.exists(p):
+                return p
+            # the log can be in another case than the disk: try the folder
+    keys = {shot_key(p) for p in frame_paths} - {None}
+    if not keys:
+        return None
+    for c in cands:
+        if _IR_RE.search(os.path.splitext(os.path.basename(c))[0]) and shot_key(c) in keys:
+            return c
+    if look_in_folder:
+        try:
+            names = os.listdir(folder)
+        except OSError:
+            names = []
+        for n in sorted(names):
+            p = os.path.join(folder, n)
+            if _IR_RE.search(os.path.splitext(n)[0]) and shot_key(p) in keys:
+                return p
+    return None

@@ -138,6 +138,26 @@ class _DownloadWorker(QObject):
             self.failed.emit(str(e))
 
 
+class _IrFindWorker(QObject):
+    """Finds one frame's IR dust off the GUI thread (reads two RAWs, ~2-4 s).
+    spec/ir-dust-and-flat-sets.md."""
+    done = Signal(object, object)      # img, spots
+    failed = Signal(object, str)       # img, message
+
+    def __init__(self, img, sensitivity):
+        super().__init__()
+        self.img = img
+        self.sensitivity = sensitivity
+
+    def run(self):
+        from core import ir_dust
+        try:
+            spots = ir_dust.find(self.img, self.sensitivity)
+            self.done.emit(self.img, spots)
+        except Exception as e:
+            self.failed.emit(self.img, str(e))
+
+
 class DustRemovalPanel(QWidget):
     def __init__(self, main_window, image_preview, parent=None):
         super().__init__(parent)
@@ -167,6 +187,16 @@ class DustRemovalPanel(QWidget):
         self._feather_timer.setInterval(200)
         self._feather_timer.timeout.connect(self._apply_feather)
 
+        # IR dust: one finder at a time, the rest queued (spec/ir-dust-and-flat-sets.md)
+        self._ir_thread = None
+        self._ir_worker = None
+        self._ir_queue = []
+        self._ir_busy_img = None
+        self._ir_sens_timer = QTimer(self)
+        self._ir_sens_timer.setSingleShot(True)
+        self._ir_sens_timer.setInterval(120)
+        self._ir_sens_timer.timeout.connect(self._apply_ir_sensitivity)
+
         self._build_ui()
         self._refresh_ai_section()
 
@@ -179,6 +209,65 @@ class DustRemovalPanel(QWidget):
         header.setAlignment(Qt.AlignCenter)
         header.setStyleSheet("font-size: 14px; font-weight: bold; margin: 4px;")
         layout.addWidget(header)
+
+        # --- IR dust (spec/ir-dust-and-flat-sets.md) ---
+        layout.addWidget(self._section_label("IR Dust"))
+        self.ir_status = QLabel("")
+        self.ir_status.setWordWrap(True)
+        self.ir_status.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 11px;")
+        layout.addWidget(self.ir_status)
+        ir_row1 = QHBoxLayout()
+        theme.apply_button_row(ir_row1)
+        self.ir_attach_btn = QPushButton("Attach IR Shot…")
+        self.ir_attach_btn.setToolTip(
+            "Pair this frame with an infrared shot of it (taken with only the "
+            "IR light on, nothing moved). Capture's IR for dust option does "
+            "this for every shot.")
+        self.ir_attach_btn.clicked.connect(self._on_ir_attach)
+        self.ir_find_btn = QPushButton("Find Again")
+        self.ir_find_btn.setToolTip("Look for dust in the IR shot again.")
+        self.ir_find_btn.clicked.connect(lambda: self.find_ir(self._current_image()))
+        ir_row1.addWidget(self.ir_attach_btn)
+        ir_row1.addWidget(self.ir_find_btn)
+        layout.addLayout(ir_row1)
+        ir_sens = QHBoxLayout()
+        ir_sens.setSpacing(theme.GAP_TIGHT)
+        lbl = QLabel("Sensitivity")
+        lbl.setFixedWidth(theme.LABEL_COL_W)
+        lbl.setToolTip("Higher finds fainter specks, and more false ones.")
+        from core import ir_dust
+        self.ir_sens_slider = QSlider(Qt.Horizontal)
+        self.ir_sens_slider.setRange(0, 100)
+        self.ir_sens_slider.setValue(ir_dust.SENS_DEFAULT)
+        self.ir_sens_slider.setFixedHeight(theme.CONTROL_H)
+        self.ir_sens_value = QLabel(str(ir_dust.SENS_DEFAULT))
+        self.ir_sens_value.setFixedWidth(theme.VALUE_COL_W)
+        self.ir_sens_slider.valueChanged.connect(self._on_ir_sens)
+        ir_sens.addWidget(lbl)
+        ir_sens.addWidget(self.ir_sens_slider)
+        ir_sens.addWidget(self.ir_sens_value)
+        layout.addLayout(ir_sens)
+        ir_row2 = QHBoxLayout()
+        theme.apply_button_row(ir_row2)
+        self.ir_heal_btn = QPushButton("Heal Them")
+        theme.style_button(self.ir_heal_btn, "primary")
+        self.ir_heal_btn.setToolTip("Heal the dust outlined in amber (one undo step).")
+        self.ir_heal_btn.clicked.connect(self._on_ir_heal)
+        self.ir_before_btn = QPushButton("Before")
+        self.ir_before_btn.setCheckable(True)
+        self.ir_before_btn.setToolTip("Show the picture as it was before Heal.")
+        self.ir_before_btn.toggled.connect(self._on_ir_before)
+        ir_row2.addWidget(self.ir_heal_btn)
+        ir_row2.addWidget(self.ir_before_btn)
+        layout.addLayout(ir_row2)
+        self.erase_btn = QPushButton("Erase Spots")
+        self.erase_btn.setCheckable(True)
+        self.erase_btn.setToolTip(
+            "Paint over a wrong spot to remove it: healed spots of any kind and "
+            "flagged IR ones. Click again to paint dust as before.")
+        self.erase_btn.toggled.connect(self._on_erase)
+        layout.addWidget(self.erase_btn)
+        layout.addWidget(self._separator())
 
         # --- Manual section ---
         layout.addWidget(self._section_label("Manual"))
@@ -377,6 +466,19 @@ class DustRemovalPanel(QWidget):
         self.feather_value.setText(f"{f * 100.0:.0f}%")
         self._refresh_ai_section()
         self.status_label.setText("")
+        for b in (self.ir_before_btn, self.erase_btn):
+            b.blockSignals(True)
+            b.setChecked(False)
+            b.blockSignals(False)
+        self.image_preview.set_dust_tool("brush")
+        self.image_preview._dust_before_on = False
+        sens = getattr(img, "ir_dust_sens", None) if img is not None else None
+        if sens is not None:
+            self.ir_sens_slider.blockSignals(True)
+            self.ir_sens_slider.setValue(int(sens))
+            self.ir_sens_slider.blockSignals(False)
+            self.ir_sens_value.setText(str(int(sens)))
+        self.refresh_ir_section()
 
     def sync_brush_size(self, r_norm: float):
         """Reflect a wheel-driven brush change from the canvas without
@@ -435,6 +537,179 @@ class DustRemovalPanel(QWidget):
 
     def _on_done(self):
         self.main_window.toggle_dust_removal(False)
+
+    # --- IR dust ----------------------------------------------------------
+    def refresh_ir_section(self):
+        """Buttons and the status line for the frame on screen."""
+        from core import ir_dust
+        img = self._current_image()
+        has_ir = img is not None and bool(getattr(img, "ir_source", None))
+        flagged = len(ir_dust.pending(img)) if img is not None else 0
+        healed = (sum(1 for sp in (getattr(img, "dust_spots", None) or [])
+                      if sp.get("kind") == ir_dust.KIND) if img is not None else 0)
+        busy = img is not None and (img is self._ir_busy_img or img in self._ir_queue)
+        why = ir_dust.can_find(img) if img is not None else "No frame."
+        self.ir_attach_btn.setEnabled(img is not None and not busy)
+        self.ir_attach_btn.setText("Change IR Shot…" if has_ir else "Attach IR Shot…")
+        self.ir_find_btn.setEnabled(has_ir and not busy and why is None)
+        self.ir_sens_slider.setEnabled(has_ir and not busy)
+        self.ir_heal_btn.setEnabled(flagged > 0 and not busy)
+        self.ir_before_btn.setEnabled(self.image_preview.has_dust_before())
+        if img is None:
+            text = ""
+        elif not has_ir:
+            text = ("No IR shot for this frame. Capture's IR for dust option "
+                    "takes one with every shot; Attach IR Shot… pairs one by hand.")
+        elif busy:
+            text = "Looking for dust in the IR shot…"
+        elif why is not None:
+            text = why
+        elif flagged:
+            text = (f"The IR shot shows {flagged} speck{'s' if flagged != 1 else ''} "
+                    "(outlined in amber), not healed yet.")
+        elif healed:
+            text = (f"{healed} IR spot{'s' if healed != 1 else ''} healed. Before "
+                    "shows the picture without them; Erase Spots removes a wrong one.")
+        elif getattr(img, "ir_dust_sens", None) is not None:
+            text = "No dust found in the IR shot at this sensitivity."
+        else:
+            text = "IR shot attached: Find Again looks for dust."
+        self.ir_status.setText(text)
+
+    def _ask_ir_file(self, img=None):
+        """The test seam: the IR RAW to pair with `img`, or None."""
+        from PySide6.QtWidgets import QFileDialog
+        start = ""
+        if img is not None:
+            import os
+            start = os.path.dirname(getattr(img, "ir_source", None)
+                                    or getattr(img, "file_path", "") or "")
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Attach IR Shot", start,
+            "Camera RAW (*.raf *.RAF *.cr2 *.CR2 *.cr3 *.CR3 *.nef *.NEF *.arw *.ARW "
+            "*.dng *.DNG *.orf *.ORF *.rw2 *.RW2 *.pef *.PEF *.3fr *.iiq);;All files (*)")
+        return path or None
+
+    def _on_ir_attach(self):
+        self.attach_ir(self._current_image())
+
+    def attach_ir(self, img):
+        """Ask for a frame's IR shot, pair it and look for dust."""
+        from core import ir_dust
+        if img is None:
+            return False
+        path = self._ask_ir_file(img)
+        if not path:
+            return False
+        ir_dust.attach(img, path)
+        self.find_ir(img)
+        self.image_preview.refresh_dust_badge()
+        self.image_preview._draw_ir_pending()
+        return True
+
+    def find_ir(self, img, sensitivity=None):
+        """Look for a frame's IR dust in the background (queued behind any
+        other frame being searched); flagged, never healed by itself."""
+        from core import ir_dust
+        if img is None or ir_dust.can_find(img) is not None:
+            self.refresh_ir_section()
+            return False
+        if sensitivity is None:
+            sensitivity = (getattr(img, "ir_dust_sens", None)
+                           if getattr(img, "ir_dust_sens", None) is not None
+                           else self.ir_sens_slider.value())
+        if img is self._ir_busy_img or img in self._ir_queue:
+            return True
+        self._ir_queue.append(img)
+        img._ir_find_sens = sensitivity
+        self._ir_next()
+        self.refresh_ir_section()
+        return True
+
+    def find_new_ir(self, images=None):
+        """Queue every frame with an IR shot that hasn't been searched yet."""
+        from core.ccr_backend import ccr_backend
+        n = 0
+        for img in list(images if images is not None else ccr_backend.images):
+            if (getattr(img, "ir_source", None) and getattr(img, "ir_dust_sens", None) is None
+                    and not getattr(img, "ir_dust_pending", None)):
+                n += bool(self.find_ir(img))
+        return n
+
+    def _ir_next(self):
+        if self._ir_thread is not None or not self._ir_queue:
+            return
+        img = self._ir_queue.pop(0)
+        self._ir_busy_img = img
+        self._ir_thread = new_thread()
+        self._ir_worker = _IrFindWorker(img, getattr(img, "_ir_find_sens", None))
+        self._ir_worker.moveToThread(self._ir_thread)
+        self._ir_thread.started.connect(self._ir_worker.run)
+        self._ir_worker.done.connect(self._on_ir_found)
+        self._ir_worker.failed.connect(self._on_ir_failed)
+        self._ir_worker.done.connect(self._ir_thread.quit)
+        self._ir_worker.failed.connect(self._ir_thread.quit)
+        self._ir_worker.done.connect(self._ir_worker.deleteLater)
+        self._ir_worker.failed.connect(self._ir_worker.deleteLater)
+        self._ir_thread.finished.connect(self._ir_thread_done)
+        self._ir_thread.start()
+
+    def _ir_thread_done(self):
+        self._ir_thread = None
+        self._ir_worker = None
+        self._ir_busy_img = None
+        self.refresh_ir_section()
+        self._ir_next()
+
+    def _on_ir_found(self, img, spots):
+        from core.ccr_backend import ccr_backend
+        if img in ccr_backend.images:
+            try:
+                ccr_backend.save_catalog()
+            except Exception:
+                pass
+        if img is self._current_image():
+            self.image_preview._draw_ir_pending()
+        self.image_preview.refresh_dust_badge()
+        self.refresh_ir_section()
+
+    def _on_ir_failed(self, img, msg):
+        if img is self._current_image():
+            self.ir_status.setText(f"The IR shot couldn't be read: {msg}")
+
+    def _on_ir_sens(self, value):
+        self.ir_sens_value.setText(str(value))
+        self._ir_sens_timer.start()
+
+    def _apply_ir_sensitivity(self):
+        from core import ir_dust
+        img = self._current_image()
+        if img is None or not getattr(img, "ir_source", None):
+            return
+        v = self.ir_sens_slider.value()
+        if getattr(img, "_ir_dust_map", None) is None:
+            self.find_ir(img, v)           # no map in memory (a restart): read again
+            return
+        ir_dust.rethreshold(img, v)
+        self.image_preview._draw_ir_pending()
+        self.image_preview.refresh_dust_badge()
+        self.refresh_ir_section()
+
+    def _on_ir_heal(self):
+        n = self.image_preview.heal_ir_dust()
+        self.refresh_ir_section()
+        if n:
+            from core.ccr_backend import ccr_backend
+            try:
+                ccr_backend.save_catalog()
+            except Exception:
+                pass
+
+    def _on_ir_before(self, on):
+        self.image_preview.set_dust_before(on)
+
+    def _on_erase(self, on):
+        self.image_preview.set_dust_tool("erase" if on else "brush")
 
     # --- AI handlers ------------------------------------------------------
     def _on_sensitivity_changed(self, value):
@@ -678,7 +953,9 @@ class DustRemovalPanel(QWidget):
                     wkr.cancel()
                 except Exception:
                     pass
+        self._ir_queue = []
         for attr_thr, attr_wkr in (("_download_thread", "_download_worker"),
+                                   ("_ir_thread", "_ir_worker"),
                                    ("_detect_thread", "_detect_worker"),
                                    ("_detect_all_thread", "_detect_all_worker")):
             thr = getattr(self, attr_thr, None)

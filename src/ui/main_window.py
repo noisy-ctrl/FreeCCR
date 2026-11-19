@@ -1657,6 +1657,11 @@ class MainWindow(QMainWindow):
             self.sliders_panel.set_temporary_hint(
                 f"{n} shot{'' if n == 1 else 's'} couldn't be merged as found: see "
                 "“rejected combinations” under the frames.", duration=6000)
+        # IR shots paired at load: look for their dust in the background
+        # (flagged, never healed by itself; spec/ir-dust-and-flat-sets.md)
+        dp = getattr(self, "dust_panel", None)
+        if dp is not None:
+            dp.find_new_ir()
         # Files the loader had to drop (undecodable RAW, missing file, …).
         # Without this they silently never appear — a built exe has no console
         # to show the loader's print. Read once, then clear.
@@ -2186,6 +2191,11 @@ class MainWindow(QMainWindow):
         capture_guide.stamp(path)        # Capture's guide, for a shot that has one
         from core import capture_log
         capture_log.add_file(path)       # Capture's log, for a shot being recorded
+        if capture_log.is_ir_file(path):
+            # the shot's IR for dust: paired with its frame, never loaded
+            # (spec/ir-dust-and-flat-sets.md)
+            self._tether_ir(path)
+            return
         if (getattr(ccr_backend, "scan_type", "colour") == "trichrome"
                 and self._tether_grouper is not None):
             if not is_raw_path(path):
@@ -2202,8 +2212,39 @@ class MainWindow(QMainWindow):
             return
         self._dispatch_to_worker(path)
 
+    def _tether_ir(self, path):
+        """An IR shot arrived: give it to its frame if that is here, else keep
+        it until the frame arrives (`_on_capture`)."""
+        waiting = self.__dict__.setdefault("_tether_ir_waiting", [])
+        if path not in waiting:
+            waiting.append(path)
+        for img in list(ccr_backend.images):
+            if self._take_waiting_ir(img):
+                break
+
+    def _take_waiting_ir(self, img):
+        """Pair `img` with a waiting IR shot of its shot and look for dust."""
+        from core import capture_log, ir_dust
+        waiting = getattr(self, "_tether_ir_waiting", None)
+        if not waiting or getattr(img, "ir_source", None):
+            return False
+        paths = list(getattr(img, "merge_sources", None) or [getattr(img, "file_path", None)])
+        ir = capture_log.ir_for([p for p in paths if p], waiting, look_in_folder=False)
+        if not ir:
+            return False
+        waiting.remove(ir)
+        ir_dust.attach(img, ir)
+        dp = getattr(self, "dust_panel", None)
+        if dp is not None:
+            dp.find_ir(img)
+        return True
+
     def _route_existing(self, paths):
         """Files already in the folder, when the user chose to import them."""
+        from core import capture_log
+        paths, irs = capture_log.split_ir(list(paths))
+        for p in irs:
+            self._tether_ir(p)
         if getattr(ccr_backend, "scan_type", "colour") != "trichrome":
             for p in paths:
                 self._dispatch_to_worker(p)
@@ -2367,6 +2408,7 @@ class MainWindow(QMainWindow):
         ccr_backend.file_paths.append(img.file_path)
         idx = len(ccr_backend.images) - 1
         rerender = False
+        self._take_waiting_ir(img)        # its IR shot may have come first
         if template is not None:
             self._apply_tether_template(img, template)
             rerender = True

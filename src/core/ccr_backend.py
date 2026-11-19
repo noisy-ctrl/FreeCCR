@@ -340,6 +340,11 @@ class CCRBackend:
         self._load_generation += 1
         gen = self._load_generation
         self.images.clear()
+        # A shot's IR file is never a frame of its own: it is paired with the
+        # frame of its shot when the batch is published
+        # (spec/ir-dust-and-flat-sets.md).
+        from core import capture_log
+        file_paths, self._load_ir_paths = capture_log.split_ir(list(file_paths))
         self.file_paths = file_paths
         self._set_load_progress(gen, 0, len(file_paths))
         # A fresh batch is a new roll: drop any B/W point sampled from the
@@ -481,9 +486,29 @@ class CCRBackend:
         if stale:
             return False
         self._attach_capture_guides(results)
+        self._attach_ir_shots(results, getattr(self, "_load_ir_paths", None) or [])
         self.images = results
         self.file_paths = [img.file_path for img in results]
         return True
+
+    def _attach_ir_shots(self, images, ir_paths=()):
+        """Pair each frame with its shot's IR file (spec/ir-dust-and-flat-sets.md):
+        the capture log's, or a `..._4IR` file of the same shot among the
+        files opened or beside the frame. A frame that has one keeps it.
+        The dust itself is looked for afterwards, in the background."""
+        from core import capture_log, ir_dust
+        logs = {}
+        for img in images:
+            if getattr(img, "ir_source", None):
+                continue
+            paths = list(getattr(img, "merge_sources", None) or [getattr(img, "file_path", None)])
+            try:
+                ir = capture_log.ir_for([p for p in paths if p], ir_paths, logs=logs)
+            except Exception as e:                       # never stop a load
+                print(f"IR shot for {os.path.basename(paths[0]) if paths else '?'}: {e}")
+                continue
+            if ir:
+                ir_dust.attach(img, ir)
 
     def _attach_capture_guides(self, images):
         """Capture's frame guide for frames a capture log knows

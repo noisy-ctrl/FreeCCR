@@ -126,13 +126,28 @@ class CaptureSequence:
         self._shot = 0               # voids a shot's file timeout once it is done
         self.exposures = None
         self._channel = None         # the colour of the shot in flight
+        self._ir = None              # the IR shot's exposure and levels, if any
+        self._levels_before = None
 
-    def start(self, timing, preset, trichrome=True, shutter=None, exposures=None):
+    def start(self, timing, preset, trichrome=True, shutter=None, exposures=None,
+              ir=None):
+        """`ir` (camera shutter only): {"shutter", "iso", "levels"}: after the
+        colour shot(s), one more with the IR LED alone at that exposure, the
+        IR shot for dust (spec/ir-dust-and-flat-sets.md); the light's levels
+        are put back after it."""
         if self.running:
             return False
         self._shutter = shutter
         self.exposures = ({k: dict(v) for k, v in exposures.items() if isinstance(v, dict)}
                           if (exposures and shutter is not None) else None)
+        self._ir = dict(ir) if (ir and shutter is not None) else None
+        if self._ir is not None:
+            lv = self._ir.get("levels") or dict(cl.OFF, ir=255)
+            self._ir["levels"] = dict(lv)
+            self.exposures = dict(self.exposures or {})
+            self.exposures["ir"] = self._ir
+        levels_now = getattr(self.light, "levels", None)
+        self._levels_before = dict(levels_now()) if callable(levels_now) else None
         self._trichrome = bool(trichrome)
         if not self._light_ok():
             self._finish("disconnected", restore=False)
@@ -142,7 +157,8 @@ class CaptureSequence:
         self._token += 1
         self._timing = clean_timing(timing)
         self._preset = {k: int((preset or {}).get(k, 0)) for k in cl.CHANNELS}
-        self._queue = list(TRICHROME) if trichrome else [None]
+        self._queue = (list(TRICHROME) if trichrome else [None]) + \
+            (["ir"] if self._ir is not None else [])
         self._next()
         return True
 
@@ -187,7 +203,8 @@ class CaptureSequence:
             self._finish("failed")
 
     def _light_ok(self):
-        if self._shutter is not None and not self._trichrome:
+        if (self._shutter is not None and not self._trichrome
+                and getattr(self, "_ir", None) is None):
             return True              # a single shot uses the light as it is
         return self.light.is_open()
 
@@ -216,7 +233,9 @@ class CaptureSequence:
         channel = self._queue.pop(0)
         self._channel = channel
         exp = self._exposure_for(channel)
-        if channel is not None:
+        if channel == "ir":
+            self.light.set_levels(dict(exp["levels"]))
+        elif channel is not None:
             lv = (exp or {}).get("levels")
             self.light.set_levels(dict(lv) if lv else cl.solo(self._preset, channel))
         elif exp and exp.get("levels") and self.light.is_open():
@@ -281,5 +300,8 @@ class CaptureSequence:
             white = dict(cl.OFF)
             white["w"] = int(self._preset.get("w", 255) or 0)
             self.light.set_levels(white)
+        elif (was and restore and getattr(self, "_ir", None) is not None
+              and self._levels_before is not None and self.light.is_open()):
+            self.light.set_levels(dict(self._levels_before))   # after the IR shot
         if self.on_finished:
             self.on_finished(reason)

@@ -6016,7 +6016,8 @@ def _heal_impl(img16: np.ndarray, spots, inpaint_radius: int,
         comp_win = labels[y0:y0 + ch, x0:x0 + cw] == i
         if not comp_win.any():
             continue  # fully overwritten by later strokes (shared pixels)
-        comp_auto = spots[i - 1].get("kind") == "auto"
+        # IR spots are generous holes like the AI ones (core x SPOT_SCALE)
+        comp_auto = spots[i - 1].get("kind") in ("auto", "ir")
         # Half-thickness = the defect's local scale (1px zero border so a
         # component touching its bbox edge still measures correctly).
         hole0 = np.zeros((ch + 2, cw + 2), np.uint8)
