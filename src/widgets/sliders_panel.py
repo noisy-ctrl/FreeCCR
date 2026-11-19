@@ -33,7 +33,7 @@ from datetime import date
 # First combo entry of the film-stock selector: the baked scalar
 # DEFAULT_DENSITY_SLOPE (no preset). See spec/film-stock-slopes.md.
 FILM_STOCK_DEFAULT_LABEL = "Default"
-PROFILE_COMBO_W = 88    # the Colour Profile list, narrow with Write to Preset beside it
+PROFILE_COMBO_W = 88    # the Colour Profile list, narrow with Write Preset beside it
 
 # Setting groups offered by the "Sync to All" and "Copy Settings" dialogs. The
 # adjustment-key groups partition SlidersPanel.ADJUSTMENT_KEYS exactly; "crop"
@@ -2009,10 +2009,10 @@ class SlidersPanel(QWidget):
         self.color_profile_combo.setFixedHeight(theme.CONTROL_H)
         theme.shrinkable_combo(self.color_profile_combo)
         self.color_profile_combo.currentIndexChanged.connect(self.on_color_profile_changed)
-        # narrower, with Write to Preset beside it (spec/film-presets.md §5)
+        # narrower, with Write Preset beside it (spec/film-presets.md §5)
         self.color_profile_combo.setFixedWidth(PROFILE_COMBO_W)
 
-        self.write_preset_btn = QPushButton("Write to Preset")
+        self.write_preset_btn = QPushButton("Write Preset")
         self.write_preset_btn.setFixedHeight(theme.CONTROL_H)
         theme.style_button(self.write_preset_btn, "secondary")
         self.write_preset_btn.setToolTip(
@@ -2024,11 +2024,15 @@ class SlidersPanel(QWidget):
         self.write_preset_btn.customContextMenuRequested.connect(self._preset_menu)
         self._preset_unticked = set(film_presets.UNTICKED_BY_DEFAULT)
 
+        # as wide as its words (it stretched over the rest of the row:
+        # spec/film-presets-menu.md §3)
+        self.write_preset_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         row = QHBoxLayout()
         row.setSpacing(theme.GAP_TIGHT)
         row.addWidget(label, alignment=Qt.AlignVCenter)
         row.addWidget(self.color_profile_combo, alignment=Qt.AlignVCenter)
-        row.addWidget(self.write_preset_btn, 1, alignment=Qt.AlignVCenter)
+        row.addWidget(self.write_preset_btn, alignment=Qt.AlignVCenter)
+        row.addStretch(1)
         return row
 
     # --- film presets (spec/film-presets.md §5) ----------------------------
@@ -2129,7 +2133,7 @@ class SlidersPanel(QWidget):
                                 f"{film_presets.label(p)}.", duration=4000)
 
     def _preset_menu_actions(self):
-        """[(label, indices or None, enabled)] for Write to Preset's right-click."""
+        """[(label, indices or None, enabled)] for Write Preset's right-click."""
         out = []
         cur = self.current_idx
         if cur is not None:
@@ -2182,7 +2186,7 @@ class SlidersPanel(QWidget):
             return
         presets = [p for p in self._film_presets() if film_presets.carried(p)]
         if not presets:
-            self.set_temporary_hint("No film preset carries settings yet: Write to Preset "
+            self.set_temporary_hint("No film preset carries settings yet: Write Preset "
                                     "first.", duration=4000)
             return
         pid = self._choose_preset(presets, self._frame_preset_id(indices[0], presets),

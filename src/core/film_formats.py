@@ -25,6 +25,11 @@ FILM_FORMATS = [
 ]
 _BY_KEY = {k: (label, ratio, cols) for k, label, ratio, cols in FILM_FORMATS}
 
+# short names, for the window title (spec/film-presets-menu.md)
+SHORT = {"35mm": "35mm", "half": "Half frame", "xpan": "XPan", "645": "6x4.5",
+         "6x6": "6x6", "6x7": "6x7", "6x8": "6x8", "6x9": "6x9", "6x12": "6x12",
+         "6x17": "6x17", "4x5": "4x5", "8x10": "8x10"}
+
 # The image area's long side on the film, mm (Glow's halation rim is a fixed
 # size on the film, so a smaller share of a larger frame:
 # spec/highlight-glow.md revision 4). Sheet film: the usual image area.
@@ -86,3 +91,9 @@ def long_mm(name):
     """The frame's long side on the film in mm, or None if unknown."""
     k = film_key(name)
     return LONG_MM.get(k) if k else None
+
+
+def short_label(name):
+    """'6x4.5' for a film key or an auto crop format name; '' if unknown."""
+    k = film_key(name)
+    return SHORT.get(k, "") if k else ""

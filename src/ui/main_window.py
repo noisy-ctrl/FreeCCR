@@ -902,6 +902,7 @@ class MainWindow(QMainWindow):
             dlg.exec()
         finally:
             self._settings_dialog = None
+            self._update_title()        # a preset renamed or deleted there
 
     def _refresh_profile_ui(self):
         """Reflect the active input profile in the Settings dialog when it is
@@ -2594,6 +2595,7 @@ class MainWindow(QMainWindow):
         if p is not None:
             self.capture_session.update(film=fp.file_film(p), film_label=fp.label(p),
                                         preset=p["id"])
+        self._update_title()
         mon = getattr(self, "_live_monitor", None)
         if mon is not None and fmt:
             mon.apply_roll_format(fmt)      # spec/film-base-per-scan-type.md §4
@@ -2609,6 +2611,47 @@ class MainWindow(QMainWindow):
         if film:
             films = [f for f in (st.value("capture/films", [], type=list) or []) if f != film]
             st.setValue("capture/films", [film] + films[:9])
+
+    # --- the roll's film and format: the canister menu, the title -------------
+    # (spec/film-presets-menu.md)
+    def roll_film_and_format(self):
+        """(preset id or None, typed film or "", format key or "") of the roll."""
+        sess = getattr(self, "capture_session", None) or {}
+        return sess.get("preset") or None, sess.get("film") or "", sess.get("format") or ""
+
+    def _session_roll(self):
+        sess = getattr(self, "capture_session", None) or {}
+        if sess.get("roll"):
+            return sess["roll"]
+        # no session yet: the roll last used, so the Start window still
+        # offers the next one
+        return self._settings.value("capture/last_roll", "", type=str) or None
+
+    def set_roll_film(self, preset_id):
+        """The canister menu's Film: a preset's id, or None for none."""
+        _pid, film, fmt = self.roll_film_and_format()
+        self._set_capture_session(self._session_roll(), fmt,
+                                  "" if preset_id is None else film, preset=preset_id)
+
+    def set_roll_format(self, key):
+        """The canister menu's Format: a film format key, or "" for Not set."""
+        pid, film, _fmt = self.roll_film_and_format()
+        self._set_capture_session(self._session_roll(), key or "", film, preset=pid)
+
+    def _window_title(self):
+        """'FreeCCR · Portra400 V1 · 35mm': the roll's film (its preset's
+        label, read now, else the typed name) and format's short name."""
+        from core import film_formats
+        from core import film_presets as fp
+        pid, film, fmt = self.roll_film_and_format()
+        if pid:
+            p = fp.find(fp.load(self._settings), pid)
+            film = fp.label(p) if p is not None else film
+        bits = [b for b in (film, film_formats.short_label(fmt)) if b]
+        return " · ".join(["FreeCCR"] + bits)
+
+    def _update_title(self):
+        self.setWindowTitle(self._window_title())
 
     def _tether_start_options(self, n_open, start_dir, from_monitor=False, parent=None):
         """The Start Hot Folder Tether window's answers (dict, see

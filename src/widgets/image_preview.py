@@ -1072,8 +1072,9 @@ class ImagePreview(QWidget):
             theme.load_tinted_icon(resource_path("icons/film-canister-icon.png")),
             "Film Presets", self)
         self.film_presets_action.setToolTip(
-            "Film Presets: each film's ID, its film bases, Film Look and settings "
-            "(Settings → Film Presets).")
+            "Film Presets: the roll's film and format (as Start Hot Folder Tether "
+            "sets them), and Edit Film Presets… for each film's ID, film bases, "
+            "Film Look and settings.")
         self.film_presets_action.triggered.connect(self.open_film_presets)
         self.toolbar.addAction(self.film_presets_action)
         self.toolbar.addAction(self.capture_action)
@@ -2607,12 +2608,81 @@ class ImagePreview(QWidget):
                               + TEXT_BUTTON_PAD)
 
     def open_film_presets(self):
-        """The toolbar's film canister: Settings at the Film Presets page."""
+        """The toolbar's film canister: a menu of the roll's film and format,
+        with Edit Film Presets… last (spec/film-presets-menu.md)."""
+        menu = self.film_menu()
+        btn = self.toolbar.widgetForAction(self.film_presets_action)
+        at = (btn.mapToGlobal(btn.rect().bottomLeft()) if btn is not None
+              else QCursor.pos())
+        self._film_menu_open = menu
+        menu.exec(at)
+        self._film_menu_open = None
+        return True
+
+    def edit_film_presets(self):
+        """Settings at the Film Presets page (the menu's last entry)."""
         opener = getattr(self.window(), "open_settings", None)
         if opener is None:
             return False
         opener(page="Film Presets")
         return True
+
+    def film_menu(self):
+        """The canister's menu, built fresh (the test seam): Film (None + the
+        presets, the roll's ticked), Format (Not set + the film formats),
+        then Edit Film Presets…. Picking sets the roll's (MainWindow's
+        capture session, as the Start Hot Folder Tether window does)."""
+        from PySide6.QtCore import QSettings
+        from PySide6.QtGui import QActionGroup
+        from PySide6.QtWidgets import QMenu
+        from core import film_formats
+        from core import film_presets as fp
+        mw = self.window()
+        menu = QMenu(self)
+        roll = getattr(mw, "roll_film_and_format", None)
+        pid, film, fmt = roll() if roll is not None else (None, "", "")
+        st = getattr(mw, "_settings", None) or QSettings("FreeCCR", "FreeCCR")
+        presets = fp.ordered(fp.load(st))
+        if pid and fp.find(presets, pid) is None:
+            pid = None                          # deleted since: read as none
+        head = menu.addAction("Film")
+        head.setEnabled(False)
+        films = QActionGroup(menu)
+        films.setExclusive(True)
+
+        def film_action(text, value, checked):
+            a = menu.addAction(text)
+            a.setCheckable(True)
+            a.setChecked(checked)
+            films.addAction(a)
+            if value is not False and hasattr(mw, "set_roll_film"):
+                a.triggered.connect(lambda _=False, v=value: mw.set_roll_film(v))
+            return a
+        typed = bool(film) and not pid
+        film_action("None", None, not pid and not typed)
+        if typed:
+            # a film typed in the Start window, not a preset: shown, inert
+            film_action(film, False, True).setToolTip(
+                "Typed in Start Hot Folder Tether, not a film preset.")
+        for p in presets:
+            film_action(fp.label(p), p["id"], p["id"] == pid)
+        menu.addSeparator()
+        head = menu.addAction("Format")
+        head.setEnabled(False)
+        formats = QActionGroup(menu)
+        formats.setExclusive(True)
+        for key, label in [("", "Not set")] + [(k, lb) for k, lb, _r, _c in
+                                                film_formats.FILM_FORMATS]:
+            a = menu.addAction(label)
+            a.setCheckable(True)
+            a.setChecked(key == (fmt or ""))
+            formats.addAction(a)
+            if hasattr(mw, "set_roll_format"):
+                a.triggered.connect(lambda _=False, k=key: mw.set_roll_format(k))
+        menu.addSeparator()
+        menu.addAction("Edit Film Presets…").triggered.connect(self.edit_film_presets)
+        menu._groups = (films, formats)          # keep the groups alive
+        return menu
 
     def open_crop(self):
         """The toolbar's Crop: what the panel's Crop button does."""
