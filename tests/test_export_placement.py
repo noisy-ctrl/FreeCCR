@@ -83,9 +83,49 @@ def test_auto_crop_sits_left_of_un_convert_behind_a_plain_gap(monkeypatch):
     assert un.left() - ac.right() >= AUTO_CROP_GAP_PX
     calls = []
     monkeypatch.setattr(w.sliders_panel, "_on_auto_crop_current", lambda: calls.append(1))
+    monkeypatch.setattr(w.sliders_panel, "_on_auto_crop_all", lambda: calls.append("all"))
+    monkeypatch.setattr(w.sliders_panel, "_on_auto_crop_selected",
+                        lambda sel: calls.append(("sel", tuple(sel))))
+    asked = []
+    answer = ["current"]
+    monkeypatch.setattr(ip, "_ask_auto_crop_scope",
+                        lambda n: asked.append(n) or answer[0])
     ip.current_idx = None
     ip.auto_crop_action.trigger()
-    assert calls == []                                        # nothing on screen
+    assert calls == [] and asked == []                        # nothing on screen
     ip.current_idx = 0
     ip.auto_crop_action.trigger()
     assert calls == [1]
+    # it asks first, like Convert (spec/auto-crop-button-choice.md)
+    monkeypatch.setattr(w.thumbnail_list, "selected_indices", lambda: [0, 2, 3])
+    answer[0] = "selected"
+    ip.auto_crop_action.trigger()
+    assert asked[-1] == 3 and calls[-1] == ("sel", (0, 2, 3))
+    answer[0] = "all"
+    ip.auto_crop_action.trigger()
+    assert calls[-1] == "all"
+    answer[0] = None
+    n = len(calls)
+    ip.auto_crop_action.trigger()
+    assert len(calls) == n                                    # Cancel
+
+
+def test_the_auto_crop_question_offers_selected_only_for_a_selection(monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+    from ui.main_window import MainWindow
+    w = MainWindow()
+    _KEEP.append(w)
+    ip = w.image_preview
+    seen = []
+
+    def fake_exec(box):
+        seen.append(([b.text() for b in box.buttons()], box.defaultButton().text()))
+        return 0
+    monkeypatch.setattr(QMessageBox, "exec", fake_exec)
+    assert ip._ask_auto_crop_scope(1) is None
+    assert ip._ask_auto_crop_scope(4) is None
+    one, many = seen
+    assert "Auto Crop Current" in one[0] and "Auto Crop All" in one[0]
+    assert not any(t.startswith("Auto Crop Selected") for t in one[0])
+    assert one[1] == "Auto Crop Current"
+    assert "Auto Crop Selected (4)" in many[0] and many[1] == "Auto Crop Selected (4)"
