@@ -473,6 +473,26 @@ def load_tinted_icon(abs_path: str, color: str = ICON,
     return icon
 
 
+def load_colour_icon(abs_path: str, disabled_color: str = ICON_DISABLED) -> QIcon:
+    """A coloured toolbar icon (False colour's ring, spec/toolbar-icons.md):
+    shown as drawn, and as a flat ``disabled_color`` glyph when disabled."""
+    base = QPixmap(abs_path)
+    if base.isNull():
+        return QIcon(abs_path)
+    grey = QPixmap(base.size())
+    grey.fill(Qt.transparent)
+    p = QPainter(grey)
+    p.drawPixmap(0, 0, base)
+    p.setCompositionMode(QPainter.CompositionMode_SourceIn)
+    p.fillRect(grey.rect(), qcolor(disabled_color))
+    p.end()
+    icon = QIcon()
+    for state in (QIcon.Off, QIcon.On):
+        icon.addPixmap(base, QIcon.Normal, state)
+        icon.addPixmap(grey, QIcon.Disabled, state)
+    return icon
+
+
 def status_icon_pixmap(kind: str = "done", size: int = 48, dpr: float = 2.0) -> QPixmap:
     """A drawn status badge for message boxes: "done" is a white tick on a
     green disc, "problem" a white exclamation mark on amber. Drawn rather

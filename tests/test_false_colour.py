@@ -201,7 +201,8 @@ def test_hdr_dots_sit_above_false_colour(tmp_path, monkeypatch):
 
 
 def test_toolbar_keeps_export_visible():
-    """The text False colour button must not push Export off the end of the
+    """The False colour button (a picture since spec/toolbar-icons.md) must
+    not push Export off the end of the
     toolbar at a typical laptop window width (see also
     test_panel_width.test_preview_toolbar_fits_at_the_smallest_window)."""
     from ui.main_window import MainWindow
@@ -211,5 +212,5 @@ def test_toolbar_keeps_export_visible():
     w.show()
     _app.processEvents()
     ip = w.image_preview
-    assert ip.fc_action.text() == "False colour" and ip.fc_action.icon().isNull()
+    assert ip.fc_action.text() == "False colour" and not ip.fc_action.icon().isNull()
     assert ip.toolbar.widgetForAction(ip.export_action).isVisible()

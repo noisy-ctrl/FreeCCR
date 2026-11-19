@@ -34,12 +34,16 @@ class _FakeMonitor:
         self.calls.append("activate")
 
 
-def test_capture_sits_left_of_auto_crop_as_a_picture():
+def test_capture_sits_in_the_middle_as_a_picture():
+    """Between the picture buttons and the words, a stretch either side
+    (spec/toolbar-icons.md, the user 2026-11-19)."""
     win = MainWindow()
     ip = win.image_preview
     acts = ip.toolbar.actions()
     i = acts.index(ip.capture_action)
-    assert acts[i + 1] is ip.auto_crop_action
+    w = ip.toolbar.widgetForAction
+    assert w(acts[i - 1]) is ip.capture_push and w(acts[i + 1]) is ip.export_push
+    assert acts[i + 2] is ip.auto_crop_action
     assert not ip.capture_action.icon().isNull()
     assert ip.capture_action.text() == "Capture"
 
