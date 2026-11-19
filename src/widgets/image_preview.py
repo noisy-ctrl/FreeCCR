@@ -947,6 +947,14 @@ class ImagePreview(QWidget):
         self.mirror_h_action.triggered.connect(lambda _checked=False: self.mirror_horizontal())
         self.toolbar.addAction(self.mirror_h_action)
         add_spacer()
+        # Crop, right after the flips (spec/toolbar-icons.md): the panel's Crop
+        self.crop_action = QAction(
+            theme.load_tinted_icon(resource_path("icons/crop-icon.png")), "Crop", self)
+        self.crop_action.setToolTip(
+            "Crop: crop and straighten this frame (the panel's Crop button).")
+        self.crop_action.triggered.connect(self.open_crop)
+        self.toolbar.addAction(self.crop_action)
+        add_spacer()
         self.toolbar.addAction(self.sprocket_action)     # after the orientation tools
         add_spacer()
 
@@ -955,18 +963,22 @@ class ImagePreview(QWidget):
         # Area-editing mask pickers — create a local masked adjustment area
         # (the global panel is the implicit whole-image layer). Guarded to
         # converted images inside add_area().
-        self.add_circle_action = QAction("Area", self)
+        # Pictures since spec/toolbar-icons.md (2026-11-19): the name leads
+        # each tooltip, as there are no words on the button.
+        self.add_circle_action = QAction(
+            theme.load_tinted_icon(resource_path("icons/area-icon.png")), "Area", self)
         self.add_circle_action.setToolTip(
-            "Add a circular local-adjustment area (squishable ellipse). "
+            "Area: add a circular local-adjustment area (squishable ellipse). "
             "Edit its adjustments in the right panel; drag on the canvas to "
             "move/resize/rotate it.")
         self.add_circle_action.triggered.connect(lambda: self.add_area("circle"))
         self.toolbar.addAction(self.add_circle_action)
         add_spacer()
 
-        self.add_gradient_action = QAction("Gradient", self)
+        self.add_gradient_action = QAction(
+            theme.load_tinted_icon(resource_path("icons/gradient-icon.png")), "Gradient", self)
         self.add_gradient_action.setToolTip(
-            "Add a linear-gradient local-adjustment area. Drag its endpoints "
+            "Gradient: add a linear-gradient local-adjustment area. Drag its endpoints "
             "on the canvas to aim the ramp.")
         self.add_gradient_action.triggered.connect(lambda: self.add_area("gradient"))
         self.toolbar.addAction(self.add_gradient_action)
@@ -977,10 +989,12 @@ class ImagePreview(QWidget):
         # state. With the area tools. "Dust removal" (the user, 2026-11-08):
         # the toolbar must still fit at a 14-inch Mac's full width without
         # pushing Export into the overflow menu (a test checks).
-        self.dust_action = QAction("Dust removal", self)
+        self.dust_action = QAction(
+            theme.load_tinted_icon(resource_path("icons/dust-icon.png"),
+                                   on_color=theme.ICON_ON), "Dust removal", self)
         self.dust_action.setCheckable(True)
         self.dust_action.setToolTip(
-            "Spot out dust, hair and small scratches. Opens the Dust Removal "
+            "Dust removal: spot out dust, hair and small scratches. Opens the Dust Removal "
             "panel: paint over dust with the brush, or use AI auto-detect.")
         self.dust_action.triggered.connect(
             lambda checked: self.window().toggle_dust_removal(checked))
@@ -1009,10 +1023,12 @@ class ImagePreview(QWidget):
         # HDR glow view: tint what will glow in a "JPEG + HDR gain map"
         # export. A display mode only, off at startup and never saved.
         # See spec/hdr-gain-map-export.md.
-        self.hdr_tint_action = QAction("HDR", self)
+        self.hdr_tint_action = QAction(
+            theme.load_tinted_icon(resource_path("icons/hdr-icon.png"),
+                                   on_color=theme.ICON_ON), "HDR", self)
         self.hdr_tint_action.setCheckable(True)
         self.hdr_tint_action.setToolTip(
-            "Dot the highlights that will glow on an HDR screen in a "
+            "HDR: dot the highlights that will glow on an HDR screen in a "
             "'JPEG + HDR gain map' export. Denser dots = more glow, up to "
             "the export's HDR headroom. Preview only.")
         self.hdr_tint_action.triggered.connect(self.set_hdr_tint)
@@ -1021,11 +1037,14 @@ class ImagePreview(QWidget):
 
         # False colour: a classic exposure scale over a greyscale view. A
         # display mode only, off at startup, never saved (spec/false-colour.md).
-        # A text button, like HDR (it was the scale's stripes as an icon).
-        self.fc_action = QAction("False colour", self)
+        # A ring in the bands' own colours, the toolbar's one coloured icon
+        # (the user, 2026-11-19; spec/toolbar-icons.md).
+        self.fc_action = QAction(
+            theme.load_colour_icon(resource_path("icons/false-colour-icon.png")),
+            "False colour", self)
         self.fc_action.setCheckable(True)
         self.fc_action.setToolTip(
-            "Show the picture in greyscale with false-colour exposure bands: "
+            "False colour: the picture in greyscale with false-colour exposure bands: "
             "purple/blue near black, green mid grey, pink one stop over, "
             "yellow/red near and at white. Preview only.\n"
             "Right-click for the stop-zone scale instead.")
@@ -1042,11 +1061,16 @@ class ImagePreview(QWidget):
         # Un-convert, Convert and Export sit at the far right, next to the
         # histogram: everything before them stays left-aligned and this spacer
         # takes up the slack.
+        # Capture sits in the middle, between the picture buttons and the
+        # words (the user, 2026-11-19): a stretch either side of it.
+        self.capture_push = QWidget()
+        self.capture_push.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.toolbar.addWidget(self.capture_push)
+        self.toolbar.addAction(self.capture_action)
         self.export_push = QWidget()
         self.export_push.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.toolbar.addWidget(self.export_push)
 
-        self.toolbar.addAction(self.capture_action)
         self.toolbar.addAction(self.auto_crop_action)
         self.auto_crop_gap = QWidget()
         self.auto_crop_gap.setFixedWidth(AUTO_CROP_GAP_PX)
@@ -2572,6 +2596,15 @@ class ImagePreview(QWidget):
             btn.setFixedWidth(QFontMetrics(font).horizontalAdvance(act.text())
                               + TEXT_BUTTON_PAD)
 
+    def open_crop(self):
+        """The toolbar's Crop: what the panel's Crop button does."""
+        panel = getattr(self.window(), "sliders_panel", None)
+        btn = getattr(panel, "crop_btn", None)
+        if btn is not None and btn.isEnabled():
+            panel._on_crop_clicked()
+            return True
+        return False
+
     def open_capture(self):
         """The toolbar's Capture: open the Live Capture Monitor, or show and
         raise it if it is open (hidden, minimised or behind)."""
@@ -2631,9 +2664,12 @@ class ImagePreview(QWidget):
             # Film B/W Point tools are negative-only.
             if hasattr(sliders_panel, "set_negative_controls_enabled"):
                 sliders_panel.set_negative_controls_enabled(not positive)
-            # Dust removal follows the same gate as the adjustment sliders.
+            # Dust removal and Crop follow the same gate as the adjustment
+            # sliders (Crop is the panel's Crop button, which they gate too).
             if hasattr(self, "dust_action"):
                 self.dust_action.setEnabled(sliders_enabled)
+            if hasattr(self, "crop_action"):
+                self.crop_action.setEnabled(sliders_enabled)
         
 
     def set_bwpoint_mode(self, mode):

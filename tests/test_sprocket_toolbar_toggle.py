@@ -53,14 +53,15 @@ def test_a_new_window_shows_the_saved_state():
 
 
 def test_it_follows_the_orientation_icons():
-    """Revision 2026-10-30: after the rotate / flip tools, before Area."""
+    """Revision 2026-10-30: after the rotate / flip tools, before Area; Crop
+    sits between the flips and it since spec/toolbar-icons.md."""
     w = MainWindow()
     try:
         acts = [a for a in w.image_preview.toolbar.actions() if not a.isSeparator()
                 and (a.text() or not a.icon().isNull())]
         names = [a.text() for a in acts]
         i = names.index("Sprocket Holes White")
-        assert names[i - 1] == "Mirror Horizontal"
+        assert names[i - 2:i] == ["Mirror Horizontal", "Crop"]
         assert names.index("Rotate Left") < i < names.index("Area")
     finally:
         w.hide()

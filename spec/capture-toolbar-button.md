@@ -22,3 +22,8 @@ window."
 - It calls `open_live_monitor`; a minimised monitor is restored, a hidden
   one shown and raised; with none open one is made.
 - The toolbar still fits the smallest canvas.
+
+## Revision 2026-11-19: in the middle
+
+Capture now sits centred between the picture buttons and the words
+(spec/toolbar-icons.md); the padding change above is kept.
