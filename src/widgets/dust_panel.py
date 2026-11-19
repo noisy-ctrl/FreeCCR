@@ -232,6 +232,24 @@ class DustRemovalPanel(QWidget):
             lambda on: self.image_preview.set_dust_source_overlay(on))
         layout.addWidget(self.show_sources_cb)
 
+        # A click grows to cover the speck's soft halo (spec/dust-fit-spot.md)
+        from PySide6.QtCore import QSettings
+        self.fit_spot_cb = QCheckBox("Fit each click to the speck")
+        self.fit_spot_cb.setToolTip(
+            "A click grows to cover the speck's soft edge, so the heal copies "
+            "from clean film beside it (a brush that covers only the bright "
+            "core leaves a trace). Never smaller than your brush, at most three "
+            "times it; strokes are left as painted.")
+        on = QSettings("FreeCCR", "FreeCCR").value("dust/fit_spot", True, type=bool)
+        self.fit_spot_cb.setChecked(on)
+        self.image_preview.dust_fit_spot = on
+
+        def _fit(on):
+            QSettings("FreeCCR", "FreeCCR").setValue("dust/fit_spot", bool(on))
+            self.image_preview.dust_fit_spot = bool(on)
+        self.fit_spot_cb.toggled.connect(_fit)
+        layout.addWidget(self.fit_spot_cb)
+
         hint = QLabel(
             "Click or drag over dust to remove it. Ctrl+wheel resizes the "
             "brush. The spot you just painted shows where it copies from: "
