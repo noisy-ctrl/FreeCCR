@@ -1,6 +1,6 @@
 # IR dust removal and flat-field sets
 
-Status: BUILT 2026-11-19 (§2–§5); Capture → Shoot Flat Fields… (end of §5) not yet.
+Status: BUILT 2026-11-19 (§2–§5, Capture → Shoot Flat Fields… at the end of §5 too).
 
 Decisions (the user, 2026-11-19): the IR shot is part of each Shoot; dust
 found in it is FLAGGED, not healed ("the dust removal tool button changing
@@ -198,15 +198,66 @@ moved by scale 0.95–1.06 and shifts of 2–4 %): unevenness inside the opening
 0.185 raw, 0.036–0.045 with the flat untracked, 0.009 tracked (the flat on
 its own shot: 0.009); the move found within 0.0007.
 Not yet: `img.scan_light` is set by nothing (a B&W frame under one LED uses
-the white flat); Capture → Shoot Flat Fields… below.
+the white flat).
+Fixed with Shoot Flat Fields: the film format was kept in the profile's meta
+as `format`, which is the .ffc file's own key for its file type, so it never
+reached the disk (a flat reloaded at start had no format and acted as an
+any-format flat). It is stored as `film_format` now (`profile_format`); in
+memory nothing changed, which is why the in-memory tests passed.
 
-**Capture → Shoot Flat Fields…** (not built; USB camera + Scanlight): asks the format
-(the roll's by default) and which lights (white, RGB, IR); with the film out
-and the empty carrier in, for each light it finds an exposure that puts the
-brightest part of the opening at ~60 % of the RAW's range (the film-base
-Calibration machinery), shoots it (two shots averaged for IR, which is
-noisy), builds and saves the profile into the library with its light,
-format and opening, and puts the light and the camera back.
+**Capture → Shoot Flat Fields…** (BUILT 2026-11-19, the user: "Capture →
+Shoot Flat Fields - please build"; `core/flat_capture.py`,
+`widgets/flat_shoot_dialog.py`). A button beside Set Black Point… under
+Shoot (`flat_btn`), enabled with a USB camera whose shutter FreeCCR can set
+and the Scanlight connected (`_flat_blocker` names what is missing in its
+tooltip; off while shooting, measuring, building or asleep). It asks
+(`_ask_flat_fields`, the seam): **Format** (the roll's, else the frame
+guide's; "Any format") and **White light / RGB (trichrome) / Infrared**
+(remembered, `live/flat_lights`, default white + RGB), with the reminder:
+film out, the empty carrier in at that format's height.
+
+- **Each shot**: its LED alone at 255 (`solo_levels`); white = one shot, RGB
+  = red, green, blue, IR = one. Always in that order.
+- **The reading** (`read_flat`, the whole picture: its brightest part is the
+  carrier opening): each colour's photosites averaged in 24-photosite blocks
+  (a 2×2 filter is read as four sub-planes with `INTER_AREA`, the same
+  numbers ~5× faster: 0.5 s on a 50 MP RAF); the level is the 99.5th
+  percentile of the block means (the hotspot, not a hot photosite); clipped
+  when the 99.9th is ≥ 0.95 or ≥ 0.05 % of the photosites sit on the top
+  value. A colour shot is judged on its own channel, white and IR on all
+  three (every channel of their flat is used). On his no-film IR shot (8 s,
+  ISO 3200) it reads 12.9 % / 11.5 % / 11.1 %.
+- **The exposure** (`FlatShooting`, `base_exposure.Calibration`'s interface,
+  so Capture's Measure plumbing runs it: live view held, a temp download
+  folder, each RAW read on a thread, a shot never abandoned on Stop, then
+  light → exposure → folder → live view put back): kept as it is when the
+  level is 35–90 % (IR 10–90 %: ~15 stops down, and a flat is a smoothed
+  128-cell grid, so its noise doesn't reach the map); clipped → 3 stops
+  shorter (at the shortest, ISO back to base, then the LED dimmed like
+  Measure); under 2 % → 3 stops longer; otherwise `plan_exposure` towards
+  60 %. White and RGB follow the film base's ladder (ISO 100 to 1 s, ISO up
+  two stops, then longer to 30 s); IR the most light first: from the IR
+  shot's pickers (8 s, ISO 3200), the longest speed to 30 s, then ISO up two
+  stops. Each colour starts where the last settled. At the camera's limit a
+  shot of at least 5 % is kept with a note ("darker than ideal"); nothing
+  there → "still too dark: is the … LED on, and the carrier's opening
+  clear?". At most 5 shots a shot, then the best one tried. No averaging of
+  two IR shots (the spec's earlier plan): the grid already averages ~1000
+  blocks a cell.
+- **The flats** (`build_flats`, on a thread, `_flats_built`): white and IR
+  decoded with `decode_calibration`, RGB merged in R, G, B order with
+  `decode_target_merged` (the merge undoes the unequal exposures; the map is
+  per channel anyway), `build_tagged_profile` (opening found, mask filled),
+  meta `shots` (each shot's shutter / ISO / level / LED, no paths) and
+  `shot_by: Capture`; saved as `Flat <light> <format|any>.ffc` in the
+  library, named "White light flat · 6x4.5", so shooting them again REPLACES
+  them (wizard-made flats keep their own names; the newest flat of a light
+  and format wins anyway). Then `ccr_backend.refresh_field_library()` and the
+  main window's `_refresh_profile_mismatch()` (open frames flagged ⚠); the
+  caption names the flats and their exposures, plus notes and the profile's
+  own warnings. The shots are deleted after the build.
+- Stop (the button reads "Stop Flat Fields", or Esc) waits for the shot on
+  its way and saves nothing; Measure is off meanwhile.
 
 ## 6. Tests (planned)
 

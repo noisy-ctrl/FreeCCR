@@ -173,3 +173,13 @@ def test_the_ir_flat_reaches_the_dust_search():
     assert ir_dust.ir_flat_for(img, (300, 450)) is not None
     ff.set_library([_flat("white", "645")])
     assert ir_dust.ir_flat_for(img, (300, 450)) is None
+
+
+def test_a_saved_flat_keeps_its_light_format_and_opening(tmp_path):
+    """The file's own "format" key names the file type: the film format is
+    stored as "film_format" so it survives a save (it didn't, 2026-11-19)."""
+    p = _flat("rgb", "645")
+    path = ff.save_profile(p, str(tmp_path / "f.ffc"))
+    back = ff.load_profile(path)
+    assert ff.profile_light(back) == "rgb" and ff.profile_format(back) == "645"
+    assert ff.profile_opening(back) == ff.profile_opening(p)
