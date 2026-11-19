@@ -2643,15 +2643,25 @@ class MainWindow(QMainWindow):
         label, read now, else the typed name) and format's short name."""
         from core import film_formats
         from core import film_presets as fp
-        pid, film, fmt = self.roll_film_and_format()
-        if pid:
-            p = fp.find(fp.load(self._settings), pid)
-            film = fp.label(p) if p is not None else film
+        _pid, _film, fmt = self.roll_film_and_format()
+        film = self._roll_film_label()
         bits = [b for b in (film, film_formats.short_label(fmt)) if b]
         return " · ".join(["FreeCCR"] + bits)
 
     def _update_title(self):
         self.setWindowTitle(self._window_title())
+        # the contact sheet's Film caption falls back to the roll's film
+        model = getattr(self, "contact_sheet_model", None)
+        if model is not None:
+            model.set_roll_film(self._roll_film_label())
+
+    def _roll_film_label(self):
+        from core import film_presets as fp
+        pid, film, _fmt = self.roll_film_and_format()
+        if pid:
+            p = fp.find(fp.load(self._settings), pid)
+            return fp.label(p) if p is not None else film
+        return film
 
     def _tether_start_options(self, n_open, start_dir, from_monitor=False, parent=None):
         """The Start Hot Folder Tether window's answers (dict, see

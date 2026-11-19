@@ -360,3 +360,157 @@ def test_overlay_off_hides_the_crop_status_and_the_legend(images, monkeypatch):
     sheet.set_overlay(True)
     a = arr()
     assert coloured(a, caption, auto) > 5 and coloured(a, footer, auto) > 5
+
+
+# --- revision 2026-11-19: turned as in the main window, Respect crop, text ---------
+
+def _quad_scan(w=400, h=300):
+    """A scan whose left half is red and right half blue, top-left corner green."""
+    q = QImage(w, h, QImage.Format_RGB888)
+    q.fill(QColor(0, 0, 220))
+    from PySide6.QtGui import QPainter
+    p = QPainter(q)
+    p.fillRect(0, 0, w // 2, h, QColor(220, 0, 0))
+    p.fillRect(0, 0, w // 8, h // 8, QColor(0, 220, 0))
+    p.end()
+    return q
+
+
+def _draw_oriented(orient, rect=None, respect=False, size=(200, 200), overlay=False):
+    from PySide6.QtCore import QRectF
+    from PySide6.QtGui import QPainter
+    out = QImage(*size, QImage.Format_RGB888)
+    out.fill(QColor(0, 0, 0))
+    p = QPainter(out)
+    got = cs.draw_frame(p, QRectF(0, 0, *size), _quad_scan(), rect, 0.0, "hand",
+                        overlay, orient=orient, respect_crop=respect)
+    p.end()
+    return out, got
+
+
+def test_a_turned_frame_is_drawn_the_way_round_the_main_window_shows_it():
+    # 90 degrees clockwise (the canvas's rotate(90)): the scan's left (red)
+    # ends up at the top, its top-left (green) at the top-right
+    out, got = _draw_oriented((90, 0.0, False, False))
+    assert got.width() < got.height()                         # now portrait
+    cx = got.center().x()
+    assert _near(_rgb(out, cx, got.top() + 10), (220, 0, 0))
+    assert _near(_rgb(out, cx, got.bottom() - 10), (0, 0, 220))
+    assert _near(_rgb(out, got.right() - 4, got.top() + 4), (0, 220, 0))
+    # mirrored left-right: red on the right, green top-right
+    out, got = _draw_oriented((0, 0.0, True, False))
+    assert _near(_rgb(out, got.right() - 20, got.center().y()), (220, 0, 0))
+    assert _near(_rgb(out, got.right() - 4, got.top() + 4), (0, 220, 0))
+
+
+def test_the_crop_overlay_turns_with_the_frame():
+    # a crop on the scan's left half, turned 90: the bright (undimmed) part is on top
+    out, got = _draw_oriented((90, 0.0, False, False), rect=(0.0, 0.0, 0.5, 1.0),
+                              overlay=True)
+    cx = got.center().x()
+    top = sum(_rgb(out, cx, got.top() + got.height() * 0.25))
+    bottom = sum(_rgb(out, cx, got.top() + got.height() * 0.75))
+    assert top > 200 and bottom < 160                          # the outside dimmed
+
+
+def test_respect_crop_shows_only_what_the_crop_keeps():
+    # the crop is the scan's left half (red): only red shows, turned
+    out, got = _draw_oriented((0, 0.0, False, False), rect=(0.0, 0.0, 0.5, 1.0),
+                              respect=True)
+    assert abs(got.width() / got.height() - (200 / 300)) < 0.02   # the crop's shape
+    for fx in (0.2, 0.5, 0.8):                                 # no blue: it was cut off
+        assert _near(_rgb(out, got.left() + got.width() * fx, got.center().y()),
+                     (220, 0, 0))
+    out, got = _draw_oriented((90, 0.0, False, False), rect=(0.0, 0.0, 0.5, 1.0),
+                              respect=True)
+    assert got.width() > got.height()                          # 200x300 turned: landscape
+    # no crop: the whole frame
+    out, got = _draw_oriented((0, 0.0, False, False), rect=None, respect=True)
+    assert abs(got.width() / got.height() - 4 / 3) < 0.02
+
+
+def test_cells_take_the_turned_frames_shape(images, monkeypatch):
+    from PySide6.QtCore import QSettings
+    monkeypatch.setattr(QSettings, "setValue", lambda self, k, v: None)
+    sheet = cs.ContactSheet()
+    sheet.respect_crop = False
+    sheet.update(force=True)
+    assert sheet.layout().cell_w / sheet.layout().cell_h == pytest.approx(4 / 3, 0.01)
+    for im in images:
+        im.rotation_angle = 270
+    sheet.update(force=True)
+    assert sheet.layout().cell_w / sheet.layout().cell_h == pytest.approx(3 / 4, 0.01)
+    # turning one frame redraws it alone
+    images[2].rotation_angle = 90
+    sheet.update()
+    assert sheet.redrawn == [2]
+
+
+def test_text_colour_and_info(images, monkeypatch):
+    from PySide6.QtCore import QSettings, QRectF
+    store = {}
+    monkeypatch.setattr(QSettings, "setValue", lambda self, k, v: store.__setitem__(k, v))
+    sheet = cs.ContactSheet()
+    sheet.overlay, sheet.respect_crop = True, False
+    sheet.text_colour, sheet.text_info = "edge", cs.DEFAULT_INFO
+    sheet.update(force=True)
+    lay = sheet.layout()
+
+    def caption_px(rgb, tol=30):
+        q = sheet.image().convertToFormat(QImage.Format_RGB888)
+        a = np.frombuffer(q.constBits(), np.uint8).reshape(
+            q.height(), q.bytesPerLine())[:, :q.width() * 3].reshape(q.height(), q.width(), 3)
+        cell, img_r = lay.cell(0), lay.image_rect(0)
+        patch = a[int(img_r.bottom()) + 1:int(cell.bottom()), int(cell.left()):int(cell.right())]
+        return int((np.abs(patch.astype(int) - np.array(rgb)).max(axis=-1) < tol).sum())
+    assert caption_px(cs.EDGE_TEXT) > 5                       # the warm number
+    sheet.set_text_colour("#ff00ff")
+    assert store["sheet/text_colour"] == "#ff00ff"
+    assert caption_px((255, 0, 255)) > 20 and caption_px(cs.EDGE_TEXT) == 0
+    sheet.set_text_colour("nonsense")
+    assert sheet.text_colour == "edge"
+    sheet.set_text_colour("white")
+    before = caption_px((240, 240, 240))
+    sheet.set_text_info({"number"})
+    assert store["sheet/text_info"] == "number"
+    assert 0 < caption_px((240, 240, 240)) < before           # the name went
+    sheet.set_text_info(())
+    assert caption_px((240, 240, 240)) == 0
+    # the film: the frame's preset, else the roll's
+    sheet.set_roll_film("XP2 V1")
+    sheet.set_text_info({"film"})
+    assert caption_px((240, 240, 240)) > 20
+
+
+def test_text_menu_and_back_to_frame(images, monkeypatch):
+    from PySide6.QtCore import QSettings
+    from PySide6.QtGui import QColor as QC
+    monkeypatch.setattr(QSettings, "setValue", lambda self, k, v: None)
+    sheet = cs.ContactSheet()
+    sheet.text_colour, sheet.text_info = "edge", cs.DEFAULT_INFO
+    view = cs.ContactSheetView(sheet)
+    _KEEP.append(view)
+    m = view.text_menu()
+    texts = [a.text() for a in m.actions() if not a.isSeparator()]
+    assert texts == ["Colour", "Edge print", "White", "Light grey", "Mid grey", "Warm",
+                     "Custom…", "Show", "Frame number", "File name", "Film",
+                     "Film format", "Crop status"]
+    by = {a.text(): a for a in m.actions()}
+    assert by["Edge print"].isChecked() and by["File name"].isChecked()
+    assert not by["Film"].isChecked()
+    by["Warm"].trigger()
+    assert sheet.text_colour == "warm"
+    by["Film"].trigger()
+    assert "film" in sheet.text_info
+    monkeypatch.setattr(view, "_choose_colour", lambda cur: QC("#123456"))
+    by["Custom…"].trigger()
+    assert sheet.text_colour == "#123456"
+    assert view.text_menu().actions()[6].isChecked()           # Custom… ticked
+    # Back to Frame stands out, and Respect crop sits after Overlay
+    assert view.back_btn.text() == "Back to Frame"
+    assert "#e6e6e6" in view.back_btn.styleSheet()
+    bar = view.neg_check.parentWidget().layout()
+    assert bar.itemAt(bar.indexOf(view.overlay_check) + 1).widget() is view.crop_check
+    view.crop_check.setChecked(True)
+    assert sheet.respect_crop is True
+
