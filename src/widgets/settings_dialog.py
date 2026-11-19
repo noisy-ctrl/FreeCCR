@@ -535,10 +535,11 @@ class SettingsDialog(QDialog):
         row.addStretch(1)
         g2.addLayout(row)
         g2.addWidget(self._muted(
-            "Buttons: the D / γ / C / M / Y pad, half a printer point a click. Sliders: "
-            "one bar each for Density, Gamma, Cyan, Magenta and Yellow; drag it, "
+            "Buttons: the D / γ / C / M / Y pad. Sliders: one bar each for Density, "
+            "Gamma, Cyan, Magenta and Yellow; click either side of 0, drag it, or "
             "double-click for 0. Both move the same Channel Levels Shift and Gamma "
-            "sliders."))
+            "sliders. Right-click Printer Lights to switch, or to set how far each "
+            "click moves."))
         lay.addWidget(grp2)
         lay.addStretch(1)
         return page

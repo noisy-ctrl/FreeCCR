@@ -68,3 +68,19 @@ a bar's 0 line adds one step and left of it takes one off, as the pad's
 buttons do: half a point (Shift: one) on Density / Cyan / Magenta / Yellow,
 2 (Shift: 4) on Gamma. Dragging past 3 px is the relative drag as before;
 double-click still resets (its first click steps, then the reset wins).
+
+## Revision 2026-11-19 (2): right-click, the step, taller bars
+
+The user: "Can you right click on printer lights and have the ability to
+change to sliders and vice-versa as well as retaining the ability to change
+increments. Can the sliders be slightly taller to be more user friendly for
+clicking."
+
+- One right-click menu (`_fill_printer_menu`) on the pad's buttons, the bars
+  and the section's header (before its Hide entry): **Reset printer lights to
+  0**; **Show as Buttons** / **Show as Sliders** (stored, the same
+  `panel/printer_style` as Settings); **Each Click ½ point (γ 2)** / **1 point
+  (γ 4)** / **2 points (γ 8)** (`panel/printer_step`, default ½). Shift-click
+  is always twice the step; the bars' clicks and arrow keys follow it, and so
+  does every tooltip.
+- The bars are 34 px tall (`PL_BAR_H`; slider rows are 28).
