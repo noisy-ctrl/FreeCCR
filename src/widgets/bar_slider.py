@@ -5,9 +5,10 @@ inside on the right, a faint line at 0 and a bright line at the value
 Drag moves the value relatively from where it was (it never jumps to the
 pointer), Shift-drag four times finer; a CLICK right of the 0 line adds a
 step and left of it takes one off, Shift-click the bigger step, as the pad's
-buttons do (revision 2026-11-19); double-click resets to 0; Left / Right
-step, Shift for the bigger step. The wheel is ignored so the panel
-scrolls."""
+buttons do (revision 2026-11-19); a quick second click is a click too, never
+a reset (the user, 2026-11-19: rapid clicks read as a double-click; Reset is
+on the right-click menu); Left / Right step, Shift for the bigger step. The
+wheel is ignored so the panel scrolls."""
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPen
 from PySide6.QtWidgets import QSizePolicy, QWidget
@@ -192,13 +193,9 @@ class BarSlider(QWidget):
         super().mouseReleaseEvent(e)
 
     def mouseDoubleClickEvent(self, e):
-        if self.isEnabled() and e.button() == Qt.LeftButton:
-            self._press = None
-            self.setValue(0.0, emit=True)
-            self.released.emit()
-            e.accept()
-            return
-        super().mouseDoubleClickEvent(e)
+        # Qt sends the second press of a quick pair as a double-click: it is
+        # one more click (or the start of a drag), so rapid clicks all step
+        self.mousePressEvent(e)
 
     def keyPressEvent(self, e):
         if not self.isEnabled() or e.key() not in (Qt.Key_Left, Qt.Key_Right):

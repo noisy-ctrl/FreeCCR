@@ -54,7 +54,8 @@ value; no separate handle or groove.
 - Dragging Cyan right by one point's width → R Shift −3; Density right →
   Master Shift negative; Gamma right → Gamma up; Shift-drag is finer.
 - Keys: Right = +0.5 point (−1.5 units), Shift+Right = +1 point; Gamma ±2/±4.
-- Double-click resets one; right-click reset clears all five.
+- Right-click a bar: "Reset <name> to 0" resets that one, "Reset printer
+  lights to 0" all five (revision 3: a double-click no longer resets).
 - A change of the underlying slider (e.g. a frame loaded) moves the bar;
   the value text reads "+1.5" / "−2" / "0".
 - Disabled bars ignore input.
@@ -67,7 +68,8 @@ the amount." A click (a press that moves less than `DRAG_PX` 3 px) right of
 a bar's 0 line adds one step and left of it takes one off, as the pad's
 buttons do: half a point (Shift: one) on Density / Cyan / Magenta / Yellow,
 2 (Shift: 4) on Gamma. Dragging past 3 px is the relative drag as before;
-double-click still resets (its first click steps, then the reset wins).
+double-click still resets (its first click steps, then the reset wins) —
+until revision 3 below.
 
 ## Revision 2026-11-19 (2): right-click, the step, taller bars
 
@@ -84,3 +86,16 @@ clicking."
   is always twice the step; the bars' clicks and arrow keys follow it, and so
   does every tooltip.
 - The bars are 34 px tall (`PL_BAR_H`; slider rows are 28).
+
+## Revision 2026-11-19 (3): rapid clicks step, Reset is on the right-click
+
+The user: "Can we remove double click reset for the new printer lights
+sliders. Reset should be in right click menu. I need to be able to click
+rapidly and it's registering as double click." Qt delivers the second press
+of a quick pair as a double-click, so `BarSlider.mouseDoubleClickEvent` is
+now a press like any other: every click of a rapid run steps (and a drag can
+start on it). A bar's right-click menu starts with **Reset <name> to 0**
+(`_printer_light_reset`, disabled at 0), then **Reset printer lights to 0**;
+the pad's and the header's menus are unchanged. Tooltips no longer mention
+double-click. Tests: `test_rapid_clicks_all_step_and_a_double_click_never_resets`,
+`test_right_clicking_a_bar_offers_its_own_reset`.

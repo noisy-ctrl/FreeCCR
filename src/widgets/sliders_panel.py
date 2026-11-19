@@ -3072,7 +3072,7 @@ class SlidersPanel(QWidget):
                 bar.setToolTip("Gamma: right lifts the midtones, left lowers them; black "
                                "and white stay put (the tone Gamma slider).\n"
                                f"Click right / left of 0: {click:g} up / down (Shift: "
-                               f"{big:g}). Drag (Shift: finer), double-click: 0.\n"
+                               f"{big:g}). Drag (Shift: finer).\n"
                                "Right-click: reset, buttons or sliders, the step.")
             else:
                 name = self._PL_BAR_LOOK[ch][0]
@@ -3085,13 +3085,20 @@ class SlidersPanel(QWidget):
                     f"{what}; in printer points (one is about 1/12 stop, "
                     f"{self.PRINTER_POINT_UNITS} units of the Channel Levels {chan} Shift "
                     f"slider).\nClick right / left of 0: {words.get(click, f'{click:g} points')} "
-                    f"(Shift: {words.get(big, f'{big:g} points')}). Drag (Shift: finer), "
-                    "double-click: 0.\nRight-click: reset, buttons or sliders, the step.")
+                    f"(Shift: {words.get(big, f'{big:g} points')}). Drag (Shift: finer).\n"
+                    "Right-click: reset, buttons or sliders, the step.")
 
-    def _fill_printer_menu(self, menu):
+    def _fill_printer_menu(self, menu, ch=None):
         """Reset; Buttons / Sliders; the step: on the pad, the bars and the
-        section's header."""
+        section's header. `ch`: the bar right-clicked, which gets its own
+        Reset first (a bar's double-click no longer resets it)."""
         from PySide6.QtGui import QActionGroup
+        if ch in self._PL_BAR_LOOK:
+            sl = self._pl_slider(ch)
+            a = menu.addAction(f"Reset {self._PL_BAR_LOOK[ch][0]} to 0",
+                               lambda c=ch: self._printer_light_reset(c))
+            a.setEnabled(sl is not None and sl.isEnabled() and self.current_idx is not None
+                         and sl.value() != 0)
         menu.addAction("Reset printer lights to 0", self._printer_lights_reset)
         menu.addSeparator()
         look = QActionGroup(menu)
@@ -3140,7 +3147,7 @@ class SlidersPanel(QWidget):
             bar.released.connect(self._settle_now)
             bar.setContextMenuPolicy(Qt.CustomContextMenu)
             bar.customContextMenuRequested.connect(
-                lambda pos, w=bar: self._printer_lights_menu(w, pos))
+                lambda pos, w=bar, c=ch: self._printer_lights_menu(w, pos, c))
             lay.addWidget(bar)
             self._pl_bars[ch] = bar
         self.printer_section.add_widget(self._pl_bars_widget)
@@ -3171,9 +3178,9 @@ class SlidersPanel(QWidget):
         if units != sl.value():
             sl.setValue(units)          # -> on_slider_changed: store, preview, undo burst
 
-    def _printer_lights_menu(self, button, pos):
+    def _printer_lights_menu(self, button, pos, ch=None):
         from PySide6.QtWidgets import QMenu
-        menu = self._fill_printer_menu(QMenu(self))
+        menu = self._fill_printer_menu(QMenu(self), ch)
         menu.exec(button.mapToGlobal(pos))
 
     def _pl_slider(self, ch):
@@ -3210,9 +3217,14 @@ class SlidersPanel(QWidget):
         if self.current_idx is None:
             return
         for ch in self._PL_COLUMNS:
-            sl = self._pl_slider(ch)
-            if sl is not None and sl.isEnabled() and sl.value() != 0:
-                sl.setValue(0)
+            self._printer_light_reset(ch)
+
+    def _printer_light_reset(self, ch):
+        """One printer light back to 0 (a bar's right-click)."""
+        sl = self._pl_slider(ch)
+        if (self.current_idx is not None and sl is not None and sl.isEnabled()
+                and sl.value() != 0):
+            sl.setValue(0)
 
     @staticmethod
     def _fmt_points(pts):

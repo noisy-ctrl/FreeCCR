@@ -42,7 +42,7 @@ def _no_shift_left_behind():
     assert not (_app.keyboardModifiers() & Qt.ShiftModifier)
 
 
-def test_the_bar_drags_relatively_steps_and_resets():
+def test_the_bar_drags_relatively_and_steps():
     b = BarSlider("Cyan", -10, 10, step=0.5, key_steps=(0.5, 1.0), tick=1)
     b.resize(206, 26)                       # 200 px of travel: 0.1 a pixel
     got = []
@@ -62,11 +62,43 @@ def test_the_bar_drags_relatively_steps_and_resets():
     assert b.value() == 0.0
     b.setValue(50)
     assert b.value() == 10.0                # clamped
-    _mouse(b, QEvent.MouseButtonDblClick, 100)
-    assert b.value() == 0.0
     b.setEnabled(False)
     _key(b, Qt.Key_Right)
-    assert b.value() == 0.0
+    assert b.value() == 10.0
+
+
+def test_rapid_clicks_all_step_and_a_double_click_never_resets():
+    """The user, 2026-11-19: "I need to be able to click rapidly and it's
+    registering as double click": Qt's double-click is the second press of
+    a quick pair, so it steps like any click."""
+    b = BarSlider("Cyan", -10, 10, step=0.5, key_steps=(0.5, 1.0), tick=1)
+    b.resize(206, 26)
+    for kind in (QEvent.MouseButtonPress, QEvent.MouseButtonRelease,
+                 QEvent.MouseButtonDblClick, QEvent.MouseButtonRelease,
+                 QEvent.MouseButtonPress, QEvent.MouseButtonRelease,
+                 QEvent.MouseButtonDblClick, QEvent.MouseButtonRelease):
+        _mouse(b, kind, 180)
+    assert b.value() == 2.0                 # four clicks, four steps
+    _mouse(b, QEvent.MouseButtonDblClick, 100)
+    _mouse(b, QEvent.MouseMove, 120)        # a drag can start on one too
+    _mouse(b, QEvent.MouseButtonRelease, 120)
+    assert b.value() == 4.0
+
+
+def test_right_clicking_a_bar_offers_its_own_reset(panel):
+    from PySide6.QtWidgets import QMenu
+    sp = panel
+    sp._printer_light("C", "+")
+    sp._printer_light("M", "+")
+    menu = sp._fill_printer_menu(QMenu(), "C")
+    texts = [a.text() for a in menu.actions() if a.text()]
+    assert texts[:2] == ["Reset Cyan to 0", "Reset printer lights to 0"]
+    menu.actions()[0].trigger()
+    assert sp._pl_slider("C").value() == 0 and sp._pl_slider("M").value() != 0
+    menu = sp._fill_printer_menu(QMenu(), "C")
+    assert not menu.actions()[0].isEnabled()           # nothing to reset
+    sp._printer_lights_reset()
+    assert sp._pl_slider("M").value() == 0
 
 
 @pytest.fixture
