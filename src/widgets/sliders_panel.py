@@ -2279,7 +2279,8 @@ class SlidersPanel(QWidget):
                 slider.blockSignals(True)
                 slider.setValue(0)
                 slider.blockSignals(False)
-                
+        self._update_printer_readout()       # the printer bars follow the sliders
+
 
     def set_negative_controls_enabled(self, enabled: bool):
         """Enable/disable the film-negative-only controls (the Film B/W Point
@@ -2909,8 +2910,20 @@ class SlidersPanel(QWidget):
     PL_GAMMA_CLICK = 2           # Gamma slider units per γ click (~2/255 at mid-grey)
     PL_GAMMA_SHIFT = 4           # ... per Shift-click
 
+    # the slider view (spec/printer-light-sliders.md): name, tint left -> right
+    _PL_BAR_LOOK = {"D": ("Density", "#b0b0b0", "#000000"),
+                    "G": ("Gamma", "#000000", "#b0b0b0"),
+                    "C": ("Cyan", "#e5261f", "#00c3d9"),
+                    "M": ("Magenta", "#12a83c", "#e3168c"),
+                    "Y": ("Yellow", "#1f58ea", "#ffd000")}
+    PRINTER_STYLE_KEY = "panel/printer_style"
+
     def _build_printer_lights(self):
         from PySide6.QtWidgets import QGridLayout
+        self._pl_pad_widget = QWidget()
+        pad_lay = QVBoxLayout(self._pl_pad_widget)
+        pad_lay.setContentsMargins(0, 0, 0, 0)
+        pad_lay.setSpacing(theme.GAP_TIGHT)
         grid = QGridLayout()
         grid.setSpacing(theme.GAP_TIGHT)
         self._pl_buttons = {}
@@ -2956,12 +2969,90 @@ class SlidersPanel(QWidget):
                     lambda pos, w=b: self._printer_lights_menu(w, pos))
                 grid.addWidget(b, row, col)
                 self._pl_buttons[(ch, sign)] = b
-        self.printer_section.add_layout(grid)
+        pad_lay.addLayout(grid)
 
         self._pl_readout = QLabel("")
         self._pl_readout.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 11px;")
         self._pl_readout.setAlignment(Qt.AlignCenter)
-        self.printer_section.add_widget(self._pl_readout)
+        pad_lay.addWidget(self._pl_readout)
+        self.printer_section.add_widget(self._pl_pad_widget)
+        self._build_printer_bars()
+        self.set_printer_style(self._settings.value(self.PRINTER_STYLE_KEY, "buttons",
+                                                    type=str) or "buttons")
+
+    def _build_printer_bars(self):
+        """Printer Lights as five bar sliders (spec/printer-light-sliders.md):
+        the same controls as the pad, in its column order."""
+        from widgets.bar_slider import BarSlider
+        self._pl_bars_widget = QWidget()
+        lay = QVBoxLayout(self._pl_bars_widget)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(theme.GAP_ROW)
+        self._pl_bars = {}
+        u = self.PRINTER_POINT_UNITS
+        for ch in self._PL_COLUMNS:
+            name, left, right = self._PL_BAR_LOOK[ch]
+            sl = self._pl_slider(ch)
+            lo, hi = sl.value_range() if sl is not None else (-100, 100)
+            if ch == "G":
+                bar = BarSlider(name, lo, hi, step=1, key_steps=(self.PL_GAMMA_CLICK,
+                                                                  self.PL_GAMMA_SHIFT),
+                                left=left, right=right, tick=10,
+                                fmt=lambda v: (f"{'+' if v > 0 else '−' if v < 0 else ''}"
+                                               f"{abs(int(round(v)))}"))
+                bar.setToolTip("Gamma: right lifts the midtones, left lowers them; black "
+                               "and white stay put (the tone Gamma slider).\n"
+                               "Drag (Shift: finer), double-click: 0, arrow keys step.\n"
+                               "Right-click: reset all printer lights to 0.")
+            else:
+                bar = BarSlider(name, -hi / u, -lo / u, step=self.PL_CLICK_POINTS,
+                                key_steps=(self.PL_CLICK_POINTS, self.PL_SHIFT_POINTS),
+                                left=left, right=right, tick=1, fmt=self._fmt_points)
+                what = ("Density: right is darker (more density), as a printer's D key"
+                        if ch == "D" else
+                        f"{name}: right adds {name.lower()}, left adds "
+                        f"{self._PL_TIPS[ch][1]}")
+                bar.setToolTip(f"{what}; in printer points (one is about 1/12 stop, "
+                               f"{u} units of the Channel Levels "
+                               f"{'Master' if ch == 'D' else self._PL_TIPS[ch][2].capitalize()}"
+                               " Shift slider).\n"
+                               "Drag (Shift: finer), double-click: 0, arrow keys: half a "
+                               "point (Shift: one).\nRight-click: reset all printer lights "
+                               "to 0.")
+            bar.valueChanged.connect(lambda v, c=ch: self._on_pl_bar(c, v))
+            bar.released.connect(self._settle_now)
+            bar.setContextMenuPolicy(Qt.CustomContextMenu)
+            bar.customContextMenuRequested.connect(
+                lambda pos, w=bar: self._printer_lights_menu(w, pos))
+            lay.addWidget(bar)
+            self._pl_bars[ch] = bar
+        self.printer_section.add_widget(self._pl_bars_widget)
+
+    def printer_style(self):
+        return getattr(self, "_printer_style", "buttons")
+
+    def set_printer_style(self, style, save=False):
+        """Printer Lights as the pad ("buttons") or as bar sliders ("sliders")."""
+        style = "sliders" if style == "sliders" else "buttons"
+        self._printer_style = style
+        self._pl_pad_widget.setVisible(style == "buttons")
+        self._pl_bars_widget.setVisible(style == "sliders")
+        if save:
+            self._settings.setValue(self.PRINTER_STYLE_KEY, style)
+        self._update_printer_readout()
+
+    def _on_pl_bar(self, ch, v):
+        sl = self._pl_slider(ch)
+        if sl is None or self.current_idx is None or not sl.isEnabled():
+            self._update_printer_readout()          # put the bar back
+            return
+        units = v if ch == "G" else -v * self.PRINTER_POINT_UNITS
+        lo, hi = sl.value_range()
+        units = max(lo, min(hi, units))
+        if abs(units - round(units)) < 1e-6:
+            units = int(round(units))
+        if units != sl.value():
+            sl.setValue(units)          # -> on_slider_changed: store, preview, undo burst
 
     def _printer_lights_menu(self, button, pos):
         from PySide6.QtWidgets import QMenu
@@ -3019,6 +3110,13 @@ class SlidersPanel(QWidget):
     def _update_printer_readout(self):
         if not hasattr(self, "_pl_readout"):
             return
+        for ch, bar in getattr(self, "_pl_bars", {}).items():
+            sl = self._pl_slider(ch)
+            if sl is None:
+                continue
+            v = sl.value()
+            bar.setValue(v if ch == "G" else -v / self.PRINTER_POINT_UNITS)
+            bar.setEnabled(sl.isEnabled() and self.current_idx is not None)
         parts = []
         for ch in self._PL_ORDER:
             sl = self._pl_slider(ch)
