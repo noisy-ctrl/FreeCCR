@@ -5,6 +5,10 @@ A running list of what is started but not done, or waiting on something
 remove an entry when it ships.
 
 ## Waiting on the user
+- **Glow's halation on his own frames** (2026-11-19, `spec/highlight-glow.md`
+  revision 4): the default mix (Halation 75 %, Rim 0.12 %) and the Auto
+  rules were judged on three of his lab scans and synthetic edges only; his
+  verdict on real conversions may move the defaults.
 - **Portra 160 pairs for Colour Organics' missing hues** (2026-11-09): the
   user's Portra 160 lab JPEGs hold ~2,270 coloured samples at 240–330°
   (the judges' bus and the skate-park graffiti frames), where 33 Portra 400

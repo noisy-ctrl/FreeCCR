@@ -25,6 +25,13 @@ FILM_FORMATS = [
 ]
 _BY_KEY = {k: (label, ratio, cols) for k, label, ratio, cols in FILM_FORMATS}
 
+# The image area's long side on the film, mm (Glow's halation rim is a fixed
+# size on the film, so a smaller share of a larger frame:
+# spec/highlight-glow.md revision 4). Sheet film: the usual image area.
+LONG_MM = {"35mm": 36.0, "half": 24.0, "xpan": 65.0, "645": 56.0, "6x6": 56.0,
+           "6x7": 69.0, "6x8": 76.0, "6x9": 84.0, "6x12": 112.0, "6x17": 168.0,
+           "4x5": 120.0, "8x10": 245.0}
+
 # auto crop's format names (core.auto_crop.FORMATS) -> film keys
 DETECTOR_TO_FILM = {"35mm 3:2": "35mm", "645": "645", "6x6": "6x6", "6x7": "6x7",
                     "6x9": "6x9", "half-frame": "half", "xpan": "xpan"}
@@ -73,3 +80,9 @@ def from_ratio(w, h, tol=INFER_TOL):
         if d <= tol and (best is None or d < best[0]):
             best = (d, k)
     return best[1] if best else None
+
+
+def long_mm(name):
+    """The frame's long side on the film in mm, or None if unknown."""
+    k = film_key(name)
+    return LONG_MM.get(k) if k else None

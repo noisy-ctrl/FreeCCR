@@ -150,7 +150,8 @@ GOLDEN_CASES = [None, {"hue": 60, "start": 40, "clean": 0, "neutral": 60, "smoot
                 {"smooth": 0}]
 SHADOW_CASES = [None, {"range": 45, "reach": 100, "depth": 70, "smooth": 0},
                 {"depth": 100, "smooth": 100}]
-GLOW_CASES = [None, {"reach": 20, "above": 85}, {"reach": 100, "above": 99}, {"reach": 30, "above": 88}]
+GLOW_CASES = [None, {"reach": 20, "above": 85}, {"reach": 100, "above": 99}, {"reach": 30, "above": 88},
+              {"halo": 0}, {"halo": 100, "rim": 40}, {"halo": 40, "rim": 3, "above": 85}]
 
 
 @pytest.mark.parametrize("shape", GOLDEN_CASES)
@@ -179,6 +180,19 @@ def test_glow_matches_numpy(gpu, shape, size):
     x = _scene(*size)
     _close(apply_glow(x, 100, shape), fg.finish_numpy_image(ctx, q, x, glow=100,
                                                             glow_shape=shape))
+
+
+@pytest.mark.parametrize("area", [None, ((0.1, 0.12, 0.85, 0.9), 2.5)])
+def test_halation_reduced_and_cropped_matches_numpy(gpu, monkeypatch, area):
+    """The halation's own reduced copy (a small MIN_SIGMA_PX forces it at a
+    test size) and its crop normalisation, per channel."""
+    from core import glow as gw
+    monkeypatch.setattr(gw, "MIN_SIGMA_PX", 1.0)
+    ctx, q, g = gpu
+    x = _scene()
+    shape = {"halo": 80, "rim": 40}
+    _close(apply_glow(x, 100, shape, area=area),
+           fg.finish_numpy_image(ctx, q, x, glow=100, glow_shape=shape, glow_area=area))
 
 
 def test_the_chain_matches_numpy(gpu):
