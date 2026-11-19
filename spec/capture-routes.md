@@ -572,3 +572,36 @@ the camera again in the list worked, because the list fires on `activated`.
 Tests (`tests/test_capture_routes.py`): a re-plugged camera with no label
 saved is opened under its new port, and the shutter follows; another model
 is never opened; `relocate_key`'s cases.
+
+## 24. A long shutter closed the camera as lost (2026-11-19)
+After the IR dust test the user's GFX 50S II "connects and immediately
+disconnects" in Capture; dropping the shutter back to normal speeds fixed it.
+His libgphoto2 log (shutter 10 s, ISO 320) shows why: with a long shutter set
+the body makes live view frames slowly (in the log, bursts 0.4–0.8 s apart,
+where it gives 36–50 a second at normal speeds), and libgphoto2 asks for the
+next frame only for ~50 ms before giving up with PTP "Invalid Object Handle",
+which it reports as a plain `GP_ERROR` (-1). FreeCCR counted that as an I/O
+failure, and three in a row (`LOST_AFTER_ERRORS`) closed the camera as lost.
+
+- On a Fujifilm, `GP_ERROR` from `capture_preview` is "no frame yet": like
+  busy it never counts towards lost, it is asked again after
+  `PREVIEW_NOT_READY_S` (0.05 s; busy keeps its 0.25 s), and it feeds the same
+  watches as busy (`_busy_since`: no USB live view after `PREVIEW_GIVE_UP_S`
+  with no frame ever, a stall after `LIVE_STALL_S` once frames came). I/O
+  errors and a vanished USB device are still a lost camera; other makes'
+  `GP_ERROR` is unchanged.
+- The same log has the camera opened twice: the found-cameras list and the
+  picture list both asked while it was still opening (the whole
+  configuration read takes seconds), and the second open closed and
+  reconnected it. `UsbCamera.open` now ignores an open for the key it is
+  already opening or has open (`_asked_open`, cleared by `close`); after a
+  loss, a failed open or a close it opens again as before.
+- The worker prints when it opens, closes, can't open or loses a camera, with
+  libgphoto2's reason, and "The USB camera disconnected" names the reason.
+
+Live view at a long shutter is slow (a few frames a second), not stopped.
+
+Tests (`tests/test_capture_routes.py`): a Fujifilm's run of `GP_ERROR`s is
+waited for (short back-off, never lost; a long run is a stall; I/O errors are
+still lost); a Canon's `GP_ERROR`s still count; a second open while opening
+queues nothing, a close or a loss lets the next open through.

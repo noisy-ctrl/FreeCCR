@@ -1678,3 +1678,67 @@ def test_monitor_says_why_the_usb_picture_stopped(mon_usb):
     usb.live_not_back.emit()
     _app.processEvents()
     assert mon.canvas.message == ""
+
+
+# --------------------------------------------------------------------------- #
+# 2026-11-19: a Fujifilm's next live view frame not made yet is not a lost
+# camera, and a camera already opening isn't opened again (spec §24)
+# --------------------------------------------------------------------------- #
+def test_a_fujifilm_frame_not_made_yet_is_waited_for_not_a_lost_camera(tmp_path):
+    """The user's log: with a 10 s shutter set, the GFX 50S II answered
+    "Invalid Object Handle" (libgphoto2: GP_ERROR) between live view frames
+    and three in a row closed the camera as lost."""
+    b, gp, clock = _gp_backend(tmp_path, cameras=(("Fujifilm GFX100", "usb:001,009"),))
+    b.list_cameras()
+    b.open("usb:001,009", None)
+    assert b.preview() is not None
+    gp.state.preview_errors = [gp.GP_ERROR] * 20
+    assert b.preview() is None
+    left = len(gp.state.preview_errors)
+    assert b.preview() is None and len(gp.state.preview_errors) == left   # a short wait
+    for _ in range(left):
+        clock.t += cb.PREVIEW_NOT_READY_S + 0.001
+        assert b.preview() is None                 # never CameraLost
+    assert not gp.state.preview_errors
+    clock.t += cb.PREVIEW_NOT_READY_S + 0.001
+    assert b.preview() is not None                 # the next frame
+    assert not b.no_preview and not b.live_stalled()
+    # a run of them as long as a stall still counts as one (and is reported)
+    gp.state.preview_errors = [gp.GP_ERROR] * 1000
+    t0 = clock.t
+    while clock.t - t0 < cb.LIVE_STALL_S + 0.5:
+        b.preview()
+        clock.t += cb.PREVIEW_NOT_READY_S + 0.001
+    assert b.live_stalled()
+    # I/O failures are still a lost camera on a Fujifilm
+    gp.state.preview_errors = [gp.GP_ERROR_IO] * 3
+    with pytest.raises(cb.CameraLost):
+        for _ in range(3):
+            b.preview()
+            clock.t += cb.PREVIEW_BUSY_BACKOFF_S + 0.01
+
+
+def test_a_plain_error_on_another_camera_still_counts(tmp_path):
+    b, gp, clock = _gp_backend(tmp_path)          # a Canon: unchanged
+    b.list_cameras()
+    b.open("usb:001,004", None)
+    gp.state.preview_errors = [gp.GP_ERROR] * 3
+    with pytest.raises(cb.CameraLost):
+        for _ in range(3):
+            b.preview()
+
+
+def test_a_camera_already_opening_is_not_opened_again():
+    usb = UsbCamera(backends=[cb.FakeBackend()])  # worker not running: commands queue
+    usb.open("usb:fake:0")
+    usb.open("usb:fake:0")                         # the picture list asking too
+    usb.frame_source("usb:fake:0")                 # LiveFeed asking while it opens
+    assert [c for c in usb._cmds if c[0] == "open"] == [("open", "usb:fake:0")]
+    usb.open("usb:fake:1")                         # another camera: opened
+    assert usb._cmds.count(("open", "usb:fake:1")) == 1
+    usb.close()
+    usb.open("usb:fake:1")                         # after a close: a fresh open
+    assert usb._cmds.count(("open", "usb:fake:1")) == 2
+    usb.status = "lost"                            # after a loss: opened again
+    usb.open("usb:fake:1")
+    assert usb._cmds.count(("open", "usb:fake:1")) == 3
