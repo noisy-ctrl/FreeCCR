@@ -302,6 +302,26 @@ def test_auto_crop_all_leaves_your_crops_alone(backend):
         backend.images = saved
 
 
+def test_auto_crop_selected_crops_the_frames_chosen(backend):
+    """spec/auto-crop-button-choice.md: the chosen frames, a hand crop
+    replaced, the others left alone."""
+    raws = [tac.scan_645(t)[0] for t in (0.0, 0.2, 0.4, 0.6)]
+    imgs = [_CImg(r) for r in raws]
+    imgs[1].crop_rect = (0.2, 0.2, 0.7, 0.7)                 # drawn by hand
+    saved = backend.images
+    backend.images = imgs
+    try:
+        summ = backend.auto_crop_all(images=[imgs[1], imgs[2]])
+        assert summ["cropped"] == 2
+        assert imgs[1].crop_rect != (0.2, 0.2, 0.7, 0.7) and imgs[1].crop_rect is not None
+        assert imgs[2].crop_rect is not None
+        assert imgs[0].crop_rect is None and imgs[3].crop_rect is None
+        assert backend.auto_crop_all(images=[imgs[0]], should_cancel=lambda: True) is None
+        assert imgs[0].crop_rect is None
+    finally:
+        backend.images = saved
+
+
 def test_settings_group_and_forget(backend, monkeypatch):
     from PySide6.QtWidgets import QApplication, QMessageBox, QWidget
     QApplication.instance() or QApplication([])

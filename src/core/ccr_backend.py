@@ -3111,12 +3111,14 @@ class CCRBackend:
             print(f"Crop after converting failed for {getattr(img, 'file_path', '?')}: {e}")
             return False
 
-    def auto_crop_all(self, progress_callback=None, should_cancel=None):
+    def auto_crop_all(self, progress_callback=None, should_cancel=None, images=None):
         """Auto Crop All: auto crop every frame `auto_crop_candidates` allows,
         with what has been learned and the roll check, converted or not.
-        Returns the summary, or None when cancelled (nothing changed)."""
+        With `images` (Auto Crop Selected, spec/auto-crop-button-choice.md),
+        those frames instead, whatever crop they have. Returns the summary,
+        or None when cancelled (nothing changed)."""
         import numpy as np
-        imgs = self.auto_crop_candidates()
+        imgs = self.auto_crop_candidates() if images is None else list(images)
         total = len(imgs)
         summary = self._new_crop_summary()
         frames, lums = [None] * total, [None] * total

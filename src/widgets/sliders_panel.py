@@ -4851,6 +4851,33 @@ class SlidersPanel(QWidget):
         self._refresh_after_crop()
         self.set_temporary_hint(self._auto_crop_summary_text(summ), duration=10000)
 
+    def _on_auto_crop_selected(self, indices):
+        """Auto Crop Selected (the toolbar's question): Auto Crop All's steps
+        on the frames chosen, replacing their crops
+        (spec/auto-crop-button-choice.md)."""
+        imgs = [img for img in (ccr_backend.get_image_by_index(i) for i in indices)
+                if img is not None]
+        if not imgs:
+            return
+        progress = QProgressDialog("Finding frames…", "Cancel", 0, len(imgs), self)
+        progress.setWindowTitle("Auto Crop Selected")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+
+        def step(done, total):
+            progress.setValue(done)
+            QApplication.processEvents()
+
+        summ = ccr_backend.auto_crop_all(step, should_cancel=progress.wasCanceled,
+                                         images=imgs)
+        progress.close()
+        if summ is None:
+            self.set_temporary_hint("Auto crop cancelled: no crops were changed.",
+                                    duration=4000)
+            return
+        self._refresh_after_crop()
+        self.set_temporary_hint(self._auto_crop_summary_text(summ), duration=10000)
+
     def _confirm_no_anchor_convert(self, reason=None) -> bool:
         """True when the conversion may proceed. With no black point the
         conversion is the fixed-constant density invert with nothing

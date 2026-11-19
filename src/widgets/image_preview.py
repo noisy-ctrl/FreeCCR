@@ -2702,12 +2702,51 @@ class ImagePreview(QWidget):
             return None
         return opener()
 
+    def _ask_auto_crop_scope(self, n_selected):
+        """The toolbar Auto Crop's question: "current", "selected", "all" or
+        None (Cancel). Selected only with more than one frame selected
+        (spec/auto-crop-button-choice.md). The test seam."""
+        box = QMessageBox(self)
+        box.setWindowTitle("Auto Crop")
+        box.setIcon(QMessageBox.Question)
+        many = n_selected > 1
+        box.setText("Auto crop the current frame, the selected frames, or every frame?"
+                    if many else "Auto crop the current frame, or every frame?")
+        box.setInformativeText(
+            "Current and Selected replace the crops those frames have (each "
+            "frame its own undo step). All leaves crops you drew or confirmed "
+            "with Done alone.")
+        current = box.addButton("Auto Crop Current", QMessageBox.AcceptRole)
+        selected = (box.addButton(f"Auto Crop Selected ({n_selected})",
+                                  QMessageBox.AcceptRole) if many else None)
+        every = box.addButton("Auto Crop All", QMessageBox.AcceptRole)
+        box.addButton(QMessageBox.Cancel)
+        box.setDefaultButton(selected or current)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is current:
+            return "current"
+        if selected is not None and clicked is selected:
+            return "selected"
+        return "all" if clicked is every else None
+
     def auto_crop_current(self):
-        """Toolbar Auto Crop: the panel's Auto Crop for the frame on screen."""
+        """Toolbar Auto Crop: asks Current / Selected / All / Cancel, then
+        runs the panel's Auto Crop, Auto Crop Selected or Auto Crop All."""
         if self.current_idx is None:
             return
-        panel = getattr(self.parent().parent(), "sliders_panel", None)
-        if panel is not None:
+        mw = self.parent().parent()
+        panel = getattr(mw, "sliders_panel", None)
+        tl = getattr(mw, "thumbnail_list", None)
+        sel = tl.selected_indices() if tl is not None else []
+        scope = self._ask_auto_crop_scope(len(sel))
+        if scope is None or panel is None:
+            return
+        if scope == "all":
+            panel._on_auto_crop_all()
+        elif scope == "selected":
+            panel._on_auto_crop_selected(sel)
+        else:
             panel._on_auto_crop_current()
 
     def _convert_current_by_reference(self):
