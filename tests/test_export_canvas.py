@@ -405,3 +405,12 @@ def test_unit_switch_converts_and_is_remembered(tmp_path, monkeypatch, settings_
     again = export_dialog.ExportSettingsDialog(current_idx=0)
     assert again.canvas_edge_unit.currentData() == "%"
     assert again.canvas_edge_pct_spin.value() == pytest.approx(97.3)
+
+
+def test_a_3000_px_long_edge_is_offered(tmp_path, monkeypatch, settings_guard):
+    """The user, 2026-11-19: 3000 px between 4000 and 2000."""
+    dlg = _dialog(tmp_path, monkeypatch)
+    sizes = [dlg.resize_combo.itemData(i) for i in range(dlg.resize_combo.count())]
+    assert sizes[:5] == [0, 4000, 3000, 2000, 1080]
+    dlg.resize_combo.setCurrentIndex(sizes.index(3000))
+    assert dlg._selected_max_long_side() == 3000
