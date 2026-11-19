@@ -59,3 +59,12 @@ value; no separate handle or groove.
   the value text reads "+1.5" / "−2" / "0".
 - Disabled bars ignore input.
 - The panel still fits its width (`tests/test_panel_width.py`).
+
+## Revision 2026-11-19: clicks step
+
+The user: "Are the sliders clickable? … click on the right side and it adds
+the amount." A click (a press that moves less than `DRAG_PX` 3 px) right of
+a bar's 0 line adds one step and left of it takes one off, as the pad's
+buttons do: half a point (Shift: one) on Density / Cyan / Magenta / Yellow,
+2 (Shift: 4) on Gamma. Dragging past 3 px is the relative drag as before;
+double-click still resets (its first click steps, then the reset wins).

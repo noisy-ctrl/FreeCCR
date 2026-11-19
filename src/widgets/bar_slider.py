@@ -2,9 +2,12 @@
 inside on the right, a faint line at 0 and a bright line at the value
 (spec/printer-light-sliders.md). Used for Printer Lights' slider view.
 
-Drag moves the value relatively from where it was (a click never jumps it),
-Shift-drag four times finer; double-click resets to 0; Left / Right step,
-Shift for the bigger step. The wheel is ignored so the panel scrolls."""
+Drag moves the value relatively from where it was (it never jumps to the
+pointer), Shift-drag four times finer; a CLICK right of the 0 line adds a
+step and left of it takes one off, Shift-click the bigger step, as the pad's
+buttons do (revision 2026-11-19); double-click resets to 0; Left / Right
+step, Shift for the bigger step. The wheel is ignored so the panel
+scrolls."""
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPen
 from PySide6.QtWidgets import QSizePolicy, QWidget
@@ -17,6 +20,7 @@ class BarSlider(QWidget):
     released = Signal()
 
     FINE = 0.25               # Shift-drag speed
+    DRAG_PX = 3               # a press that moves less than this is a click
 
     def __init__(self, label, minimum, maximum, step=1.0, key_steps=(1.0, 4.0),
                  left=None, right=None, fmt=None, tick=None, parent=None):
@@ -31,6 +35,7 @@ class BarSlider(QWidget):
         self._tick = tick
         self._value = 0.0
         self._press = None
+        self._dragging = False
         self._hover = False
         self.setFixedHeight(theme.CONTROL_H - 2)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -153,12 +158,16 @@ class BarSlider(QWidget):
             return super().mousePressEvent(e)
         self.setFocus(Qt.MouseFocusReason)
         self._press = (e.position().x(), self._value)
+        self._dragging = False
         e.accept()
 
     def mouseMoveEvent(self, e):
         if self._press is None:
             return super().mouseMoveEvent(e)
         x0, v0 = self._press
+        if not self._dragging and abs(e.position().x() - x0) < self.DRAG_PX:
+            return
+        self._dragging = True
         speed = self.FINE if e.modifiers() & Qt.ShiftModifier else 1.0
         self.setValue(v0 + (e.position().x() - x0) * self.units_per_px() * speed, emit=True)
         e.accept()
@@ -166,6 +175,13 @@ class BarSlider(QWidget):
     def mouseReleaseEvent(self, e):
         if self._press is not None and e.button() == Qt.LeftButton:
             self._press = None
+            if not self._dragging:
+                # a click: a step towards the side clicked (right of 0 = +)
+                big = bool(e.modifiers() & Qt.ShiftModifier)
+                step = self._keys[1 if big else 0]
+                up = e.position().x() >= self._x_of(0.0)
+                self.setValue(self._value + (step if up else -step), emit=True)
+            self._dragging = False
             self.released.emit()
             e.accept()
             return
