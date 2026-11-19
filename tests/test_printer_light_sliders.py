@@ -47,8 +47,10 @@ def test_the_bar_drags_relatively_steps_and_resets():
     b.resize(206, 26)                       # 200 px of travel: 0.1 a pixel
     got = []
     b.valueChanged.connect(got.append)
-    _mouse(b, QEvent.MouseButtonPress, 30)  # a click far left doesn't jump
+    _mouse(b, QEvent.MouseButtonPress, 30)  # a press far left doesn't jump
     assert b.value() == 0 and got == []
+    _mouse(b, QEvent.MouseMove, 31)         # under DRAG_PX: nothing yet
+    assert b.value() == 0
     _mouse(b, QEvent.MouseMove, 50)         # +20 px = +2
     assert b.value() == 2.0
     _mouse(b, QEvent.MouseMove, 52, Qt.ShiftModifier)   # finer: +22 px x 0.25 = 0.55
@@ -139,3 +141,24 @@ def test_the_settings_page_sets_it(panel):
     dlg.accept()
     assert sp.printer_style() == "sliders"
     assert sp._settings.value(sp.PRINTER_STYLE_KEY) == "sliders"
+
+
+def test_a_click_steps_towards_the_side_clicked():
+    """The user, 2026-11-19: "click on the right side and it adds the amount"."""
+    b = BarSlider("Cyan", -10, 10, step=0.5, key_steps=(0.5, 1.0), tick=1)
+    b.resize(206, 26)
+    released = []
+    b.released.connect(lambda: released.append(1))
+    for x, mods, want in ((180, Qt.NoModifier, 0.5), (190, Qt.ShiftModifier, 1.5),
+                          (20, Qt.NoModifier, 1.0), (40, Qt.ShiftModifier, 0.0),
+                          (40, Qt.NoModifier, -0.5)):
+        _mouse(b, QEvent.MouseButtonPress, x, mods)
+        _mouse(b, QEvent.MouseMove, x + 1, mods)          # a twitch is still a click
+        _mouse(b, QEvent.MouseButtonRelease, x + 1, mods)
+        assert b.value() == want, (x, mods)
+    assert len(released) == 5
+    g = BarSlider("Gamma", -100, 100, step=1, key_steps=(2, 4), tick=10)
+    g.resize(206, 26)
+    _mouse(g, QEvent.MouseButtonPress, 150)
+    _mouse(g, QEvent.MouseButtonRelease, 150)
+    assert g.value() == 2
