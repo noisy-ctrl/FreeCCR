@@ -117,7 +117,7 @@ def _pic(shot, n=40):
     return st.Picture(v, 1.0)
 
 
-def _plan_pics(seq, quality=None, pictures=True):
+def _plan_pics(seq, quality=None, pictures=True, with_singles=False):
     """seq: tokens like "R1" (red, shot 1), "g1" (a weak green of shot 1),
     "W2" (white light, shot 2)."""
     from core import scan_type as st
@@ -132,6 +132,8 @@ def _plan_pics(seq, quality=None, pictures=True):
                             quality=quality or (lambda p, c: (1.0, 0.0)), workers=1)
     sets = [" ".join(tok[p] for p in t) for t in plan.sets]
     notes = [(n["short"], [tok[p] for p in n["paths"]]) for n in plan.notes]
+    if with_singles:
+        return sets, notes, [(tok[p], k) for p, k in plan.singles]
     return sets, notes
 
 
@@ -161,13 +163,111 @@ def test_a_weak_frame_completes_its_own_shot():
     # ...but not without its picture, nor across shots
     sets, notes = _plan_pics(["R1", "g1", "B1"], pictures=False)
     assert sets == [] and ("Not one colour", ["g1"]) in notes
-    sets, notes = _plan_pics(["R1", "B1", "g2", "R3", "G3", "B3"])
-    assert sets == ["R3 G3 B3"] and ("Not one colour", ["g2"]) in notes
+    # a weak frame of a picture no other frame shows is no part of any shot:
+    # loaded on its own (spec/import-singles.md)
+    sets, notes, singles = _plan_pics(["R1", "B1", "g2", "R3", "G3", "B3"],
+                                      with_singles=True)
+    assert sets == ["R3 G3 B3"] and singles == [("g2", "light")]
+    assert not any("g2" in ps for _s, ps in notes)
 
 
 def test_white_light_is_never_taken_as_a_colour():
     sets, notes = _plan_pics(["R1", "W1", "B1"])
     assert sets == [] and ("Not one colour", ["W1"]) in notes
+
+
+# --- frames that are no part of any shot load on their own (spec/import-singles.md) ---
+
+def test_white_lit_frames_of_their_own_pictures_are_singles():
+    sets, notes, singles = _plan_pics(["W1", "W2", "W3", "W4"], with_singles=True)
+    assert sets == [] and notes == []
+    assert singles == [("W1", "light"), ("W2", "light"), ("W3", "light"), ("W4", "light")]
+    # among trichrome shots, a white frame of its own picture too
+    sets, notes, singles = _plan_pics(["R1", "G1", "B1", "W2", "R3", "G3", "B3"],
+                                      with_singles=True)
+    assert sets == ["R1 G1 B1", "R3 G3 B3"] and singles == [("W2", "light")]
+    assert notes == []
+    # ... but a white take OF a trichrome shot stays a note (a failed take)
+    sets, notes, singles = _plan_pics(["R1", "W1", "B1"], with_singles=True)
+    assert singles == [] and ("Not one colour", ["W1"]) in notes
+
+
+def test_a_roll_lit_by_one_led_loads_as_singles():
+    """B&W shot under one LED (Capture's B&W light: green): every frame green,
+    no set possible: all of them load, none is refused."""
+    sets, notes, singles = _plan_pics(["G1", "G2", "G3", "G4"], with_singles=True)
+    assert sets == [] and notes == [] and [t for t, _k in singles] == ["G1", "G2", "G3", "G4"]
+
+
+def test_capture_logged_singles_load_as_what_they_were(tmp_path):
+    from core import capture_log
+    from core import scan_type as st
+    names = ["R0001_BW_001.RAF", "R0001_BW_002.RAF", "R0001_WHITE_003.RAF"]
+    paths = []
+    for n in names:
+        (tmp_path / n).write_bytes(b"x")
+        paths.append(str(tmp_path / n))
+    log = tmp_path / capture_log.LOG_NAME
+    import json
+    with open(log, "w") as f:
+        for i, (n, kind, key) in enumerate(((names[0], "bw", "bw"), (names[1], "bw", "bw"),
+                                            (names[2], "colour", "white"))):
+            f.write(json.dumps({"v": 1, "roll": "R0001", "shot": i + 1, "scan_type": kind,
+                                "files": {key: n}, "done": True}) + "\n")
+    assert capture_log.logged_singles(paths) == {paths[0]: "bw", paths[1]: "bw",
+                                                 paths[2]: "colour"}
+    # the light is never even read for them
+    plan = tp.plan_triplets(paths, shares_fn=lambda p: (_ for _ in ()).throw(AssertionError),
+                            workers=1)
+    assert plan.sets == [] and plan.notes == []
+    assert plan.singles == [(paths[0], "bw"), (paths[1], "bw"), (paths[2], "colour")]
+    _ = st
+
+
+def test_the_backend_loads_singles_and_a_logged_bw_gets_the_bw_profile(tmp_path, monkeypatch):
+    from core.ccr_backend import ccr_backend
+    from core import scan_type as st
+    from core import catalog
+    from core import capture_log
+    paths = []
+    for i, c in enumerate("RGBW"):
+        p = tmp_path / f"F{i}_{c}.RAF"
+        p.write_bytes(b"x")
+        paths.append(str(p))
+    lit = {p: SHARES[p[-5]] for p in paths}
+    monkeypatch.setattr(st, "read_light", lambda p: st.LightReading(lit[p]))
+    monkeypatch.setattr(st, "thumb_bgr", lambda p, height=44: None)
+    monkeypatch.setattr(capture_log, "logged_singles",
+                        lambda ps: {paths[3]: "bw"} if paths[3] in ps else {})
+
+    def fake_img(path):
+        from core.ccr_image import CCRImage
+        im = CCRImage.__new__(CCRImage)
+        im.file_path = path
+        im.display_name = os.path.basename(path)
+        im.color_profile = "color"
+        im.capture_type = None
+        return im
+    monkeypatch.setattr(catalog, "create_images_for_merge",
+                        lambda sources, **k: [fake_img(sources[0])])
+
+    def fake_single(path, **k):
+        im = fake_img(path)
+        im._catalog_fresh = True
+        return [im]
+    monkeypatch.setattr(catalog, "create_images_for_path", fake_single)
+    monkeypatch.setattr(ccr_backend, "rgb_merge_mode", True, raising=False)
+    monkeypatch.setattr(ccr_backend, "_commit_load",
+                        lambda gen, results, cancel: setattr(ccr_backend, "images", results) or True)
+    gen = ccr_backend._load_generation
+    n = ccr_backend._load_merged_triplets(paths, gen=gen)
+    try:
+        assert n == 2 and ccr_backend.last_merge_attention == []
+        single = [im for im in ccr_backend.images if im.file_path == paths[3]][0]
+        assert single.color_profile == "bw" and single.capture_type == "bw"
+    finally:
+        ccr_backend.images = []
+        ccr_backend.file_paths = []
 
 
 def test_the_backend_merges_sets_and_reports_the_rest(tmp_path, monkeypatch):

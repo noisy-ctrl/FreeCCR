@@ -30,6 +30,11 @@ class Plan:
     sets: list = field(default_factory=list)       # [(r, g, b) paths]
     notes: list = field(default_factory=list)      # attention entries (dicts)
     chosen: list = field(default_factory=list)     # [(colour, used, [spares])]
+    # frames that are no part of any trichrome shot, loaded on their own
+    # (spec/import-singles.md): [(path, kind)], kind "bw" / "colour" (as
+    # Capture logged it) or "light" (white or mixed light, or a batch lit by
+    # one colour only)
+    singles: list = field(default_factory=list)
 
 
 def colour_of(shares):
@@ -180,11 +185,15 @@ def plan_triplets(paths, shares_fn=None, quality=frame_quality, workers=None,
     if use_log:
         from core import capture_log
         logged, used = capture_log.logged_sets(list(paths))
-        if logged:
-            rest = [p for p in paths if p not in used]
+        # single shots Capture logged (B&W, colour) load on their own
+        singles = capture_log.logged_singles([p for p in paths if p not in used])
+        if logged or singles:
+            rest = [p for p in paths if p not in used and p not in singles]
             plan = plan_triplets(rest, shares_fn, quality, workers, time_fn,
                                  use_log=False) if rest else Plan()
             plan.sets = list(logged) + list(plan.sets)
+            plan.singles = ([(p, singles[p]) for p in paths if p in singles]
+                            + list(plan.singles))
             return plan
     shares_fn = shares_fn or st.read_light
     # Four readers at most: each holds a whole RAW while it reads (~100 MB for
@@ -199,6 +208,44 @@ def plan_triplets(paths, shares_fn=None, quality=frame_quality, workers=None,
     shares, pictures = zip(*(_reading(r) for r in readings)) if readings else ((), ())
     colours = [colour_of(sh) for sh in shares]
     colours, _rescued = rescue_weak_frames(colours, list(shares), list(pictures))
+    lone = single_frames(colours, list(pictures))
+    if lone:
+        # frames that are no part of a trichrome shot load on their own;
+        # the rest is planned as before (spec/import-singles.md)
+        keep = [i for i in range(len(ordered)) if i not in lone]
+        plan = _plan_ordered([ordered[i] for i in keep], [colours[i] for i in keep],
+                             [pictures[i] for i in keep], quality)
+        plan.singles = [(ordered[i], "light") for i in sorted(lone)] + plan.singles
+        return plan
+    return _plan_ordered(list(ordered), colours, list(pictures), quality)
+
+
+SINGLE_NEAR = 2          # a white frame this close to a one-colour frame of its
+                         # picture is part of that shot (a failed take)
+
+
+def single_frames(colours, pictures):
+    """Indices (in shooting order) of frames that are no part of any
+    trichrome shot: lit by white or mixed light (read, but not one colour)
+    with no one-colour frame of the same picture, or of an unknown picture,
+    within SINGLE_NEAR; and, when every lit frame in the batch is one and the
+    same colour (B&W lit by one LED), all of them."""
+    n = len(colours)
+    lit = {c for c in colours if c in COLOURS}
+    if len(lit) == 1 and sum(c in COLOURS for c in colours) >= 2:
+        return {i for i, c in enumerate(colours) if c in COLOURS or c is None}
+    out = set()
+    for i, c in enumerate(colours):
+        if c is not None:
+            continue
+        near = [j for j in range(max(0, i - SINGLE_NEAR), min(n, i + SINGLE_NEAR + 1))
+                if j != i and colours[j] in COLOURS]
+        if all(st.same_picture(pictures[i], pictures[j]) is False for j in near):
+            out.add(i)
+    return out
+
+
+def _plan_ordered(ordered, colours, pictures, quality):
     plan = Plan()
     seen = {}
     raw_quality = quality

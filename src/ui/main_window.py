@@ -1879,6 +1879,10 @@ class MainWindow(QMainWindow):
                 from core import ccr_merge
                 to_merge = [p for p in valid_files
                             if not ccr_merge.is_freeccr_merge_tiff(p)]
+                # no RAW at all: nothing to merge, a normal load
+                # (spec/import-singles.md)
+                if not any(ccr_merge.is_raw_path(p) for p in to_merge):
+                    to_merge = []
                 if to_merge:
                     ok, err = ccr_merge.validate_merge_inputs(
                         ccr_merge.sort_for_merge(to_merge), whole_sets=False)
@@ -2373,6 +2377,11 @@ class MainWindow(QMainWindow):
         # or B&W by the scan type (a single file of a trichrome scan, loaded
         # on its own, is neither).
         st = getattr(ccr_backend, "scan_type", "colour")
+        single = getattr(img, "_single_kind", None)
+        if single is not None:
+            # a lone frame of a trichrome import: what Capture logged, else
+            # a colour frame (spec/import-singles.md)
+            st = single if single in ("bw", "colour") else "colour"
         sess = getattr(self, "capture_session", None) or {}
         if (sess.get("preset") and self._tether_active
                 and os.path.normpath(img.file_path) not in self._tether_import_existing):

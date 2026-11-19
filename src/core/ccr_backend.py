@@ -372,7 +372,9 @@ class CCRBackend:
             # spec/merge-linear-tiff-replace.md.
             passthrough = [p for p in file_paths
                            if ccr_merge.is_freeccr_merge_tiff(p)]
-            if passthrough:
+            if not any(ccr_merge.is_raw_path(p) for p in file_paths):
+                pass   # nothing to merge: a normal load (spec/import-singles.md)
+            elif passthrough:
                 marked = set(passthrough)
                 to_merge = [p for p in file_paths if p not in marked]
                 if to_merge:   # mixed: merge the RAWs, load the baked TIFFs too
@@ -535,16 +537,21 @@ class CCRBackend:
                 self.file_paths = []
             return 0
         raws = [p for p in ordered if ccr_merge.is_raw_path(p)]
-        notes = [{"paths": [p], "short": "Not a RAW file",
-                  "reason": f"{os.path.basename(p)} isn't a RAW file, so it can't be "
-                            "merged"} for p in ordered if not ccr_merge.is_raw_path(p)]
         plan = triplet_plan.plan_triplets(raws) if raws else triplet_plan.Plan()
-        notes += plan.notes
+        # Files that are no part of any red/green/blue shot load on their own
+        # instead of being refused (spec/import-singles.md): a file that isn't
+        # RAW (it can't be merged), a single shot Capture logged (B&W,
+        # colour), a frame lit by white or mixed light that no shot claims.
+        singles = ([(p, "file") for p in ordered if not ccr_merge.is_raw_path(p)]
+                   + list(plan.singles))
+        single_kind = {p: k for p, k in singles}
+        passthrough_paths = list(passthrough_paths or []) + [p for p, _k in singles]
+        notes = list(plan.notes)
         for n in notes:
             n["thumbs"] = [st.thumb_bgr(p) for p in n["paths"]]
         if current:
             self.last_merge_attention = notes
-        if not plan.sets:
+        if not plan.sets and not passthrough_paths:
             if not file_paths:
                 self.last_merge_error = "No files selected for 3-way RGB merge."
             elif not notes:
@@ -630,6 +637,7 @@ class CCRBackend:
                         imgs = create_images_for_path(p, catalog_data=catalog_data)
                     for order, im in enumerate(imgs):
                         im._catalog_order = order
+                        self._mark_single(im, single_kind.get(p))
                     results.extend(imgs)
                 except Exception as e:
                     print(f"Failed to load merge TIFF {os.path.basename(p)}: {e}")
@@ -653,6 +661,19 @@ class CCRBackend:
             return 0
         self.last_load_errors = failures
         return len(results)
+
+    def _mark_single(self, img, kind):
+        """A frame loaded on its own from a merge import: what it was scanned
+        as, and, for B&W (Capture's log, else the app's scan type for a frame
+        lit by white light), the B&W colour profile on a fresh load (a frame
+        the catalogue restored keeps its own). spec/import-singles.md."""
+        if kind is None:
+            return
+        bw = kind == "bw" or (kind == "light" and getattr(self, "scan_type", "") == "bw")
+        if kind in ("bw", "colour"):
+            img.capture_type = kind
+        if bw and getattr(img, "_catalog_fresh", False):
+            img.color_profile = "bw"
 
     @staticmethod
     def _dedupe_display_names(images) -> None:

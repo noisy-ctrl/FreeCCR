@@ -591,6 +591,7 @@ def create_images_for_path(file_path: str, path: str = None,
         # stored value to fall back to). See spec/input-transfer-function.md §3.4.
         img = CCRImage(file_path, input_transfer=_import_transfer_override())
         img._catalog_signature = signature
+        img._catalog_fresh = True        # nothing restored (spec/import-singles.md)
         if restore_failed:
             img._catalog_restore_failed = True
         return [img]

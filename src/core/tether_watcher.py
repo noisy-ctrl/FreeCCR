@@ -247,7 +247,10 @@ class TetherWatchWorker(QObject):
         return self._cat_data
 
     @Slot(str)
-    def process(self, path):
+    def process(self, path, kind=None):
+        """One file. `kind` ("bw" / "colour" / "light") when a trichrome
+        import found it is no part of any shot: it then decides the frame's
+        scan type, not the app's (spec/import-singles.md)."""
         if self._cancelled:
             return
         template = self.template
@@ -257,6 +260,9 @@ class TetherWatchWorker(QObject):
             if not imgs:
                 self.captureError.emit(path, "no image produced")
                 return
+            if kind is not None:
+                for im in imgs:
+                    im._single_kind = kind
             self._finish(imgs, template, paths=[path])
         except Exception as e:
             # Terse form: the GUI shows this inline in the hint strip, so a
@@ -321,6 +327,12 @@ class TetherWatchWorker(QObject):
             if self._cancelled:
                 return
             self.process_triplet({"paths": list(s), "check": True})
+        # frames that are no part of any shot (B&W or colour Capture logged,
+        # white-lit): loaded on their own (spec/import-singles.md)
+        for path, kind in plan.singles:
+            if self._cancelled:
+                return
+            self.process(path, kind)
         for n in plan.notes:
             self.describe_leftover({"paths": n["paths"],
                                     "reason": n.get("reason") or n.get("short", "")})
