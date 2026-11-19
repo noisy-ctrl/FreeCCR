@@ -654,6 +654,17 @@ class ThumbnailList(QWidget):
         duplicate_action = menu.addAction(f"Duplicate{suffix}")
         remove_action = menu.addAction(f"Remove from list{suffix}")
         menu.addSeparator()
+        # spec/show-in-finder.md: the selected frames' files (a merge's three)
+        from utils import reveal_files
+        reveal_paths = []
+        for i in indices:
+            if i < len(ccr_backend.images):
+                for p in reveal_files.frame_files(ccr_backend.images[i]):
+                    if p not in reveal_paths:
+                        reveal_paths.append(p)
+        reveal_action = menu.addAction(reveal_files.menu_label())
+        reveal_action.setEnabled(bool(reveal_paths))
+        menu.addSeparator()
         export_action = menu.addAction("Export…")
         reset_action = menu.addAction(f"Reset{suffix}")
         # Offered only when the selection contains slices: restores the
@@ -684,6 +695,8 @@ class ThumbnailList(QWidget):
             self.duplicate_images(indices)
         elif action == remove_action:
             self.remove_images(indices)
+        elif action == reveal_action:
+            reveal_files.reveal(reveal_paths)
         elif action == export_action:
             # Open the export dialog pre-scoped to the right-clicked selection.
             self._main_window().image_preview.open_export_dialog(default_scope="selected")
