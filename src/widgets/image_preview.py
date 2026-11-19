@@ -821,9 +821,11 @@ def orientation_prompt(kind, frames):
     return prompt
 
 
-EXPORT_GAP_PX = 32     # the line-less break between Convert and Export (was 18)
+EXPORT_GAP_PX = 24     # the line-less break between Convert and Export (was 18, then 32;
+                       # 24 since the Capture button, 2026-11-19)
 ZOOM_GAP_PX = 8        # ... and the one between Export and the zoom box
-TEXT_BUTTON_PAD = 8    # a text button's width past its words (Qt's hint: ~17)
+TEXT_BUTTON_PAD = 6    # a text button's width past its words (Qt's hint: ~17; 8 until
+                       # the Capture button, 2026-11-19)
 ICON_BUTTON_PAD = 6    # a picture button's width past its icon (Qt's hint: 8)
 AUTO_CROP_GAP_PX = 12  # the plain gap between Auto Crop and Un-convert (2026-11-08)
 
@@ -878,6 +880,14 @@ class ImagePreview(QWidget):
             "Find this frame's picture on the scan, straighten it and crop to "
             "it, as the panel's Auto Crop button does. Ctrl+Z undoes it.")
         self.auto_crop_action.triggered.connect(self.auto_crop_current)
+        # Capture opens the Live Capture Monitor, or brings it back to the
+        # front when it is already open (spec/capture-toolbar-button.md).
+        self.capture_action = QAction(
+            theme.load_tinted_icon(resource_path("icons/camera-icon.png")), "Capture", self)
+        self.capture_action.setToolTip(
+            "Open Capture (the camera's live view and the light), or bring it "
+            "to the front if it is already open.")
+        self.capture_action.triggered.connect(self.open_capture)
         self.unconvert_action = QAction("Un-convert", self)
         self.unconvert_action.triggered.connect(self.unconvert_ccr)
 
@@ -1036,6 +1046,7 @@ class ImagePreview(QWidget):
         self.export_push.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.toolbar.addWidget(self.export_push)
 
+        self.toolbar.addAction(self.capture_action)
         self.toolbar.addAction(self.auto_crop_action)
         self.auto_crop_gap = QWidget()
         self.auto_crop_gap.setFixedWidth(AUTO_CROP_GAP_PX)
@@ -2560,6 +2571,15 @@ class ImagePreview(QWidget):
                 font.setBold(True)
             btn.setFixedWidth(QFontMetrics(font).horizontalAdvance(act.text())
                               + TEXT_BUTTON_PAD)
+
+    def open_capture(self):
+        """The toolbar's Capture: open the Live Capture Monitor, or show and
+        raise it if it is open (hidden, minimised or behind)."""
+        win = self.window()
+        opener = getattr(win, "open_live_monitor", None)
+        if opener is None:
+            return None
+        return opener()
 
     def auto_crop_current(self):
         """Toolbar Auto Crop: the panel's Auto Crop for the frame on screen."""

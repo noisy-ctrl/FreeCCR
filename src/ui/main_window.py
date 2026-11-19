@@ -1981,7 +1981,10 @@ class MainWindow(QMainWindow):
             sess = getattr(self, "capture_session", None) or {}
             if sess.get("format"):
                 mon.apply_roll_format(sess["format"])
-        mon.show()
+        if mon.isMinimized():
+            mon.showNormal()
+        else:
+            mon.show()
         mon.raise_()
         mon.activateWindow()
         return mon
