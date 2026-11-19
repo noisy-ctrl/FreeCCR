@@ -2548,8 +2548,17 @@ def renders_monochrome(ccr_image) -> bool:
     is called with lightweight image stubs in several places (tests included),
     and they must read as colour without needing to know about this.
     See spec/monochrome-raw-mode.md §3."""
-    return (bool(getattr(ccr_image, "decoded_mono", False))
-            or getattr(ccr_image, "color_profile", "color") == "bw")
+    if bool(getattr(ccr_image, "decoded_mono", False)):
+        return True
+    if getattr(ccr_image, "color_profile", "color") != "bw":
+        return False
+    # Natural tint gives a B&W frame its film's tint back: not monochrome
+    # then, so the export keeps 3 channels (spec/natural-tint.md)
+    s = getattr(ccr_image, "adjustment_settings", None) or {}
+    try:
+        return not float(s.get("natural_tint", 0) or 0) > 0
+    except (TypeError, ValueError):
+        return True
 
 
 def hdr_geometry(cap, ccr_image, fine_angle, h_flip, v_flip):

@@ -53,7 +53,8 @@ SYNC_GROUPS = [
     # too: it is a finishing tone curve, set together with the rest).
     ("sat", "Saturation & Lab Finish", ("saturation", "sat_rolloff", "vibrance",
                             "clean_lights", "golden_highlights", "shadow_neutralise",
-                            "shadow_lift", "glow", "colour_organics")),
+                            "shadow_lift", "glow", "colour_organics",
+                            "natural_tint")),
     ("crop", "Crop", ()),
     # Coarse 90-degree rotation + the mirror flags, synced like crop (whole-image
     # properties, not adjustment keys). fine_rotation_angle is deliberately NOT
@@ -183,6 +184,7 @@ _BASIC_LABELS = {
     "saturation": "Saturation", "sat_rolloff": "Saturation Roll-off",
     "vibrance": "Vibrance",
     "colour_organics": "Colour Organics",
+    "natural_tint": "Natural tint",
     "clean_lights": "Clean Lights",
     "golden_highlights": "Golden Highlights",
     "shadow_neutralise": "Shadow Neutralise",
@@ -847,6 +849,9 @@ class SlidersPanel(QWidget):
         # Glow, the last Lab Finish tool (spec/highlight-glow.md)
         "glow",
         "colour_organics",
+        # Natural tint, shown in Colour Organics' place in B&W
+        # (spec/natural-tint.md), created right after it
+        "natural_tint",
         # Per-channel levels controls (collapsible section)
         "ch_input_gain", "ch_master_shift", "ch_master_gain",
         "ch_r_shift", "ch_r_gain", "ch_r_blackpoint",
@@ -1545,6 +1550,18 @@ class SlidersPanel(QWidget):
         self._organics_label.customContextMenuRequested.connect(
             lambda pos: self._open_organics_popup(self._organics_label.mapToGlobal(pos)))
         self._update_organics_label()
+        # Natural tint: in B&W it takes Colour Organics' place (the user,
+        # 2026-11-19; spec/natural-tint.md). Created right after Colour
+        # Organics (ADJUSTMENT_KEYS zip); off (0) by default.
+        self.natural_tint_slider_layout = self.create_slider(
+            "Natural tint", min_value=0, max_value=100)
+        self._natural_tint_label = self.natural_tint_slider_layout.itemAt(0).widget()
+        self._natural_tint_label.setToolTip(
+            "Natural tint (Black & White): gives the picture back the tint this "
+            "frame has in Color, as the film shows it - cooler or warmer by "
+            "tone, a base's cast - but never per pixel, so grain and stray "
+            "colours don't come back. 0 is completely monochrome; 100 the full "
+            "tint the frame shows in Color.")
 
         scroll_layout.addLayout(self.color_profile_row)
         scroll_layout.addLayout(self.temperature_slider_layout)
@@ -1571,6 +1588,8 @@ class SlidersPanel(QWidget):
         # Finish tools in their own section, open by default and hideable in
         # Settings -> Panel like the other sections.
         scroll_layout.addLayout(self.colour_organics_slider_layout)
+        scroll_layout.addLayout(self.natural_tint_slider_layout)
+        self._layout_visible(self.natural_tint_slider_layout, False)   # Color first
         sep = theme.section_separator()
         scroll_layout.addWidget(sep)
         self._section_separators["lab_finish"] = sep
@@ -2228,6 +2247,25 @@ class SlidersPanel(QWidget):
         self.color_profile_combo.blockSignals(True)
         self.color_profile_combo.setCurrentIndex(row)
         self.color_profile_combo.blockSignals(False)
+        self._sync_bw_rows(profile)
+
+    @staticmethod
+    def _layout_visible(layout, on):
+        for i in range(layout.count()):
+            w = layout.itemAt(i).widget()
+            if w is not None:
+                w.setVisible(on)
+
+    def _sync_bw_rows(self, profile=None):
+        """B&W: Natural tint in Colour Organics' place; Color: the reverse
+        (spec/natural-tint.md)."""
+        if profile is None:
+            img = (ccr_backend.get_image_by_index(self.current_idx)
+                   if self.current_idx is not None else None)
+            profile = getattr(img, "color_profile", "color") if img is not None else "color"
+        bw = profile == "bw"
+        self._layout_visible(self.colour_organics_slider_layout, not bw)
+        self._layout_visible(self.natural_tint_slider_layout, bw)
 
     def on_color_profile_changed(self, index):
         """Switch the current image between Color and Black & White. A single
@@ -2245,6 +2283,7 @@ class SlidersPanel(QWidget):
         self.end_undo_burst()
         img.push_undo_state()
         img.color_profile = profile
+        self._sync_bw_rows(profile)
         img.update_thumbnail_and_preview()
         mw = self.parent().parent()
         try:

@@ -1703,6 +1703,28 @@ class CCRImage:
         gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
         return cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
 
+    def _bw_collapse(self, image: np.ndarray, settings) -> np.ndarray:
+        """The Black & White collapse, with Natural tint's share of the
+        frame's own tint added back when it is on (spec/natural-tint.md). A
+        monochrome decode has no tint to give back."""
+        grey = self._to_grayscale(image)
+        amount = float((settings or {}).get("natural_tint", 0) or 0)
+        if amount <= 0 or getattr(self, "decoded_mono", False):
+            return grey
+        from core import natural_tint
+        if image.dtype == np.uint16:
+            scale = 65535.0
+        elif image.dtype == np.uint8:
+            scale = 255.0
+        else:
+            scale = 1.0
+        out = natural_tint.apply(grey.astype(np.float32) / np.float32(scale),
+                                 image.astype(np.float32) / np.float32(scale), amount,
+                                 area=getattr(self, "crop_rect", None))
+        if scale == 1.0:
+            return out.astype(image.dtype, copy=False)
+        return (np.clip(out, 0.0, 1.0) * np.float32(scale) + 0.5).astype(image.dtype)
+
     def _apply_dust_removal(self, image: np.ndarray,
                             ws_windowed: bool = False) -> np.ndarray:
         """Inpaint stored dust spots out of the working image (no-op when there
@@ -2146,7 +2168,7 @@ class CCRImage:
             if ws:
                 image = _apply_working_space_recovery(image, 0.0, auto_tone=at)
             # Black & White still has to map the image to a single luminance channel.
-            return self._to_grayscale(image) if profile == "bw" else image
+            return self._bw_collapse(image, s) if profile == "bw" else image
         adjusted = adjust_image_opencl(image,
                      s.get('temperature', 0) + tb,
                      s.get('tint', 0),
@@ -2278,7 +2300,7 @@ class CCRImage:
                 adjusted, areas,
                 functools.partial(self._adjust_for_area, nr_live=nr_live))
         if profile == "bw":
-            adjusted = self._to_grayscale(adjusted)
+            adjusted = self._bw_collapse(adjusted, s)
         # Sharpening is the LAST stage — after gamma, curves, the area composite
         # and the B&W collapse — because it is output-referred: it sharpens what
         # the user actually sees. It sits here rather than inside adjust_image
