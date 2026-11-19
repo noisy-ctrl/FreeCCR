@@ -179,6 +179,27 @@ def logged_sets(paths):
     return sets, used
 
 
+def logged_singles(paths):
+    """{path: "bw" | "colour"} for those of `paths` Capture logged as a
+    single-exposure shot (B&W or white-light colour), so an import loads them
+    on their own (spec/import-singles.md)."""
+    by_folder = {}
+    for p in paths:
+        by_folder.setdefault(os.path.dirname(os.path.abspath(p)), {})[
+            os.path.normcase(os.path.basename(p))] = p
+    out = {}
+    for folder, names in by_folder.items():
+        for e in read_log(folder):
+            kind = e.get("scan_type")
+            if kind not in ("bw", "colour"):
+                continue
+            for f in (e.get("files") or {}).values():
+                p = names.get(os.path.normcase(str(f)))
+                if p is not None:
+                    out[p] = kind
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # the shot being recorded (Capture's thread and the hot folder's both add)
 # --------------------------------------------------------------------------- #

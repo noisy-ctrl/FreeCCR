@@ -316,14 +316,15 @@ def test_force_no_merge_loads_tiff_as_normal(tmp_path):
     assert not getattr(ccr_backend.images[0], "is_merged", False)
 
 
-def test_without_force_no_merge_a_tiff_is_rejected_in_merge_mode(tmp_path):
+def test_without_force_no_merge_a_tiff_loads_normally_in_merge_mode(tmp_path):
+    """A selection with no RAW has nothing to merge: a normal load, not a
+    rejection (spec/import-singles.md; it used to be refused)."""
     p = str(tmp_path / "lin.tiff")
     tifffile.imwrite(p, MERGED)
     ccr_backend.rgb_merge_mode = True
     ccr_backend.last_merge_error = None
     n = ccr_backend.load_images_from_files([p])   # merge on, TIFF is not RAW
-    assert n == 0
-    assert ccr_backend.last_merge_error          # a rejection was recorded
+    assert n == 1 and not ccr_backend.last_merge_error
 
 
 if __name__ == "__main__":
