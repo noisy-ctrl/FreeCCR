@@ -380,7 +380,7 @@ def test_the_colour_profile_row_has_write_to_preset(mw):
     from widgets.sliders_panel import PROFILE_COMBO_W
     assert sp.color_profile_combo.width() == PROFILE_COMBO_W
     assert sp.color_profile_combo.itemText(1) == "B&W"
-    assert sp.write_preset_btn.text() == "Write to Preset"
+    assert sp.write_preset_btn.text() == "Write Preset"
 
 
 def test_the_settings_page(mw):
@@ -439,3 +439,85 @@ def test_write_with_no_presets_names_the_first_one(mw, tmp_path):
     p = fp.load(mw._settings)[0]
     assert fp.label(p) == "Ektar100 V1" and got == {"current": p["id"], "n": 1}
     assert p["chosen"] == ["adj:contrast"] and img.film_preset == p["id"]
+
+
+# --------------------------------------------------------------------------- #
+# the canister's menu and the window title (spec/film-presets-menu.md)
+# --------------------------------------------------------------------------- #
+def _texts(menu):
+    return [a.text() for a in menu.actions() if not a.isSeparator()]
+
+
+def test_the_canister_menu_shows_the_rolls_film_and_format(mw):
+    from core import film_formats
+    st = mw._settings
+    lst, a = fp.add([], fp.make("Portra400"))
+    lst, b = fp.add(lst, fp.make("XP2", 0, 1, "Lisbon 2026"))
+    fp.save(st, lst)
+    mw._set_capture_session("R0007", "6x7", "", preset=b["id"])
+    menu = mw.image_preview.film_menu()
+    t = _texts(menu)
+    n = len(film_formats.FILM_FORMATS)
+    assert t[:4] == ["Film", "None", "Portra400 V1", "XP2 V1 (Lisbon 2026)"]
+    assert t[4:6] == ["Format", "Not set"] and len(t) == 6 + n + 1
+    assert t[-1] == "Edit Film Presets…"
+    ticked = [a.text() for a in menu.actions() if a.isChecked()]
+    assert ticked == ["XP2 V1 (Lisbon 2026)", "120: 6x7"]
+    assert not menu.actions()[0].isEnabled()                      # a heading
+    by = {a.text(): a for a in menu.actions()}
+    by["Portra400 V1"].trigger()
+    assert mw.capture_session["preset"] == a["id"]
+    assert mw.capture_session["format"] == "6x7"                  # kept
+    assert mw.capture_session["roll"] == "R0007"
+    by["35mm: 36x24"].trigger()
+    assert mw.capture_session["format"] == "35mm"
+    assert mw.capture_session["preset"] == a["id"]
+    assert st.value("capture/format") == "35mm" and st.value("capture/preset") == a["id"]
+    by["None"].trigger()
+    assert "preset" not in mw.capture_session and not mw.capture_session["film"]
+
+
+def test_a_typed_film_shows_and_picking_starts_a_session_on_the_last_roll(mw):
+    st = mw._settings
+    st.setValue("capture/last_roll", "R0012")
+    mw.capture_session = None
+    lst, a = fp.add([], fp.make("Gold200"))
+    fp.save(st, lst)
+    menu = mw.image_preview.film_menu()
+    assert [x.text() for x in menu.actions() if x.isChecked()] == ["None", "Not set"]
+    {x.text(): x for x in menu.actions()}["Gold200 V1"].trigger()
+    assert mw.capture_session["roll"] == "R0012" and mw.capture_session["preset"] == a["id"]
+    assert st.value("capture/last_roll") == "R0012"     # Start still offers R0013
+    assert mw._capture_defaults()["roll"] == "R0013"
+    mw._set_capture_session("R0013", "", "Ektar typed")
+    menu = mw.image_preview.film_menu()
+    assert "Ektar typed" in [x.text() for x in menu.actions() if x.isChecked()]
+
+
+def test_the_window_title_names_the_film_and_format(mw):
+    st = mw._settings
+    lst, a = fp.add([], fp.make("Portra400"))
+    fp.save(st, lst)
+    mw.capture_session = None
+    mw._update_title()
+    assert mw.windowTitle() == "FreeCCR"
+    mw._set_capture_session("R0001", "35mm", "", preset=a["id"])
+    assert mw.windowTitle() == "FreeCCR · Portra400 V1 · 35mm"
+    mw.set_roll_format("645")
+    assert mw.windowTitle() == "FreeCCR · Portra400 V1 · 6x4.5"
+    lst, _p = fp.update(lst, a["id"], notes="Lisbon 2026")       # renamed in Settings
+    fp.save(st, lst)
+    mw._update_title()
+    assert mw.windowTitle() == "FreeCCR · Portra400 V1 (Lisbon 2026) · 6x4.5"
+    mw.set_roll_film(None)
+    assert mw.windowTitle() == "FreeCCR · 6x4.5"
+    mw._set_capture_session("R0002", "", "XP2 typed")
+    assert mw.windowTitle() == "FreeCCR · XP2 typed"
+
+
+def test_write_preset_is_as_wide_as_its_words(mw):
+    sp = mw.sliders_panel
+    btn = sp.write_preset_btn
+    assert btn.text() == "Write Preset"
+    from PySide6.QtWidgets import QSizePolicy
+    assert btn.sizePolicy().horizontalPolicy() == QSizePolicy.Fixed

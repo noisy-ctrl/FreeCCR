@@ -1,4 +1,4 @@
-"""The main window's Write to Preset and Apply Preset windows
+"""The main window's Write Preset and Apply Preset windows
 (spec/film-presets.md §5)."""
 from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QHBoxLayout, QLabel,
                                QPushButton, QVBoxLayout)

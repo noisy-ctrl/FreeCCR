@@ -61,8 +61,10 @@ def test_crop_follows_the_panel_crop_button():
 
 
 def test_the_canister_opens_film_presets():
+    """Its menu ends in Edit Film Presets… (spec/film-presets-menu.md)."""
     w = MainWindow()
     pages = []
     w.open_settings = lambda page=None: pages.append(page)
-    w.image_preview.film_presets_action.trigger()
+    menu = w.image_preview.film_menu()
+    menu.actions()[-1].trigger()
     assert pages == ["Film Presets"]

@@ -1,7 +1,7 @@
 """Settings → Film Presets (spec/film-presets.md §6).
 
 The film presets and what each carries: its ID (film, push/pull, version,
-notes), its Film Look, the slider settings Write to Preset put in it, and
+notes), its Film Look, the slider settings Write Preset put in it, and
 the film bases Capture measured for it. Changes are saved as they are made.
 Film bases go through the main window (`film_bases_data` /
 `set_film_bases_data`) so an open Capture reloads them."""
@@ -36,7 +36,7 @@ class FilmPresetsPage(QWidget):
             "A film preset is one film at one push or pull, in one version: "
             "“Portra400 V1”, “Colorplus200 +1 V2 (Barcelona 2022)”. It carries the film "
             "bases Capture measures for it, a Film Look, and the slider settings you "
-            "write to it with Write to Preset (beside Colour Profile). Pick it as the "
+            "write to it with Write Preset (beside Colour Profile). Pick it as the "
             "Film when you start Hot Folder Tether: the roll's first frame starts from it. "
             "Changes here are saved as you make them."))
 
@@ -228,7 +228,7 @@ class FilmPresetsPage(QWidget):
         n = fp.carried(p) - (1 if fp.look_of(p) else 0)
         self.settings_note.setText(
             f"Slider settings: {n} setting{'' if n == 1 else 's'}" if n > 0 else
-            "Slider settings: none yet (Write to Preset, beside Colour Profile).")
+            "Slider settings: none yet (Write Preset, beside Colour Profile).")
         self.clear_btn.setEnabled(fp.carried(p) > 0)
         lines = []
         for _i, b in be.bases_of(self.bases(), p["id"]):
