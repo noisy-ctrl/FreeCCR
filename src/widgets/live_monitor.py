@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (QWidget, QFrame, QHBoxLayout, QVBoxLayout, QLabel
 from core import base_exposure as be
 from core import camera_backends as cb
 from core import film_presets as fp
+from core import flat_capture as fc
 from core import capture_light as cl
 from core import capture_sequence as cs
 from core import capture_guide
@@ -322,6 +323,7 @@ class LiveCaptureMonitor(QWidget):
 
     closed = Signal()
     _patch_read = Signal(int, object)    # a film-base test shot's reading (or error)
+    _flats_built = Signal(object)        # Shoot Flat Fields: the saved flats (or error)
     _base_bp_read = Signal(int, object)  # (name, black point or error), from a thread
     _zoom_spot_found = Signal(int, object)   # where the magnifier looked (or None)
 
@@ -371,6 +373,11 @@ class LiveCaptureMonitor(QWidget):
         self._shoot_exp_before = None    # the camera's exposure before a film-base Shoot
         self._log_shot = None            # the shot being logged (spec/capture-log-and-names.md)
         self._read_patch = be.read_patch
+        # Shoot Flat Fields (spec/ir-dust-and-flat-sets.md §5): seams for tests
+        self._read_flat = fc.read_flat
+        self._build_flats = fc.build_flats
+        self._flats_threaded = True
+        self._flat_building = False      # the flats being built after their shots
         # the focus rail (spec/focus-rail.md)
         self._af = None                  # the autofocus sweep running (or last run)
         self._af_then = None             # called with the sweep's result when it ends
@@ -972,7 +979,17 @@ class LiveCaptureMonitor(QWidget):
         self.black_point_btn.clicked.connect(self._on_black_point)
         self.black_point_btn.setEnabled(
             hasattr(self._mw, "start_roll_black_point"))
-        lay.addWidget(self.black_point_btn)
+        # the flats of a set, shot through the empty carrier
+        # (spec/ir-dust-and-flat-sets.md §5)
+        self.flat_btn = QPushButton("Shoot Flat Fields…")
+        self.flat_btn.setFixedHeight(theme.CONTROL_H)
+        self.flat_btn.clicked.connect(self._on_flat_clicked)
+        r = QHBoxLayout()
+        r.setContentsMargins(0, 0, 0, 0)
+        theme.apply_button_row(r)
+        r.addWidget(self.black_point_btn, 1)
+        r.addWidget(self.flat_btn, 1)
+        lay.addLayout(r)
         self.capture_caption = _muted("")
         lay.addWidget(self.capture_caption)
 
@@ -1192,6 +1209,7 @@ class LiveCaptureMonitor(QWidget):
             lambda on: (_settings().setValue("live/film_base_use", bool(on)),
                         self._refresh_film_bases()))
         self._patch_read.connect(self._on_patch_read)
+        self._flats_built.connect(self._on_flats_built)
         self._base_bp_read.connect(self._on_base_bp_read)
         self._base_bp_token = 0
         self._base_bp_threaded = True       # tests read it in line
@@ -3370,7 +3388,8 @@ class LiveCaptureMonitor(QWidget):
 
     def _on_measure_clicked(self):
         if self._measure is not None:
-            self._measure_stop()
+            if self._measure.get("kind") != "flat":     # the flats have their own Stop
+                self._measure_stop()
             return
         answer = self._ask_film_base_name(self._measure_default_id())
         if not answer:
@@ -3552,6 +3571,178 @@ class LiveCaptureMonitor(QWidget):
         self._measure_next()
         return True
 
+    # ------------------------------------------------------------------ #
+    # Shoot Flat Fields (spec/ir-dust-and-flat-sets.md §5)
+    # ------------------------------------------------------------------ #
+    def _flat_blocker(self):
+        """Why Shoot Flat Fields can't start now, or ""."""
+        if self._flat_building:
+            return "Building the flats just shot."
+        if self._measure is not None or self.sequence.running or self._af_shot is not None:
+            return "Not while shooting or measuring."
+        if self._sleeping is not None:
+            return "Wake the light first."
+        if not self.usb.is_open() or not self._exp_choices.get("shutter"):
+            return ("Shooting flat fields needs a USB camera whose shutter speed FreeCCR "
+                    "can set.")
+        if not self.light.is_open():
+            return "Shooting flat fields needs the Scanlight connected: it lights each LED."
+        return ""
+
+    def _refresh_flat_btn(self):
+        if not hasattr(self, "flat_btn"):
+            return
+        if self._measure is not None and self._measure.get("kind") == "flat":
+            self.flat_btn.setEnabled(True)
+            self.flat_btn.setToolTip("Stop after the shot on its way; nothing is saved.")
+            return
+        why = self._flat_blocker()
+        self.flat_btn.setEnabled(not why)
+        self.flat_btn.setToolTip(why or (
+            "With the film out and the empty carrier in: each chosen light (white, "
+            "RGB, infrared) is lit alone and shot at its own exposure, and its flat "
+            "goes into the field-correction library for that light and format."))
+
+    def _on_flat_clicked(self):
+        if self._measure is not None:
+            if self._measure.get("kind") == "flat":
+                self._measure_stop()
+            return
+        self.start_flat_fields()
+
+    def _flat_default_format(self):
+        """The roll's format, else the frame guide's."""
+        sess = getattr(self._mw, "capture_session", None)   # with or without the hot folder
+        fmt = sess.get("format") if isinstance(sess, dict) else None
+        return fmt or (self.canvas.guide or {}).get("format") or ""
+
+    def _ask_flat_fields(self, default_format):
+        """The test seam: {"format", "lights"} or None (cancelled)."""
+        from widgets.flat_shoot_dialog import FlatShootDialog
+        saved = str(_settings().value("live/flat_lights", "white,rgb") or "")
+        dlg = FlatShootDialog(default_format, [x for x in saved.split(",") if x], parent=self)
+        self.light_dialog(dlg)
+        if dlg.exec() != QDialog.Accepted:
+            return None
+        return dlg.values()
+
+    def start_flat_fields(self, choice=None):
+        why = self._flat_blocker()
+        if why:
+            self._warn_caption(why)
+            return False
+        if self._refuse_when_magnified("Shooting flat fields"):
+            return False
+        if choice is None:
+            choice = self._ask_flat_fields(self._flat_default_format())
+        if not choice or not choice.get("lights"):
+            return False
+        why = self._flat_blocker()                # the window was open a while
+        if why:
+            self._warn_caption(why)
+            return False
+        lights = [x for x in fc.LIGHT_ORDER if x in choice["lights"]]
+        _settings().setValue("live/flat_lights", ",".join(lights))
+        ir_start = {"shutter": self.ir_shutter_combo.currentData()
+                    or str(self.IR_SHUTTER_DEFAULT),
+                    "iso": self.ir_iso_combo.currentData() or str(int(self.IR_ISO_DEFAULT))}
+        first = self._exposure.get("shutter") or self.shutter_speed_combo.currentData()
+        cal = fc.FlatShooting(lights, self._exp_choices.get("shutter") or [],
+                              self._exp_choices.get("iso") or [], first, ir_start=ir_start,
+                              can_dim=True)
+        if cal.done:
+            self._warn_caption(cal.error or "Nothing to shoot.")
+            return False
+        import tempfile
+        self._used()
+        self._measure_token += 1
+        self._measure = {
+            "kind": "flat", "cal": cal, "name": "", "index": None, "rect": None,
+            "where": "the carrier's opening", "read": self._read_flat, "read_arg": None,
+            "format": choice.get("format") or None, "lights": lights,
+            "temp": tempfile.mkdtemp(prefix="freeccr-flats-"),
+            "levels": dict(self._levels),
+            "exposure": {f: self._exposure.get(f) for f in ("shutter", "iso")
+                         if self._exposure.get(f)},
+            "in_flight": False, "stopping": False, "token": self._measure_token,
+        }
+        self._hold_live(True)
+        self.usb.set_dest(self._measure["temp"])
+        self.flat_btn.setText("Stop Flat Fields")
+        self.measure_btn.setEnabled(False)
+        self._refresh_film_bases()
+        self._refresh_shoot_enabled()
+        self._measure_next()
+        return True
+
+    def _flat_finish(self, m, cal):
+        """The shots are in (or it stopped): build and save the flats on a
+        thread, then delete the shots."""
+        if cal.error is not None or not cal.result:
+            if cal.error == "cancelled":
+                self._note_caption("Flat fields stopped; nothing was saved.")
+            else:
+                self._warn_caption((cal.error or "The flat fields didn't finish.")
+                                   + " Nothing was saved.")
+            return
+        from core.ccr_backend import ccr_backend
+        self._flat_building = True
+        self._note_caption(f"Building the flats ({fc.summary(cal.result)})…")
+        args = (cal.result, m["format"], ccr_backend.field_profiles_dir())
+        demosaic = bool(getattr(ccr_backend, "merge_demosaic", True))
+        temp, notes = m["temp"], list(cal.notes)
+        build = self._build_flats
+
+        def work():
+            try:
+                out = (build(*args, demosaic=demosaic), notes, cal.result)
+            except Exception as e:
+                out = e
+            finally:
+                import shutil
+                shutil.rmtree(temp, ignore_errors=True)
+            self._flats_built.emit(out)
+
+        if self._flats_threaded:
+            import threading
+            threading.Thread(target=work, daemon=True).start()
+        else:
+            work()
+        self._refresh_flat_btn()
+
+    def _on_flats_built(self, out):
+        self._flat_building = False
+        self._refresh_flat_btn()
+        if isinstance(out, Exception):
+            self._warn_caption(f"Couldn't build the flats: {out}")
+            return
+        saved, notes, result = out
+        from core.ccr_backend import ccr_backend
+        try:
+            ccr_backend.refresh_field_library()     # chosen per frame at once
+        except Exception as e:
+            print(f"flat fields: refreshing the library: {e}")
+        refresh = getattr(self._mw, "_refresh_profile_mismatch", None)
+        if refresh is not None:
+            try:
+                refresh()                            # open frames flagged ⚠
+            except Exception as e:
+                print(f"flat fields: flagging open frames: {e}")
+        names = ", ".join(s["profile"].name for s in saved)
+        warn = []
+        for s_ in saved:
+            for w in (s_["profile"].meta or {}).get("warnings") or []:
+                warn.append(f"{s_['profile'].name}: {w}")
+        text = (f"Flats saved: {names} ({fc.summary(result)}). Frames of that light and "
+                "format use them; frames already open are flagged ⚠ (right-click → "
+                "Replace… re-grades them).")
+        if notes:
+            text += " " + " ".join(notes)
+        if warn:
+            self._warn_caption(text + " " + " ".join(warn))
+        else:
+            self._note_caption(text)
+
     def _measure_next(self):
         m = self._measure
         if m is None:
@@ -3563,7 +3754,7 @@ class LiveCaptureMonitor(QWidget):
             return
         colour, levels, exp = shot
         m["shot_key"] = _shot_key(colour, exp, levels)
-        if colour in be.COLOURS and not self.light.is_open():
+        if (colour in be.COLOURS or m.get("kind") == "flat") and not self.light.is_open():
             cal.failed("The Scanlight disconnected.")
             self._measure_finish()
             return
@@ -3573,8 +3764,14 @@ class LiveCaptureMonitor(QWidget):
         if m.get("kind") == "frame":
             what = (be.NAMES.get(colour, colour) if colour in be.COLOURS else "the frame")
         verb = "Metering" if m.get("kind") == "frame" else "Measuring"
-        self._note_caption(f"{verb} {what} ({m['where']}): shot {cal.shots + 1} at "
-                           f"{be.short_text(exp['shutter'])}, ISO {exp['iso']}…  Esc stops.")
+        if m.get("kind") == "flat":
+            self._note_caption(f"Shooting {cal.what()}: shot {cal.shots + 1} at "
+                               f"{be.short_text(exp['shutter'])}, ISO {exp['iso']}…  "
+                               "Esc stops.")
+        else:
+            self._note_caption(f"{verb} {what} ({m['where']}): shot {cal.shots + 1} at "
+                               f"{be.short_text(exp['shutter'])}, ISO {exp['iso']}…  "
+                               "Esc stops.")
         token = m["token"]
         QTimer.singleShot(cs.settle_ms(self._timing), lambda: self._measure_fire(token, exp))
 
@@ -3632,7 +3829,9 @@ class LiveCaptureMonitor(QWidget):
         else:
             cal.landed(reading)
         path, m["last_path"] = m.get("last_path"), None
-        if path:
+        if path and m.get("kind") == "flat":
+            pass            # kept in the temp folder until the flats are built
+        elif path:
             if cal.done and cal.error not in (None, "cancelled") and m.get("kind") != "frame":
                 m["kept"] = self._keep_failed_shot(path)      # to look into
             elif (m.get("kind") != "frame" and not isinstance(reading, Exception)
@@ -3708,14 +3907,21 @@ class LiveCaptureMonitor(QWidget):
         self._hold_live(False)
         self.canvas.set_mark(None)
         bp_paths = None
-        if m.get("kind") != "frame" and cal.error is None and cal.result:
+        kind = m.get("kind")
+        if kind not in ("frame", "flat") and cal.error is None and cal.result:
             bp_paths = _accepted_paths(m.get("files") or {}, cal.result)
-        if bp_paths is None:
+        building = kind == "flat" and cal.error is None and bool(cal.result)
+        if bp_paths is None and not building:
             import shutil
             shutil.rmtree(m["temp"], ignore_errors=True)
         self.measure_btn.setText("Measure…")
-        if m.get("kind") == "frame":
+        self.flat_btn.setText("Shoot Flat Fields…")
+        if kind == "flat":
+            self.measure_btn.setEnabled(True)
+        if kind == "frame":
             self._frame_meter_finish(m, cal)
+        elif kind == "flat":
+            self._flat_finish(m, cal)
         elif cal.error is None and cal.result:
             camera = self._usb_model or ""
             scan = self.scan_type()
@@ -3744,7 +3950,7 @@ class LiveCaptureMonitor(QWidget):
                 kept = m.get("kept")
                 self._warn_caption((cal.error or "Measuring didn't finish.")
                                    + (f" The test shot is kept: {kept}" if kept else ""))
-        if m.get("kind") != "frame":
+        if kind not in ("frame", "flat"):
             self._base_click_used = True
             self._ask_where = cal.error not in (None, "cancelled")
         if self._exp_held:
@@ -3771,6 +3977,7 @@ class LiveCaptureMonitor(QWidget):
         return data.startswith("usb:") and getattr(self.usb, "key", data) == data
 
     def _refresh_shoot_enabled(self):
+        self._refresh_flat_btn()
         if self._af_shot is not None:
             self.shoot_btn.setEnabled(True)      # a second press stops it
             self.shoot_btn.setText("Stop   (Esc)")
@@ -3785,7 +3992,9 @@ class LiveCaptureMonitor(QWidget):
             return
         if self._measure is not None:
             self.shoot_btn.setEnabled(False)
-            self.shoot_btn.setToolTip("Measuring the film base")
+            self.shoot_btn.setToolTip("Shooting the flat fields"
+                                      if self._measure.get("kind") == "flat"
+                                      else "Measuring the film base")
             return
         if self.sequence.running:
             self.shoot_btn.setEnabled(True)
@@ -3859,6 +4068,7 @@ class LiveCaptureMonitor(QWidget):
         self._refresh_capture_caption()
 
     def _on_usb_state(self, kind, text):
+        QTimer.singleShot(0, self._refresh_flat_btn)      # its state follows the camera
         holders = list(getattr(self.usb, "holders", None) or []) if kind == "busy" else []
         own = [h for h in holders if getattr(h, "own", False)]
         holders = [h for h in holders if not getattr(h, "own", False)]
@@ -4048,6 +4258,7 @@ class LiveCaptureMonitor(QWidget):
         self.film_base_box.setVisible(bool(self._exp_choices.get("shutter")))
         self._fill_ir_exposure()
         self._select_exposure()
+        self._refresh_flat_btn()
 
     IR_SHUTTER_DEFAULT = 8.0       # s: the user's tests, 2026-11-19
     IR_ISO_DEFAULT = 3200.0

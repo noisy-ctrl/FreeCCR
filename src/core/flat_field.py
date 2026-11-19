@@ -609,7 +609,9 @@ def profile_light(p: Optional[FieldProfile]) -> Optional[str]:
 
 
 def profile_format(p: Optional[FieldProfile]) -> Optional[str]:
-    return ((p.meta or {}).get("format") or None) if p is not None else None
+    # "film_format": the file's own "format" key names the file type, so a
+    # meta "format" never reached the disk (fixed 2026-11-19)
+    return ((p.meta or {}).get("film_format") or None) if p is not None else None
 
 
 def profile_opening(p: Optional[FieldProfile]) -> Optional[Dict[str, float]]:
@@ -734,7 +736,7 @@ def build_tagged_profile(arr_u16: np.ndarray, name: str, *, light: str,
     sides = opening_of(arr_u16)
     src = fill_outside(arr_u16, sides) if sides else arr_u16
     meta = dict(meta or {})
-    meta.update({"light": light, "format": fmt or None, "opening": sides or None})
+    meta.update({"light": light, "film_format": fmt or None, "opening": sides or None})
     return build_profile(src, name, meta=meta, max_gain=max_gain)
 
 

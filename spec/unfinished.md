@@ -5,15 +5,14 @@ A running list of what is started but not done, or waiting on something
 remove an entry when it ships.
 
 ## Started
-- **Capture → Shoot Flat Fields…** (2026-11-19, `spec/ir-dust-and-flat-sets.md`
-  §5): the flat sets are built (made in Settings' wizard with a Light and a
-  Format); Capture doesn't shoot them by itself yet. Also nothing records a
-  B&W frame's LED (`img.scan_light`), so B&W under one LED uses the white flat.
+- **A B&W frame's LED** (2026-11-19, `spec/ir-dust-and-flat-sets.md` §5):
+  nothing records `img.scan_light`, so B&W shot under one LED uses the white
+  flat.
 
 ## Waiting on the user
-- **The right-hand panel needing a horizontal scroll** (2026-11-19): not
-  reproduced here (main panel, Capture's panel and every Settings page fit,
-  also at a 15 % wider font); waiting on his screenshot.
+- **Shoot Flat Fields on the rig** (2026-11-19): built and tested on a
+  simulated camera and his no-film IR shot only; his first real run will show
+  whether the 35–90 % window and the IR ladder (8 s → 30 s, ISO up) suit it.
 - **IR dust on real shots** (2026-11-19): the threshold was judged on his
   3 s / 8 s / 5 s IR tests and his circled 008 frame; its default
   sensitivity (7σ) may move once he has used it on a roll with Heal / Erase.
