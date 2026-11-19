@@ -314,7 +314,7 @@ class TestSettingsDialog:
     def test_has_categories(self):
         d = _dialog()
         names = [d._sidebar.item(i).text() for i in range(d._sidebar.count())]
-        assert names == ["General", "Color Management"]
+        assert names == ["General", "Color Management", "Film Presets"]
         # The General tab carries the Auto gain toggle (spec/auto-gain.md).
         assert hasattr(d, "_cb_auto_gain")
 

@@ -8,6 +8,7 @@ from PySide6.QtGui import (QKeySequence, QShortcut, QPainter, QColor,
                            QLinearGradient, QPen)
 from core.ccr_backend import ccr_backend
 from core import detail_defaults
+from core import film_presets
 from utils.qt_threads import WorkerThread
 from core.ccr_processor import (COLOR_BANDS, BAND_PARAMS, BAND_ADJUSTMENT_KEYS,
                                 compute_density_slopes, CHROMA_NR_RADIUS_DEFAULT,
@@ -32,6 +33,7 @@ from datetime import date
 # First combo entry of the film-stock selector: the baked scalar
 # DEFAULT_DENSITY_SLOPE (no preset). See spec/film-stock-slopes.md.
 FILM_STOCK_DEFAULT_LABEL = "Default"
+PROFILE_COMBO_W = 88    # the Colour Profile list, narrow with Write to Preset beside it
 
 # Setting groups offered by the "Sync to All" and "Copy Settings" dialogs. The
 # adjustment-key groups partition SlidersPanel.ADJUSTMENT_KEYS exactly; "crop"
@@ -2000,18 +2002,217 @@ class SlidersPanel(QWidget):
         label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
 
         self.color_profile_combo = QComboBox()
-        self.color_profile_combo.addItems(["Color", "Black & White"])
+        # "B&W" (it was "Black & White") so the list fits narrow beside Write to
+        # Preset (spec/film-presets.md §5)
+        self.color_profile_combo.addItems(["Color", "B&W"])
+        self.color_profile_combo.setItemData(1, "Black & White", Qt.ToolTipRole)
         self.color_profile_combo.setFixedHeight(theme.CONTROL_H)
         theme.shrinkable_combo(self.color_profile_combo)
         self.color_profile_combo.currentIndexChanged.connect(self.on_color_profile_changed)
+        # narrower, with Write to Preset beside it (spec/film-presets.md §5)
+        self.color_profile_combo.setFixedWidth(PROFILE_COMBO_W)
+
+        self.write_preset_btn = QPushButton("Write to Preset")
+        self.write_preset_btn.setFixedHeight(theme.CONTROL_H)
+        theme.style_button(self.write_preset_btn, "secondary")
+        self.write_preset_btn.setToolTip(
+            "Write this frame's settings (and Film Look) to a film preset, so a roll "
+            "started with it begins from them.\nRight-click: apply a preset to frames, "
+            "manage presets.")
+        self.write_preset_btn.clicked.connect(self._on_write_preset)
+        self.write_preset_btn.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.write_preset_btn.customContextMenuRequested.connect(self._preset_menu)
+        self._preset_unticked = set(film_presets.UNTICKED_BY_DEFAULT)
 
         row = QHBoxLayout()
         row.setSpacing(theme.GAP_TIGHT)
         row.addWidget(label, alignment=Qt.AlignVCenter)
         row.addWidget(self.color_profile_combo, alignment=Qt.AlignVCenter)
+        row.addWidget(self.write_preset_btn, 1, alignment=Qt.AlignVCenter)
         return row
 
+    # --- film presets (spec/film-presets.md §5) ----------------------------
+    def _film_presets(self):
+        return film_presets.load(self._settings)
+
+    def _frame_preset_id(self, idx, presets):
+        """The preset a frame belongs to: its own, else the roll's, else None."""
+        img = ccr_backend.get_image_by_index(idx) if idx is not None else None
+        pid = getattr(img, "film_preset", None)
+        if film_presets.find(presets, pid):
+            return pid
+        sess = getattr(self.window(), "capture_session", None) or {}
+        pid = sess.get("preset") if isinstance(sess, dict) else None
+        return pid if film_presets.find(presets, pid) else None
+
+    def _sync_preset_button(self, idx):
+        presets = self._film_presets()
+        img = ccr_backend.get_image_by_index(idx) if idx is not None else None
+        pid = getattr(img, "film_preset", None)
+        p = film_presets.find(presets, pid)
+        base = ("Write this frame's settings (and Film Look) to a film preset, so a roll "
+                "started with it begins from them.\nRight-click: apply a preset to "
+                "frames, manage presets.")
+        if p is not None:
+            base = f"This frame: {film_presets.label(p)}.\n" + base
+        elif pid:
+            base = "This frame's film preset was deleted.\n" + base
+        self.write_preset_btn.setToolTip(base)
+
+    def _new_preset_id(self, initial=None):
+        """The test seam: a new preset's ID dict, or None."""
+        from widgets.film_preset_id_dialog import FilmPresetIdDialog
+        dlg = FilmPresetIdDialog(self._film_presets(), initial or {}, title="New Film Preset",
+                                 parent=self)
+        return dlg.values() if dlg.exec() == QDialog.Accepted else None
+
+    def _make_preset(self):
+        """Ask for an ID and store the preset (or find the one it names)."""
+        v = self._new_preset_id()
+        if not v or not v.get("film"):
+            return None
+        presets, p = film_presets.ensure(self._film_presets(), v["film"], v["push"],
+                                         v["version"], v.get("notes", ""))
+        film_presets.save(self._settings, presets)
+        return p
+
+    def _write_preset_dialog(self, options, unticked, presets, current):
+        """The test seam: (preset id, chosen rows) or None."""
+        from widgets.film_preset_write import make_write_dialog
+        dlg = make_write_dialog(self, options, unticked, presets, current, self._make_preset)
+        if dlg.exec() != QDialog.Accepted or not dlg.preset_id():
+            return None
+        return dlg.preset_id(), dlg.selection()
+
+    def _on_write_preset(self):
+        idx = self.current_idx
+        snap = self.settings_snapshot(idx) if idx is not None else None
+        if snap is None:
+            self.set_temporary_hint("No image selected to write from.", duration=3000)
+            return
+        for k in film_presets.GEOMETRY:
+            snap.pop(k, None)
+        options = [o for o in paste_options(snap, self._default_for)
+                   if o[1] not in film_presets.GEOMETRY]
+        if not options:
+            self.set_temporary_hint("This frame has no changes from default to write.",
+                                    duration=3000)
+            return
+        presets = self._film_presets()
+        current = self._frame_preset_id(idx, presets)
+        if not presets:
+            # nothing to write to yet: name the first preset
+            p = self._make_preset()
+            if p is None:
+                return
+            presets, current = self._film_presets(), p["id"]
+        res = self._write_preset_dialog(options, self._preset_unticked, presets, current)
+        if not res:
+            return
+        pid, chosen = res
+        chosen = set(chosen)
+        self._preset_unticked = {o[1] for o in options if o[1] not in chosen}
+        if not chosen:
+            self.set_temporary_hint("Nothing ticked: the preset is unchanged.", duration=3000)
+            return
+        presets, p = film_presets.write_clip(self._film_presets(), pid, snap,
+                                             [o[1] for o in options if o[1] in chosen])
+        if p is None:
+            self.set_temporary_hint("That film preset no longer exists.", duration=3000)
+            return
+        film_presets.save(self._settings, presets)
+        img = ccr_backend.get_image_by_index(idx)
+        img.film_preset = p["id"]
+        self._sync_preset_button(idx)
+        n = len(p["chosen"])
+        self.set_temporary_hint(f"Wrote {n} setting{'' if n == 1 else 's'} to "
+                                f"{film_presets.label(p)}.", duration=4000)
+
+    def _preset_menu_actions(self):
+        """[(label, indices or None, enabled)] for Write to Preset's right-click."""
+        out = []
+        cur = self.current_idx
+        if cur is not None:
+            out.append(("Apply Preset to This Frame…", [cur], True))
+        tl = getattr(self.window(), "thumbnail_list", None)
+        sel = tl.selected_indices() if tl is not None and hasattr(tl, "selected_indices") else []
+        if len(sel) > 1:
+            out.append((f"Apply Preset to the {len(sel)} Selected Frames…", sel, True))
+        out.append(("Manage Film Presets…", None, True))
+        return out
+
+    def _preset_menu(self, pos):
+        m = QMenu(self)
+        for label, indices, enabled in self._preset_menu_actions():
+            if indices is None:
+                m.addSeparator()
+                a = m.addAction(label, self._manage_presets)
+            else:
+                a = m.addAction(label, lambda ix=indices: self.apply_preset_to(ix))
+            a.setEnabled(enabled)
+        m.popup(self.write_preset_btn.mapToGlobal(pos))
+        self._preset_popup = m
+
+    def _manage_presets(self):
+        opener = getattr(self.window(), "open_settings", None)
+        if opener is not None:
+            opener(page="Film Presets")
+
+    def _choose_preset(self, presets, current, n):
+        """The test seam: a preset id, or None."""
+        from widgets.film_preset_write import ChoosePresetDialog
+        what = "this frame" if n == 1 else f"the {n} selected frames"
+        dlg = ChoosePresetDialog(presets, current, prompt=f"Apply a film preset to {what}:",
+                                 parent=self)
+        return dlg.preset_id() if dlg.exec() == QDialog.Accepted else None
+
+    def _apply_preset_rows(self, options, n):
+        """The test seam: the rows to apply (all ticked to start), or None."""
+        dlg = PasteSettingsDialog(self, options, (), target_count=n)
+        dlg.setWindowTitle("Apply Film Preset")
+        from widgets.film_preset_write import _rename_button
+        _rename_button(dlg, "Paste", "Apply")
+        return dlg.selection() if dlg.exec_() == QDialog.Accepted else None
+
+    def apply_preset_to(self, indices):
+        """Paste a film preset's settings onto frames (one undo step each) and
+        mark them as that preset's."""
+        indices = [i for i in (indices or []) if ccr_backend.get_image_by_index(i) is not None]
+        if not indices:
+            return
+        presets = [p for p in self._film_presets() if film_presets.carried(p)]
+        if not presets:
+            self.set_temporary_hint("No film preset carries settings yet: Write to Preset "
+                                    "first.", duration=4000)
+            return
+        pid = self._choose_preset(presets, self._frame_preset_id(indices[0], presets),
+                                  len(indices))
+        p = film_presets.find(presets, pid)
+        if p is None:
+            return
+        options = [o for o in paste_options(p["clip"], self._default_for)
+                   if o[1] in p["chosen"]]
+        chosen = self._apply_preset_rows(options, len(indices))
+        if not chosen:
+            return
+        old = self.clipboard
+        self.clipboard = p["clip"]
+        try:
+            self._paste_chosen(indices, chosen, verb="Applied")
+        finally:
+            self.clipboard = old
+        for i in indices:
+            ccr_backend.get_image_by_index(i).film_preset = p["id"]
+        self._sync_preset_button(self.current_idx)
+
     def _sync_color_profile_combo(self, idx):
+        try:
+            self._sync_preset_button(idx)
+        except Exception:
+            pass
+        self._sync_color_profile_combo_only(idx)
+
+    def _sync_color_profile_combo_only(self, idx):
         """Reflect the image's stored color profile in the dropdown without
         firing the change handler."""
         img = ccr_backend.get_image_by_index(idx) if idx is not None else None
@@ -2061,6 +2262,7 @@ class SlidersPanel(QWidget):
         self.auto_wb_btn.setEnabled(enabled)
         self.crop_btn.setEnabled(enabled)
         self.color_profile_combo.setEnabled(enabled)
+        self.write_preset_btn.setEnabled(enabled)
         self.curve_editor.setEnabled(enabled)
         # Area editing presupposes a converted positive — gate the Layers list
         # with the same flag as the sliders.
@@ -4744,10 +4946,27 @@ class SlidersPanel(QWidget):
         """Snapshot every setting of image `idx` onto the clipboard. The
         current image is read from the LIVE UI (its active layer, global or
         area, as before); any other image from its global layer."""
-        img = ccr_backend.get_image_by_index(idx)
-        if img is None:
+        snap = self.settings_snapshot(idx)
+        if snap is None:
             self.set_temporary_hint("No image selected to copy from", duration=4000)
             return
+        self.clipboard = snap
+        n = len(paste_options(self.clipboard, self._default_for))
+        if n:
+            self.set_temporary_hint(
+                f"Copied settings ({n} change{'' if n == 1 else 's'} from default).",
+                duration=4000)
+        else:
+            self.set_temporary_hint(
+                "Copied, but this image has no changes from default.", duration=4000)
+
+    def settings_snapshot(self, idx):
+        """Every setting of image `idx` in the clipboard's form (None when
+        there is no such image): what Copy Settings copies and Write to
+        Preset writes."""
+        img = ccr_backend.get_image_by_index(idx)
+        if img is None:
+            return None
         if idx == self.current_idx:
             live = {key: slider.value()
                     for key, slider in zip(self.adjustment_keys, self.sliders)}
@@ -4773,7 +4992,7 @@ class SlidersPanel(QWidget):
             for flag in GLOBAL_FLAG_KEYS:
                 if g.get(flag):
                     live[flag] = g[flag]
-        self.clipboard = {
+        return {
             "adjustments": {k: live[k] for k in self.adjustment_keys},
             "curves": copy.deepcopy(live.get("curves")) or None,
             "cineon_log": bool(live.get("cineon_log")),
@@ -4796,14 +5015,6 @@ class SlidersPanel(QWidget):
             "flip_v": bool(getattr(img, "vertical_mirrored", False)),
             "fine_rotation": getattr(img, "fine_rotation_angle", 0) or 0,
         }
-        n = len(paste_options(self.clipboard, self._default_for))
-        if n:
-            self.set_temporary_hint(
-                f"Copied settings ({n} change{'' if n == 1 else 's'} from default).",
-                duration=4000)
-        else:
-            self.set_temporary_hint(
-                "Copied, but this image has no changes from default.", duration=4000)
 
     def paste_adjustment_settings(self):
         """Cmd/Ctrl+V: paste onto the current image (via the dialog)."""
@@ -4848,6 +5059,11 @@ class SlidersPanel(QWidget):
             self.set_temporary_hint("Nothing selected to paste.", duration=3000)
             return
 
+        self._paste_chosen(indices, chosen)
+
+    def _paste_chosen(self, indices, chosen, verb="Pasted"):
+        """Apply the clipboard's `chosen` rows to each image in `indices` (one
+        undo step each), refresh them and say so."""
         self.end_undo_burst()
         skipped_fine = 0
         reoriented_current = False
@@ -4873,7 +5089,7 @@ class SlidersPanel(QWidget):
             mw.image_preview.update_preview(self.current_idx)
 
         n = len(chosen)
-        msg = f"Pasted {n} setting{'' if n == 1 else 's'}"
+        msg = f"{verb} {n} setting{'' if n == 1 else 's'}"
         if len(indices) > 1:
             msg += f" to {len(indices)} images"
         msg += "."
@@ -4882,14 +5098,13 @@ class SlidersPanel(QWidget):
                     f"{'' if skipped_fine == 1 else 's'}.")
         self.set_temporary_hint(msg, duration=3000)
 
-    def _apply_paste(self, idx, chosen):
-        """Apply the ticked clipboard items to one image. Returns
-        {'reoriented': bool, 'skipped_fine': 0|1}."""
-        img = ccr_backend.get_image_by_index(idx)
-        clip = self.clipboard
-        is_current = idx == self.current_idx
-        img.push_undo_state()
-
+    def paste_into(self, target, clip, chosen):
+        """`target`'s adjustment dict with the `chosen` rows of `clip` pasted
+        over it, every key filled (missing ones with defaults); None when no
+        chosen row touches the adjustments. Pure: the paste dialog, Apply
+        Preset and a capture's film-preset look all use it
+        (spec/film-presets.md)."""
+        target = dict(target or {})
         adj_keys = [k for k in self.adjustment_keys if f"adj:{k}" in chosen]
         if "bands" in chosen:
             adj_keys += [k for k in self.adjustment_keys if k in _BAND_KEYS]
@@ -4906,59 +5121,71 @@ class SlidersPanel(QWidget):
                      or "organics_shape" in chosen or "golden_shape" in chosen
                      or "shadow_shape" in chosen or "glow_shape" in chosen
                      or "shadow_lift_shape" in chosen)
-        merged = None
-        if touch_adj:
-            # Build a COMPLETE dict from the target (missing keys filled with
-            # defaults) and overwrite only the ticked keys, so un-ticked
-            # settings survive and the "a non-empty adjustment dict carries
-            # every key" invariant holds. The current image's ACTIVE layer is
-            # the target (area editing); other images take their global layer.
-            target = (self._read_active_settings(idx) if is_current
-                      else dict(img.adjustment_settings or {}))
-            merged = {k: target.get(k, self._default_for(k)) for k in self.adjustment_keys}
-            for k in adj_keys:
-                merged[k] = clip["adjustments"].get(k, self._default_for(k))
-            if "curves" in chosen and clip.get("curves"):
-                merged["curves"] = copy.deepcopy(clip["curves"])
-            elif target.get("curves") is not None:
-                merged["curves"] = target["curves"]
-            if "xtone_shape" in chosen and clip.get("xtone_shape"):
-                merged["xtone_shape"] = copy.deepcopy(clip["xtone_shape"])
-            elif normalize_xtone_shape(target.get("xtone_shape")):
-                merged["xtone_shape"] = target["xtone_shape"]
-            if "organics_shape" in chosen and clip.get("organics_shape"):
-                merged["organics_shape"] = copy.deepcopy(clip["organics_shape"])
-            elif normalize_organics_shape(target.get("organics_shape")):
-                merged["organics_shape"] = target["organics_shape"]
-            if "golden_shape" in chosen and clip.get("golden_shape"):
-                merged["golden_shape"] = copy.deepcopy(clip["golden_shape"])
-            elif normalize_golden_shape(target.get("golden_shape")):
-                merged["golden_shape"] = target["golden_shape"]
-            if "shadow_shape" in chosen and clip.get("shadow_shape"):
-                merged["shadow_shape"] = copy.deepcopy(clip["shadow_shape"])
-            elif normalize_shadow_shape(target.get("shadow_shape")):
-                merged["shadow_shape"] = target["shadow_shape"]
-            if "glow_shape" in chosen and clip.get("glow_shape"):
-                merged["glow_shape"] = copy.deepcopy(clip["glow_shape"])
-            elif normalize_glow_shape(target.get("glow_shape")):
-                merged["glow_shape"] = target["glow_shape"]
-            if "shadow_lift_shape" in chosen and clip.get("shadow_lift_shape"):
-                merged["shadow_lift_shape"] = copy.deepcopy(clip["shadow_lift_shape"])
-            elif normalize_lift_shape(target.get("shadow_lift_shape")):
-                merged["shadow_lift_shape"] = target["shadow_lift_shape"]
-            if "cineon_log" in chosen or target.get("cineon_log"):
-                merged["cineon_log"] = True
-            if "look_lut" in chosen and clip.get("look_lut"):
-                merged["look_lut"] = clip["look_lut"]
-            elif target.get("look_lut"):
-                merged["look_lut"] = target["look_lut"]
-            clip_flags = clip.get("flags") or {}
-            for row, flag in flag_for.items():
-                if row in chosen:
-                    if clip_flags.get(flag):
-                        merged[flag] = True
-                elif target.get(flag):
+        if not touch_adj:
+            return None
+        # Build a COMPLETE dict from the target (missing keys filled with
+        # defaults) and overwrite only the ticked keys, so un-ticked
+        # settings survive and the "a non-empty adjustment dict carries
+        # every key" invariant holds. The current image's ACTIVE layer is
+        # the target (area editing); other images take their global layer.
+        merged = {k: target.get(k, self._default_for(k)) for k in self.adjustment_keys}
+        for k in adj_keys:
+            merged[k] = clip["adjustments"].get(k, self._default_for(k))
+        if "curves" in chosen and clip.get("curves"):
+            merged["curves"] = copy.deepcopy(clip["curves"])
+        elif target.get("curves") is not None:
+            merged["curves"] = target["curves"]
+        if "xtone_shape" in chosen and clip.get("xtone_shape"):
+            merged["xtone_shape"] = copy.deepcopy(clip["xtone_shape"])
+        elif normalize_xtone_shape(target.get("xtone_shape")):
+            merged["xtone_shape"] = target["xtone_shape"]
+        if "organics_shape" in chosen and clip.get("organics_shape"):
+            merged["organics_shape"] = copy.deepcopy(clip["organics_shape"])
+        elif normalize_organics_shape(target.get("organics_shape")):
+            merged["organics_shape"] = target["organics_shape"]
+        if "golden_shape" in chosen and clip.get("golden_shape"):
+            merged["golden_shape"] = copy.deepcopy(clip["golden_shape"])
+        elif normalize_golden_shape(target.get("golden_shape")):
+            merged["golden_shape"] = target["golden_shape"]
+        if "shadow_shape" in chosen and clip.get("shadow_shape"):
+            merged["shadow_shape"] = copy.deepcopy(clip["shadow_shape"])
+        elif normalize_shadow_shape(target.get("shadow_shape")):
+            merged["shadow_shape"] = target["shadow_shape"]
+        if "glow_shape" in chosen and clip.get("glow_shape"):
+            merged["glow_shape"] = copy.deepcopy(clip["glow_shape"])
+        elif normalize_glow_shape(target.get("glow_shape")):
+            merged["glow_shape"] = target["glow_shape"]
+        if "shadow_lift_shape" in chosen and clip.get("shadow_lift_shape"):
+            merged["shadow_lift_shape"] = copy.deepcopy(clip["shadow_lift_shape"])
+        elif normalize_lift_shape(target.get("shadow_lift_shape")):
+            merged["shadow_lift_shape"] = target["shadow_lift_shape"]
+        if "cineon_log" in chosen or target.get("cineon_log"):
+            merged["cineon_log"] = True
+        if "look_lut" in chosen and clip.get("look_lut"):
+            merged["look_lut"] = clip["look_lut"]
+        elif target.get("look_lut"):
+            merged["look_lut"] = target["look_lut"]
+        clip_flags = clip.get("flags") or {}
+        for row, flag in flag_for.items():
+            if row in chosen:
+                if clip_flags.get(flag):
                     merged[flag] = True
+            elif target.get(flag):
+                merged[flag] = True
+        return merged
+
+    def _apply_paste(self, idx, chosen):
+        """Apply the ticked clipboard items to one image. Returns
+        {'reoriented': bool, 'skipped_fine': 0|1}."""
+        img = ccr_backend.get_image_by_index(idx)
+        clip = self.clipboard
+        is_current = idx == self.current_idx
+        img.push_undo_state()
+        target = (self._read_active_settings(idx) if is_current
+                  else dict(img.adjustment_settings or {}))
+        merged = self.paste_into(target, clip, chosen)
+        touch_adj = merged is not None
+        if touch_adj:
             if is_current and img.active_area_id is not None:
                 # Whole-image flags never go into an area layer.
                 for flag in GLOBAL_FLAG_KEYS:

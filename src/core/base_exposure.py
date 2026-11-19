@@ -664,16 +664,37 @@ def _clean_base(b):
     bp = _clean_bp(b.get("black_point"))
     if bp:
         out["black_point"] = bp
+    # the film preset it belongs to (spec/film-presets.md); older ones have none
+    pid = str(b.get("preset", "") or "").strip()
+    if pid:
+        out["preset"] = pid
     return out
 
 
-def set_black_point(data, name, bp):
-    """The film base called `name` takes the black point `bp` (spec/film-base-
+def scans(base):
+    """The scan types a film base serves: {trichrome}, {colour}, {bw}, or
+    both one-exposure types for an older base that recorded none."""
+    s = scan_of(base)
+    if s:
+        return {s}
+    return {"colour", "bw"} if "w" in ((base or {}).get("colours") or {}) else set()
+
+
+def _clash(a, b):
+    """Two film bases that may not share a name: they would be listed
+    together (spec/film-presets.md §2)."""
+    sa, sb = scans(a), scans(b)
+    return not sa or not sb or bool(sa & sb)
+
+
+def set_black_point(data, name, bp, scan=None):
+    """The film base called `name` (for the scan type `scan`, when given: names
+    repeat across scan types) takes the black point `bp` (spec/film-base-
     black-point.md); the rest of the list is left as it is."""
     d = normalise(data)
     clean = _clean_bp(bp)
     for b in d["bases"]:
-        if b["name"].lower() == str(name or "").lower():
+        if b["name"].lower() == str(name or "").lower() and (scan is None or fits(b, scan)):
             if clean:
                 b["black_point"] = clean
             else:
@@ -689,12 +710,12 @@ def normalise(data):
             data = json.loads(data) if data.strip() else None
         except (TypeError, ValueError):
             data = None
-    bases, seen = [], set()
+    bases = []
     if isinstance(data, dict):
         for b in data.get("bases", []) or []:
             c = _clean_base(b)
-            if c and c["name"].lower() not in seen:
-                seen.add(c["name"].lower())
+            if c and not any(o["name"].lower() == c["name"].lower() and _clash(o, c)
+                             for o in bases):
                 bases.append(c)
     sel = -1
     if isinstance(data, dict):
@@ -718,8 +739,11 @@ def selected(data):
     return d["bases"][d["selected"]] if d["selected"] >= 0 else None
 
 
-def unique_name(data, name):
-    taken = {b["name"].lower() for b in normalise(data)["bases"]}
+def unique_name(data, name, like=None):
+    """`name`, or 'name 2', … when a film base it would be listed with (one
+    serving a scan type `like` serves; any, without `like`) has it."""
+    taken = {b["name"].lower() for b in normalise(data)["bases"]
+             if like is None or _clash(b, like)}
     base = (name or "Film base").strip() or "Film base"
     if base.lower() not in taken:
         return base
@@ -739,13 +763,16 @@ BW_LIGHTS = ("w", "r", "g", "b")
 LIGHT_NAMES = {"w": "white", "r": "red", "g": "green", "b": "blue"}
 
 
-def entry(name, colours, camera="", notes=(), when=None, scan=None, light=None):
+def entry(name, colours, camera="", notes=(), when=None, scan=None, light=None,
+          preset=None):
     e = {"name": name, "when": when or datetime.date.today().isoformat(),
          "camera": camera or "", "colours": dict(colours), "notes": list(notes)}
     if scan:
         e["scan"] = scan
     if light:
         e["light"] = light
+    if preset:
+        e["preset"] = preset
     return e
 
 
@@ -772,7 +799,7 @@ def fits(base, scan_type):
 
 def add(data, new):
     d = normalise(data)
-    c = _clean_base(dict(new, name=unique_name(d, new.get("name"))))
+    c = _clean_base(dict(new, name=unique_name(d, new.get("name"), like=new)))
     if c:
         d["bases"].append(c)
         d["selected"] = len(d["bases"]) - 1
@@ -786,7 +813,7 @@ def replace(data, index, colours, camera="", notes=(), when=None, scan=None, lig
         old = d["bases"][index]
         c = _clean_base(entry(old["name"], colours, camera or old["camera"], notes, when,
                               scan=scan or old.get("scan"),
-                              light=light or old.get("light")))
+                              light=light or old.get("light"), preset=old.get("preset")))
         if c:
             d["bases"][index] = c
             d["selected"] = index
@@ -798,7 +825,9 @@ def rename(data, index, name):
     name = (name or "").strip()
     if not name or not (0 <= index < len(d["bases"])):
         return d
-    if name.lower() in {b["name"].lower() for i, b in enumerate(d["bases"]) if i != index}:
+    me = d["bases"][index]
+    if any(b["name"].lower() == name.lower() and _clash(b, me)
+           for i, b in enumerate(d["bases"]) if i != index):
         return d
     d["bases"][index]["name"] = name
     return d
@@ -897,7 +926,7 @@ def edit(data, index, name, colours):
     others = dict(d, bases=[b for i, b in enumerate(d["bases"]) if i != index])
     name = (name or "").strip() or old["name"]
     if name.lower() != old["name"].lower():
-        name = unique_name(others, name)
+        name = unique_name(others, name, like=old)
     c = _clean_base(dict(old, name=name, colours=colours))
     if c:
         d["bases"][index] = c
@@ -947,3 +976,58 @@ def summary(base, trichrome):
     if base.get("black_point"):
         line += " · black point"
     return line
+
+
+# --------------------------------------------------------------------------- #
+# film presets (spec/film-presets.md)
+# --------------------------------------------------------------------------- #
+def bases_of(data, pid):
+    """[(index, base)] of the film bases linked to the preset `pid`."""
+    return [(i, b) for i, b in enumerate(normalise(data)["bases"])
+            if pid and b.get("preset") == pid]
+
+
+def unlinked(data):
+    """[(index, base)] of the film bases that belong to no preset."""
+    return [(i, b) for i, b in enumerate(normalise(data)["bases"]) if not b.get("preset")]
+
+
+def link(data, index, pid, name):
+    """The film base at `index` joins the preset `pid` under `name` (its label).
+    Refused (unchanged) when a base it would be listed with has that name."""
+    d = normalise(data)
+    if not 0 <= index < len(d["bases"]):
+        return d
+    me = d["bases"][index]
+    if any(b["name"].lower() == name.lower() and _clash(b, me)
+           for i, b in enumerate(d["bases"]) if i != index):
+        return d
+    me["name"] = name
+    me["preset"] = pid
+    return d
+
+
+def relabel(data, pid, name):
+    """Every film base of the preset `pid` takes its new label `name`."""
+    d = normalise(data)
+    for b in d["bases"]:
+        if b.get("preset") == pid:
+            b["name"] = name
+    return normalise(d)
+
+
+def unlink_preset(data, pid):
+    """A deleted preset's film bases stay, unlinked, under their names."""
+    d = normalise(data)
+    for b in d["bases"]:
+        if b.get("preset") == pid:
+            b.pop("preset", None)
+    return d
+
+
+def base_for(data, pid, scan_type):
+    """(index, base) of the preset's film base for this scan type, or (None, None)."""
+    for i, b in bases_of(data, pid):
+        if fits(b, scan_type):
+            return i, b
+    return None, None

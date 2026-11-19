@@ -52,7 +52,7 @@ def test_the_window_shows_only_the_choices_that_apply(tmp_path):
     o = dlg.options(True)
     assert o == {"start": True, "folder": str(roll), "scan_type": "trichrome",
                  "close_open": False, "import_existing": True, "dont_ask": False,
-                 "roll": "R0001", "format": "", "film": ""}
+                 "roll": "R0001", "format": "", "film": "", "preset": ""}
     assert dlg.options(False)["start"] is False
 
 
