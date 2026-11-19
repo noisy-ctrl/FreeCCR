@@ -1246,10 +1246,15 @@ class ImagePreview(QWidget):
         self._dust_selected = None
 
         # Coalesce a fine-rotation drag into a single undo step
+        self._straighten_dirty = False
+        self._straighten_refresh = QTimer(self)        # coalesces display re-crops
+        self._straighten_refresh.setSingleShot(True)
+        self._straighten_refresh.setInterval(15)
+        self._straighten_refresh.timeout.connect(self._straighten_show)
         self._fine_rot_burst_active = False
         self._fine_rot_burst_timer = QTimer(self)
         self._fine_rot_burst_timer.setSingleShot(True)
-        self._fine_rot_burst_timer.timeout.connect(self._end_fine_rot_burst)
+        self._fine_rot_burst_timer.timeout.connect(lambda: self._end_fine_rot_burst(show=True))
 
         # --- Zoom & hi-res detail state ---
         # _zoom is relative to the fitted view (1.0 = fit). While zoomed past
@@ -1568,7 +1573,8 @@ class ImagePreview(QWidget):
 
         self.current_pixmap = preview_img
         self.current_fine_rotation = ccr_backend.get_image_fine_rotation_by_index(idx)
-        self.rotation_slider.setValue(self.current_fine_rotation)
+        # the frame's straighten (spec/straighten-in-crop.md); never writes back
+        self._set_rotation_slider(self._slider_value_for(ccr_backend.images[idx]))
         self.current_rotation = ccr_backend.get_image_rotation_by_index(idx)
         self.current_vertical_flip = ccr_backend.get_image_vertical_flip_by_index(idx)
         self.current_horizontal_flip = ccr_backend.get_image_horizontal_flip_by_index(idx)
@@ -1603,7 +1609,8 @@ class ImagePreview(QWidget):
             # In crop mode the panel's Straighten slider replaces it (and the
             # image-level micro-rotation is folded into the crop), so keep it
             # disabled there too.
-            self.rotation_slider.setEnabled(not self.dust_mode and not self.crop_mode)
+            self.rotation_slider.setEnabled(not self.dust_mode)
+            self._style_rotation_slider()
             self.pixmap_item = QGraphicsPixmapItem(preview_img)
             # The item's own mode wins over the view's SmoothPixmapTransform
             # hint; the default (Fast) drew an enlarged preview nearest-
@@ -2340,8 +2347,25 @@ class ImagePreview(QWidget):
         lab.show()
         lab.raise_()
 
-    def _end_fine_rot_burst(self):
+    def _end_fine_rot_burst(self, show=False):
         self._fine_rot_burst_active = False
+        if getattr(self, "_straighten_dirty", False):
+            # the drag is over: re-render (Glow reads the crop), thumbnail,
+            # catalogue (spec/straighten-in-crop.md). `show` only from the
+            # burst timer: a frame switch is already redrawing.
+            self._straighten_dirty = False
+            self._straighten_refresh.stop()
+            img = getattr(self, "_current_image_ref", None)
+            if img is not None:
+                img.update_thumbnail_and_preview()
+                idx = (ccr_backend.images.index(img)
+                       if img in ccr_backend.images else None)
+                if show and idx is not None and idx == self.current_idx and not self.crop_mode:
+                    self.update_preview(idx)
+                tl = self._thumbnail_list_widget()
+                if tl is not None and idx is not None:
+                    tl.update_thumbnail(idx)
+                ccr_backend.save_catalog()
 
     def end_undo_bursts(self):
         """End any in-progress fine-rotation undo burst, e.g. after an undo,
@@ -2349,11 +2373,65 @@ class ImagePreview(QWidget):
         self._end_fine_rot_burst()
         self._fine_rot_burst_timer.stop()
 
+    # --- the long rotate slider (spec/straighten-in-crop.md) -----------------
+    @staticmethod
+    def _straightens_crop(img):
+        """The slider turns the picture inside its crop where the crop is
+        shown (a converted frame, or Positive mode); an unconverted negative
+        keeps the old image fine rotation."""
+        return img is not None and bool(getattr(img, "converted", False)
+                                        or ccr_backend.positive_mode)
+
+    def _slider_value_for(self, img):
+        fine = int(getattr(img, "fine_rotation_angle", 0) or 0)
+        if not self._straightens_crop(img):
+            return fine
+        ang = float(getattr(img, "crop_angle", 0.0) or 0.0) if img.crop_rect else 0.0
+        return int(round(fine - ang * 100.0))
+
+    def _set_rotation_slider(self, value):
+        was = self.rotation_slider.blockSignals(True)
+        self.rotation_slider.setValue(int(value))
+        self.rotation_slider.blockSignals(was)
+
+    def _style_rotation_slider(self):
+        """Red in crop mode: there it moves the crop box's angle."""
+        sl = self.rotation_slider
+        want = "crop" if self.crop_mode else ""
+        if getattr(sl, "_look", None) == want:
+            return
+        sl._look = want
+        if want:
+            red = theme.DANGER
+            sl.setStyleSheet(
+                "QSlider::groove:horizontal { height: 4px; border-radius: 2px;"
+                f" background: {red}; }}"
+                " QSlider::handle:horizontal { width: 14px; margin: -6px 0;"
+                f" border-radius: 7px; background: {red}; border: 1px solid #ffffff; }}")
+            sl.setToolTip("Straighten: turns the crop box (as the Crop panel's "
+                          "Straighten). Double-click for 0.")
+        else:
+            sl.setStyleSheet("")
+            sl.setToolTip("Straighten: turns the picture inside its crop, keeping "
+                          "the frame upright and the crop inside the picture. "
+                          "Double-click for 0.")
+
     def _on_slider_rotate(self, value):
+        if self.crop_mode:
+            # the crop box's angle, as the panel's Straighten and the knob
+            self._crop_box_is_seed = False
+            self.set_pending_straighten(-value / 100.0)
+            self._sync_crop_panel()
+            return
+        img = ccr_backend.get_image_by_index(self.current_idx)
+        if img is None:
+            return
+        if self._straightens_crop(img):
+            self._straighten_in_crop(img, value)
+            return
         # Snapshot once per burst, and only for real user changes (the slider
         # is also set programmatically to the backend value on image switch).
-        img = ccr_backend.get_image_by_index(self.current_idx)
-        if img is not None and img.fine_rotation_angle != value:
+        if img.fine_rotation_angle != value:
             if not self._fine_rot_burst_active:
                 img.push_undo_state()
                 self._fine_rot_burst_active = True
@@ -2361,6 +2439,43 @@ class ImagePreview(QWidget):
         self.current_fine_rotation = value
         ccr_backend.set_image_fine_rotation_by_index(self.current_idx, value)
         self.apply_transformations()
+
+    def _straighten_in_crop(self, img, value):
+        """The picture turned inside its crop: the crop's angle set, the box
+        the largest of its starting shape that stays inside the picture
+        (core.straighten.fit_box). Back at 0 with no starting crop, none."""
+        from core import straighten as st
+        if self._slider_value_for(img) == value:
+            return
+        prev = img.resized_preview if getattr(img, "resized_preview", None) is not None else None
+        if prev is None or prev.isNull():
+            return
+        w, h = prev.width(), prev.height()
+        cur = (tuple(img.crop_rect) if img.crop_rect else None,
+               round(float(img.crop_angle or 0.0), 6))
+        memo = getattr(img, "_straighten_memo", None)
+        base = memo[0] if memo is not None and memo[1] == cur else (cur[0] or st.FULL)
+        if not self._fine_rot_burst_active:
+            img.push_undo_state()
+            self._fine_rot_burst_active = True
+        self._fine_rot_burst_timer.start(800)
+        self._straighten_dirty = True
+        angle = -value / 100.0
+        rect = st.fit_box(base, angle, w, h)
+        if abs(angle) < 0.005 and st.is_full(rect):
+            img.crop_rect, img.crop_angle = None, 0.0
+        else:
+            img.crop_rect, img.crop_angle = tuple(rect), angle
+        img.fine_rotation_angle = 0           # an old fine rotation is folded in
+        self.current_fine_rotation = 0
+        img._straighten_memo = (base, (tuple(img.crop_rect) if img.crop_rect else None,
+                                       round(float(img.crop_angle or 0.0), 6)))
+        self._straighten_refresh.start()
+
+    def _straighten_show(self):
+        """The display re-cropped (coalesced while the slider moves)."""
+        if self.current_idx is not None and not self.crop_mode:
+            self.update_preview(self.current_idx)
 
     def _on_slider_pressed(self):
         self.show_grid = True
@@ -4953,9 +5068,12 @@ class ImagePreview(QWidget):
             self._crop_box_is_seed = True
         self._draw_crop_overlay()
         self.view.setCursor(Qt.CrossCursor)
-        # The panel straighten slider replaces the canvas micro-rotation slider
-        # while cropping; disable it so it can't set a second, stacking rotation.
-        self.rotation_slider.setEnabled(False)
+        # The long slider stays: red, it moves the crop box's angle like the
+        # panel's Straighten and the knob (spec/straighten-in-crop.md §2), so
+        # it can't set a second, stacking rotation.
+        self.rotation_slider.setEnabled(True)
+        self._style_rotation_slider()
+        self._set_rotation_slider(int(round(-self._pending_crop_angle * 100.0)))
         return True
 
     # ---- Crop panel hooks: aspect ratio + straighten --------------------
@@ -5262,14 +5380,32 @@ class ImagePreview(QWidget):
             self.view.setCursor(Qt.CrossCursor)
             return
         p = base.inverted()[0].map(scene_pos)
-        self.view.setCursor(self._cursor_for_handle(self._crop_handle_at(p)))
+        self.view.setCursor(self._cursor_for_handle(self._crop_mode_at(p)))
+
+    @staticmethod
+    def _draw_new_held():
+        """Alt (Option) held: a drag outside the box draws a new one."""
+        return bool(QApplication.keyboardModifiers() & Qt.AltModifier)
+
+    def _crop_mode_at(self, p):
+        """What a drag from local point p does: a handle, move, or - outside
+        the box and off its lines - ROTATE (the user, 2026-11-19: "a standard
+        ui/ux thing"; spec/straighten-in-crop.md §3); with no box yet, or
+        with Alt held, a new box (None)."""
+        handle = self._crop_handle_at(p)
+        if handle is not None:
+            return handle
+        sel = self._pending_crop_local
+        if sel is None or sel.width() < 2 or sel.height() < 2 or self._draw_new_held():
+            return None
+        return "rotate"
 
     def begin_crop_drag(self, scene_pos):
         base = self._base_transform()
         if base is None or self.current_pixmap is None:
             return
         p = base.inverted()[0].map(scene_pos)
-        mode = self._crop_handle_at(p) or "new"
+        mode = self._crop_mode_at(p) or "new"
         sel = self._pending_crop_local
         self._crop_drag = {
             "mode": mode,
@@ -5508,6 +5644,10 @@ class ImagePreview(QWidget):
             return
         box_t = self._box_transform(sel)
         combined = box_t * base  # box rotation first, then coarse flips/rotation
+        # the long slider follows the box (knob, panel, Auto, Reset)
+        want = int(round(-self._pending_crop_angle * 100.0))
+        if self.rotation_slider.value() != want:
+            self._set_rotation_slider(want)
 
         path = QPainterPath()
         path.setFillRule(Qt.OddEvenFill)
@@ -5519,6 +5659,22 @@ class ImagePreview(QWidget):
         overlay.setTransform(base)
         self.scene.addItem(overlay)
         self._crop_overlay_item = overlay
+
+        # A grid in the box, turning with it: thirds plainly, twelfths faintly
+        # (spec/straighten-in-crop.md §2)
+        for i in range(1, 12):
+            third = i % 4 == 0
+            pen = QPen(QColor(255, 255, 255, 120 if third else 45), 1)
+            pen.setCosmetic(True)
+            for line in (QGraphicsLineItem(sel.left() + sel.width() * i / 12.0, sel.top(),
+                                           sel.left() + sel.width() * i / 12.0, sel.bottom()),
+                         QGraphicsLineItem(sel.left(), sel.top() + sel.height() * i / 12.0,
+                                           sel.right(), sel.top() + sel.height() * i / 12.0)):
+                line.setPen(pen)
+                line.setTransform(combined)
+                self.scene.addItem(line)
+                self._crop_handle_items.append(line)
+                line._crop_grid = True
 
         # Handles are laid out in un-rotated box coords and carry the
         # combined transform, so they ride along with the box rotation.
@@ -5731,6 +5887,10 @@ class ImagePreview(QWidget):
         self._crop_drag = None
         self._remove_crop_overlay_items()
         self.view.setCursor(Qt.ArrowCursor)
+        self._style_rotation_slider()
+        img = ccr_backend.get_image_by_index(self.current_idx)
+        if img is not None:
+            self._set_rotation_slider(self._slider_value_for(img))
         # Single chokepoint for every crop exit (Done/Enter/Esc/right-click/
         # image-switch/entering-dust) — restore the right-hand sliders panel.
         mw = self.window()

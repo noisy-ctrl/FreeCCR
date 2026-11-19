@@ -117,3 +117,29 @@ def test_square_boxes_and_orientation_free_presets_leave_the_toggle():
     assert panel.landscape_radio.isChecked()
     _ip, panel = _with_panel("free", landscape=True)
     assert panel.match_box_orientation(100, 300) is False
+
+
+# --- rotate by dragging outside the box (spec/straighten-in-crop.md §3) -------------
+
+def test_dragging_outside_the_box_turns_it(monkeypatch):
+    ip = _preview()
+    assert ip._crop_mode_at(QPointF(50, 150)) == "rotate"
+    assert ip._crop_mode_at(QPointF(150, 130)) == "move"         # inside still moves
+    # from the left of the box, down a little: the box turns, keeps its size
+    _drag(ip, (40, 150), (40, 180))
+    r = ip._pending_crop_local
+    assert (r.width(), r.height()) == pytest.approx((200, 100))
+    assert abs(ip._pending_crop_angle) > 5
+    # Alt held: a new box instead
+    monkeypatch.setattr(type(ip), "_draw_new_held", staticmethod(lambda: True))
+    assert ip._crop_mode_at(QPointF(50, 150)) is None
+    ip._pending_crop_angle = 0.0
+    _drag(ip, (20, 20), (80, 70))
+    r = ip._pending_crop_local
+    assert r.width() < 100
+
+
+def test_with_no_box_a_drag_draws_one():
+    ip = _preview()
+    ip._pending_crop_local = None
+    assert ip._crop_mode_at(QPointF(50, 150)) is None
