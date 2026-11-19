@@ -74,19 +74,28 @@ class UsbCamera(WorkerThread):
         self.dest = None
         self.status = "closed"           # read by sources and the GUI
         self.holders = []                # who held it on the last busy open (camera_holder)
+        self._asked_open = None          # the key of the open asked for last (GUI side)
 
     # -- GUI side ---------------------------------------------------------
     def scan(self):
         self._command(("scan",))
 
     def open(self, key):
+        if key == self._asked_open and self.status in ("opening", "open"):
+            # already opening or open on this key: a second open would close
+            # it and connect again (the user's log, 2026-11-19: the picture
+            # list and the found-cameras list both asked, 0.7 s lost and the
+            # whole configuration read twice)
+            return
         if key != self.key or self.status not in ("opening", "open"):
             # Seen at once by a source made for this key (LiveFeed's thread):
             # opening a camera takes a while and isn't a lost one.
             self.key, self.status = key, "opening"
+        self._asked_open = key
         self._command(("open", key))
 
     def close(self):
+        self._asked_open = None              # the next open is a fresh one
         self._command(("close",))
 
     def set_live(self, on):

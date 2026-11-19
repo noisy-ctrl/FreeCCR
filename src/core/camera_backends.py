@@ -37,6 +37,12 @@ QUIET_S = 0.3              # a shot's files (RAW + JPEG) arrive within this of e
 # live view.
 PREVIEW_BUSY_BACKOFF_S = 0.25
 PREVIEW_GIVE_UP_S = 15.0
+# A Fujifilm's live view frame that isn't made yet: libgphoto2 asks for it a
+# few times over ~50 ms, then reports PTP "Invalid Object Handle" as a plain
+# GP_ERROR. With a 10 s shutter set, the user's GFX 50S II answered that
+# between frames and three in a row closed the camera as lost (log
+# 2026-11-19). It is "not yet", like busy, and asked again after this.
+PREVIEW_NOT_READY_S = 0.05
 # While live view runs and no shot is on its way, libgphoto2's event check is
 # made only this often (spec §17): on a Fujifilm each check also sets the
 # body's priority mode and lists its storage, and checking between every
@@ -508,10 +514,12 @@ class Gphoto2Backend:
             if code == getattr(self.gp, "GP_ERROR_NOT_SUPPORTED", -6):
                 self.no_preview = True
                 return None
-            if code == self.gp.GP_ERROR_CAMERA_BUSY:
+            not_ready = code == getattr(self.gp, "GP_ERROR", -1) and self._is_fuji()
+            if code == self.gp.GP_ERROR_CAMERA_BUSY or not_ready:
                 if self._busy_since is None:
                     self._busy_since = now
-                self._busy_until = now + PREVIEW_BUSY_BACKOFF_S
+                self._busy_until = now + (PREVIEW_NOT_READY_S if not_ready
+                                          else PREVIEW_BUSY_BACKOFF_S)
                 if (not self._preview_frames
                         and now - self._busy_since >= PREVIEW_GIVE_UP_S):
                     self.no_preview = True    # shooting over USB still works
