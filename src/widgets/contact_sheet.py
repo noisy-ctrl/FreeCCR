@@ -72,8 +72,13 @@ GATES = (("square", "Square"), ("camera", "Camera's own"))
 FILM_EDGES = (("black", "Black", (6, 6, 6)), ("grey", "Dark grey", (40, 40, 40)),
               ("brown", "Brown-black", (28, 19, 12)))
 HOLE_WHITE = (245, 245, 245)
-# 35 mm perforations (ISO 491 / KS), mm
-HOLE_PITCH, HOLE_ALONG, HOLE_ACROSS, HOLE_EDGE = 4.75, 2.8, 2.0, 2.0
+# 35 mm perforations, mm: KS (0.078 x 0.110 in), 1.98 ALONG the film by 2.79
+# ACROSS it, corners r 0.51, every 4.75, 2.01 from the edge. Measured on the
+# user's own full-width scans (2026-11-20): 1.98-2.01 along x 2.77-2.80
+# across, 25.35 between the two rows (2.79 / 2.01 had been the wrong way
+# round: wide, short holes).
+HOLE_PITCH, HOLE_ALONG, HOLE_ACROSS, HOLE_EDGE = 4.75, 1.98, 2.79, 2.01
+HOLE_RADIUS = 0.51
 EDGE_FONT_MM = 1.5          # edge print lettering on the film
 EDGE_BAND_MM = 1.6          # 120's edge print: the outer band of its rebate
 CAMERA_BLEED_MM = 1.5       # "Camera's own": at most this much scan past the crop
@@ -829,7 +834,8 @@ class ContactSheet(QObject):
                     continue                    # never a hole cut by the strip's end
                 for y in (HOLE_EDGE * ppm, F - (HOLE_EDGE + HOLE_ACROSS) * ppm):
                     hole = QPainterPath()
-                    hole.addRoundedRect(QRectF(x, y, ha, hx), 0.4 * ppm, 0.4 * ppm)
+                    hole.addRoundedRect(QRectF(x, y, ha, hx), HOLE_RADIUS * ppm,
+                                        HOLE_RADIUS * ppm)
                     p.fillPath(hole, hc)
         p.restore()
 
