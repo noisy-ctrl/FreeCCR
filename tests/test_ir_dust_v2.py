@@ -308,3 +308,62 @@ def test_the_panel_says_what_it_learned_and_forgets_on_request(store, monkeypatc
     assert ir_dust_learn.examples("merged") == [] and p.refreshed == 1
     (_t, _cb, enabled), = p.ir_heading_actions()
     assert not enabled
+
+
+# --------------------------------------------------------------------------- #
+# bridges: a fibre's pieces joined where the IR barely shows it (§3.6)
+# --------------------------------------------------------------------------- #
+def test_a_fibre_the_ir_loses_in_the_middle_is_healed_end_to_end():
+    """The user's wavy line on 002: the IR shows its top and bottom, the
+    colour shots all of it. The pieces are flagged and the middle bridged."""
+    h, w = 400, 600
+    vis, ir = _scene()
+    line = np.zeros((h, w), np.uint8)
+    cv2.line(line, (300, 120), (306, 280), 1, 2)
+    ends = line.copy()
+    ends[192:208] = 0                                   # the IR loses the middle
+    lv = cv2.GaussianBlur(np.where(line > 0, 0.55, 1.0).astype(np.float32), (0, 0), 0.6)
+    li = cv2.GaussianBlur(np.where(ends > 0, 0.75, 1.0).astype(np.float32), (0, 0), 0.9)
+    dm = ir_dust.dust_map(ir * li, [vis * lv])
+    spots = ir_dust.spots_from(dm, ir_dust.SENS_DEFAULT)
+    assert any("ir_bridge" in s for s in spots)
+    assert all("ir_f" not in s for s in spots if "ir_bridge" in s)   # nothing to learn from
+    cov = np.zeros((h, w), np.uint8)
+    for s in spots:
+        pts = np.array([[x * w, y * h] for x, y in s["pts"]], np.int32)
+        r = max(1, int(round(s["r"] * w)))
+        if len(pts) == 1:
+            cv2.circle(cov, tuple(int(v) for v in pts[0]), r, 1, -1)
+        else:
+            cv2.polylines(cov, [pts.reshape(-1, 1, 2)], False, 1, 2 * r)
+    assert cov[line > 0].mean() >= 0.95
+    gap = line.copy()
+    gap[:192] = 0
+    gap[208:] = 0
+    assert cov[gap > 0].mean() >= 0.95                 # the middle too
+    no_bridge = np.zeros((h, w), np.uint8)
+    for s in spots:
+        if "ir_bridge" not in s:
+            pts = np.array([[x * w, y * h] for x, y in s["pts"]], np.int32)
+            r = max(1, int(round(s["r"] * w)))
+            if len(pts) == 1:
+                cv2.circle(no_bridge, tuple(int(v) for v in pts[0]), r, 1, -1)
+            else:
+                cv2.polylines(no_bridge, [pts.reshape(-1, 1, 2)], False, 1, 2 * r)
+    assert no_bridge[gap > 0].mean() < 0.8             # which the pieces alone don't
+    # without the colour shots' line in the gap there is no bridge
+    lv2 = cv2.GaussianBlur(np.where(ends > 0, 0.55, 1.0).astype(np.float32), (0, 0), 0.6)
+    dm2 = ir_dust.dust_map(ir * li, [vis * lv2])
+    assert not any("ir_bridge" in s for s in ir_dust.spots_from(dm2, ir_dust.SENS_DEFAULT))
+
+
+def test_a_bridge_follows_a_thin_dark_line_not_an_edge():
+    vz = np.zeros((60, 60), np.float32)
+    vz[10:50, 29:31] = -6.0                               # a thin dark line
+    path = ir_dust.dark_path(vz, (30, 12), (30, 47))
+    assert path and all(29 <= x <= 30 for x, _y in path[2:-2])
+    assert ir_dust._ridge_share(vz, path, 3.0) >= 0.9
+    edge = np.zeros((60, 60), np.float32)
+    edge[:, :30] = -6.0                                   # dark on one side only
+    path = [(28, y) for y in range(10, 50)]
+    assert ir_dust._ridge_share(edge, path, 3.0) < 0.2
