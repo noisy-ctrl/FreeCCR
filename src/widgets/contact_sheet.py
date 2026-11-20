@@ -65,6 +65,20 @@ TEXT_COLOURS = (("edge", "Edge print", None), ("white", "White", (240, 240, 240)
 TEXT_INFO = (("number", "Frame number"), ("name", "File name"), ("film", "Film"),
              ("format", "Film format"), ("status", "Crop status"))
 DEFAULT_INFO = ("number", "name", "format", "status")
+# Layout… (spec/contact-sheet-strips.md): the grid, or the roll as strips of film
+LAYOUTS = (("grid", "Grid"), ("strips", "Film strips"))
+DIRECTIONS = (("auto", "By format"), ("across", "Across"), ("down", "Down"))
+GATES = (("square", "Square"), ("camera", "Camera's own"))
+FILM_EDGES = (("black", "Black", (6, 6, 6)), ("grey", "Dark grey", (40, 40, 40)),
+              ("brown", "Brown-black", (28, 19, 12)))
+HOLE_WHITE = (245, 245, 245)
+# 35 mm perforations (ISO 491 / KS), mm
+HOLE_PITCH, HOLE_ALONG, HOLE_ACROSS, HOLE_EDGE = 4.75, 2.8, 2.0, 2.0
+EDGE_FONT_MM = 1.5          # edge print lettering on the film
+EDGE_BAND_MM = 1.6          # 120's edge print: the outer band of its rebate
+CAMERA_BLEED_MM = 1.5       # "Camera's own": at most this much scan past the crop
+TURN_SLACK = 1.02           # a frame is turned to lie along the film only when its
+                            # shape and its slot's differ by more than this
 
 
 def _same_rect(a, b, tol=1e-6):
@@ -150,27 +164,34 @@ def shown_size(sw, sh, crop_rect=None, orient=None, respect_crop=False):
 
 
 def draw_frame(p, target, source_img, crop_rect, crop_angle, source, overlay=True,
-               orient=None, respect_crop=False):
+               orient=None, respect_crop=False, turn=0, bleed=0.0):
     """One frame fitted and centred in `target`, turned and mirrored as the
     main window shows it (`orient`, see orientation_of; None = as scanned),
     with its crop overlay: the outside dimmed and the crop outlined in the
     source colour (a red dashed outline round a frame auto crop wasn't sure
     of). With `respect_crop` only what the crop keeps is shown (the crop box
     and its angle, then the turns: what an export gives) and the overlay is a
-    line round the frame. With `overlay` False, just the frame. Returns the
-    frame's bounding rect in `target`'s coordinates."""
+    line round the frame; `bleed` (px in `target`) shows that much of the
+    scan past the crop too (a film strip's "camera's own" gate). `turn`
+    (±90) turns the whole frame as shown once more, to lie along a strip.
+    With `overlay` False, just the frame. Returns the frame's bounding rect
+    in `target`'s coordinates."""
     if isinstance(source_img, QPixmap):
         source_img = source_img.toImage()
     sw, sh = source_img.width(), source_img.height()
     rot, fine, hflip, vflip = orient or (0, 0.0, False, False)
     cropped = bool(respect_crop and crop_rect is not None)
     W, H = shown_size(sw, sh, crop_rect, (rot, fine), respect_crop)
+    if turn % 180:
+        W, H = H, W
     scale = min(target.width() / W, target.height() / H)
     colour = QColor(*SOURCES.get(source, SOURCES["none"])[0])
     p.save()
     # the canvas's order (image_preview.apply_transformations /
     # ccr_processor.apply_orientation): turns about the centre, mirrors last
     p.translate(target.center())
+    if turn:
+        p.rotate(turn)               # the frame as shown, turned as a whole
     p.scale(scale, scale)
     if vflip:
         p.scale(1, -1)
@@ -183,7 +204,9 @@ def draw_frame(p, target, source_img, crop_rect, crop_angle, source, overlay=Tru
         x1, y1, x2, y2 = crop_rect
         bw, bh = abs(x2 - x1) * sw, abs(y2 - y1) * sh
         box = QRectF(-bw / 2, -bh / 2, bw, bh)
-        p.setClipRect(box)
+        b = max(0.0, float(bleed)) / scale
+        # intersect: a strip piece's own clip stays (no clip set = replace)
+        p.setClipRect(box.adjusted(-b, -b, b, b), Qt.IntersectClip)
         p.save()
         p.rotate(-(crop_angle or 0.0))
         p.translate(-(x1 + x2) / 2 * sw, -(y1 + y2) / 2 * sh)
@@ -357,6 +380,98 @@ class SheetLayout:
         return (self.n, self.cols, self.cell_w, round(self.cell_h, 2))
 
 
+def strip_format(imgs, roll_format=""):
+    """The film the strips are drawn as: the frames' most common format,
+    else the roll's, else 35mm. None for sheet film (no strips)."""
+    fmts = [f for f in (frame_format(i) for i in imgs) if f]
+    if fmts:
+        fmt = max(set(fmts), key=fmts.count)
+    else:
+        fmt = film_formats.film_key(roll_format) or "35mm"
+    return fmt if film_formats.strip_geometry(fmt) is not None else None
+
+
+class StripLayout:
+    """The roll as strips of film (spec/contact-sheet-strips.md): `per`
+    frames to a strip, strips side by side, running "across" or "down".
+
+    Each frame's cell is its PIECE of strip, from the middle of the gap before
+    it to the middle of the gap after, the film's whole width; pieces are
+    whole pixels and drawn clipped to themselves, so one frame redraws
+    without touching its neighbours. `strip_transform(k)` maps strip
+    coordinates (x along the film from the strip's start, y across it from
+    the edge carrying the film's name) to the composite."""
+
+    def __init__(self, n, fmt, direction, cell_w):
+        g = film_formats.strip_geometry(fmt)
+        self.geo, self.fmt, self.n = g, g.key, n
+        self.direction = "down" if direction == "down" else "across"
+        self.per = self.cols = max(1, g.per_strip or 1)
+        self.cell_w = cell_w
+        # the frame's slot is as wide on screen as a grid cell
+        self.ppm = cell_w / (g.along if self.direction == "across" else g.across)
+        self.film_px = int(round(g.film * self.ppm))
+        self.xs = [int(round(j * g.pitch * self.ppm)) for j in range(self.per + 1)]
+        self.strips = max(1, math.ceil(n / self.per))
+        self.foot_h = FOOT_FRAC * cell_w
+        long_px = self.xs[-1]
+        side = self.strips * self.film_px + (self.strips - 1) * GAP
+        if self.direction == "across":
+            self.width = 2 * MARGIN + long_px
+            self.height = int(round(2 * MARGIN + side + GAP + self.foot_h))
+        else:
+            self.width = 2 * MARGIN + side
+            self.height = int(round(2 * MARGIN + long_px + GAP + self.foot_h))
+
+    def strip_transform(self, k):
+        from PySide6.QtGui import QTransform
+        off = MARGIN + k * (self.film_px + GAP)
+        if self.direction == "across":
+            return QTransform.fromTranslate(MARGIN, off)
+        # turned a quarter clockwise: along runs down, the name's edge on the right
+        return QTransform(0, 1, -1, 0, off + self.film_px, MARGIN)
+
+    def frames_in(self, k):
+        return min(self.per, self.n - k * self.per)
+
+    def piece(self, i):
+        """(strip, its piece in strip coordinates)."""
+        k, j = divmod(i, self.per)
+        return k, QRectF(self.xs[j], 0, self.xs[j + 1] - self.xs[j], self.film_px)
+
+    def slot(self, i):
+        """The frame's image area in strip coordinates."""
+        g, ppm = self.geo, self.ppm
+        k, j = divmod(i, self.per)
+        return QRectF(self.xs[j] + g.gap / 2 * ppm, g.rebate * ppm,
+                      g.along * ppm, g.across * ppm)
+
+    def cell(self, i):
+        k, r = self.piece(i)
+        return self.strip_transform(k).mapRect(r)
+
+    def image_rect(self, i):
+        return self.strip_transform(i // self.per).mapRect(self.slot(i))
+
+    def frame_at(self, x, y):
+        for i in range(self.n):
+            if self.cell(i).contains(QPointF(x, y)):
+                return i
+        return None
+
+    def key(self):
+        return ("strips", self.n, self.fmt, self.direction, self.cell_w)
+
+
+def lie_along(shown_w, shown_h, slot):
+    """-90 (its top to the left) when a frame shown w x h has the other
+    shape from its slot on screen, else 0 (the user, 2026-11-20)."""
+    land, port = shown_w > shown_h * TURN_SLACK, shown_h > shown_w * TURN_SLACK
+    s_land = slot.width() > slot.height() * TURN_SLACK
+    s_port = slot.height() > slot.width() * TURN_SLACK
+    return -90 if (land and s_port) or (port and s_land) else 0
+
+
 class ContactSheet(QObject):
     """The composite and what keeps it current."""
     changed = Signal()
@@ -377,6 +492,17 @@ class ContactSheet(QObject):
         self.text_info = (tuple(k for k in info if k in keys) if info is not None
                           else DEFAULT_INFO)
         self.roll_film = ""           # the roll's film (MainWindow sets it)
+        self.roll_format = ""         # ...and its format: the strips' fallback
+        # Layout… (2026-11-20): grid, or strips of film with their own options
+        def pick(key, default, allowed):
+            v = self._settings.value(key, default, type=str) or default
+            return v if v in allowed else default
+        self.layout_mode = pick("sheet/layout", "grid", {k for k, _l in LAYOUTS})
+        self.strip_dir = pick("sheet/strip_dir", "auto", {k for k, _l in DIRECTIONS})
+        self.gate = pick("sheet/gate", "square", {k for k, _l in GATES})
+        edge = self._settings.value("sheet/film_edge", "black", type=str) or "black"
+        self.film_edge = edge if self._edge_ok(edge) else "black"
+        self.holes_white = self._settings.value("sheet/holes_white", True, type=bool)
         self._image = None
         self._layout = None
         self._sigs = []
@@ -446,6 +572,80 @@ class ContactSheet(QObject):
             if "film" in self.text_info:
                 self.update(force=True)
 
+    def set_roll_format(self, key):
+        key = film_formats.film_key(key) or ""
+        if key != self.roll_format:
+            self.roll_format = key
+            if self.layout_mode == "strips":
+                self.update(force=True)
+
+    # --- Layout… -------------------------------------------------------------
+    def _set(self, attr, key, value):
+        setattr(self, attr, value)
+        self._settings.setValue(key, value)
+        self.update(force=True)
+
+    def set_layout_mode(self, mode):
+        """"grid" or "strips"."""
+        self._set("layout_mode", "sheet/layout",
+                  mode if mode in {k for k, _l in LAYOUTS} else "grid")
+
+    def set_strip_dir(self, d):
+        """"auto" (by format), "across" or "down"."""
+        self._set("strip_dir", "sheet/strip_dir",
+                  d if d in {k for k, _l in DIRECTIONS} else "auto")
+
+    def set_gate(self, gate):
+        """"square" (the crop, clean edges) or "camera" (the scan just past
+        the crop: the camera's own gate edge)."""
+        self._set("gate", "sheet/gate", gate if gate in {k for k, _l in GATES} else "square")
+
+    @staticmethod
+    def _edge_ok(key):
+        return (key in {k for k, _l, _c in FILM_EDGES}
+                or (key.startswith("#") and QColor(key).isValid()))
+
+    def set_film_edge(self, key):
+        """A FILM_EDGES key or "#rrggbb"."""
+        key = str(key or "black")
+        self._set("film_edge", "sheet/film_edge", key if self._edge_ok(key) else "black")
+
+    def set_holes_white(self, on):
+        self._set("holes_white", "sheet/holes_white", bool(on))
+
+    def edge_colour(self):
+        named = {k: c for k, _l, c in FILM_EDGES}
+        if self.film_edge in named:
+            return QColor(*named[self.film_edge])
+        c = QColor(self.film_edge)
+        return c if c.isValid() else QColor(*named["black"])
+
+    def strip_geometry(self):
+        """The strips' format geometry with Film strips on, else None (grid,
+        or sheet film)."""
+        lay = self._layout
+        return lay.geo if isinstance(lay, StripLayout) else None
+
+    def _make_layout(self, imgs):
+        cell_w = CELL_W_LONG_ROLL if len(imgs) > 48 else CELL_W
+        if self.layout_mode == "strips":
+            fmt = strip_format(imgs, self.roll_format)
+            if fmt is not None:
+                geo = film_formats.strip_geometry(fmt)
+                d = self.strip_dir if self.strip_dir != "auto" else geo.direction
+                return StripLayout(len(imgs), fmt, d, cell_w)
+        aspects = []
+        for i in imgs:
+            pv = getattr(i, "resized_preview", None)
+            if pv is None or pv.isNull() or not pv.height():
+                continue
+            w, h = shown_size(pv.width(), pv.height(), getattr(i, "crop_rect", None),
+                              orientation_of(i), self.respect_crop)
+            if h > 0:
+                aspects.append(w / h)       # the frame as shown: turned, cropped
+        aspect = float(np.median(aspects)) if aspects else 1.5
+        return SheetLayout(len(imgs), film_columns(imgs), cell_w, aspect)
+
     def _colours(self):
         """(number, words, footer, legend words) as QColors."""
         named = {k: c for k, _l, c in TEXT_COLOURS}
@@ -477,18 +677,7 @@ class ContactSheet(QObject):
         for img in imgs:
             if not getattr(img, "converted", False):
                 self._remember_negative(img)
-        aspects = []
-        for i in imgs:
-            pv = getattr(i, "resized_preview", None)
-            if pv is None or pv.isNull() or not pv.height():
-                continue
-            w, h = shown_size(pv.width(), pv.height(), getattr(i, "crop_rect", None),
-                              orientation_of(i), self.respect_crop)
-            if h > 0:
-                aspects.append(w / h)       # the frame as shown: turned, cropped
-        aspect = float(np.median(aspects)) if aspects else 1.5
-        cell_w = CELL_W_LONG_ROLL if len(imgs) > 48 else CELL_W
-        layout = SheetLayout(len(imgs), film_columns(imgs), cell_w, aspect)
+        layout = self._make_layout(imgs)
         if force or self._layout is None or layout.key() != self._layout.key():
             self._layout = layout
             self._image = QImage(layout.width, layout.height, QImage.Format_RGB888)
@@ -503,7 +692,8 @@ class ContactSheet(QObject):
         if "film" in self.text_info:
             from core import film_presets as fp
             presets = fp.load(self._settings)
-        look = (self.respect_crop, self.text_colour, self.text_info, self.overlay)
+        look = (self.respect_crop, self.text_colour, self.text_info, self.overlay,
+                self.layout_mode, self.gate, self.film_edge, self.holes_white)
         for i, img in enumerate(imgs):
             src, detail = crop_source(img)
             fmt = frame_format(img)
@@ -533,6 +723,9 @@ class ContactSheet(QObject):
 
     def _draw_cell(self, p, i, img, src, detail, fmt=None, film=""):
         lay = self._layout
+        if isinstance(lay, StripLayout):
+            self._draw_piece(p, i, img, src, film)
+            return
         cell = lay.cell(i)
         p.fillRect(cell.adjusted(-2, -2, 2, 2), QColor(*BG))
         source = self._source_image(img)
@@ -594,6 +787,90 @@ class ContactSheet(QObject):
             p.drawText(rest, Qt.AlignLeft | Qt.AlignVCenter,
                        p.fontMetrics().elidedText(_caption(src, detail), Qt.ElideRight,
                                                   int(rest.width())))
+
+    @staticmethod
+    def _bands(g):
+        """(edge print band, scan past the crop allowed) in mm: 35 mm prints
+        between its holes and the edge; 120, with no holes, in the outer
+        EDGE_BAND_MM of its rebate. "Camera's own" never reaches either."""
+        band = HOLE_EDGE if g.holes else min(g.rebate, EDGE_BAND_MM)
+        free = g.rebate - band - (HOLE_ACROSS if g.holes else 0.0)
+        # a sliver of the gap between frames is always left (40 % a side)
+        return band, max(0.0, min(0.4 * g.gap, CAMERA_BLEED_MM, free))
+
+    def _draw_piece(self, p, i, img, src, film=""):
+        """Frame i's piece of film strip (spec/contact-sheet-strips.md): the
+        film in the edge colour, rounded where the strip ends; 35 mm's
+        sprocket holes; the frame as its crop keeps it, lying along the film
+        (turned top to the left when its shape is the slot's other way);
+        the edge print: the number, and the film at each strip's start."""
+        lay = self._layout
+        g, ppm = lay.geo, lay.ppm
+        k, piece = lay.piece(i)
+        T = lay.strip_transform(k)
+        F = lay.film_px
+        band_mm, bleed_mm = self._bands(g)
+        p.save()
+        p.setTransform(T)
+        p.setClipRect(piece)
+        p.fillRect(piece, QColor(*BG))
+        end = lay.xs[lay.frames_in(k)]
+        film_path = QPainterPath()
+        film_path.addRoundedRect(QRectF(0, 0, end, F), 0.6 * ppm, 0.6 * ppm)
+        p.fillPath(film_path, self.edge_colour())
+        if g.holes:
+            hc = QColor(*HOLE_WHITE) if self.holes_white else QColor(*BG)
+            pitch, ha, hx = HOLE_PITCH * ppm, HOLE_ALONG * ppm, HOLE_ACROSS * ppm
+            m0 = max(0, int(piece.left() // pitch) - 1)
+            m1 = int(piece.right() // pitch) + 1
+            for m in range(m0, m1 + 1):
+                x = (m + 0.5) * pitch - ha / 2
+                if x < 0.3 * ppm or x + ha > end - 0.3 * ppm:
+                    continue                    # never a hole cut by the strip's end
+                for y in (HOLE_EDGE * ppm, F - (HOLE_EDGE + HOLE_ACROSS) * ppm):
+                    hole = QPainterPath()
+                    hole.addRoundedRect(QRectF(x, y, ha, hx), 0.4 * ppm, 0.4 * ppm)
+                    p.fillPath(hole, hc)
+        p.restore()
+
+        area = lay.image_rect(i)
+        source = self._source_image(img)
+        p.save()
+        p.setClipRect(lay.cell(i))
+        if source is not None and not source.isNull():
+            orient = orientation_of(img)
+            W, H = shown_size(source.width(), source.height(), img.crop_rect, orient, True)
+            draw_frame(p, area, source, img.crop_rect, getattr(img, "crop_angle", 0.0),
+                       src, self.overlay, orient=orient, respect_crop=True,
+                       turn=lie_along(W, H, area),
+                       bleed=bleed_mm * ppm if self.gate == "camera" else 0.0)
+        else:
+            p.setPen(QColor(110, 110, 110))
+            p.drawText(area, Qt.AlignCenter, "reading scan…")
+        p.restore()
+
+        num_c, word_c, _foot, _leg = self._colours()
+        band = band_mm * ppm
+        slot = lay.slot(i)
+        p.save()
+        p.setTransform(T)
+        p.setClipRect(piece)
+        f = QFont()
+        f.setPixelSize(max(8, int(round(min(EDGE_FONT_MM, 0.85 * band_mm) * ppm))))
+        f.setBold(True)
+        p.setFont(f)
+        if "number" in self.text_info:
+            p.setPen(num_c)
+            tb = QRectF(slot.left(), F - band, slot.width(), band)
+            p.drawText(tb, Qt.AlignLeft | Qt.AlignVCenter, f" {i + 1}")
+            p.drawText(tb, Qt.AlignHCenter | Qt.AlignVCenter, f"{i + 1}A ▸")
+        if film and "film" in self.text_info and i % lay.per == 0:
+            f.setBold(False)
+            p.setFont(f)
+            p.setPen(word_c)
+            p.drawText(QRectF(slot.left(), 0, slot.width(), band),
+                       Qt.AlignLeft | Qt.AlignVCenter, f" {film}")
+        p.restore()
 
     def _draw_footer(self, summary=("", None, None)):
         lay = self._layout
@@ -815,22 +1092,25 @@ class ContactSheetView(QWidget):
         self.overlay_check.setChecked(self.sheet.overlay)
         self.overlay_check.toggled.connect(self.sheet.set_overlay)
         b.addWidget(self.overlay_check)
-        self.crop_check = QCheckBox("Respect crop")
-        self.crop_check.setToolTip(
-            "Show each cropped frame as its crop keeps it (turned and mirrored "
-            "as in the main window, as an export gives it). Frames with no crop "
-            "show whole. Also what Export writes.")
-        self.crop_check.setChecked(self.sheet.respect_crop)
-        self.crop_check.toggled.connect(self.sheet.set_respect_crop)
-        b.addWidget(self.crop_check)
+        self.layout_btn = QPushButton("Layout…")
+        self.layout_btn.setToolTip(
+            "A grid (Respect crop shows each frame as its crop keeps it), or "
+            "the roll as strips of film: which way they run, the frames' gate, "
+            "the film's edge colour and sprocket holes.")
+        self.layout_btn.clicked.connect(self._show_layout_menu)
         self.text_btn = QPushButton("Text…")
         self.text_btn.setToolTip("The captions' colour, and what they show.")
         self.text_btn.clicked.connect(self._show_text_menu)
         self.fit_btn = QPushButton("Fit")
         self.full_btn = QPushButton("100%")
         self.export_btn = QPushButton("Export…")
-        for w in (self.text_btn, self.fit_btn, self.full_btn, self.export_btn):
+        from PySide6.QtGui import QFontMetrics
+        for w in (self.layout_btn, self.text_btn, self.fit_btn, self.full_btn,
+                  self.export_btn):
             theme.style_button(w, "secondary")
+            # as wide as its words and the stylesheet's padding (Qt's own
+            # minimum is 80 px; 2026-11-20: Layout… had to fit in 900 px)
+            w.setFixedWidth(QFontMetrics(w.font()).horizontalAdvance(w.text()) + 22)
             b.addWidget(w)
         # the way out stands out: the bar's one light button (revision 2026-11-19)
         self.back_btn = QPushButton("Back to Frame")
@@ -926,6 +1206,7 @@ class ContactSheetView(QWidget):
         m.addSeparator()
         head = m.addAction("Show")
         head.setEnabled(False)
+        strips = sheet.strip_geometry() is not None
         for key, label in TEXT_INFO:
             cb = _RowCheck(label)
             cb.setChecked(key in sheet.text_info)
@@ -935,14 +1216,133 @@ class ContactSheetView(QWidget):
                 (keys.add if on else keys.discard)(k)
                 sheet.set_text_info(keys)
             cb.toggled.connect(flip)
-            self._menu_row(m, label, cb)
+            act = self._menu_row(m, label, cb)
+            if strips and key in ("name", "format", "status"):
+                # film strips carry the film's own edge print: number and film
+                act.defaultWidget().setEnabled(False)
+                cb.setToolTip("Not on film strips: the edge print carries the "
+                              "frame number and the film. Shown in the grid.")
         m._group = group
         return m
 
+    # --- Layout… -------------------------------------------------------------------
+    def layout_menu(self):
+        """Layout…'s menu (the test seam; spec/contact-sheet-strips.md):
+        Layout (Grid, with Respect crop / Film strips), then the strips' own: which way they
+        run, the gate, the film's edge colour, white sprocket holes. Rows are
+        real buttons, so the menu stays open while you choose; the strips'
+        rows are greyed in the grid. Each row's action carries its label as
+        text and its button as `action.box`."""
+        from PySide6.QtWidgets import QButtonGroup
+        sheet = self.sheet
+        m = QMenu(self)
+        m._groups = []
+        geo = film_formats.strip_geometry(
+            strip_format(list(ccr_backend.images), sheet.roll_format) or "")
+        strip_rows, hole_rows, grid_rows = [], [], []
+
+        def heading(text):
+            a = m.addAction(text)
+            a.setEnabled(False)
+            return a
+
+        def radios(options, current, setter, tips=None, after=None):
+            group = QButtonGroup(m)
+            group.setExclusive(True)
+            m._groups.append(group)
+            acts = []
+            for key, label in options:
+                rb = _RowRadio(label)
+                rb.setChecked(current == key)
+                if tips and key in tips:
+                    rb.setToolTip(tips[key])
+                group.addButton(rb)
+                rb.toggled.connect(lambda on, k=key: on and setter(k))
+                acts.append(self._menu_row(m, label, rb))
+                if after and key in after:
+                    after[key]()
+            return acts, group
+
+        def refresh():
+            on = sheet.layout_mode == "strips" and geo is not None
+            for a in strip_rows:
+                a.defaultWidget().setEnabled(on)
+            for a in hole_rows:
+                a.defaultWidget().setEnabled(on and geo.holes)
+            custom.setEnabled(on)
+            for a in grid_rows:
+                a.defaultWidget().setEnabled(sheet.layout_mode != "strips" or geo is None)
+
+        def respect_row():
+            # Respect crop is the grid's (film strips always show the crop):
+            # its row sits under Grid (2026-11-20: off the bar, for Layout…)
+            respect = _RowCheck("Respect crop")
+            respect.setChecked(sheet.respect_crop)
+            respect.setToolTip(
+                "In the grid, each cropped frame as its crop keeps it (turned "
+                "and mirrored as in the main window, as an export gives it). "
+                "Frames with no crop show whole. Film strips always show the crop.")
+            respect.toggled.connect(sheet.set_respect_crop)
+            grid_rows.append(self._menu_row(m, "Respect crop", respect, indent=True))
+
+        heading("Layout")
+        lay_acts, _g = radios(LAYOUTS, sheet.layout_mode,
+                              lambda k: (sheet.set_layout_mode(k), refresh()),
+                              after={"grid": respect_row})
+        if geo is None:
+            lay_acts[1].defaultWidget().setEnabled(False)
+            lay_acts[1].box.setToolTip("Sheet film isn't cut into strips.")
+        m.addSeparator()
+        heading("Strips run")
+        auto = "By format"
+        if geo is not None:
+            auto = (f"By format ({'down' if geo.direction == 'down' else 'across'} "
+                    f"for {film_formats.short_label(geo.key)})")
+        dirs = tuple((k, auto if k == "auto" else l) for k, l in DIRECTIONS)
+        acts, _g = radios(dirs, sheet.strip_dir, sheet.set_strip_dir)
+        strip_rows += acts
+        heading("Gate")
+        acts, _g = radios(GATES, sheet.gate, sheet.set_gate, tips={
+            "square": "Each frame as its crop keeps it, with clean square edges.",
+            "camera": "A little of the scan past each crop too, so the camera's "
+                      "own gate edge shows, as it was shot."})
+        strip_rows += acts
+        heading("Film edge")
+        named = {k for k, _l, _c in FILM_EDGES}
+        acts, group = radios(tuple((k, l) for k, l, _c in FILM_EDGES), sheet.film_edge,
+                             sheet.set_film_edge)
+        strip_rows += acts
+        custom = m.addAction("Custom…")
+        custom.setCheckable(True)
+        custom.setChecked(sheet.film_edge not in named)
+        custom.triggered.connect(self._pick_edge_colour)
+        for b in group.buttons():
+            b.toggled.connect(lambda on: on and custom.setChecked(False))
+        m.addSeparator()
+        holes = _RowCheck("White sprocket holes")
+        holes.setChecked(sheet.holes_white)
+        holes.setToolTip("35 mm's sprocket holes white, as the film-border tool "
+                         "shows them; off, dark as converted. 120 film has none."
+                         if geo is None or geo.holes else "120 film has no sprocket holes.")
+        holes.toggled.connect(sheet.set_holes_white)
+        hole_rows.append(self._menu_row(m, "White sprocket holes", holes))
+        refresh()
+        return m
+
+    def _pick_edge_colour(self):
+        c = self._choose_colour(self.sheet.edge_colour(), "Film edge colour")
+        if c is not None and c.isValid():
+            self.sheet.set_film_edge(c.name())
+
+    def _show_layout_menu(self):
+        m = self.layout_menu()
+        m.exec(self.layout_btn.mapToGlobal(self.layout_btn.rect().bottomLeft()))
+
     @staticmethod
-    def _menu_row(menu, label, button):
+    def _menu_row(menu, label, button, indent=False):
         """A row holding a check box or radio button: clicking it doesn't
-        close the menu. The whole row is the button's (it fills the width)."""
+        close the menu. The whole row is the button's (it fills the width);
+        `indent` sets it under the row above."""
         from PySide6.QtWidgets import QWidgetAction
         row = _MenuRow(button, menu)
         row.setObjectName("sheetMenuRow")
@@ -950,7 +1350,7 @@ class ContactSheetView(QWidget):
         row.setAttribute(Qt.WA_Hover, True)
         row.setStyleSheet(f"#sheetMenuRow:hover {{ background-color: {theme.SURFACE_HOVER}; }}")
         lay = QHBoxLayout(row)
-        lay.setContentsMargins(12, 3, 16, 3)
+        lay.setContentsMargins(34 if indent else 12, 3, 16, 3)
         button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         lay.addWidget(button)
         act = QWidgetAction(menu)
@@ -960,10 +1360,10 @@ class ContactSheetView(QWidget):
         menu.addAction(act)
         return act
 
-    def _choose_colour(self, current):
+    def _choose_colour(self, current, title="Caption colour"):
         """The colour picker's answer, a QColor (invalid on Cancel). The seam."""
         from PySide6.QtWidgets import QColorDialog
-        return QColorDialog.getColor(current, self, "Caption colour")
+        return QColorDialog.getColor(current, self, title)
 
     def _pick_text_colour(self):
         cur = self.sheet._colours()[1]

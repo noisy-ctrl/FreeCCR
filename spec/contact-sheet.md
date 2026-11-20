@@ -182,3 +182,9 @@ the click (`_RowCheck` / `_RowRadio.hitButton`, `_MenuRow`): a click a
 button ignored used to reach the menu, which closed. Custom… is still an
 ordinary item (it opens the colour picker). Each row's action keeps its
 label as text and its button as `action.box` (the tests use them).
+
+## Revision 2026-11-20 b: Layout…, film strips
+
+**Layout…** (before Text…) chooses the grid or the roll as strips of film:
+see `spec/contact-sheet-strips.md`. Respect crop moved from the bar into
+Layout…, under Grid.

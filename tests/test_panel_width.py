@@ -447,9 +447,10 @@ def test_preview_toolbar_fits_at_the_smallest_window():
 
 @needs_ui_font
 def test_the_contact_sheet_bar_fits_its_narrowest_width():
-    """The sheet's bar (spec/contact-sheet.md, revision 2026-11-19: Respect
-    crop, Text…, Back to Frame) fits the sheet's 900 px minimum at the
-    stressed font; the hint gives way first."""
+    """The sheet's bar (spec/contact-sheet.md, revision 2026-11-19: Text…,
+    Back to Frame; spec/contact-sheet-strips.md: Layout…, with Respect crop
+    moved into it) fits the sheet's 900 px minimum at the stressed font; the
+    hint gives way first."""
     from PySide6.QtCore import QSettings
     from widgets import contact_sheet as cs
     base = _app.font()

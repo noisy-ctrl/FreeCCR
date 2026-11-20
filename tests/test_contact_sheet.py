@@ -514,12 +514,14 @@ def test_text_menu_and_back_to_frame(images, monkeypatch):
     again = {a.text(): a for a in view.text_menu().actions()}
     assert again["Custom…"].isChecked()                        # Custom… ticked
     assert not any(again[l].box.isChecked() for _k, l, _c in cs.TEXT_COLOURS)
-    # Back to Frame stands out, and Respect crop sits after Overlay
+    # Back to Frame stands out; Respect crop is in Layout… under Grid since
+    # 2026-11-20 (spec/contact-sheet-strips.md)
     assert view.back_btn.text() == "Back to Frame"
     assert "#e6e6e6" in view.back_btn.styleSheet()
     bar = view.neg_check.parentWidget().layout()
-    assert bar.itemAt(bar.indexOf(view.overlay_check) + 1).widget() is view.crop_check
-    view.crop_check.setChecked(True)
+    assert bar.itemAt(bar.indexOf(view.overlay_check) + 1).widget() is view.layout_btn
+    sheet.layout_mode = "grid"
+    {a.text(): a for a in view.layout_menu().actions()}["Respect crop"].box.click()
     assert sheet.respect_crop is True
 
 

@@ -2823,6 +2823,7 @@ class MainWindow(QMainWindow):
         model = getattr(self, "contact_sheet_model", None)
         if model is not None:
             model.set_roll_film(self._roll_film_label())
+            model.set_roll_format(self.roll_film_and_format()[2] or "")
 
     def _roll_film_label(self):
         from core import film_presets as fp
