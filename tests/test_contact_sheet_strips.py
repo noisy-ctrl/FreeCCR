@@ -186,7 +186,7 @@ def test_the_film_edge_colour_and_white_holes(monkeypatch):
     T = lay.strip_transform(0)
     ppm = lay.ppm
     hole = T.map(QPointF(0.5 * cs.HOLE_PITCH * ppm, (cs.HOLE_EDGE + cs.HOLE_ACROSS / 2) * ppm))
-    rebate = T.map(QPointF(0.5 * cs.HOLE_PITCH * ppm, (cs.HOLE_EDGE + cs.HOLE_ACROSS + 0.7) * ppm))
+    rebate = T.map(QPointF(0.5 * cs.HOLE_PITCH * ppm, (cs.HOLE_EDGE + cs.HOLE_ACROSS + 0.3) * ppm))
     assert _near(_rgb(sheet.image(), hole.x(), hole.y()), cs.HOLE_WHITE, 8)
     assert _near(_rgb(sheet.image(), rebate.x(), rebate.y()), (6, 6, 6), 4)
     sheet.set_holes_white(False)
@@ -379,3 +379,17 @@ def test_layout_button_sits_before_text(monkeypatch):
     bar = view.text_btn.parentWidget().layout()
     assert bar.itemAt(bar.indexOf(view.text_btn) - 1).widget() is view.layout_btn
     assert view.layout_btn.text() == "Layout…"
+
+
+def test_35mm_perforations_are_ks_and_stand_across_the_film():
+    """KS perforations, measured on the user's full-width scans (2026-11-20):
+    narrower along the film than across it, 2.01 mm from the edge, leaving
+    ~0.7 mm of rebate between a hole and the 24 mm picture."""
+    assert cs.HOLE_ALONG < cs.HOLE_ACROSS
+    assert abs(cs.HOLE_ALONG - 1.98) < 0.01 and abs(cs.HOLE_ACROSS - 2.79) < 0.01
+    assert abs(cs.HOLE_EDGE - 2.01) < 0.01 and cs.HOLE_PITCH == 4.75
+    from core import film_formats as ff
+    g = ff.strip_geometry("35mm")
+    inner = g.film - 2 * (cs.HOLE_EDGE + cs.HOLE_ACROSS)     # between the two rows
+    assert abs(inner - 25.37) < 0.1 and inner > g.across
+    assert 0.6 < g.rebate - cs.HOLE_EDGE - cs.HOLE_ACROSS < 0.8
