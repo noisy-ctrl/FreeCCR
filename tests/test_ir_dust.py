@@ -96,6 +96,7 @@ def test_sensitivity_finds_more_and_the_spots_cover_their_specks():
         s = _near(ir_dust.spots_from(dm), x, y, w, h)
         assert s["r"] * w >= r                           # the hole covers the speck
     assert ir_dust.sigma_for(0) > ir_dust.sigma_for(50) > ir_dust.sigma_for(100)
+    assert ir_dust.p_needed(0) > ir_dust.p_needed(50) > ir_dust.p_needed(100)
 
 
 def test_a_knock_between_the_shots_is_registered():
@@ -209,17 +210,19 @@ def test_the_users_pair_finds_dust_that_is_dark_in_white_light():
     keep[120:2840, 220:3920] = True
     spots = ir_dust.spots_from(dm, ir_dust.SENS_DEFAULT, keep)
     assert len(spots) >= 10
+    # revision 2 (spec/ir-dust-v2.md) flags fainter dust than revision 1's
+    # 7 sigma, so the test is "dark in white light" at 4x that residual's
+    # noise (MAD 0.025 log): measured 93 % of the flagged candidates
     lv = cv2.GaussianBlur(np.log(np.maximum(vis, 0.5)), (0, 0), 1.0)
     el = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
     bg = np.maximum(cv2.GaussianBlur(cv2.morphologyEx(lv, cv2.MORPH_CLOSE, el), (0, 0), 2.5), lv)
-    dark = 0
-    for s in spots:
-        x, y = s["pts"][0]
-        X, Y = int(x * w), int(y * h)
-        r = max(2, int(s["r"] * w))
-        if (lv - bg)[max(0, Y - r):Y + r + 1, max(0, X - r):X + r + 1].min() < -0.25:
-            dark += 1
-    assert dark >= 0.8 * len(spots)
+    d = lv - bg
+    flagged = ir_dust.flagged(dm, ir_dust.SENS_DEFAULT, keep)
+    dark = sum(1 for i in flagged
+               if d[dm.cands[i].y0:dm.cands[i].y0 + dm.cands[i].mask.shape[0],
+                    dm.cands[i].x0:dm.cands[i].x0 + dm.cands[i].mask.shape[1]][dm.cands[i].mask].min()
+               < -0.1)
+    assert dark >= 0.85 * len(flagged)
 
 
 # --------------------------------------------------------------------------- #

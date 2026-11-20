@@ -211,7 +211,11 @@ class DustRemovalPanel(QWidget):
         layout.addWidget(header)
 
         # --- IR dust (spec/ir-dust-and-flat-sets.md) ---
-        layout.addWidget(self._section_label("IR Dust"))
+        self.ir_heading = self._section_label("IR Dust")
+        # right-click: forget what IR dust learned (spec/ir-dust-v2.md §4)
+        self.ir_heading.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.ir_heading.customContextMenuRequested.connect(self._ir_heading_menu)
+        layout.addWidget(self.ir_heading)
         self.ir_status = QLabel("")
         self.ir_status.setWordWrap(True)
         self.ir_status.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 11px;")
@@ -580,7 +584,67 @@ class DustRemovalPanel(QWidget):
             extra = ir_dust.align_text(getattr(dm, "align", None))
             if extra:
                 text += " " + extra
+            # too dark to show faint dust, and what was learned (spec/ir-dust-v2.md)
+            dark = ir_dust.dark_ir_text(getattr(dm, "ir_level", None))
+            if dark:
+                text += " " + dark
+            learned = self._ir_learned_text(dm.kind)
+            if learned:
+                text += " " + learned
         self.ir_status.setText(text)
+
+    @staticmethod
+    def _ir_learned_text(kind) -> str:
+        """'Learned from N of your corrections on this kind of scan.' once
+        the model has moved (spec/ir-dust-v2.md §4)."""
+        try:
+            from core import ir_dust_learn
+            n = ir_dust_learn.explicit_count(kind)
+        except Exception:
+            return ""
+        if n < getattr(ir_dust_learn, "MIN_EXPLICIT", 10):
+            return ""
+        return f"Learned from {n} of your corrections on this kind of scan."
+
+    def ir_heading_actions(self):
+        """The IR Dust heading's right-click entries: [(text, callback, enabled)]
+        (the test seam)."""
+        from core import ir_dust, ir_dust_learn
+        img = self._current_image()
+        kind = ir_dust.scan_kind(img) if img is not None else None
+        n = len(ir_dust_learn.examples(kind)) if kind in ir_dust_learn.KINDS else 0
+        return [("Forget What It Learned…", lambda: self._forget_ir_learning(kind), n > 0)]
+
+    def _ir_heading_menu(self, pos):
+        from PySide6.QtWidgets import QMenu
+        menu = QMenu(self)
+        for text, cb, enabled in self.ir_heading_actions():
+            act = menu.addAction(text)
+            act.setEnabled(enabled)
+            act.triggered.connect(cb)
+        menu.exec(self.ir_heading.mapToGlobal(pos))
+
+    def _confirm_forget_ir(self, kind) -> bool:
+        """The test seam: ask before forgetting."""
+        what = "trichrome" if kind == "merged" else "single-shot"
+        return QMessageBox.question(
+            self, "Forget What It Learned",
+            f"Forget every correction IR dust has learned from on {what} scans? "
+            "It goes back to how it judged dust at first.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes
+
+    def _forget_ir_learning(self, kind):
+        from core import ir_dust, ir_dust_learn
+        if kind not in ir_dust_learn.KINDS or not self._confirm_forget_ir(kind):
+            return
+        ir_dust_learn.forget(kind)
+        img = self._current_image()
+        if img is not None and getattr(img, "_ir_dust_map", None) is not None:
+            ir_dust.rethreshold(img, getattr(img, "ir_dust_sens", None))
+            if hasattr(self.image_preview, "_draw_ir_pending"):
+                self.image_preview._draw_ir_pending()
+                self.image_preview.refresh_dust_badge()
+        self.refresh_ir_section()
 
     def _ask_ir_file(self, img=None):
         """The test seam: the IR RAW to pair with `img`, or None."""

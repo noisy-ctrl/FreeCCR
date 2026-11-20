@@ -5004,7 +5004,24 @@ class ImagePreview(QWidget):
                 "r": self._dust_fitted_r(pts, float(self._dust_brush_r))}
         img.dust_spots.append(spot)
         self._dust_selected = spot
+        self._learn_ir_from_stroke(img, pts, spot["r"])
         self._commit_dust_change(img)
+
+    def _learn_ir_from_stroke(self, img, pts, r):
+        """A hand stroke over a candidate IR dust didn't flag teaches it that
+        it missed one (spec/ir-dust-v2.md §4)."""
+        if getattr(img, "_ir_dust_map", None) is None:
+            return
+        try:
+            from core import ir_dust
+            size = self._dust_full_frame_size()
+            if size is None or size[0] <= 0:
+                return
+            if ir_dust.learn_from_stroke(img, pts, float(r), size[1] / size[0]):
+                if hasattr(getattr(self, "dust_panel", None), "refresh_ir_section"):
+                    self.dust_panel.refresh_ir_section()
+        except Exception:
+            pass
 
     dust_fit_spot = True     # Dust panel → Fit each click to the speck
 
@@ -5308,7 +5325,7 @@ class ImagePreview(QWidget):
         trial = type("T", (), {})()
         trial.dust_spots = list(img.dust_spots or [])
         trial.ir_dust_pending = getattr(img, "ir_dust_pending", None)
-        n_h, n_f = ir_dust.erase(trial, pts, r, aspect)
+        n_h, n_f = ir_dust.erase(trial, pts, r, aspect, learn=False)
         if not (n_h or n_f):
             return
         img.push_undo_state()
