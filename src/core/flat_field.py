@@ -260,9 +260,7 @@ class FieldProfile:
         """One-line description for the Settings library row."""
         st = self.stats
         cs = st.get("corner_stops") or [0.0, 0.0, 0.0]
-        cam = self.meta.get("camera", {}) or {}
-        bits = [b for b in (cam.get("model") or cam.get("make"),
-                            _lens_label(cam)) if b]
+        bits = [b for b in (camera_name(self), lens_name(self)) if b]
         head = " · ".join(bits)
         tail = (f"max +{max(cs):.1f} EV · colour spread "
                 f"{st.get('cast_stops', 0.0):.2f} EV")
@@ -279,6 +277,92 @@ def _lens_label(cam: Dict[str, Any]) -> str:
     if cam.get("aperture"):
         parts.append(f"f/{float(cam['aperture']):g}")
     return " ".join(parts)
+
+
+def camera_name(p) -> str:
+    """The camera a flat was shot with (spec/flat-field-info.md §3): the name
+    typed for it, else its metadata's make and model, else ""."""
+    if p is None:
+        return ""
+    typed = ((p.meta or {}).get("details") or {}).get("camera")
+    if typed:
+        return str(typed)
+    cam = (p.meta or {}).get("camera") or {}
+    make, model = str(cam.get("make") or "").strip(), str(cam.get("model") or "").strip()
+    if model and make and model.lower().startswith(make.lower()):
+        return model
+    return " ".join(b for b in (make, model) if b)
+
+
+def lens_name(p) -> str:
+    """The lens: the name typed for it, else the metadata's lens, else ""
+    (an adapted lens records none)."""
+    if p is None:
+        return ""
+    typed = ((p.meta or {}).get("details") or {}).get("lens")
+    if typed:
+        return str(typed)
+    return _lens_label((p.meta or {}).get("camera") or {})
+
+
+def typed_details(p) -> Dict[str, str]:
+    """{"camera", "lens"} as typed for the flat ("" where nothing was)."""
+    return _typed((p.meta or {}) if p is not None else {})
+
+
+def _typed(meta) -> Dict[str, str]:
+    d = (meta or {}).get("details") or {}
+    return {"camera": str(d.get("camera") or ""), "lens": str(d.get("lens") or "")}
+
+
+def with_details(meta: Optional[Dict[str, Any]], camera="", lens="") -> Dict[str, Any]:
+    """`meta` with the typed camera and lens (blank ones dropped)."""
+    meta = dict(meta or {})
+    d = {k: str(v).strip() for k, v in (("camera", camera), ("lens", lens))
+         if v and str(v).strip()}
+    if d:
+        meta["details"] = d
+    else:
+        meta.pop("details", None)
+    return meta
+
+
+def remembered_details() -> Dict[str, str]:
+    """The camera and lens last typed for a flat (QSettings flat/camera,
+    flat/lens): they fill the next one's fields."""
+    try:
+        from PySide6.QtCore import QSettings
+        st = QSettings("FreeCCR", "FreeCCR")
+        return {k: str(st.value(f"flat/{k}", "") or "") for k in ("camera", "lens")}
+    except Exception:
+        return {"camera": "", "lens": ""}
+
+
+def remember_details(camera="", lens="") -> None:
+    try:
+        from PySide6.QtCore import QSettings
+        st = QSettings("FreeCCR", "FreeCCR")
+        st.setValue("flat/camera", str(camera or "").strip())
+        st.setValue("flat/lens", str(lens or "").strip())
+    except Exception:
+        pass
+
+
+def set_details(p: "FieldProfile", camera="", lens="") -> bool:
+    """Name the flat's camera and lens and save it (when it has a file).
+    Its content id is kept, so naming them never flags a frame for
+    re-grading. True when anything changed."""
+    if p is None:
+        return False
+    new = with_details(p.meta, camera, lens)
+    if _typed(new) == typed_details(p):
+        return False
+    if p.content_id and not new.get("content_id"):
+        new["content_id"] = p.content_id
+    p.meta = new
+    if p.path:
+        save_profile(p, p.path)
+    return True
 
 
 def _corner_stops(gain: np.ndarray) -> List[float]:
@@ -374,7 +458,8 @@ def save_profile(profile: FieldProfile, path: str) -> str:
     with open(path, "wb") as f:
         f.write(blob.encode("utf-8"))
     profile.path = path
-    profile.content_id = _content_id(path)
+    # a flat whose camera / lens were named keeps the id it had (set_details)
+    profile.content_id = (profile.meta or {}).get("content_id") or _content_id(path)
     return path
 
 
@@ -435,7 +520,7 @@ def load_profile(path: str) -> FieldProfile:
     return FieldProfile(
         name=str(doc.get("name") or os.path.splitext(os.path.basename(path))[0]),
         gain=gain, aspect=aspect, meta=meta, path=path,
-        content_id=_content_id(path))
+        content_id=str(meta.get("content_id") or "") or _content_id(path))
 
 
 # --------------------------------------------------------------------------- #
@@ -953,19 +1038,56 @@ def track(profile: Optional[FieldProfile], frame_sides: Optional[Dict[str, float
     """(s, dx, dy) taking the flat's opening to the frame's (scale about the
     centre, shift in fractions), or None to apply the flat untracked: no
     opening on either side, or an answer too big to be the rail moving."""
+    return track_state(profile, frame_sides)[0]
+
+
+def track_state(profile: Optional[FieldProfile], frame_sides: Optional[Dict[str, float]]):
+    """(move, state): `track`'s move and what happened (spec/flat-field-info.md
+    §1): "moved" (followed the carrier), "same" (already lined up), "not
+    found" (the frame's opening wasn't found, or the move was refused: the
+    flat applied as shot), None (the flat has no opening of its own)."""
     ref = profile_opening(profile)
-    if not ref or not frame_sides:
-        return None
+    if not ref:
+        return None, None
+    if not frame_sides:
+        return None, "not found"
     from core import guide_tracker
     sol = guide_tracker.solve(ref, frame_sides)
     if sol is None:
-        return None
+        return None, "not found"
     s, dx, dy, _n = sol
     if not (TRACK_S[0] <= s <= TRACK_S[1]) or max(abs(dx), abs(dy)) > TRACK_SHIFT:
-        return None
+        return None, "not found"
     if abs(s - 1) < 1e-4 and max(abs(dx), abs(dy)) < 1e-4:
+        return None, "same"
+    return (float(s), float(dx), float(dy)), "moved"
+
+
+def flat_label(p: Optional[FieldProfile]) -> str:
+    """'White light flat · 6x4.5' for a flat of a set, else its name."""
+    if p is None:
+        return ""
+    light = profile_light(p)
+    if not light:
+        return p.name or "Field correction"
+    from core import film_formats
+    text = LIGHT_LABELS.get(light, light).split(" (")[0] + " flat"
+    fmt = profile_format(p)
+    return text + (" · " + film_formats.short_label(fmt) if fmt else "")
+
+
+def flat_id(p: Optional[FieldProfile]) -> Optional[str]:
+    """The flat's id as the grading signature knows it (None for no flat)."""
+    return None if p is None else (p.content_id or p.name or "?")
+
+
+def applied_record(p: Optional[FieldProfile], carrier=None) -> Optional[Dict[str, Any]]:
+    """What a decode applied, kept on the frame as `flat_applied`."""
+    if p is None:
         return None
-    return float(s), float(dx), float(dy)
+    return {"name": p.name, "id": flat_id(p), "label": flat_label(p),
+            "light": profile_light(p), "format": profile_format(p),
+            "camera": camera_name(p), "lens": lens_name(p), "carrier": carrier}
 
 
 def warp_gain(gain: np.ndarray, move) -> np.ndarray:

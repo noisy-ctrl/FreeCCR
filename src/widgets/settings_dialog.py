@@ -645,7 +645,14 @@ class SettingsDialog(QDialog):
             "the camera profiles and film looks). Film presets point at these files "
             "(Film Presets → Flat fields), so any number of presets can share one.")
         self._btn_field_folder.clicked.connect(self._show_field_folder)
+        # what the flats were shot with (spec/flat-field-info.md §3)
+        self._btn_field_details = QPushButton("Camera and Lens…")
+        self._btn_field_details.setToolTip(
+            "Name the camera and lens each flat field was shot with: the shots' "
+            "metadata knows the camera, but an adapted lens records nothing.")
+        self._btn_field_details.clicked.connect(self._edit_flat_details)
         ff_btns.addWidget(btn_create)
+        ff_btns.addWidget(self._btn_field_details)
         ff_btns.addWidget(self._btn_field_folder)
         ff_btns.addWidget(self._btn_field_delete)
         ff_btns.addStretch(1)
@@ -778,6 +785,32 @@ class SettingsDialog(QDialog):
         self._mw.create_field_correction_profile()
         self.refresh_color_management()
 
+    def _flat_details_exec(self, dlg):
+        """The test seam: run the Camera and Lens window, True on Save."""
+        return dlg.exec() == QDialog.Accepted
+
+    def _edit_flat_details(self):
+        """Camera and Lens…: every flat in the library, named and saved."""
+        from core import flat_field
+        from widgets.flat_details_dialog import FlatDetailsDialog
+        profiles = []
+        for entry in ccr_backend.list_field_profiles():
+            try:
+                profiles.append(flat_field.load_profile(entry["path"]))
+            except Exception as e:
+                print(f"Camera and Lens: skipping {entry['path']}: {e}")
+        if not profiles:
+            return 0
+        from PySide6.QtWidgets import QWidget
+        dlg = FlatDetailsDialog(profiles, parent=self if isinstance(self, QWidget) else None)
+        if not self._flat_details_exec(dlg):
+            return 0
+        n = dlg.save()
+        if n:
+            ccr_backend.refresh_field_library()
+            self.refresh_color_management()
+        return n
+
     def _delete_field(self):
         path = self._combo_field.currentData()
         if not path:
@@ -817,6 +850,7 @@ class SettingsDialog(QDialog):
         finally:
             self._loading_field_combo = False
         self._update_field_detail()
+        self._btn_field_details.setEnabled(bool(self._field_entries))
         tagged = [p for p in self._field_entries if p.get("light")]
         self._field_sets_note.setText(
             f"{len(tagged)} flat{'s' if len(tagged) != 1 else ''} with a light set: each "

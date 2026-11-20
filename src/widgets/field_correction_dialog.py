@@ -208,8 +208,8 @@ class FieldCorrectionDialog(QDialog):
         self.format_combo = QComboBox()
         self.format_combo.addItem("Any", "")
         from core import film_formats
-        for f in film_formats.FILM_FORMATS:
-            self.format_combo.addItem(f.label, f.key)
+        for key, label, _ratio, _cols in film_formats.FILM_FORMATS:
+            self.format_combo.addItem(label, key)
         sets.addWidget(self.format_combo, 1)
         lay.addLayout(sets)
         self.carrier_note = QLabel(
@@ -373,6 +373,19 @@ class FieldCorrectionDialog(QDialog):
         self.name_edit = QLineEdit()
         row.addWidget(self.name_edit, 1)
         lay.addLayout(row)
+        # what it was shot with (spec/flat-field-info.md §3): typed names win
+        # over the shot's metadata; an adapted lens records none
+        typed = ff.remembered_details()
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Camera:"))
+        self.camera_edit = QLineEdit(typed["camera"])
+        self.camera_edit.setPlaceholderText("From the shot's metadata")
+        row.addWidget(self.camera_edit, 1)
+        row.addWidget(QLabel("Lens:"))
+        self.lens_edit = QLineEdit(typed["lens"])
+        self.lens_edit.setPlaceholderText("None in the metadata? Type it")
+        row.addWidget(self.lens_edit, 1)
+        lay.addLayout(row)
         return w
 
     def _build_and_show(self) -> bool:
@@ -439,6 +452,10 @@ class FieldCorrectionDialog(QDialog):
         self.warn_label.setVisible(bool(warnings))
         if not self.name_edit.text().strip():
             self.name_edit.setText(profile.name)
+        exif = ff.FieldProfile(profile.name, profile.gain, profile.aspect,
+                               meta={k: v for k, v in profile.meta.items() if k != "details"})
+        self.camera_edit.setPlaceholderText(ff.camera_name(exif) or "Not in the shot's metadata")
+        self.lens_edit.setPlaceholderText(ff.lens_name(exif) or "None in the metadata? Type it")
         return True
 
     # ------------------------------------------------------------------ #
@@ -484,6 +501,9 @@ class FieldCorrectionDialog(QDialog):
                 "Replace it?") != QMessageBox.Yes:
             return False
         self._profile.name = self.name_edit.text().strip() or self._profile.name
+        camera, lens = self.camera_edit.text().strip(), self.lens_edit.text().strip()
+        self._profile.meta = ff.with_details(self._profile.meta, camera, lens)
+        ff.remember_details(camera, lens)
         try:
             ff.save_profile(self._profile, path)
         except Exception as e:

@@ -43,8 +43,10 @@ def test_capture_sits_in_the_middle_as_a_picture():
     i = acts.index(ip.capture_action)
     w = ip.toolbar.widgetForAction
     assert acts[i - 1] is ip.film_presets_action      # the canister beside it
-    assert w(acts[i - 2]) is ip.capture_push and w(acts[i + 1]) is ip.export_push
-    assert acts[i + 2] is ip.auto_crop_action
+    # dead centre between two stretches a side (spec/toolbar-centred.md)
+    assert w(acts[i - 2]) is ip.capture_push and w(acts[i - 3]) is ip.capture_push_2
+    assert w(acts[i + 1]) is ip._balance_right_a and w(acts[i + 2]) is ip.convert_push
+    assert acts[i + 3] is ip.auto_crop_action
     assert not ip.capture_action.icon().isNull()
     assert ip.capture_action.text() == "Capture"
 

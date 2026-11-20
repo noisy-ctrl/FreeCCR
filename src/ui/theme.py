@@ -635,6 +635,30 @@ def style_button(btn, role, *, default=False, glyph_only=False) -> None:
         btn.setDefault(True)
 
 
+_TOOL_PRIMARY_QSS = (
+    "QToolButton { background-color: %(s_active)s; color: %(text)s;"
+    " border: 1px solid %(border_strong)s; border-radius: %(r)dpx;"
+    " padding: 2px 10px; font-weight: bold; }"
+    " QToolButton:hover { background-color: %(p_hover)s; }"
+    " QToolButton:pressed { background-color: %(border)s; }"
+    " QToolButton:disabled { background-color: %(surface)s; color: %(disabled)s;"
+    " border-color: %(border)s; }"
+)
+
+
+def style_tool_button(btn, role) -> None:
+    """A QToolButton with a QPushButton role's look: ``"primary"`` is the
+    panel's primary (the canvas toolbar's Export, spec/toolbar-centred.md);
+    anything else clears it."""
+    if (role or "").lower() == "primary":
+        btn.setStyleSheet(_TOOL_PRIMARY_QSS % {
+            "r": RADIUS_SM, "surface": SURFACE, "s_active": SURFACE_ACTIVE,
+            "p_hover": "#505050", "border": BORDER, "border_strong": BORDER_STRONG,
+            "text": TEXT, "disabled": TEXT_DISABLED})
+    else:
+        btn.setStyleSheet("")
+
+
 def apply_panel_spacing(layout, *, margin=GAP_PANEL, spacing=GAP_ROW):
     """Conform a panel/dialog layout to the standard rhythm in one call."""
     layout.setContentsMargins(margin, margin, margin, margin)

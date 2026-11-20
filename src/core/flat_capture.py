@@ -469,10 +469,12 @@ def profile_name(light, fmt):
     return f"{head} flat · {tail}"
 
 
-def build_flats(result, fmt, out_dir, demosaic=True, decode=None, merge=None):
+def build_flats(result, fmt, out_dir, demosaic=True, decode=None, merge=None,
+                details=None):
     """Build and save each light's flat from its accepted shot(s): a list of
     {"light", "path", "profile"} in light order. `decode` / `merge` stand in
-    for the RAW decode and the trichrome merge (tests)."""
+    for the RAW decode and the trichrome merge (tests). `details`: the
+    camera and lens typed for them (spec/flat-field-info.md §3)."""
     from core import flat_field as ff
     if decode is None:
         decode = ff.decode_calibration
@@ -499,6 +501,7 @@ def build_flats(result, fmt, out_dir, demosaic=True, decode=None, merge=None):
         meta["shots"] = {k: {f: v for f, v in e.items() if f != "path"}
                          for k, e in shots.items()}
         meta["shot_by"] = "Capture"
+        meta = ff.with_details(meta, **(details or {}))
         prof = ff.build_tagged_profile(arr, profile_name(light, fmt), light=light,
                                        fmt=fmt, meta=meta)
         path = os.path.join(out_dir, file_name(light, fmt) + ff.EXTENSION)

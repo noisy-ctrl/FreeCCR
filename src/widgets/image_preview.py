@@ -9,7 +9,7 @@ from PySide6.QtGui import (QPixmap, QIcon, QTransform, QPen, QColor, QAction, QP
                            QCursor, QDesktopServices, QPainterPath,
                            QBrush, QPolygonF,
                            QImage)
-from PySide6.QtCore import Qt, QSize, Signal, QRect, QRectF, QPointF, QThread, QTimer, QUrl
+from PySide6.QtCore import Qt, QSize, Signal, QRect, QRectF, QPointF, QThread, QTimer, QUrl, QEvent
 from core.ccr_backend import ccr_backend
 from utils.qt_threads import WorkerThread
 from core.ccr_processor import (apply_dust_removal, DUST_FEATHER_DEFAULT,
@@ -842,8 +842,12 @@ def orientation_prompt(kind, frames):
     return prompt
 
 
-EXPORT_GAP_PX = 24     # the line-less break between Convert and Export (was 18, then 32;
-                       # 24 since the Capture button, 2026-11-19)
+EXPORT_GAP_PX = 12     # the least break between Convert and Export: a stretch with this
+                       # minimum since spec/toolbar-centred.md (2026-11-20; a fixed gap
+                       # of 18, 32, then 24 before), the boxed Export marks itself
+CONVERT_GAP_PX = 8     # ... and between Capture and Auto Crop
+EXPORT_BOX_PAD = 24    # the boxed Export's width past its bold words (2 x 10 padding,
+                       # the border, 2 px of air)
 ZOOM_GAP_PX = 8        # ... and the one between Export and the zoom box
 TEXT_BUTTON_PAD = 6    # a text button's width past its words (Qt's hint: ~17; 8 until
                        # the Capture button, 2026-11-19)
@@ -1041,6 +1045,27 @@ class ImagePreview(QWidget):
             "Zoom level — percentages are relative to the image's actual size "
             "(100% = one source pixel per screen pixel)")
         self.zoom_combo.activated.connect(self._on_zoom_combo)
+        # Flat field map: what the frame's flat field correction does, as a
+        # pink wash with contour lines (spec/flat-field-map.md). Display only,
+        # off at startup; right-click for the exaggeration. Left of HDR (the
+        # user, 2026-11-20).
+        self.flat_map_action = QAction(
+            theme.load_tinted_icon(resource_path("icons/flat-field-icon.png"),
+                                   on_color=theme.ICON_ON), "Flat field map", self)
+        self.flat_map_action.setCheckable(True)
+        self.flat_map_action.setToolTip(
+            "Flat field map: where this frame's flat field correction brightens "
+            "the scan, as a pink wash (stronger = more) with lines every "
+            "tenth of a stop; blue where it darkens. Preview only.\n"
+            "Right-click to exaggerate it, or hide the lines.")
+        self.flat_map_action.triggered.connect(self.set_flat_map)
+        self.toolbar.addAction(self.flat_map_action)
+        _fm_btn = self.toolbar.widgetForAction(self.flat_map_action)
+        if _fm_btn is not None:
+            _fm_btn.setContextMenuPolicy(Qt.CustomContextMenu)
+            _fm_btn.customContextMenuRequested.connect(
+                lambda pos, b=_fm_btn: self._show_flat_map_menu(b.mapToGlobal(pos)))
+        add_spacer()
         # HDR glow view: tint what will glow in a "JPEG + HDR gain map"
         # export. A display mode only, off at startup and never saved.
         # See spec/hdr-gain-map-export.md.
@@ -1093,14 +1118,30 @@ class ImagePreview(QWidget):
         self.toolbar.addAction(self.sample_action)
         add_spacer()
 
-        # Un-convert, Convert and Export sit at the far right, next to the
-        # histogram: everything before them stays left-aligned and this spacer
-        # takes up the slack.
-        # Capture sits in the middle, between the picture buttons and the
-        # words (the user, 2026-11-19): a stretch either side of it.
-        self.capture_push = QWidget()
-        self.capture_push.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        self.toolbar.addWidget(self.capture_push)
+        # Film Presets + Capture dead centre, Auto Crop / Un-convert / Convert
+        # midway between Capture and a boxed Export (spec/toolbar-centred.md,
+        # the user 2026-11-20): two stretches a side share the slack equally,
+        # and a measured balance spacer pads the lighter side
+        # (_balance_toolbar).
+        def fixed_gap(width):
+            gap = QWidget()
+            gap.setFixedWidth(width)
+            gap.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+            self.toolbar.addWidget(gap)
+            return gap
+
+        def push(minimum=0):
+            stretch = QWidget()
+            stretch.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            if minimum:
+                stretch.setMinimumWidth(minimum)
+            self.toolbar.addWidget(stretch)
+            return stretch
+
+        self._toolbar_balance = 0          # right minus left, px
+        self._balance_left = fixed_gap(0)
+        self.capture_push_2 = push()
+        self.capture_push = push()
         # the film presets, beside Capture (spec/film-presets.md §6, the
         # user 2026-11-19): Settings at its Film Presets page
         self.film_presets_action = QAction(
@@ -1113,9 +1154,8 @@ class ImagePreview(QWidget):
         self.film_presets_action.triggered.connect(self.open_film_presets)
         self.toolbar.addAction(self.film_presets_action)
         self.toolbar.addAction(self.capture_action)
-        self.export_push = QWidget()
-        self.export_push.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        self.toolbar.addWidget(self.export_push)
+        self._balance_right_a = fixed_gap(0)
+        self.convert_push = push(CONVERT_GAP_PX)
 
         self.toolbar.addAction(self.auto_crop_action)
         self.auto_crop_gap = QWidget()
@@ -1135,15 +1175,19 @@ class ImagePreview(QWidget):
         _conv_btn = self.toolbar.widgetForAction(self.convert_action)
         if _conv_btn is not None:                  # the main action: bold
             _conv_btn.setStyleSheet("QToolButton { font-weight: bold; }")
-        # A plain gap, no line, between the conversion pair and Export.
-        self.export_gap = QWidget()
-        self.export_gap.setFixedWidth(EXPORT_GAP_PX)
-        self.export_gap.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
-        self.toolbar.addWidget(self.export_gap)
+        # A stretch, no line, between the conversion words and Export (at
+        # least EXPORT_GAP_PX), then the other half of the right balance
+        self.export_push = push(EXPORT_GAP_PX)
+        self._balance_right_b = fixed_gap(0)
 
         self.export_action = QAction("Export…", self)
         self.export_action.triggered.connect(self.open_export_dialog)
         self.toolbar.addAction(self.export_action)
+        # boxed like the panel's Export… (the user, 2026-11-20)
+        _exp_btn = self.toolbar.widgetForAction(self.export_action)
+        if _exp_btn is not None:
+            theme.style_tool_button(_exp_btn, "primary")
+            _exp_btn.setFixedHeight(self.zoom_combo.sizeHint().height())
         # ... and the zoom box last, at the far right (a plain gap before it)
         self.zoom_gap = QWidget()
         self.zoom_gap.setFixedWidth(ZOOM_GAP_PX)
@@ -1155,6 +1199,8 @@ class ImagePreview(QWidget):
         export_margin.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
         self.toolbar.addWidget(export_margin)
         self._tighten_text_buttons()
+        self._balance_pending = False
+        self.toolbar.installEventFilter(self)
 
         self.layout.addWidget(self.toolbar)
 
@@ -1346,6 +1392,13 @@ class ImagePreview(QWidget):
         # child of the picture item, so nothing that reads the picture sees it.
         self._glow_item = None
         self._glow_cache = None          # (id of the alpha map, full-size pixmap)
+        # Flat field map (spec/flat-field-map.md): its own layer, above
+        # False colour; settings remembered, the toggle not.
+        self._flat_map = False
+        self._fm_item = None
+        self._fm_cache = None
+        self._fm_legend = None
+        self._fm_gain, self._fm_contours = self._stored_flat_map()
         # False colour (spec/false-colour.md): its own layer under the glow.
         self._false_colour = False
         self._fc_item = None
@@ -1428,6 +1481,7 @@ class ImagePreview(QWidget):
         self._glow_item = None           # scene.clear() above deleted it
         self._glow_cache = None
         self._fc_item = None
+        self._fm_item = None
         self._sample_item = None
         self._fc_cache = None
         self._gm_item = None
@@ -1645,6 +1699,7 @@ class ImagePreview(QWidget):
         self._dust_cursor_item = None
         self._glow_item = None
         self._fc_item = None
+        self._fm_item = None
         self._gm_item = None
         self._clip_item = None
         self._sample_item = None
@@ -1867,6 +1922,7 @@ class ImagePreview(QWidget):
         # The false-colour and HDR glow layers follow whatever pixmap is now
         # displayed.
         self._refresh_fc_overlay()
+        self._refresh_flat_map()
         self._refresh_gold_mask()
         self._refresh_glow_overlay()
         self._refresh_clip_overlay()
@@ -2109,6 +2165,247 @@ class ImagePreview(QWidget):
             action.blockSignals(was)
         self._refresh_fc_overlay()
 
+    # --- Flat field map (spec/flat-field-map.md) -----------------------------
+    _FM_GAIN_KEY = "view/flat_map_gain"
+    _FM_LINES_KEY = "view/flat_map_contours"
+
+    @classmethod
+    def _stored_flat_map(cls):
+        from PySide6.QtCore import QSettings
+        from core import flat_map
+        try:
+            st = QSettings("FreeCCR", "FreeCCR")
+            k = flat_map.exaggeration(st.value(cls._FM_GAIN_KEY, flat_map.DEFAULT_GAIN))
+            lines = st.value(cls._FM_LINES_KEY, True, type=bool)
+        except Exception:
+            k, lines = flat_map.DEFAULT_GAIN, True
+        return k, bool(lines)
+
+    def set_flat_map(self, on):
+        """Show or hide the flat field map: display only, off at startup."""
+        self._flat_map = bool(on)
+        action = getattr(self, "flat_map_action", None)
+        if action is not None and action.isChecked() != self._flat_map:
+            was = action.blockSignals(True)
+            action.setChecked(self._flat_map)
+            action.blockSignals(was)
+        self._refresh_flat_map()
+
+    def set_flat_map_options(self, gain=None, contours=None):
+        """The exaggeration (×1/2/4/8) and contour lines, remembered."""
+        from PySide6.QtCore import QSettings
+        from core import flat_map
+        if gain is not None:
+            self._fm_gain = flat_map.exaggeration(gain)
+        if contours is not None:
+            self._fm_contours = bool(contours)
+        try:
+            st = QSettings("FreeCCR", "FreeCCR")
+            st.setValue(self._FM_GAIN_KEY, self._fm_gain)
+            st.setValue(self._FM_LINES_KEY, self._fm_contours)
+        except Exception:
+            pass
+        self._fm_cache = None
+        self._refresh_flat_map()
+
+    def flat_map_menu(self):
+        """The tool's right-click menu (the test seam): Exaggeration ×1 / ×2
+        / ×4 / ×8 and Contour lines; a choice turns the map on."""
+        from PySide6.QtWidgets import QMenu
+        from PySide6.QtGui import QActionGroup
+        from core import flat_map
+        menu = QMenu(self)
+        head = menu.addAction("Exaggeration")
+        head.setEnabled(False)
+        group = QActionGroup(menu)
+        for k in flat_map.EXAGGERATIONS:
+            text = ("×1 (as it is)" if k == 1
+                    else f"×{k} (a {flat_map.FULL_AT_EV / k:g} stop change shows in full)")
+            a = menu.addAction(text)
+            a.setCheckable(True)
+            a.setChecked(self._fm_gain == k)
+            group.addAction(a)
+            a.triggered.connect(lambda _c=False, g=k: self._pick_flat_map(gain=g))
+        menu.addSeparator()
+        lines = menu.addAction("Contour lines")
+        lines.setCheckable(True)
+        lines.setChecked(self._fm_contours)
+        lines.triggered.connect(lambda on: self._pick_flat_map(contours=on))
+        menu._group = group
+        return menu
+
+    def _show_flat_map_menu(self, global_pos):
+        self._fm_menu = self.flat_map_menu()
+        self._fm_menu.popup(global_pos)
+
+    def _pick_flat_map(self, gain=None, contours=None):
+        self.set_flat_map_options(gain, contours)
+        if not self._flat_map:
+            self.set_flat_map(True)
+
+    def _flat_map_source(self, img):
+        """(profile, full decode (h, w), mono, note): the flat the frame's
+        decode applied, else the one it would get now (untracked)."""
+        from core import flat_field
+        used = getattr(img, "_flat_used", "missing")
+        if used != "missing":
+            if used is None:
+                return None, None, False, ""
+            return used[0], used[1], used[2], ""
+        p = flat_field.profile_for(img)
+        if p is None:
+            return None, None, False, ""
+        raw = getattr(img, "resized_raw", None)
+        hw = tuple(raw.shape[:2]) if raw is not None else None
+        return p, hw, False, " (re-grade it to see the one it was decoded with)"
+
+    def _flat_map_layer(self, img):
+        """(full-frame layer pixmap cut like the display, legend html) for
+        the frame on screen; cached on what it depends on."""
+        from core import flat_map
+        pv = getattr(img, "resized_preview", None)
+        if pv is None or pv.isNull():
+            return None, ""
+        profile, hw, mono, note = self._flat_map_source(img)
+        crop_key = (repr(getattr(img, "crop_rect", None)), self._crop_display_angle,
+                    self._crop_display_transform is not None)
+        key = (id(profile), hw, mono, repr(getattr(img, "source_ops", None)),
+               pv.width(), pv.height(), self._fm_gain, self._fm_contours, crop_key)
+        if self._fm_cache is not None and self._fm_cache[0] == key:
+            return self._fm_cache[1], self._fm_cache[2]
+        if profile is None or not hw:
+            html = "<b>Flat field map</b><br>No flat field on this frame."
+            self._fm_cache = (key, None, html)
+            return None, html
+        gain = flat_map.frame_gain(profile, hw, getattr(img, "source_ops", None),
+                                   (pv.width(), pv.height()), mono)
+        ev = flat_map.ev_map(gain)
+        rgba = np.ascontiguousarray(flat_map.layer_rgba(ev, self._fm_gain, self._fm_contours))
+        h, w = rgba.shape[:2]
+        qimg = QImage(rgba.data, w, h, 4 * w, QImage.Format_RGBA8888).copy()
+        if self._fm_contours:
+            self._draw_flat_map_labels(qimg, flat_map.label_points(ev, self._fm_gain))
+        layer = self._crop_layer_like_display(QPixmap.fromImage(qimg), img,
+                                              fill=Qt.transparent)
+        html = self._flat_map_legend_html(img, profile, flat_map.summary(profile, ev), note)
+        self._fm_cache = (key, layer, html)
+        return layer, html
+
+    @staticmethod
+    def _draw_flat_map_labels(qimg, points):
+        from PySide6.QtGui import QFont, QPainter
+        if not points:
+            return
+        p = QPainter(qimg)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.TextAntialiasing)
+        f = QFont()
+        f.setPixelSize(max(10, int(round(max(qimg.width(), qimg.height()) / 85))))
+        f.setBold(True)
+        p.setFont(f)
+        fm = p.fontMetrics()
+        for x, y, text in points:
+            tw, th = fm.horizontalAdvance(text) + 8, fm.height() + 2
+            r = QRectF(x - tw / 2, y - th / 2, tw, th)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(0, 0, 0, 170))
+            p.drawRoundedRect(r, 4, 4)
+            p.setPen(QColor(255, 255, 255))
+            p.drawText(r, Qt.AlignCenter, text)
+        p.end()
+
+    def _flat_map_legend_html(self, img, profile, figs, note=""):
+        from core import flat_field, flat_map
+        k = self._fm_gain
+        applied = getattr(img, "flat_applied", None) or {}
+        head = flat_field.flat_label(profile)
+        carrier = applied.get("carrier") if not note else None
+        if carrier in ("moved", "same"):
+            head += ", followed the carrier"
+        elif carrier == "not found":
+            head += ", the carrier wasn't found: as shot"
+        lines = [f"<b>Flat field map</b> · {head}{note}"]
+        lift = f"Brightens by up to {figs['lift']:+.2f} EV"
+        if len(figs["corners"]) == 3:
+            r, g, b = figs["corners"]
+            lift += f" (corners R {r:+.2f} · G {g:+.2f} · B {b:+.2f})"
+        lines.append(lift)
+        if figs["lower"] < -0.02:              # a real lowering, not rounding
+            lines.append(f"Darkens by up to {figs['lower']:+.2f} EV "
+                         f"(<span style='color:rgb{flat_map.BLUE}'>blue</span>)")
+        full = flat_map.FULL_AT_EV / k
+        ramp = (f"<table cellspacing='0' cellpadding='0'><tr><td>0&nbsp;</td>"
+                + "".join(f"<td style='background-color: rgba(255,64,170,{a:.2f});' "
+                          f"width='14'>&nbsp;</td>"
+                          for a in np.linspace(0.08, flat_map.WASH_ALPHA, 8))
+                + f"<td>&nbsp;{full:+g} EV and more</td></tr></table>")
+        lines.append(ramp)
+        step = flat_map.CONTOUR_STEP[k]
+        tail = f"Shown ×{k}"
+        if self._fm_contours:
+            tail += f" · lines every {step:g} EV"
+        lines.append(f"<span style='color:#bdbdbd'>{tail} · right-click the button to "
+                     f"change. The picture itself isn't changed.</span>")
+        return "<br>".join(lines)
+
+    def _refresh_flat_map(self):
+        """Show, update or hide the flat field map layer and its legend."""
+        item = self.pixmap_item
+        on = (getattr(self, "_flat_map", False) and item is not None
+              and self.current_pixmap is not None and self.current_idx is not None)
+        target = item.pixmap() if item is not None else None
+        img = ccr_backend.get_image_by_index(self.current_idx) if on else None
+        if not on or target is None or target.isNull() or img is None:
+            if getattr(self, "_fm_item", None) is not None:
+                self._fm_item.setVisible(False)
+            self._place_flat_map_legend(None)
+            return
+        layer, html = self._flat_map_layer(img)
+        if layer is None or layer.isNull():
+            if self._fm_item is not None:
+                self._fm_item.setVisible(False)
+        else:
+            if self._fm_item is None:
+                self._fm_item = QGraphicsPixmapItem(item)
+                self._fm_item.setTransformationMode(Qt.SmoothTransformation)
+                self._fm_item.setZValue(1.4)
+            self._fm_item.setPixmap(layer)
+            t = QTransform()
+            t.scale(target.width() / layer.width(), target.height() / layer.height())
+            self._fm_item.setTransform(t)
+            self._fm_item.setVisible(True)
+        self._place_flat_map_legend(html)
+
+    def _place_flat_map_legend(self, html):
+        """Bottom-left, above False colour's legend when both show."""
+        from PySide6.QtWidgets import QLabel
+        lab = getattr(self, "_fm_legend", None)
+        if html is None:
+            if lab is not None:
+                lab.hide()
+            return
+        if lab is None:
+            lab = QLabel(self.view.viewport())
+            lab.setTextFormat(Qt.RichText)
+            lab.setWordWrap(True)
+            lab.setFixedWidth(420)
+            lab.setStyleSheet(
+                f"QLabel {{ background-color: rgba(20, 20, 20, 210); "
+                f"color: {theme.TEXT}; font-size: 11px; padding: 6px; "
+                f"border-radius: {theme.RADIUS_MD}px; }}")
+            lab.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            self._fm_legend = lab
+        lab.setText(html)
+        lab.adjustSize()
+        vp = self.view.viewport()
+        bottom = vp.height() - 8
+        fc = getattr(self, "_fc_legend", None)
+        if getattr(self, "_false_colour", False) and fc is not None and fc.isVisible():
+            bottom = fc.y() - 6
+        lab.move(8, max(0, bottom - lab.height()))
+        lab.show()
+        lab.raise_()
+
     # --- Stop zones (spec/false-colour.md, 2026-10-23) ----------------------
     _FC_SCALE_KEY = "view/false_colour_scale"
     _FC_SOURCE_KEY = "view/false_colour_zone_source"
@@ -2249,15 +2546,22 @@ class ImagePreview(QWidget):
         h, w = rgb.shape[:2]
         layer = QPixmap.fromImage(QImage(rgb.data, w, h, 3 * w,
                                          QImage.Format_RGB888).copy())
-        if self._crop_display_transform is not None:
-            crop = getattr(img, "crop_rect", None)
-            if crop is not None and self._crop_display_angle:
-                extracted = self._extract_rotated_crop(layer, crop,
-                                                       self._crop_display_angle)
-                layer = extracted[0] if extracted is not None else None
-            elif crop is not None:
-                px_rect = self._crop_rect_to_pixels(crop, layer)
-                layer = layer.copy(px_rect) if px_rect is not None else None
+        return self._crop_layer_like_display(layer, img)
+
+    def _crop_layer_like_display(self, layer, img, fill=None):
+        """A full-frame layer (the uncropped preview's geometry) cut as the
+        displayed picture is (as the HDR glow layer is); None when the cut
+        fails."""
+        if layer is None or self._crop_display_transform is None:
+            return layer
+        crop = getattr(img, "crop_rect", None)
+        if crop is not None and self._crop_display_angle:
+            extracted = self._extract_rotated_crop(layer, crop, self._crop_display_angle,
+                                                   fill=fill)
+            return extracted[0] if extracted is not None else None
+        if crop is not None:
+            px_rect = self._crop_rect_to_pixels(crop, layer)
+            return layer.copy(px_rect) if px_rect is not None else None
         return layer
 
     def _fc_pixmap_for(self, target):
@@ -2403,6 +2707,9 @@ class ImagePreview(QWidget):
         lab.move(8, max(0, vp.height() - lab.height() - 8))
         lab.show()
         lab.raise_()
+        fm = getattr(self, "_fm_legend", None)
+        if fm is not None and fm.isVisible():
+            self._place_flat_map_legend(fm.text())
 
     def _end_fine_rot_burst(self, show=False):
         self._fine_rot_burst_active = False
@@ -2776,8 +3083,54 @@ class ImagePreview(QWidget):
             font = btn.font()
             if "font-weight: bold" in btn.styleSheet():
                 font.setBold(True)
-            btn.setFixedWidth(QFontMetrics(font).horizontalAdvance(act.text())
-                              + TEXT_BUTTON_PAD)
+            pad = EXPORT_BOX_PAD if act is self.export_action else TEXT_BUTTON_PAD
+            btn.setFixedWidth(QFontMetrics(font).horizontalAdvance(act.text()) + pad)
+
+    def eventFilter(self, obj, event):
+        if obj is self.toolbar and event.type() in (QEvent.Resize, QEvent.LayoutRequest):
+            self._schedule_toolbar_balance()
+        return super().eventFilter(obj, event)
+
+    def _schedule_toolbar_balance(self):
+        if getattr(self, "_balance_pending", True):
+            return
+        self._balance_pending = True
+        QTimer.singleShot(0, self._balance_toolbar)
+
+    def _balance_toolbar(self):
+        """Keep Film Presets + Capture dead centre (spec/toolbar-centred.md):
+        measure how far right of the toolbar's middle their middle sits, `d`,
+        and move the balance (right minus left) by 2d. `d` doesn't depend on
+        the width, so this settles in one step. The balance is only spent
+        from room the toolbar has to spare: at the narrowest canvas it
+        shrinks to nothing rather than push Export into the overflow arrow.
+        Returns the px the signed balance moved."""
+        self._balance_pending = False
+        tb = self.toolbar
+        film = tb.widgetForAction(self.film_presets_action)
+        cap = tb.widgetForAction(self.capture_action)
+        if film is None or cap is None or not tb.isVisible() or not cap.isVisible():
+            return 0
+        spacers = (self._balance_left, self._balance_right_a, self._balance_right_b)
+        applied = sum(s.width() for s in spacers)
+        b = self._toolbar_balance
+        pushes = (self.capture_push_2, self.capture_push, self.convert_push, self.export_push)
+        fits = tb.sizeHint().width() <= tb.width()     # nothing in the overflow arrow
+        if fits and applied == abs(b) and all(p.width() > p.minimumWidth() for p in pushes):
+            mid = (film.geometry().left() + cap.geometry().right() + 1) / 2.0
+            d = mid - tb.width() / 2.0
+            if abs(d) >= 1.0:
+                b = max(-400, min(400, int(round(b + 2 * d))))
+        moved = b - self._toolbar_balance
+        self._toolbar_balance = b
+        room = max(0, tb.width() - (tb.sizeHint().width() - applied))
+        spend = min(abs(b), room)
+        left = spend if b < 0 else 0
+        right = spend if b > 0 else 0
+        for s, w in zip(spacers, (left, right // 2, right - right // 2)):
+            if s.width() != w:
+                s.setFixedWidth(w)
+        return moved
 
     def open_film_presets(self):
         """The toolbar's film canister: a menu of the roll's film and format,
@@ -2839,8 +3192,12 @@ class ImagePreview(QWidget):
             # a film typed in the Start window, not a preset: shown, inert
             film_action(film, False, True).setToolTip(
                 "Typed in Start Hot Folder Tether, not a film preset.")
+        flat_formats, flat_presets = self._flat_marks(presets)
         for p in presets:
-            film_action(fp.label(p), p["id"], p["id"] == pid)
+            # "flat field" in the shortcut column: this preset names one
+            # (spec/flat-field-info.md §2)
+            film_action(fp.label(p) + ("\tflat field" if p["id"] in flat_presets else ""),
+                        p["id"], p["id"] == pid)
         menu.addSeparator()
         head = menu.addAction("Format")
         head.setEnabled(False)
@@ -2848,7 +3205,7 @@ class ImagePreview(QWidget):
         formats.setExclusive(True)
         for key, label in [("", "Not set")] + [(k, lb) for k, lb, _r, _c in
                                                 film_formats.FILM_FORMATS]:
-            a = menu.addAction(label)
+            a = menu.addAction(label + ("\tflat field" if key and key in flat_formats else ""))
             a.setCheckable(True)
             a.setChecked(key == (fmt or ""))
             formats.addAction(a)
@@ -2857,9 +3214,65 @@ class ImagePreview(QWidget):
             elif hasattr(mw, "set_roll_format"):
                 a.triggered.connect(lambda _=False, k=key: mw.set_roll_format(k))
         menu.addSeparator()
+        head = menu.addAction("Flat field")
+        head.setEnabled(False)
+        for line in self.flat_field_lines():
+            a = menu.addAction(line)
+            a.setEnabled(False)
+        menu.addSeparator()
         menu.addAction("Edit Film Presets…").triggered.connect(self.edit_film_presets)
         menu._groups = (films, formats)          # keep the groups alive
         return menu
+
+    def _flat_marks(self, presets):
+        """(formats with a flat of the roll's light in the library, ids of
+        presets that name a flat): the film menu marks them."""
+        from core import film_presets as fp
+        from core import flat_field
+        light = "rgb" if getattr(ccr_backend, "scan_type", "colour") == "trichrome" else "white"
+        fmts = {flat_field.profile_format(p) for p in flat_field.library()
+                if flat_field.profile_light(p) == light and flat_field.profile_format(p)}
+        named = {pid for pid, flats in fp.flats_map(presets).items()
+                 if any(v and v != fp.NO_FLAT for v in flats.values())}
+        return fmts, named
+
+    def flat_field_lines(self):
+        """The film menu's lines about the frame on screen's flat field
+        (spec/flat-field-info.md §2): what its decode applied, how it lined
+        up and with what camera and lens, and whether re-grading would give
+        it another."""
+        from core import flat_field
+        idx = self.current_idx
+        img = ccr_backend.get_image_by_index(idx) if idx is not None else None
+        if img is None:
+            return ["No frame open"]
+        missing = object()
+        applied = getattr(img, "flat_applied", missing)
+        if applied is missing:                 # decoded before this was kept
+            applied = flat_field.applied_record(flat_field.profile_for(img))
+        lines = [f"Frame {idx + 1}: " + (applied["label"] if applied else "no flat field")]
+        if applied:
+            bits = []
+            carrier = applied.get("carrier")
+            if carrier in ("moved", "same"):
+                bits.append("followed the carrier")
+            elif carrier == "not found":
+                bits.append("the carrier wasn't found: applied as shot")
+            bits += [b for b in (applied.get("camera"), applied.get("lens")) if b]
+            if bits:
+                lines.append("   " + " · ".join(bits))
+        sig = getattr(img, "profile_signature", None)
+        try:
+            now_sig = ccr_backend.active_profile_signature(img)
+        except Exception:
+            now_sig = sig
+        if sig is not None and now_sig != sig:
+            now = flat_field.profile_for(img)
+            if flat_field.flat_id(now) != (applied.get("id") if applied else None):
+                lines.append("⚠ Re-grade to apply "
+                             + (flat_field.flat_label(now) if now is not None else "no flat")
+                             + ": right-click its thumbnail")
+        return lines
 
     def open_crop(self):
         """The toolbar's Crop: what the panel's Crop button does."""
