@@ -10,7 +10,6 @@ remove an entry when it ships.
   flat.
 
 ## Waiting on the user
-- **Light leaks on the contact sheet's film strips** (2026-11-20,
   `spec/contact-sheet-strips.md`): drafts to sign off before they go in.
 - **Film strips on his own rolls** (2026-11-20): the look was signed off on
   drafts ("would have to test"); spacing, edge print and the camera gate's

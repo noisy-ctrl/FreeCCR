@@ -168,3 +168,39 @@ film (when Text… has Film and the roll's film is known) at the frame's start
 and end along the top. 35 mm is unchanged. The 6x7 rebate measured on the
 reference, ~2.3-2.75 mm of a 61.5 mm film, matches the geometry
 (`STRIPS["6x7"]`, 2.75 mm), so no size changed.
+
+## Light leaks (signed off 2026-11-20)
+
+Layout… → Light leaks: Off / Slight / Strong (`sheet/leaks`). Only ever on the
+film's edge (the user, 2026-11-20: "never extend to the images … otherwise
+it's unrealistic that the images aren't affected"): a leak fades in from the
+edge and is gone by `leak_reach` (35 mm: the holes' outer 60 %; 120: 80 % of
+the rebate, ≥ 0.5 mm clear of the picture), drawn under the holes and the
+edge print. 35 mm: patches with narrow tongues, some edges clean, the roll's
+first strip fogged at its start (light at the cassette's lip). 120 (the
+user's two references: a roll-film leak runs as one long wavy streak along
+an edge, coming and going): `leak_streaks` / `streak_field`, a soft-edged
+band whose strength and depth wander along the film (two slow waves), one
+edge usually, sometimes both. Fixed per strip, so the same on every redraw.
+
+Revision (the user, 2026-11-20: "there should be fewer"): a 35 mm edge has a
+patch in 30 % of strips' edges (was 1-2 on most), a 120 strip a streak in
+40 % (one edge, gaps along it more often); the roll's start is still fogged.
+
+## A drawn gate isn't perfectly square (DRAFT, same branch)
+
+The user's references (a 6x6 and a 35 mm print with their gates): the
+corners are rounded, the edges wander a little and are soft. With Gate
+"Square" (the drawn gate; "Camera's own" shows the scan's real one) the film's
+colour is laid over each frame's outermost edge (`gate_edge`): a rounded
+rectangle (r 0.5 mm on 35 mm, 1.0 mm on 120), inset 0.10 mm, its sides moved
+in by two octaves of smooth noise (steps of 4 mm and 1.2 mm, ±0.07 mm),
+fixed per frame, softened by σ 0.05 mm (the gate sits just off the film
+plane).
+
+How often (the user, signing off: "quite rare on 35mm except near beginning
+and end. On 120 film, they frequently [appear] top and bottom - I'd say less
+frequently though"): 35 mm mid-roll strips have one small patch on
+`LEAK_35_MIDDLE` (12 %) of them, the roll's first strip is fogged at its
+start and its last at its end; 120 has a streak on `LEAK_120_STRIP` (45 %)
+of the strips, half of those on both edges.

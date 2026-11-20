@@ -21,6 +21,7 @@ import os
 import threading
 import time
 
+import cv2
 import numpy as np
 from PySide6.QtCore import QObject, QPointF, QRectF, QSettings, Qt, Signal
 from PySide6.QtGui import (QColor, QFont, QImage, QPainter, QPainterPath, QPen,
@@ -72,6 +73,13 @@ GATES = (("square", "Square"), ("camera", "Camera's own"))
 FILM_EDGES = (("black", "Black", (6, 6, 6)), ("grey", "Dark grey", (40, 40, 40)),
               ("brown", "Brown-black", (28, 19, 12)))
 HOLE_WHITE = (245, 245, 245)
+# Light leaks on the film's edges (DRAFT for sign-off): off / slight / strong
+LEAKS = (("off", "Off"), ("slight", "Slight"), ("strong", "Strong"))
+LEAK_PEAK = {"slight": 0.38, "strong": 0.8}
+# fog colour by how strong it is: deep red where faint, through orange to a
+# pale yellow at the core (a print of fogged negative edges)
+LEAK_RAMP = ((0.0, (150, 20, 5)), (0.4, (230, 70, 15)), (0.75, (255, 150, 40)),
+             (1.0, (255, 225, 150)))
 # 35 mm perforations, mm: KS (0.078 x 0.110 in), 1.98 ALONG the film by 2.79
 # ACROSS it, corners r 0.51, every 4.75, 2.01 from the edge. Measured on the
 # user's own full-width scans (2026-11-20): 1.98-2.01 along x 2.77-2.80
@@ -468,6 +476,227 @@ class StripLayout:
         return ("strips", self.n, self.fmt, self.direction, self.cell_w)
 
 
+def leak_reach(geo):
+    """How far in from the film's edge a leak may reach, mm: past the
+    sprocket holes' outer half on 35 mm (the holes' inner edge is 0.7 mm
+    from the picture), 60 % of the rebate on 120. Always well short of the
+    picture, so it's plausible the pictures took no light (the user,
+    2026-11-20: "never extend to the images")."""
+    if geo.holes:
+        return HOLE_EDGE + 0.6 * HOLE_ACROSS
+    return 0.8 * geo.rebate
+
+
+LEAK_35_MIDDLE = 0.12      # 35 mm: the share of mid-roll strips with a leak at all
+LEAK_120_STRIP = 0.45      # 120: the share of strips with a streak
+LEAK_120_BOTH = 0.5        # ... and of those, the share on both edges
+
+
+def leak_blobs(k, length_mm, reach_mm, roll_start=False, roll_end=False):
+    """Strip k's 35 mm light leaks: [(edge 0|1, centre mm, width mm, height,
+    depth mm)], fixed per strip (the same every redraw and export). Rare
+    (the user, 2026-11-20: "quite rare on 35mm except near beginning and
+    end"): a mid-roll strip has one small patch at most, LEAK_35_MIDDLE of
+    them; the roll's first strip is fogged at its start and its last at its
+    end, on both edges, with a patch near them."""
+    rng = np.random.default_rng(20261120 + 7919 * k)
+    out = []
+
+    def patch(edge, c):
+        out.append((edge, c, float(rng.uniform(4, 14)), float(rng.uniform(0.35, 0.9)),
+                    float(rng.uniform(0.2, 0.4)) * reach_mm))
+        for _t in range(int(rng.integers(1, 3))):
+            out.append((edge, c + float(rng.normal(0, 4)), float(rng.uniform(0.8, 2.5)),
+                        float(rng.uniform(0.4, 1.0)), float(rng.uniform(0.45, 0.8)) * reach_mm))
+
+    if not (roll_start or roll_end):
+        if rng.random() < LEAK_35_MIDDLE:
+            patch(int(rng.integers(0, 2)), float(rng.uniform(0, length_mm)))
+        return out
+    for end, at in ((roll_start, 0.0), (roll_end, length_mm)):
+        if not end:
+            continue
+        for edge in (0, 1):
+            out.append((edge, at, 22.0, 1.2, 0.8 * reach_mm))
+            if rng.random() < 0.7:
+                patch(edge, abs(at - float(rng.uniform(10, 45))))
+    return out
+
+
+def leak_streaks(k, force=False):
+    """Strip k's 120 leak (the user's reference, 2026-11-20: a roll-film leak
+    runs as one long wavy streak along an edge, light let in past the spool
+    flanges, not in patches): [(edge, strength, profiles)], usually one edge,
+    sometimes both; each profile is a few slow waves along the film whose sum
+    sets the streak's strength and its depth in from the edge."""
+    rng = np.random.default_rng(20261121 + 7919 * k)
+    if rng.random() >= LEAK_120_STRIP and not force:      # "less frequently"
+        return []
+    edges = [0, 1] if rng.random() < LEAK_120_BOTH else [int(rng.integers(0, 2))]  # "top and bottom"
+    out = []
+    for e in edges:
+        def waves():
+            n = 6
+            return (rng.uniform(1 / 80.0, 1 / 10.0, n), rng.uniform(0, 2 * np.pi, n),
+                    rng.uniform(0.3, 1.0, n))
+        out.append((e, float(rng.uniform(0.8, 1.3)), waves(), waves()))
+    return out
+
+
+def _wave(x, w):
+    f, ph, a = w
+    v = (a[None, :] * np.sin(2 * np.pi * f[None, :] * x[:, None] + ph[None, :])).sum(axis=1)
+    return v / max(float(a.sum()), 1e-6)                  # -1 .. 1
+
+
+def streak_field(streaks, x_mm, y_mm, film_mm, reach_mm):
+    """The 120 streaks' fog (h, w) float: per column a strength and a depth
+    from two slow waves; strong where both waves are up, gone where the
+    first dips; fading in from the edge and gone by `reach_mm`."""
+    field = np.zeros((y_mm.size, x_mm.size), np.float32)
+    for edge, strength, w1, w2 in streaks:
+        a = strength * np.clip(0.3 + 0.9 * _wave(x_mm, w1), 0.0, 1.0) ** 1.2
+        # a band with a soft inner edge (not a thin glow on the edge): full
+        # from the edge, easing out by its depth, which wanders 45-100 % of
+        # the reach (never past it)
+        depth = reach_mm * (0.45 + 0.55 * (0.5 + 0.5 * _wave(x_mm, w2)))
+        d = (y_mm if edge == 0 else film_mm - y_mm)[:, None]
+        t = np.clip(d / np.maximum(depth[None, :], 1e-3), 0.0, 1.0)
+        band = 1.0 - t * t * (3.0 - 2.0 * t)
+        field += (2.0 * band * a[None, :]).astype(np.float32)
+    return field
+
+
+def leak_field(blobs, x_mm, film_mm, ppm, peak, reach_mm, holes=(), streaks=()):
+    """Premultiplied RGBA (h, w, 4) uint8 of the fog over strip columns at
+    `x_mm` (mm along the strip, one per pixel column), the film's whole
+    width. A leak fades in from the film's edge and is gone, smoothly, by
+    `reach_mm` in; `holes` = slot rects (x0, y0, x1, y1 mm) are left clear
+    as well, so no picture is ever fogged."""
+    h = max(1, int(round(film_mm * ppm)))
+    y = (np.arange(h, dtype=np.float32) + 0.5) / ppm
+    x = np.asarray(x_mm, dtype=np.float32)
+    field = np.zeros((h, x.size), np.float32)
+    for edge, c, w, a, depth in blobs:
+        along = a * np.exp(-((x - c) ** 2) / (2 * w * w))
+        d = y if edge == 0 else film_mm - y
+        t = np.clip(d / max(reach_mm, 1e-6), 0.0, 1.0)
+        fade = 1.0 - t * t * (3.0 - 2.0 * t)          # smoothstep to 0 at the reach
+        field += (np.exp(-d / max(depth, 1e-6)) * fade)[:, None] * along[None, :]
+    if streaks:
+        field += streak_field(streaks, x, y, film_mm, reach_mm)
+    for x0, y0, x1, y1 in holes:
+        inside = ((x[None, :] >= x0) & (x[None, :] <= x1)
+                  & (y[:, None] >= y0) & (y[:, None] <= y1))
+        field[inside] = 0.0
+    t = peak * (1.0 - np.exp(-1.6 * field))
+    u = np.clip(t / max(peak, 1e-6), 0, 1)
+    rgb = np.zeros(t.shape + (3,), np.float32)
+    for c in range(3):
+        rgb[..., c] = np.interp(u, [s for s, _c in LEAK_RAMP], [col[c] for _s, col in LEAK_RAMP])
+    out = np.empty(t.shape + (4,), np.uint8)
+    out[..., :3] = np.clip(rgb * t[..., None], 0, 255).astype(np.uint8)
+    out[..., 3] = np.clip(t * 255, 0, 255).astype(np.uint8)
+    return out
+
+
+# A drawn ("Square") gate isn't a perfect rectangle (the user's references,
+# 2026-11-20): its corners are rounded, its edges wander a little and are
+# soft (the gate sits just off the film plane). mm on the film.
+GATE_RADIUS = {True: 0.5, False: 1.0}      # 35 mm (holes) / 120
+GATE_INSET, GATE_WOBBLE, GATE_SOFT = 0.10, 0.07, 0.05
+
+
+def gate_edge(w_px, h_px, ppm, seed, colour, radius_mm):
+    """An RGBA (premultiplied) image w x h: the film's colour over a frame's
+    outermost edge, inside it clear, the boundary a rounded rectangle whose
+    sides wander (two octaves, fixed by `seed`) with a soft edge."""
+    w, h = max(2, int(math.ceil(w_px))), max(2, int(math.ceil(h_px)))
+    rng = np.random.default_rng(424242 + 1009 * int(seed))
+    r = max(1.0, radius_mm * ppm)
+    base = GATE_INSET * ppm
+    path = QPainterPath()
+    path.addRoundedRect(QRectF(base, base, w - 2 * base, h - 2 * base), r, r)
+    n = max(64, int(2 * (w + h) / 2))
+    s = np.linspace(0.0, 1.0, n, endpoint=False)
+    perim_mm = 2 * (w + h) / ppm
+
+    def octave(step_mm, amp):
+        k = max(4, int(perim_mm / step_mm))
+        knots = rng.uniform(-1, 1, k + 1)
+        knots[-1] = knots[0]                                  # closes round the frame
+        return amp * np.interp(s * k, np.arange(k + 1), knots)
+    wob = (octave(4.0, 1.0) + octave(1.2, 0.45)) / 1.45 * GATE_WOBBLE * ppm
+    inner = QRectF(base + r, base + r, max(0.0, w - 2 * base - 2 * r),
+                   max(0.0, h - 2 * base - 2 * r))
+    pts = []
+    for t, dv in zip(s, wob):
+        q = path.pointAtPercent(float(t))
+        cx = min(max(q.x(), inner.left()), inner.right())
+        cy = min(max(q.y(), inner.top()), inner.bottom())
+        nx, ny = q.x() - cx, q.y() - cy
+        ln = math.hypot(nx, ny) or 1.0
+        pts.append(QPointF(q.x() - nx / ln * dv, q.y() - ny / ln * dv))
+    mask = QImage(w, h, QImage.Format_Grayscale8)
+    mask.fill(0)
+    mp = QPainter(mask)
+    mp.setRenderHint(QPainter.Antialiasing)
+    mp.setPen(Qt.NoPen)
+    mp.setBrush(QColor(255, 255, 255))
+    mp.drawPolygon(QPolygonF(pts))
+    mp.end()
+    a = np.frombuffer(mask.constBits(), np.uint8, mask.bytesPerLine() * h)
+    a = a.reshape(h, mask.bytesPerLine())[:, :w].astype(np.float32) / 255.0
+    sig = max(0.5, GATE_SOFT * ppm)
+    a = cv2.GaussianBlur(a, (0, 0), sig)
+    alpha = 1.0 - a                                         # film over the edge
+    col = np.array([colour.red(), colour.green(), colour.blue()], np.float32)
+    out = np.empty((h, w, 4), np.uint8)
+    out[..., :3] = np.clip(col[None, None, :] * alpha[..., None], 0, 255).astype(np.uint8)
+    out[..., 3] = np.clip(alpha * 255, 0, 255).astype(np.uint8)
+    return QImage(out.data, w, h, 4 * w, QImage.Format_RGBA8888_Premultiplied).copy()
+
+
+def measured_gate_edge(w_px, h_px, ppm, colour, fmt):
+    """The film's colour over a frame's edge where its camera's gate is
+    measured (core.film_gate, the user 2026-11-20: 35 mm a clean edge, 120
+    the gate of his 6x6 reference), the same for every frame of the format,
+    softened by GATE_SOFT as the gate sits just off the film plane. None
+    when the format keeps a clean edge."""
+    from core import film_gate
+    w, h = max(2, int(math.ceil(w_px))), max(2, int(math.ceil(h_px)))
+    key = (w, h, round(float(ppm), 3), colour.rgb(), fmt)
+    if key in _GATE_CACHE:
+        return _GATE_CACHE[key]
+    outline = film_gate.outline_for(fmt, w / ppm, h / ppm)
+    if not outline:
+        return None
+    mask = QImage(w, h, QImage.Format_Grayscale8)
+    mask.fill(0)
+    mp = QPainter(mask)
+    mp.setRenderHint(QPainter.Antialiasing)
+    mp.setPen(Qt.NoPen)
+    mp.setBrush(QColor(255, 255, 255))
+    mp.drawPolygon(QPolygonF([QPointF(x * ppm, y * ppm) for x, y in outline]))
+    mp.end()
+    a = np.frombuffer(mask.constBits(), np.uint8, mask.bytesPerLine() * h)
+    a = a.reshape(h, mask.bytesPerLine())[:, :w].astype(np.float32) / 255.0
+    a = cv2.GaussianBlur(a, (0, 0), max(0.5, GATE_SOFT * ppm))
+    alpha = 1.0 - a
+    col = np.array([colour.red(), colour.green(), colour.blue()], np.float32)
+    out = np.empty((h, w, 4), np.uint8)
+    out[..., :3] = np.clip(col[None, None, :] * alpha[..., None], 0, 255).astype(np.uint8)
+    out[..., 3] = np.clip(alpha * 255, 0, 255).astype(np.uint8)
+    img = QImage(out.data, w, h, 4 * w, QImage.Format_RGBA8888_Premultiplied).copy()
+    if len(_GATE_CACHE) > 64:
+        _GATE_CACHE.clear()
+    _GATE_CACHE[key] = img
+    return img
+
+
+_GATE_CACHE = {}
+
+
 def lie_along(shown_w, shown_h, slot):
     """-90 (its top to the left) when a frame shown w x h has the other
     shape from its slot on screen, else 0 (the user, 2026-11-20)."""
@@ -508,6 +737,7 @@ class ContactSheet(QObject):
         edge = self._settings.value("sheet/film_edge", "black", type=str) or "black"
         self.film_edge = edge if self._edge_ok(edge) else "black"
         self.holes_white = self._settings.value("sheet/holes_white", True, type=bool)
+        self.leaks = pick("sheet/leaks", "off", {k for k, _l in LEAKS})
         self._image = None
         self._layout = None
         self._sigs = []
@@ -618,6 +848,10 @@ class ContactSheet(QObject):
     def set_holes_white(self, on):
         self._set("holes_white", "sheet/holes_white", bool(on))
 
+    def set_leaks(self, level):
+        """Light leaks on the film's edges: "off", "slight" or "strong"."""
+        self._set("leaks", "sheet/leaks", level if level in {k for k, _l in LEAKS} else "off")
+
     def edge_colour(self):
         named = {k: c for k, _l, c in FILM_EDGES}
         if self.film_edge in named:
@@ -698,7 +932,8 @@ class ContactSheet(QObject):
             from core import film_presets as fp
             presets = fp.load(self._settings)
         look = (self.respect_crop, self.text_colour, self.text_info, self.overlay,
-                self.layout_mode, self.gate, self.film_edge, self.holes_white)
+                self.layout_mode, self.gate, self.film_edge, self.holes_white,
+                self.leaks)
         for i, img in enumerate(imgs):
             src, detail = crop_source(img)
             fmt = frame_format(img)
@@ -823,6 +1058,8 @@ class ContactSheet(QObject):
         film_path = QPainterPath()
         film_path.addRoundedRect(QRectF(0, 0, end, F), 0.6 * ppm, 0.6 * ppm)
         p.fillPath(film_path, self.edge_colour())
+        if self.leaks in LEAK_PEAK:
+            self._draw_leaks(p, i, k, piece)
         if g.holes:
             hc = QColor(*HOLE_WHITE) if self.holes_white else QColor(*BG)
             pitch, ha, hx = HOLE_PITCH * ppm, HOLE_ALONG * ppm, HOLE_ACROSS * ppm
@@ -846,10 +1083,18 @@ class ContactSheet(QObject):
         if source is not None and not source.isNull():
             orient = orientation_of(img)
             W, H = shown_size(source.width(), source.height(), img.crop_rect, orient, True)
-            draw_frame(p, area, source, img.crop_rect, getattr(img, "crop_angle", 0.0),
-                       src, self.overlay, orient=orient, respect_crop=True,
-                       turn=lie_along(W, H, area),
-                       bleed=bleed_mm * ppm if self.gate == "camera" else 0.0)
+            fr = draw_frame(p, area, source, img.crop_rect, getattr(img, "crop_angle", 0.0),
+                            src, self.overlay, orient=orient, respect_crop=True,
+                            turn=lie_along(W, H, area),
+                            bleed=bleed_mm * ppm if self.gate == "camera" else 0.0)
+            if self.gate == "square":   # the scan's own gate shows with Camera's own
+                # 35 mm keeps a clean edge, 120 its camera's gate, the same on
+                # every frame (the user, 2026-11-20)
+                edge = measured_gate_edge(fr.width(), fr.height(), ppm, self.edge_colour(),
+                                          g.key)
+                if edge is not None:
+                    p.drawImage(QRectF(fr.x(), fr.y(), math.ceil(fr.width()),
+                                       math.ceil(fr.height())), edge)
         else:
             p.setPen(QColor(110, 110, 110))
             p.drawText(area, Qt.AlignCenter, "reading scan…")
@@ -897,6 +1142,32 @@ class ContactSheet(QObject):
                 p.drawText(top.adjusted(inset, 0, 0, 0), Qt.AlignLeft | Qt.AlignVCenter, film)
                 p.drawText(top.adjusted(0, 0, -inset, 0), Qt.AlignRight | Qt.AlignVCenter, film)
         p.restore()
+
+    def _draw_leaks(self, p, i, k, piece):
+        """The fog on this piece of strip k's edges (strip coordinates, the
+        painter already on the strip's transform and clipped to the piece)."""
+        lay = self._layout
+        g, ppm = lay.geo, lay.ppm
+        x0 = int(piece.left())
+        cols = int(piece.width())
+        x_mm = (np.arange(x0, x0 + cols, dtype=np.float32) + 0.5) / ppm
+        slots = []
+        for j in range(k * lay.per, k * lay.per + lay.frames_in(k)):
+            r = lay.slot(j)
+            slots.append((r.left() / ppm, r.top() / ppm, r.right() / ppm, r.bottom() / ppm))
+        reach = leak_reach(g)
+        if g.holes:          # 35 mm: patches from the cassette's lip
+            blobs = leak_blobs(k, lay.xs[lay.frames_in(k)] / ppm, reach, roll_start=(k == 0),
+                               roll_end=(k == lay.strips - 1 and lay.strips > 1))
+            streaks = ()
+        else:                # 120: a long wavy streak along an edge
+            blobs, streaks = [], leak_streaks(k)
+        rgba = leak_field(blobs, x_mm, g.film, ppm, LEAK_PEAK[self.leaks], reach, slots,
+                          streaks=streaks)
+        rgba = np.ascontiguousarray(rgba[:lay.film_px])
+        h, w = rgba.shape[:2]
+        qi = QImage(rgba.data, w, h, 4 * w, QImage.Format_RGBA8888_Premultiplied).copy()
+        p.drawImage(QRectF(x0, 0, w, h), qi)
 
     def _draw_footer(self, summary=("", None, None)):
         lay = self._layout
@@ -1344,6 +1615,13 @@ class ContactSheetView(QWidget):
         custom.triggered.connect(self._pick_edge_colour)
         for b in group.buttons():
             b.toggled.connect(lambda on: on and custom.setChecked(False))
+        heading("Light leaks")
+        acts, _g = radios(LEAKS, sheet.leaks, sheet.set_leaks, tips={
+            "slight": "A little warm fog along the film's edges, fading out before "
+                      "the sprocket holes' inner side: never near a picture.",
+            "strong": "More fog along the film's edges, still fading out before the "
+                      "sprocket holes' inner side: never near a picture."})
+        strip_rows += acts
         m.addSeparator()
         holes = _RowCheck("White sprocket holes")
         holes.setChecked(sheet.holes_white)
