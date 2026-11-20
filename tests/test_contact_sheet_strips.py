@@ -308,7 +308,8 @@ def test_layout_menu(monkeypatch):
     assert texts == ["Layout", "Grid", "Respect crop", "Film strips", "Strips run",
                      "By format (down for 6x4.5)", "Across", "Down", "Gate", "Square",
                      "Camera's own", "Film edge", "Black", "Dark grey", "Brown-black",
-                     "Custom…", "White sprocket holes"]
+                     "Custom…", "Light leaks", "Off", "Slight", "Strong",
+                     "White sprocket holes"]
     by = {a.text(): a for a in m.actions()}
     assert by["Grid"].box.isChecked()
     # the strips' rows are greyed in the grid, and Respect crop is the grid's
@@ -393,3 +394,46 @@ def test_35mm_perforations_are_ks_and_stand_across_the_film():
     inner = g.film - 2 * (cs.HOLE_EDGE + cs.HOLE_ACROSS)     # between the two rows
     assert abs(inner - 25.37) < 0.1 and inner > g.across
     assert 0.6 < g.rebate - cs.HOLE_EDGE - cs.HOLE_ACROSS < 0.8
+
+
+def test_light_leaks_stay_on_the_films_edge(monkeypatch):
+    """DRAFT (spec/contact-sheet-strips.md, light leaks): the fog fades in
+    from the film's edge and is gone well before the picture (the user,
+    2026-11-20: "never extend to the images")."""
+    import numpy as np
+    for fmt in ("35mm", "645"):
+        g = film_formats.strip_geometry(fmt)
+        reach = cs.leak_reach(g)
+        assert reach < g.rebate - 0.5                       # never near a picture
+        if g.holes:
+            assert reach < cs.HOLE_EDGE + cs.HOLE_ACROSS    # short of the holes' inner side
+        ppm = 20.0
+        blobs = cs.leak_blobs(0, 200.0, reach, roll_start=True)
+        streaks = () if g.holes else cs.leak_streaks(0, force=True) + cs.leak_streaks(3, force=True)
+        x = (np.arange(0, 4000) + 0.5) / ppm
+        rgba = cs.leak_field(blobs if g.holes else [], x, g.film, ppm,
+                             cs.LEAK_PEAK["strong"], reach, streaks=streaks)
+        y = (np.arange(rgba.shape[0]) + 0.5) / ppm
+        inner = (y >= reach) & (y <= g.film - reach)
+        assert rgba[inner, :, 3].max() == 0                 # nothing past the reach
+        assert rgba[y < 0.5, :, 3].max() > 100              # fogged at the edge
+        # and it falls off smoothly: no step bigger than a few levels a row
+        col = rgba[:, :, 3].astype(int).max(axis=1)
+        assert np.abs(np.diff(col[: rgba.shape[0] // 2])).max() < 40
+
+
+
+def test_light_leaks_are_rare_mid_roll_on_35mm_and_some_strips_on_120():
+    """The user, 2026-11-20: "quite rare on 35mm except near beginning and
+    end"; on 120 top and bottom, "less frequently"."""
+    mid = [cs.leak_blobs(k, 228.0, 3.7) for k in range(1, 201)]
+    share = sum(1 for b in mid if b) / len(mid)
+    assert 0.05 < share < 0.2
+    assert cs.leak_blobs(0, 228.0, 3.7, roll_start=True)
+    ends = cs.leak_blobs(5, 228.0, 3.7, roll_end=True)
+    assert any(abs(c - 228.0) < 1e-6 for _e, c, *_r in ends)
+    st = [cs.leak_streaks(k) for k in range(200)]
+    some = [x for x in st if x]
+    assert 0.3 < len(some) / len(st) < 0.6
+    both = sum(1 for x in some if len(x) == 2) / len(some)
+    assert 0.3 < both < 0.7
