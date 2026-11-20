@@ -809,7 +809,7 @@ class CCRImage:
         the disable toggle / Positive mode) later changes."""
         try:
             from core.ccr_backend import ccr_backend
-            self.profile_signature = ccr_backend.active_profile_signature()
+            self.profile_signature = ccr_backend.active_profile_signature(self)
         except Exception:
             self.profile_signature = None
 

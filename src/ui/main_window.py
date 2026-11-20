@@ -476,6 +476,7 @@ class MainWindow(QMainWindow):
             ccr_backend.refresh_field_library()   # flats chosen per frame (§5)
         except Exception as e:
             print(f"Field profile library: {e}")
+        self.push_preset_flats()                  # spec/preset-flat-fields.md
         saved_ff = self._settings.value("import/field_profile_path", "", type=str)
         if saved_ff and saved_ff != "none" and os.path.exists(saved_ff):
             try:
@@ -894,6 +895,34 @@ class MainWindow(QMainWindow):
         help_action.triggered.connect(self.open_help_website)
 
     # --- Color management (global input profile, lives in Settings) -------
+    def push_preset_flats(self):
+        """Hand the film presets' flats to the per-frame flat choice
+        (spec/preset-flat-fields.md §3)."""
+        from core import film_presets as fp
+        from core import flat_field
+        try:
+            flat_field.set_preset_flats(fp.flats_map(fp.load(self._settings)))
+        except Exception as e:
+            print(f"Film presets' flats: {e}")
+
+    def _note_capture_preset(self, paths):
+        """The roll's preset and scan type for files about to be decoded, so
+        their flat is the preset's (they are marked only after the decode):
+        the same files `_on_capture` marks (spec/preset-flat-fields.md §4)."""
+        sess = getattr(self, "capture_session", None) or {}
+        pid = sess.get("preset") if isinstance(sess, dict) else None
+        if not pid or not self._tether_active:
+            return
+        paths = [p for p in paths or () if p
+                 and os.path.normpath(p) not in self._tether_import_existing]
+        if not paths:
+            return
+        from core import flat_field
+        scan = "trichrome" if len(paths) == 3 else getattr(ccr_backend, "scan_type", "colour")
+        if scan == "trichrome" and len(paths) != 3:
+            scan = "colour"
+        flat_field.note_capture(paths, pid, scan)
+
     def open_settings(self, page=None):
         """Open the Settings dialog (Color Management tab holds the input
         ICC/DCP, the IT8 wizard, and Positive mode), at `page` if named."""
@@ -2361,11 +2390,13 @@ class MainWindow(QMainWindow):
     def _dispatch_to_worker(self, path):
         if self._tether_worker is None:
             return
+        self._note_capture_preset([path])
         self._hand_template()
         QMetaObject.invokeMethod(self._tether_worker, "process",
                                  Qt.QueuedConnection, Q_ARG(str, path))
 
     def _emit_triplet(self, job):
+        self._note_capture_preset(list(job.get("paths") or ()))
         self._hand_template()
         self._tether_triplet_req.emit(job)
 

@@ -533,6 +533,13 @@ def field_profile_active() -> bool:
     return _active_profile is not None
 
 
+def frame_field_signature(img) -> str:
+    """The id of the flat a decode of THIS frame would get now (the frame's
+    part of its grading signature, spec/preset-flat-fields.md §5)."""
+    p = profile_for(img)
+    return "none" if p is None else "ff:" + (p.content_id or p.name or "?")
+
+
 def active_field_signature() -> str:
     """Stable id of the field correction a decode would get now — composed into
     the per-image grading signature so a change flags the affected thumbnails."""
@@ -654,10 +661,123 @@ def frame_format(img) -> Optional[str]:
     return None
 
 
+# --------------------------------------------------------------------------- #
+# A film preset's flats (spec/preset-flat-fields.md): a preset points at a
+# library flat per scan type, by file name; the main window pushes the pins.
+# --------------------------------------------------------------------------- #
+SCANS = ("trichrome", "colour", "bw")
+SCAN_LIGHTS = {"trichrome": ("rgb",), "colour": ("white",),
+               "bw": ("white", "red", "green", "blue")}
+NO_FLAT = "none"
+NOTE_LIMIT = 2000
+
+_preset_flats: Dict[str, Dict[str, str]] = {}
+_capture_notes: "Dict[str, tuple]" = {}
+
+
+def set_preset_flats(mapping) -> None:
+    """{preset id: {scan: file name | "none"}} (`film_presets.flats_map`)."""
+    global _preset_flats
+    _preset_flats = {str(k): dict(v) for k, v in (mapping or {}).items()
+                     if isinstance(v, dict) and v}
+
+
+def preset_flats() -> Dict[str, Dict[str, str]]:
+    return {k: dict(v) for k, v in _preset_flats.items()}
+
+
+def _norm(path) -> str:
+    return os.path.normcase(os.path.normpath(str(path)))
+
+
+def note_capture(paths, preset_id, scan) -> None:
+    """A capture's files, noted with the roll's preset and scan type before
+    the worker decodes them (the frame is marked with its preset only after)."""
+    if not preset_id:
+        return
+    for p in paths or ():
+        if p:
+            _capture_notes.pop(_norm(p), None)
+            _capture_notes[_norm(p)] = (str(preset_id), scan if scan in SCANS else None)
+    while len(_capture_notes) > NOTE_LIMIT:
+        _capture_notes.pop(next(iter(_capture_notes)))
+
+
+def _note_of(img):
+    paths = list(getattr(img, "merge_sources", None) or []) + [getattr(img, "file_path", None)]
+    for p in paths:
+        if p and _norm(p) in _capture_notes:
+            return _capture_notes[_norm(p)]
+    return None
+
+
+def frame_preset(img) -> Optional[str]:
+    pid = getattr(img, "film_preset", None)
+    if pid:
+        return pid
+    note = _note_of(img)
+    return note[0] if note else None
+
+
+def frame_scan(img) -> str:
+    """How the frame was scanned: trichrome / colour / bw."""
+    if getattr(img, "is_merged", False) or getattr(img, "merge_sources", None):
+        return "trichrome"
+    ct = getattr(img, "capture_type", None)
+    if ct in SCANS:
+        return ct
+    note = _note_of(img)
+    if note and note[1]:
+        return note[1]
+    return "bw" if getattr(img, "color_profile", None) == "bw" else "colour"
+
+
+def flat_ref(p: Optional[FieldProfile]) -> Optional[str]:
+    """How a preset names a library flat: its file's name."""
+    return os.path.basename(p.path) if p is not None and p.path else None
+
+
+def flat_by_ref(ref) -> Optional[FieldProfile]:
+    if not ref or ref == NO_FLAT:
+        return None
+    for p in _library:
+        if flat_ref(p) == ref:
+            return p
+    return None
+
+
+def flats_for_scan(scan) -> List[FieldProfile]:
+    """The library's flats a preset may pin for a scan type: those lit by
+    one of its lights, and untagged ones."""
+    lights = SCAN_LIGHTS.get(scan, ())
+    return [p for p in _library
+            if not profile_light(p) or profile_light(p) in lights]
+
+
+def pinned(img):
+    """("auto" | "none" | "flat" | "missing", profile or None)."""
+    pins = _preset_flats.get(frame_preset(img) or "")
+    ref = (pins or {}).get(frame_scan(img)) if pins else None
+    if not ref:
+        return "auto", None
+    if ref == NO_FLAT:
+        return "none", None
+    p = flat_by_ref(ref)
+    return ("flat", p) if p is not None else ("missing", None)
+
+
 def profile_for(img) -> Optional[FieldProfile]:
-    """The flat for a frame: a tagged library flat of its light and format,
-    else of its light, else the active profile (with no tagged flat in the
-    library: always the active profile, as before)."""
+    """The flat for a frame: its preset's flat for its scan type when the
+    preset names one (spec/preset-flat-fields.md), else a tagged library
+    flat of its light and format, else of its light, else the active profile
+    (with no tagged flat in the library: always the active profile, as
+    before)."""
+    if img is not None and _preset_flats:
+        state, p = pinned(img)
+        if state == "flat":
+            return p
+        if state == "none":
+            return None
     tagged = _tagged()
     if not tagged or img is None:
         return _active_profile

@@ -570,14 +570,13 @@ class ThumbnailList(QWidget):
         if img is None:
             return False
         sig = getattr(img, "profile_signature", None)
-        return sig is not None and sig != ccr_backend.active_profile_signature()
+        return sig is not None and sig != ccr_backend.active_profile_signature(img)
 
     def refresh_profile_warnings(self):
         """Flag every thumbnail whose image was graded under a different camera
         profile than the active one — ⚠ prefix + amber text + tooltip. Called on
         load/append and whenever the active profile (or disable / Positive mode)
         changes."""
-        active = ccr_backend.active_profile_signature()
         warn = theme.qcolor(theme.WARN_TEXT)
         normal = theme.qcolor(theme.TEXT)
         for row in range(self.thumbnail_list.count()):
@@ -589,7 +588,8 @@ class ThumbnailList(QWidget):
             filename = (getattr(img, "display_name", None)
                         or os.path.basename(img.file_path))
             sig = getattr(img, "profile_signature", None)
-            mism = sig is not None and sig != active
+            # per frame: its own flat (spec/preset-flat-fields.md §5)
+            mism = sig is not None and sig != ccr_backend.active_profile_signature(img)
             item.setText(("⚠ " + filename) if mism else filename)
             item.setForeground(warn if mism else normal)
             item.setToolTip(
