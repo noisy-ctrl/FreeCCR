@@ -409,8 +409,10 @@ def test_light_leaks_stay_on_the_films_edge(monkeypatch):
             assert reach < cs.HOLE_EDGE + cs.HOLE_ACROSS    # short of the holes' inner side
         ppm = 20.0
         blobs = cs.leak_blobs(0, 200.0, reach, roll_start=True)
+        streaks = () if g.holes else cs.leak_streaks(0) + cs.leak_streaks(3)
         x = (np.arange(0, 4000) + 0.5) / ppm
-        rgba = cs.leak_field(blobs, x, g.film, ppm, cs.LEAK_PEAK["strong"], reach)
+        rgba = cs.leak_field(blobs if g.holes else [], x, g.film, ppm,
+                             cs.LEAK_PEAK["strong"], reach, streaks=streaks)
         y = (np.arange(rgba.shape[0]) + 0.5) / ppm
         inner = (y >= reach) & (y <= g.film - reach)
         assert rgba[inner, :, 3].max() == 0                 # nothing past the reach

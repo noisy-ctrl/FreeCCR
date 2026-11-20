@@ -168,3 +168,17 @@ film (when Text… has Film and the roll's film is known) at the frame's start
 and end along the top. 35 mm is unchanged. The 6x7 rebate measured on the
 reference, ~2.3-2.75 mm of a 61.5 mm film, matches the geometry
 (`STRIPS["6x7"]`, 2.75 mm), so no size changed.
+
+## Light leaks (DRAFT, branch feature/sheet-light-leaks, awaiting sign-off)
+
+Layout… → Light leaks: Off / Slight / Strong (`sheet/leaks`). Only ever on the
+film's edge (the user, 2026-11-20: "never extend to the images … otherwise
+it's unrealistic that the images aren't affected"): a leak fades in from the
+edge and is gone by `leak_reach` (35 mm: the holes' outer 60 %; 120: 80 % of
+the rebate, ≥ 0.5 mm clear of the picture), drawn under the holes and the
+edge print. 35 mm: patches with narrow tongues, some edges clean, the roll's
+first strip fogged at its start (light at the cassette's lip). 120 (the
+user's two references: a roll-film leak runs as one long wavy streak along
+an edge, coming and going): `leak_streaks` / `streak_field`, a soft-edged
+band whose strength and depth wander along the film (two slow waves), one
+edge usually, sometimes both. Fixed per strip, so the same on every redraw.

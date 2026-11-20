@@ -483,7 +483,7 @@ def leak_reach(geo):
     2026-11-20: "never extend to the images")."""
     if geo.holes:
         return HOLE_EDGE + 0.6 * HOLE_ACROSS
-    return 0.6 * geo.rebate
+    return 0.8 * geo.rebate
 
 
 def leak_blobs(k, length_mm, reach_mm, roll_start=False):
@@ -509,7 +509,49 @@ def leak_blobs(k, length_mm, reach_mm, roll_start=False):
     return out
 
 
-def leak_field(blobs, x_mm, film_mm, ppm, peak, reach_mm, holes=()):
+def leak_streaks(k):
+    """Strip k's 120 leak (the user's reference, 2026-11-20: a roll-film leak
+    runs as one long wavy streak along an edge, light let in past the spool
+    flanges, not in patches): [(edge, strength, profiles)], usually one edge,
+    sometimes both; each profile is a few slow waves along the film whose sum
+    sets the streak's strength and its depth in from the edge."""
+    rng = np.random.default_rng(20261121 + 7919 * k)
+    edges = [int(rng.integers(0, 2))] if rng.random() < 0.7 else [0, 1]
+    out = []
+    for e in edges:
+        def waves():
+            n = 6
+            return (rng.uniform(1 / 80.0, 1 / 10.0, n), rng.uniform(0, 2 * np.pi, n),
+                    rng.uniform(0.3, 1.0, n))
+        out.append((e, float(rng.uniform(0.8, 1.3)), waves(), waves()))
+    return out
+
+
+def _wave(x, w):
+    f, ph, a = w
+    v = (a[None, :] * np.sin(2 * np.pi * f[None, :] * x[:, None] + ph[None, :])).sum(axis=1)
+    return v / max(float(a.sum()), 1e-6)                  # -1 .. 1
+
+
+def streak_field(streaks, x_mm, y_mm, film_mm, reach_mm):
+    """The 120 streaks' fog (h, w) float: per column a strength and a depth
+    from two slow waves; strong where both waves are up, gone where the
+    first dips; fading in from the edge and gone by `reach_mm`."""
+    field = np.zeros((y_mm.size, x_mm.size), np.float32)
+    for edge, strength, w1, w2 in streaks:
+        a = strength * np.clip(0.5 + 0.7 * _wave(x_mm, w1), 0.0, 1.0) ** 1.2
+        # a band with a soft inner edge (not a thin glow on the edge): full
+        # from the edge, easing out by its depth, which wanders 45-100 % of
+        # the reach (never past it)
+        depth = reach_mm * (0.45 + 0.55 * (0.5 + 0.5 * _wave(x_mm, w2)))
+        d = (y_mm if edge == 0 else film_mm - y_mm)[:, None]
+        t = np.clip(d / np.maximum(depth[None, :], 1e-3), 0.0, 1.0)
+        band = 1.0 - t * t * (3.0 - 2.0 * t)
+        field += (2.0 * band * a[None, :]).astype(np.float32)
+    return field
+
+
+def leak_field(blobs, x_mm, film_mm, ppm, peak, reach_mm, holes=(), streaks=()):
     """Premultiplied RGBA (h, w, 4) uint8 of the fog over strip columns at
     `x_mm` (mm along the strip, one per pixel column), the film's whole
     width. A leak fades in from the film's edge and is gone, smoothly, by
@@ -525,6 +567,8 @@ def leak_field(blobs, x_mm, film_mm, ppm, peak, reach_mm, holes=()):
         t = np.clip(d / max(reach_mm, 1e-6), 0.0, 1.0)
         fade = 1.0 - t * t * (3.0 - 2.0 * t)          # smoothstep to 0 at the reach
         field += (np.exp(-d / max(depth, 1e-6)) * fade)[:, None] * along[None, :]
+    if streaks:
+        field += streak_field(streaks, x, y, film_mm, reach_mm)
     for x0, y0, x1, y1 in holes:
         inside = ((x[None, :] >= x0) & (x[None, :] <= x1)
                   & (y[:, None] >= y0) & (y[:, None] <= y1))
@@ -991,8 +1035,13 @@ class ContactSheet(QObject):
             r = lay.slot(j)
             slots.append((r.left() / ppm, r.top() / ppm, r.right() / ppm, r.bottom() / ppm))
         reach = leak_reach(g)
-        blobs = leak_blobs(k, lay.xs[lay.frames_in(k)] / ppm, reach, roll_start=(k == 0))
-        rgba = leak_field(blobs, x_mm, g.film, ppm, LEAK_PEAK[self.leaks], reach, slots)
+        if g.holes:          # 35 mm: patches from the cassette's lip
+            blobs = leak_blobs(k, lay.xs[lay.frames_in(k)] / ppm, reach, roll_start=(k == 0))
+            streaks = ()
+        else:                # 120: a long wavy streak along an edge
+            blobs, streaks = [], leak_streaks(k)
+        rgba = leak_field(blobs, x_mm, g.film, ppm, LEAK_PEAK[self.leaks], reach, slots,
+                          streaks=streaks)
         rgba = np.ascontiguousarray(rgba[:lay.film_px])
         h, w = rgba.shape[:2]
         qi = QImage(rgba.data, w, h, 4 * w, QImage.Format_RGBA8888_Premultiplied).copy()
