@@ -161,11 +161,23 @@ def measured_outline(gate: dict, width_mm: float, height_mm: float) -> List[Tupl
     return _round_corners(pts, W, H, [c["tl"], c["tr"], c["br"], c["bl"]])
 
 
-def outline_for(fmt: str, width_mm: float, height_mm: float, square: bool = True):
-    """The gate for a format: the user's measured one (squarer unless
-    `square` is False), else the drawn one."""
+def gate_key(fmt: str):
+    """Which measured gate a film format uses: every 120 format the 120 one;
+    35 mm, half frame and XPan none (a clean edge, the user's choice)."""
+    from core import film_formats
+    g = film_formats.strip_geometry(fmt)
+    if g is None or g.holes:
+        return None
+    return "120"
+
+
+def outline_for(fmt: str, width_mm: float, height_mm: float, square: bool = False):
+    """The gate for a format on a width x height mm image area, or None for
+    a clean edge: the measured gate (made squarer when `square`), stretched
+    to the area's sides."""
     from core.film_gate_data import GATES
-    g = GATES.get(fmt)
-    if g is not None:
-        return measured_outline(squared(g) if square else g, width_mm, height_mm)
-    return gate_outline(fmt, width_mm, height_mm)
+    key = gate_key(fmt)
+    g = GATES.get(key) if key else None
+    if g is None:
+        return None
+    return measured_outline(squared(g) if square else g, width_mm, height_mm)

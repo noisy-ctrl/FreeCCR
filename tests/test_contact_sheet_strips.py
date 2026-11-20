@@ -437,3 +437,19 @@ def test_light_leaks_are_rare_mid_roll_on_35mm_and_some_strips_on_120():
     assert 0.3 < len(some) / len(st) < 0.6
     both = sum(1 for x in some if len(x) == 2) / len(some)
     assert 0.3 < both < 0.7
+
+
+def test_the_drawn_gate_is_clean_on_35mm_and_measured_on_120():
+    """The user, 2026-11-20: 35 mm a clean square edge; 120 the gate of his
+    6x6 reference, the same on every frame of the format."""
+    from PySide6.QtGui import QColor
+    assert cs.measured_gate_edge(360, 240, 10.0, QColor(6, 6, 6), "35mm") is None
+    a = cs.measured_gate_edge(560, 560, 10.0, QColor(6, 6, 6), "6x6")
+    b = cs.measured_gate_edge(560, 560, 10.0, QColor(6, 6, 6), "6x6")
+    assert a is not None and a == b                     # one gate for the format
+    # film colour at the very corner, clear in the middle
+    assert a.pixelColor(0, 0).alpha() > 200 and a.pixelColor(280, 280).alpha() == 0
+    from core import film_gate
+    pts = film_gate.outline_for("6x6", 56.0, 56.0)
+    xs = [x for x, _y in pts]; ys = [y for _x, y in pts]
+    assert min(xs) >= 0 and max(xs) <= 56.0 and min(ys) >= 0 and max(ys) <= 56.0

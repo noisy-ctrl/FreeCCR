@@ -1,4 +1,4 @@
-# A camera's gate edge (DRAFT, awaiting sign-off)
+# A camera's gate edge
 
 The user, 2026-11-20, with two references (a 6x6 full-border scan, a 35 mm
 print with a worn black border): "the film gate isn't perfectly square. It
@@ -35,3 +35,24 @@ comes inward of the image area, so the picture is always under it.
 
 The contact sheet strips' Gate (Square / **Your camera's** / Camera's own)
 and the collage's Generated film borders.
+
+## Decided (the user, 2026-11-20)
+
+"Option 1 for 35mm looks good for the gate. Maybe pick the first reference
+image I gave you for a 120 film gate." So:
+
+- **35 mm: a clean square edge** (no gate drawn). The measurement of his
+  35 mm camera stays in this spec only.
+- **120: the gate of his first reference**, a full-border 6x6 Kodak 400TX
+  print (1030 x 1000 px, 56 mm = 926 px, 0.060 mm a pixel), measured the same
+  way on the inverted print (its black border is the "base"): sides wander
+  0.04 / 0.32 / 0.09 / 0.31 mm (top, right, bottom, left; the right and left
+  carry the reference's nicks), corners 0.13-0.31 mm. Used as measured, for
+  every 120 format (6x4.5, 6x6, 6x7 …), stretched to the frame's sides, the
+  same on every frame. `core/film_gate_data.GATES["120"]`,
+  `film_gate.gate_key` / `outline_for`.
+- Contact sheet strips, Gate "Square": `measured_gate_edge` lays the film's
+  colour over the frame outside that outline, softened by `GATE_SOFT`
+  (0.05 mm), cached per size. The earlier per-frame random drawn gate
+  (`gate_edge`, which varied between frames) is no longer used.
+- The collage's Generated film borders use the same (`spec/collage-maker.md`).
