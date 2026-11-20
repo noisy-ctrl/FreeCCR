@@ -496,16 +496,24 @@ def test_text_menu_and_back_to_frame(images, monkeypatch):
                      "Custom…", "Show", "Frame number", "File name", "Film",
                      "Film format", "Crop status"]
     by = {a.text(): a for a in m.actions()}
-    assert by["Edge print"].isChecked() and by["File name"].isChecked()
-    assert not by["Film"].isChecked()
-    by["Warm"].trigger()
-    assert sheet.text_colour == "warm"
-    by["Film"].trigger()
+    # real radio buttons and check boxes, so the menu stays open (2026-11-20)
+    from PySide6.QtWidgets import QCheckBox as QCB, QRadioButton
+    assert isinstance(by["Warm"].box, QRadioButton) and isinstance(by["Film"].box, QCB)
+    assert by["Edge print"].box.isChecked() and by["File name"].box.isChecked()
+    assert not by["Film"].box.isChecked()
+    by["Warm"].box.click()
+    assert sheet.text_colour == "warm" and not by["Edge print"].box.isChecked()
+    by["Film"].box.click()
     assert "film" in sheet.text_info
+    by["Film"].box.click()
+    assert "film" not in sheet.text_info
+    by["Film"].box.click()
     monkeypatch.setattr(view, "_choose_colour", lambda cur: QC("#123456"))
     by["Custom…"].trigger()
     assert sheet.text_colour == "#123456"
-    assert view.text_menu().actions()[6].isChecked()           # Custom… ticked
+    again = {a.text(): a for a in view.text_menu().actions()}
+    assert again["Custom…"].isChecked()                        # Custom… ticked
+    assert not any(again[l].box.isChecked() for _k, l, _c in cs.TEXT_COLOURS)
     # Back to Frame stands out, and Respect crop sits after Overlay
     assert view.back_btn.text() == "Back to Frame"
     assert "#e6e6e6" in view.back_btn.styleSheet()
@@ -514,3 +522,26 @@ def test_text_menu_and_back_to_frame(images, monkeypatch):
     view.crop_check.setChecked(True)
     assert sheet.respect_crop is True
 
+
+
+def test_ticking_in_the_text_menu_keeps_it_open(images, monkeypatch):
+    """The user, 2026-11-20: 'you need to reopen the menu after every click'."""
+    from PySide6.QtCore import QPoint, QSettings, Qt
+    from PySide6.QtTest import QTest
+    monkeypatch.setattr(QSettings, "setValue", lambda self, k, v: None)
+    sheet = cs.ContactSheet()
+    sheet.text_colour, sheet.text_info = "edge", cs.DEFAULT_INFO
+    view = cs.ContactSheetView(sheet)
+    _KEEP.append(view)
+    m = view.text_menu()
+    m.popup(QPoint(100, 100))
+    QApplication.processEvents()
+    by = {a.text(): a for a in m.actions()}
+    for label in ("Film", "Frame number", "White"):
+        box = by[label].box
+        QTest.mouseClick(box, Qt.LeftButton, pos=box.rect().center())
+        QApplication.processEvents()
+        assert m.isVisible(), label
+    assert "film" in sheet.text_info and "number" not in sheet.text_info
+    assert sheet.text_colour == "white"
+    m.close()
