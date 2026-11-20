@@ -409,7 +409,7 @@ def test_light_leaks_stay_on_the_films_edge(monkeypatch):
             assert reach < cs.HOLE_EDGE + cs.HOLE_ACROSS    # short of the holes' inner side
         ppm = 20.0
         blobs = cs.leak_blobs(0, 200.0, reach, roll_start=True)
-        streaks = () if g.holes else cs.leak_streaks(0) + cs.leak_streaks(3)
+        streaks = () if g.holes else cs.leak_streaks(0, force=True) + cs.leak_streaks(3, force=True)
         x = (np.arange(0, 4000) + 0.5) / ppm
         rgba = cs.leak_field(blobs if g.holes else [], x, g.film, ppm,
                              cs.LEAK_PEAK["strong"], reach, streaks=streaks)
@@ -420,3 +420,20 @@ def test_light_leaks_stay_on_the_films_edge(monkeypatch):
         # and it falls off smoothly: no step bigger than a few levels a row
         col = rgba[:, :, 3].astype(int).max(axis=1)
         assert np.abs(np.diff(col[: rgba.shape[0] // 2])).max() < 40
+
+
+
+def test_light_leaks_are_rare_mid_roll_on_35mm_and_some_strips_on_120():
+    """The user, 2026-11-20: "quite rare on 35mm except near beginning and
+    end"; on 120 top and bottom, "less frequently"."""
+    mid = [cs.leak_blobs(k, 228.0, 3.7) for k in range(1, 201)]
+    share = sum(1 for b in mid if b) / len(mid)
+    assert 0.05 < share < 0.2
+    assert cs.leak_blobs(0, 228.0, 3.7, roll_start=True)
+    ends = cs.leak_blobs(5, 228.0, 3.7, roll_end=True)
+    assert any(abs(c - 228.0) < 1e-6 for _e, c, *_r in ends)
+    st = [cs.leak_streaks(k) for k in range(200)]
+    some = [x for x in st if x]
+    assert 0.3 < len(some) / len(st) < 0.6
+    both = sum(1 for x in some if len(x) == 2) / len(some)
+    assert 0.3 < both < 0.7

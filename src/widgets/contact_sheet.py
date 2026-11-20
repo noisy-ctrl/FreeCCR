@@ -487,40 +487,52 @@ def leak_reach(geo):
     return 0.8 * geo.rebate
 
 
-def leak_blobs(k, length_mm, reach_mm, roll_start=False):
-    """Strip k's light leaks: [(edge 0|1, centre mm, width mm, height, depth
-    mm)], fixed per strip (the same every redraw and export). Each edge gets
-    one to three soft patches, as deep as a third to a whole `reach_mm`; the
-    roll's first strip is fogged at its start on both edges, the deepest."""
+LEAK_35_MIDDLE = 0.12      # 35 mm: the share of mid-roll strips with a leak at all
+LEAK_120_STRIP = 0.45      # 120: the share of strips with a streak
+LEAK_120_BOTH = 0.5        # ... and of those, the share on both edges
+
+
+def leak_blobs(k, length_mm, reach_mm, roll_start=False, roll_end=False):
+    """Strip k's 35 mm light leaks: [(edge 0|1, centre mm, width mm, height,
+    depth mm)], fixed per strip (the same every redraw and export). Rare
+    (the user, 2026-11-20: "quite rare on 35mm except near beginning and
+    end"): a mid-roll strip has one small patch at most, LEAK_35_MIDDLE of
+    them; the roll's first strip is fogged at its start and its last at its
+    end, on both edges, with a patch near them."""
     rng = np.random.default_rng(20261120 + 7919 * k)
     out = []
-    for edge in (0, 1):
-        # most edges stay clean (the user, 2026-11-20: "there should be fewer")
-        for _ in range(1 if rng.random() < 0.3 else 0):
-            c = float(rng.uniform(0, length_mm))
-            # a patch: a soft core and one or two narrow tongues reaching in
-            out.append((edge, c, float(rng.uniform(4, 14)), float(rng.uniform(0.35, 0.9)),
-                        float(rng.uniform(0.2, 0.4)) * reach_mm))
-            for _t in range(int(rng.integers(1, 3))):
-                out.append((edge, c + float(rng.normal(0, 4)), float(rng.uniform(0.8, 2.5)),
-                            float(rng.uniform(0.4, 1.0)),
-                            float(rng.uniform(0.45, 0.8)) * reach_mm))
-    if roll_start:
+
+    def patch(edge, c):
+        out.append((edge, c, float(rng.uniform(4, 14)), float(rng.uniform(0.35, 0.9)),
+                    float(rng.uniform(0.2, 0.4)) * reach_mm))
+        for _t in range(int(rng.integers(1, 3))):
+            out.append((edge, c + float(rng.normal(0, 4)), float(rng.uniform(0.8, 2.5)),
+                        float(rng.uniform(0.4, 1.0)), float(rng.uniform(0.45, 0.8)) * reach_mm))
+
+    if not (roll_start or roll_end):
+        if rng.random() < LEAK_35_MIDDLE:
+            patch(int(rng.integers(0, 2)), float(rng.uniform(0, length_mm)))
+        return out
+    for end, at in ((roll_start, 0.0), (roll_end, length_mm)):
+        if not end:
+            continue
         for edge in (0, 1):
-            out.append((edge, 0.0, 22.0, 1.2, 0.8 * reach_mm))
+            out.append((edge, at, 22.0, 1.2, 0.8 * reach_mm))
+            if rng.random() < 0.7:
+                patch(edge, abs(at - float(rng.uniform(10, 45))))
     return out
 
 
-def leak_streaks(k):
+def leak_streaks(k, force=False):
     """Strip k's 120 leak (the user's reference, 2026-11-20: a roll-film leak
     runs as one long wavy streak along an edge, light let in past the spool
     flanges, not in patches): [(edge, strength, profiles)], usually one edge,
     sometimes both; each profile is a few slow waves along the film whose sum
     sets the streak's strength and its depth in from the edge."""
     rng = np.random.default_rng(20261121 + 7919 * k)
-    if rng.random() > 0.4:          # most strips have none ("there should be fewer")
+    if rng.random() >= LEAK_120_STRIP and not force:      # "less frequently"
         return []
-    edges = [int(rng.integers(0, 2))]
+    edges = [0, 1] if rng.random() < LEAK_120_BOTH else [int(rng.integers(0, 2))]  # "top and bottom"
     out = []
     for e in edges:
         def waves():
@@ -1102,7 +1114,8 @@ class ContactSheet(QObject):
             slots.append((r.left() / ppm, r.top() / ppm, r.right() / ppm, r.bottom() / ppm))
         reach = leak_reach(g)
         if g.holes:          # 35 mm: patches from the cassette's lip
-            blobs = leak_blobs(k, lay.xs[lay.frames_in(k)] / ppm, reach, roll_start=(k == 0))
+            blobs = leak_blobs(k, lay.xs[lay.frames_in(k)] / ppm, reach, roll_start=(k == 0),
+                               roll_end=(k == lay.strips - 1 and lay.strips > 1))
             streaks = ()
         else:                # 120: a long wavy streak along an edge
             blobs, streaks = [], leak_streaks(k)

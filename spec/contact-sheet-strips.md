@@ -169,7 +169,7 @@ and end along the top. 35 mm is unchanged. The 6x7 rebate measured on the
 reference, ~2.3-2.75 mm of a 61.5 mm film, matches the geometry
 (`STRIPS["6x7"]`, 2.75 mm), so no size changed.
 
-## Light leaks (DRAFT, branch feature/sheet-light-leaks, awaiting sign-off)
+## Light leaks (signed off 2026-11-20)
 
 Layout… → Light leaks: Off / Slight / Strong (`sheet/leaks`). Only ever on the
 film's edge (the user, 2026-11-20: "never extend to the images … otherwise
@@ -197,3 +197,10 @@ rectangle (r 0.5 mm on 35 mm, 1.0 mm on 120), inset 0.10 mm, its sides moved
 in by two octaves of smooth noise (steps of 4 mm and 1.2 mm, ±0.07 mm),
 fixed per frame, softened by σ 0.05 mm (the gate sits just off the film
 plane).
+
+How often (the user, signing off: "quite rare on 35mm except near beginning
+and end. On 120 film, they frequently [appear] top and bottom - I'd say less
+frequently though"): 35 mm mid-roll strips have one small patch on
+`LEAK_35_MIDDLE` (12 %) of them, the roll's first strip is fogged at its
+start and its last at its end; 120 has a streak on `LEAK_120_STRIP` (45 %)
+of the strips, half of those on both edges.
