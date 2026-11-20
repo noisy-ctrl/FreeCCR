@@ -2729,6 +2729,84 @@ class MainWindow(QMainWindow):
         pid, film, _fmt = self.roll_film_and_format()
         self._set_capture_session(self._session_roll(), key or "", film, preset=pid)
 
+    # --- the roll's film and format to the open frames (spec/roll-to-frames.md)
+    def pick_roll_film(self, preset_id):
+        """The canister menu's Film: the roll's, then (asked) the frames'."""
+        self.set_roll_film(preset_id)
+        return self._roll_to_frames("film", film_preset=preset_id or None)
+
+    def pick_roll_format(self, key):
+        """The canister menu's Format: the roll's, then (asked) the frames'."""
+        self.set_roll_format(key)
+        return self._roll_to_frames("format", film_format=key or None)
+
+    def _roll_to_frames(self, what, **attrs):
+        n = len(ccr_backend.images)
+        if not n:
+            return None
+        sel = [i for i in self.thumbnail_list.selected_indices() if 0 <= i < n]
+        scope = self._ask_roll_to_frames(what, len(sel), n)
+        if scope not in ("selected", "all"):
+            return None
+        indices = sel if scope == "selected" else list(range(n))
+        if not indices:
+            return None
+        return self.mark_frames(indices, what=what, **attrs)
+
+    def _ask_roll_to_frames(self, what, n_selected, n_open):
+        """"selected", "all" or None (just the roll). The test seam."""
+        box = QMessageBox(self)
+        box.setWindowTitle(f"Film {what.capitalize()}")
+        box.setIcon(QMessageBox.Question)
+        box.setText(f"Give the open frames this {what} too?")
+        box.setInformativeText(
+            f"The roll's {what} names your next captures. Frames given it also take "
+            f"that {what}'s flat field: any whose flat changes are re-processed, "
+            "keeping their crop and settings. "
+            + ("Their slider settings stay: Apply Preset (Write Preset's right-click) "
+               "pastes a preset's." if what == "film" else
+               "It is also the format the contact sheet shows."))
+        sel = None
+        if n_selected:
+            sel = box.addButton("Selected Frame" if n_selected == 1
+                                else f"Selected Frames ({n_selected})",
+                                QMessageBox.AcceptRole)
+        every = box.addButton(f"All Open Frames ({n_open})", QMessageBox.AcceptRole)
+        just = box.addButton("Just the Roll", QMessageBox.RejectRole)
+        box.setDefaultButton(sel or every)
+        box.setEscapeButton(just)
+        box.exec()
+        clicked = box.clickedButton()
+        if sel is not None and clicked is sel:
+            return "selected"
+        return "all" if clicked is every else None
+
+    def mark_frames(self, indices, what="", **attrs):
+        """Give frames a film / format; re-grade those whose flat changes."""
+        changed = ccr_backend.mark_frames(indices, **attrs)
+        tl = self.thumbnail_list
+        if changed:
+            tl.replace_with_current_profile(changed)      # saves the catalogue
+        else:
+            try:
+                ccr_backend.save_catalog()
+            except Exception as e:
+                print(f"Saving the catalogue: {e}")
+        tl.refresh_profile_warnings()
+        sp = self.sliders_panel
+        if hasattr(sp, "_sync_preset_button"):
+            try:
+                sp._sync_preset_button(sp.current_idx)
+            except Exception:
+                pass
+        n = len(indices)
+        hint = f"{(what or 'Film').capitalize()} given to {n} frame{'' if n == 1 else 's'}"
+        if changed:
+            hint += (f"; {len(changed)} re-processed for {'its' if len(changed) == 1 else 'their'} "
+                     "flat field")
+        sp.set_temporary_hint(hint + ".", duration=4000)
+        return changed
+
     def _window_title(self):
         """'FreeCCR · Portra400 V1 · 35mm': the roll's film (its preset's
         label, read now, else the typed name) and format's short name."""

@@ -2827,7 +2827,10 @@ class ImagePreview(QWidget):
             a.setCheckable(True)
             a.setChecked(checked)
             films.addAction(a)
-            if value is not False and hasattr(mw, "set_roll_film"):
+            if value is not False and hasattr(mw, "pick_roll_film"):
+                # the roll's, then (asked) the open frames' (spec/roll-to-frames.md)
+                a.triggered.connect(lambda _=False, v=value: mw.pick_roll_film(v))
+            elif value is not False and hasattr(mw, "set_roll_film"):
                 a.triggered.connect(lambda _=False, v=value: mw.set_roll_film(v))
             return a
         typed = bool(film) and not pid
@@ -2849,7 +2852,9 @@ class ImagePreview(QWidget):
             a.setCheckable(True)
             a.setChecked(key == (fmt or ""))
             formats.addAction(a)
-            if hasattr(mw, "set_roll_format"):
+            if hasattr(mw, "pick_roll_format"):
+                a.triggered.connect(lambda _=False, k=key: mw.pick_roll_format(k))
+            elif hasattr(mw, "set_roll_format"):
                 a.triggered.connect(lambda _=False, k=key: mw.set_roll_format(k))
         menu.addSeparator()
         menu.addAction("Edit Film Presets…").triggered.connect(self.edit_film_presets)
@@ -6187,8 +6192,11 @@ class ImagePreview(QWidget):
         panel = self._crop_panel
         film = (panel.active_film_format()
                 if panel is not None and hasattr(panel, "active_film_format") else None)
+        reflat = []
         if img_obj is not None and film and not cleared and not too_small:
-            img_obj.film_format = film
+            # the format decides the frame's flat field: re-graded below when
+            # it changes (spec/roll-to-frames.md §3)
+            reflat = ccr_backend.mark_frames([self.current_idx], film_format=film)
         self._exit_crop_mode()
         # A confirmed frame teaches auto crop this setup's frame (only when auto
         # crop looked at this image; spec/auto-crop-learning.md).
@@ -6210,6 +6218,15 @@ class ImagePreview(QWidget):
             hint = "Crop unchanged."
         if learned:
             hint += " Auto crop will remember this frame."
+        if reflat:
+            tl = getattr(self.window(), "thumbnail_list", None)
+            if tl is not None and hasattr(tl, "replace_with_current_profile"):
+                tl.replace_with_current_profile(reflat)
+            else:
+                ccr_backend.regrade_images_by_indices(reflat)
+            from core import film_formats
+            hint += (f" Re-processed with the {film_formats.short_label(film)} "
+                     "flat field.")
         try:
             self.parent().parent().sliders_panel.set_temporary_hint(hint, duration=4000)
         except AttributeError:

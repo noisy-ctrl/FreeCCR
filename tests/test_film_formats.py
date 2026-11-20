@@ -146,10 +146,12 @@ def test_sheet_labels_formats_and_cuts_strips_to_the_format(monkeypatch):
     # a format change redraws that frame (its label) and the footer
     imgs[6].film_format = "6x6"
     sheet.update()
-    assert sheet.redrawn == [6] and sheet._footer == "120: 6x6 ×6 · 120: 6x4.5 ×1"
+    # the footer's state is (summary, text colour, overlay) since the sheet's
+    # Text… options (2026-11-19)
+    assert sheet.redrawn == [6] and sheet._footer[0] == "120: 6x6 ×6 · 120: 6x4.5 ×1"
     imgs[5].film_format = "6x6"
     sheet.update()
-    assert cs.format_summary(imgs) == "120: 6x6" and sheet._footer == "120: 6x6"
+    assert cs.format_summary(imgs) == "120: 6x6" and sheet._footer[0] == "120: 6x6"
 
 
 # --- saved with the frame, and what auto crop learns -------------------------------------

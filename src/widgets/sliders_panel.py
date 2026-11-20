@@ -2234,14 +2234,7 @@ class SlidersPanel(QWidget):
     def _mark_preset(self, indices, pid):
         """Mark frames as of a film preset and re-grade those whose flat field
         that changes (spec/preset-flat-fields.md §2)."""
-        imgs = [(i, ccr_backend.get_image_by_index(i)) for i in indices]
-        before = {i: ccr_backend.active_profile_signature(img) for i, img in imgs if img}
-        for _i, img in imgs:
-            if img is not None:
-                img.film_preset = pid
-        changed = [i for i, img in imgs if img is not None
-                   and getattr(img, "profile_signature", None) is not None
-                   and ccr_backend.active_profile_signature(img) != before[i]]
+        changed = ccr_backend.mark_frames(indices, film_preset=pid)
         if changed:
             tl = getattr(self.window(), "thumbnail_list", None)
             if tl is not None and hasattr(tl, "replace_with_current_profile"):
