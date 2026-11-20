@@ -37,8 +37,11 @@ through `_set_capture_session`), so:
   one on the roll last used (`capture/last_roll`, unchanged, so the Start
   window still offers the next roll).
 
-Nothing is applied to frames already open: that stays Write Preset's
-right-click (Apply Preset to This / the Selected Frames).
+Since 2026-11-20 (spec/roll-to-frames.md) a pick with frames open then asks
+whether to give the selected frames or all open frames that film or format
+too (their flat field follows); Just the Roll is the old behaviour. A
+preset's slider settings still go only through Write Preset's right-click
+(Apply Preset to This / the Selected Frames).
 
 ## 2. The film and format in the window title (`MainWindow._update_title`)
 

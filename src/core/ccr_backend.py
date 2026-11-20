@@ -1302,6 +1302,23 @@ class CCRBackend:
             except Exception as e:
                 print(f"Failed to convert image at index {idx}: {e}")
 
+    def mark_frames(self, indices, **attrs) -> list:
+        """Set attributes on frames (film_preset, film_format, ...); the
+        indices of the decoded ones whose flat field changes with it, which
+        the caller re-grades (spec/roll-to-frames.md)."""
+        changed = []
+        for i in indices or ():
+            img = self.get_image_by_index(i)
+            if img is None:
+                continue
+            before = self.active_profile_signature(img)
+            for k, v in attrs.items():
+                setattr(img, k, v)
+            if (getattr(img, "profile_signature", None) is not None
+                    and self.active_profile_signature(img) != before):
+                changed.append(i)
+        return changed
+
     def active_profile_signature(self, img=None) -> str:
         """The grading signature an image decoded NOW would carry: the camera
         profile ('none' in Positive mode or when disabled/unset, else
