@@ -388,6 +388,27 @@ def scope_sample():
     return img
 
 
+def flat_field():
+    """The flat field map (spec/flat-field-map.md): a frame whose corners are
+    shaded, as a lens and light fall off (the user's pick of the drafts,
+    2026-11-20: "1 shading")."""
+    from PySide6.QtGui import QRadialGradient
+    img, p = canvas()
+    r = QRectF(2.6, 4.6, 18.8, 14.8)
+    g = QRadialGradient(QPointF(12, 12), 12.2)
+    g.setColorAt(0.0, QColor(0, 0, 0, 0))
+    g.setColorAt(0.45, QColor(0, 0, 0, 0))
+    g.setColorAt(1.0, QColor(0, 0, 0, 235))
+    p.setPen(Qt.NoPen)
+    p.setBrush(QBrush(g))
+    p.drawRoundedRect(r, 1.2, 1.2)
+    p.setPen(pen(1.6))
+    p.setBrush(Qt.NoBrush)
+    p.drawRoundedRect(r, 1.2, 1.2)
+    p.end()
+    return img
+
+
 # (file in src/icons, drawing): the names the app loads
 ICONS = [
     ("rotate-left-icon-size_512.png", lambda: rotate(True)),
@@ -403,6 +424,7 @@ ICONS = [
     ("false-colour-icon.png", false_colour_coloured),
     ("film-canister-icon.png", canister),
     ("scope-sample-icon.png", scope_sample),
+    ("flat-field-icon.png", flat_field),
 ]
 # Capture keeps its camera (camera-icon.png, the user's choice, 2026-11-19).
 

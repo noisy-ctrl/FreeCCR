@@ -758,7 +758,9 @@ class CCRImage:
                 logging.warning(f"Carrier opening not found: {e}")
         profile = flat_field.profile_for(self, opening=opening)
         # what this decode applied, for the film menu (spec/flat-field-info.md)
+        # and the flat field map (spec/flat-field-map.md; in memory only)
         self.flat_applied = None
+        self._flat_used = None
         if profile is None:
             return arr
         try:
@@ -772,6 +774,7 @@ class CCRImage:
                 profile_used = profile
             out = flat_field.apply_field(arr, profile_used, encoded=encoded, mono=mono)
             self.flat_applied = flat_field.applied_record(profile, carrier)
+            self._flat_used = (profile_used, tuple(arr.shape[:2]), bool(mono))
             return out
         except Exception as e:
             logging.warning(f"Field correction could not be applied: {e}")

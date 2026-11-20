@@ -1041,6 +1041,27 @@ class ImagePreview(QWidget):
             "Zoom level — percentages are relative to the image's actual size "
             "(100% = one source pixel per screen pixel)")
         self.zoom_combo.activated.connect(self._on_zoom_combo)
+        # Flat field map: what the frame's flat field correction does, as a
+        # pink wash with contour lines (spec/flat-field-map.md). Display only,
+        # off at startup; right-click for the exaggeration. Left of HDR (the
+        # user, 2026-11-20).
+        self.flat_map_action = QAction(
+            theme.load_tinted_icon(resource_path("icons/flat-field-icon.png"),
+                                   on_color=theme.ICON_ON), "Flat field map", self)
+        self.flat_map_action.setCheckable(True)
+        self.flat_map_action.setToolTip(
+            "Flat field map: where this frame's flat field correction brightens "
+            "the scan, as a pink wash (stronger = more) with lines every "
+            "tenth of a stop; blue where it darkens. Preview only.\n"
+            "Right-click to exaggerate it, or hide the lines.")
+        self.flat_map_action.triggered.connect(self.set_flat_map)
+        self.toolbar.addAction(self.flat_map_action)
+        _fm_btn = self.toolbar.widgetForAction(self.flat_map_action)
+        if _fm_btn is not None:
+            _fm_btn.setContextMenuPolicy(Qt.CustomContextMenu)
+            _fm_btn.customContextMenuRequested.connect(
+                lambda pos, b=_fm_btn: self._show_flat_map_menu(b.mapToGlobal(pos)))
+        add_spacer()
         # HDR glow view: tint what will glow in a "JPEG + HDR gain map"
         # export. A display mode only, off at startup and never saved.
         # See spec/hdr-gain-map-export.md.
@@ -1346,6 +1367,13 @@ class ImagePreview(QWidget):
         # child of the picture item, so nothing that reads the picture sees it.
         self._glow_item = None
         self._glow_cache = None          # (id of the alpha map, full-size pixmap)
+        # Flat field map (spec/flat-field-map.md): its own layer, above
+        # False colour; settings remembered, the toggle not.
+        self._flat_map = False
+        self._fm_item = None
+        self._fm_cache = None
+        self._fm_legend = None
+        self._fm_gain, self._fm_contours = self._stored_flat_map()
         # False colour (spec/false-colour.md): its own layer under the glow.
         self._false_colour = False
         self._fc_item = None
@@ -1428,6 +1456,7 @@ class ImagePreview(QWidget):
         self._glow_item = None           # scene.clear() above deleted it
         self._glow_cache = None
         self._fc_item = None
+        self._fm_item = None
         self._sample_item = None
         self._fc_cache = None
         self._gm_item = None
@@ -1645,6 +1674,7 @@ class ImagePreview(QWidget):
         self._dust_cursor_item = None
         self._glow_item = None
         self._fc_item = None
+        self._fm_item = None
         self._gm_item = None
         self._clip_item = None
         self._sample_item = None
@@ -1867,6 +1897,7 @@ class ImagePreview(QWidget):
         # The false-colour and HDR glow layers follow whatever pixmap is now
         # displayed.
         self._refresh_fc_overlay()
+        self._refresh_flat_map()
         self._refresh_gold_mask()
         self._refresh_glow_overlay()
         self._refresh_clip_overlay()
@@ -2109,6 +2140,247 @@ class ImagePreview(QWidget):
             action.blockSignals(was)
         self._refresh_fc_overlay()
 
+    # --- Flat field map (spec/flat-field-map.md) -----------------------------
+    _FM_GAIN_KEY = "view/flat_map_gain"
+    _FM_LINES_KEY = "view/flat_map_contours"
+
+    @classmethod
+    def _stored_flat_map(cls):
+        from PySide6.QtCore import QSettings
+        from core import flat_map
+        try:
+            st = QSettings("FreeCCR", "FreeCCR")
+            k = flat_map.exaggeration(st.value(cls._FM_GAIN_KEY, flat_map.DEFAULT_GAIN))
+            lines = st.value(cls._FM_LINES_KEY, True, type=bool)
+        except Exception:
+            k, lines = flat_map.DEFAULT_GAIN, True
+        return k, bool(lines)
+
+    def set_flat_map(self, on):
+        """Show or hide the flat field map: display only, off at startup."""
+        self._flat_map = bool(on)
+        action = getattr(self, "flat_map_action", None)
+        if action is not None and action.isChecked() != self._flat_map:
+            was = action.blockSignals(True)
+            action.setChecked(self._flat_map)
+            action.blockSignals(was)
+        self._refresh_flat_map()
+
+    def set_flat_map_options(self, gain=None, contours=None):
+        """The exaggeration (×1/2/4/8) and contour lines, remembered."""
+        from PySide6.QtCore import QSettings
+        from core import flat_map
+        if gain is not None:
+            self._fm_gain = flat_map.exaggeration(gain)
+        if contours is not None:
+            self._fm_contours = bool(contours)
+        try:
+            st = QSettings("FreeCCR", "FreeCCR")
+            st.setValue(self._FM_GAIN_KEY, self._fm_gain)
+            st.setValue(self._FM_LINES_KEY, self._fm_contours)
+        except Exception:
+            pass
+        self._fm_cache = None
+        self._refresh_flat_map()
+
+    def flat_map_menu(self):
+        """The tool's right-click menu (the test seam): Exaggeration ×1 / ×2
+        / ×4 / ×8 and Contour lines; a choice turns the map on."""
+        from PySide6.QtWidgets import QMenu
+        from PySide6.QtGui import QActionGroup
+        from core import flat_map
+        menu = QMenu(self)
+        head = menu.addAction("Exaggeration")
+        head.setEnabled(False)
+        group = QActionGroup(menu)
+        for k in flat_map.EXAGGERATIONS:
+            text = ("×1 (as it is)" if k == 1
+                    else f"×{k} (a {flat_map.FULL_AT_EV / k:g} stop change shows in full)")
+            a = menu.addAction(text)
+            a.setCheckable(True)
+            a.setChecked(self._fm_gain == k)
+            group.addAction(a)
+            a.triggered.connect(lambda _c=False, g=k: self._pick_flat_map(gain=g))
+        menu.addSeparator()
+        lines = menu.addAction("Contour lines")
+        lines.setCheckable(True)
+        lines.setChecked(self._fm_contours)
+        lines.triggered.connect(lambda on: self._pick_flat_map(contours=on))
+        menu._group = group
+        return menu
+
+    def _show_flat_map_menu(self, global_pos):
+        self._fm_menu = self.flat_map_menu()
+        self._fm_menu.popup(global_pos)
+
+    def _pick_flat_map(self, gain=None, contours=None):
+        self.set_flat_map_options(gain, contours)
+        if not self._flat_map:
+            self.set_flat_map(True)
+
+    def _flat_map_source(self, img):
+        """(profile, full decode (h, w), mono, note): the flat the frame's
+        decode applied, else the one it would get now (untracked)."""
+        from core import flat_field
+        used = getattr(img, "_flat_used", "missing")
+        if used != "missing":
+            if used is None:
+                return None, None, False, ""
+            return used[0], used[1], used[2], ""
+        p = flat_field.profile_for(img)
+        if p is None:
+            return None, None, False, ""
+        raw = getattr(img, "resized_raw", None)
+        hw = tuple(raw.shape[:2]) if raw is not None else None
+        return p, hw, False, " (re-grade it to see the one it was decoded with)"
+
+    def _flat_map_layer(self, img):
+        """(full-frame layer pixmap cut like the display, legend html) for
+        the frame on screen; cached on what it depends on."""
+        from core import flat_map
+        pv = getattr(img, "resized_preview", None)
+        if pv is None or pv.isNull():
+            return None, ""
+        profile, hw, mono, note = self._flat_map_source(img)
+        crop_key = (repr(getattr(img, "crop_rect", None)), self._crop_display_angle,
+                    self._crop_display_transform is not None)
+        key = (id(profile), hw, mono, repr(getattr(img, "source_ops", None)),
+               pv.width(), pv.height(), self._fm_gain, self._fm_contours, crop_key)
+        if self._fm_cache is not None and self._fm_cache[0] == key:
+            return self._fm_cache[1], self._fm_cache[2]
+        if profile is None or not hw:
+            html = "<b>Flat field map</b><br>No flat field on this frame."
+            self._fm_cache = (key, None, html)
+            return None, html
+        gain = flat_map.frame_gain(profile, hw, getattr(img, "source_ops", None),
+                                   (pv.width(), pv.height()), mono)
+        ev = flat_map.ev_map(gain)
+        rgba = np.ascontiguousarray(flat_map.layer_rgba(ev, self._fm_gain, self._fm_contours))
+        h, w = rgba.shape[:2]
+        qimg = QImage(rgba.data, w, h, 4 * w, QImage.Format_RGBA8888).copy()
+        if self._fm_contours:
+            self._draw_flat_map_labels(qimg, flat_map.label_points(ev, self._fm_gain))
+        layer = self._crop_layer_like_display(QPixmap.fromImage(qimg), img,
+                                              fill=Qt.transparent)
+        html = self._flat_map_legend_html(img, profile, flat_map.summary(profile, ev), note)
+        self._fm_cache = (key, layer, html)
+        return layer, html
+
+    @staticmethod
+    def _draw_flat_map_labels(qimg, points):
+        from PySide6.QtGui import QFont, QPainter
+        if not points:
+            return
+        p = QPainter(qimg)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.TextAntialiasing)
+        f = QFont()
+        f.setPixelSize(max(10, int(round(max(qimg.width(), qimg.height()) / 85))))
+        f.setBold(True)
+        p.setFont(f)
+        fm = p.fontMetrics()
+        for x, y, text in points:
+            tw, th = fm.horizontalAdvance(text) + 8, fm.height() + 2
+            r = QRectF(x - tw / 2, y - th / 2, tw, th)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(0, 0, 0, 170))
+            p.drawRoundedRect(r, 4, 4)
+            p.setPen(QColor(255, 255, 255))
+            p.drawText(r, Qt.AlignCenter, text)
+        p.end()
+
+    def _flat_map_legend_html(self, img, profile, figs, note=""):
+        from core import flat_field, flat_map
+        k = self._fm_gain
+        applied = getattr(img, "flat_applied", None) or {}
+        head = flat_field.flat_label(profile)
+        carrier = applied.get("carrier") if not note else None
+        if carrier in ("moved", "same"):
+            head += ", followed the carrier"
+        elif carrier == "not found":
+            head += ", the carrier wasn't found: as shot"
+        lines = [f"<b>Flat field map</b> · {head}{note}"]
+        lift = f"Brightens by up to {figs['lift']:+.2f} EV"
+        if len(figs["corners"]) == 3:
+            r, g, b = figs["corners"]
+            lift += f" (corners R {r:+.2f} · G {g:+.2f} · B {b:+.2f})"
+        lines.append(lift)
+        if figs["lower"] < -0.02:              # a real lowering, not rounding
+            lines.append(f"Darkens by up to {figs['lower']:+.2f} EV "
+                         f"(<span style='color:rgb{flat_map.BLUE}'>blue</span>)")
+        full = flat_map.FULL_AT_EV / k
+        ramp = (f"<table cellspacing='0' cellpadding='0'><tr><td>0&nbsp;</td>"
+                + "".join(f"<td style='background-color: rgba(255,64,170,{a:.2f});' "
+                          f"width='14'>&nbsp;</td>"
+                          for a in np.linspace(0.08, flat_map.WASH_ALPHA, 8))
+                + f"<td>&nbsp;{full:+g} EV and more</td></tr></table>")
+        lines.append(ramp)
+        step = flat_map.CONTOUR_STEP[k]
+        tail = f"Shown ×{k}"
+        if self._fm_contours:
+            tail += f" · lines every {step:g} EV"
+        lines.append(f"<span style='color:#bdbdbd'>{tail} · right-click the button to "
+                     f"change. The picture itself isn't changed.</span>")
+        return "<br>".join(lines)
+
+    def _refresh_flat_map(self):
+        """Show, update or hide the flat field map layer and its legend."""
+        item = self.pixmap_item
+        on = (getattr(self, "_flat_map", False) and item is not None
+              and self.current_pixmap is not None and self.current_idx is not None)
+        target = item.pixmap() if item is not None else None
+        img = ccr_backend.get_image_by_index(self.current_idx) if on else None
+        if not on or target is None or target.isNull() or img is None:
+            if getattr(self, "_fm_item", None) is not None:
+                self._fm_item.setVisible(False)
+            self._place_flat_map_legend(None)
+            return
+        layer, html = self._flat_map_layer(img)
+        if layer is None or layer.isNull():
+            if self._fm_item is not None:
+                self._fm_item.setVisible(False)
+        else:
+            if self._fm_item is None:
+                self._fm_item = QGraphicsPixmapItem(item)
+                self._fm_item.setTransformationMode(Qt.SmoothTransformation)
+                self._fm_item.setZValue(1.4)
+            self._fm_item.setPixmap(layer)
+            t = QTransform()
+            t.scale(target.width() / layer.width(), target.height() / layer.height())
+            self._fm_item.setTransform(t)
+            self._fm_item.setVisible(True)
+        self._place_flat_map_legend(html)
+
+    def _place_flat_map_legend(self, html):
+        """Bottom-left, above False colour's legend when both show."""
+        from PySide6.QtWidgets import QLabel
+        lab = getattr(self, "_fm_legend", None)
+        if html is None:
+            if lab is not None:
+                lab.hide()
+            return
+        if lab is None:
+            lab = QLabel(self.view.viewport())
+            lab.setTextFormat(Qt.RichText)
+            lab.setWordWrap(True)
+            lab.setFixedWidth(420)
+            lab.setStyleSheet(
+                f"QLabel {{ background-color: rgba(20, 20, 20, 210); "
+                f"color: {theme.TEXT}; font-size: 11px; padding: 6px; "
+                f"border-radius: {theme.RADIUS_MD}px; }}")
+            lab.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            self._fm_legend = lab
+        lab.setText(html)
+        lab.adjustSize()
+        vp = self.view.viewport()
+        bottom = vp.height() - 8
+        fc = getattr(self, "_fc_legend", None)
+        if getattr(self, "_false_colour", False) and fc is not None and fc.isVisible():
+            bottom = fc.y() - 6
+        lab.move(8, max(0, bottom - lab.height()))
+        lab.show()
+        lab.raise_()
+
     # --- Stop zones (spec/false-colour.md, 2026-10-23) ----------------------
     _FC_SCALE_KEY = "view/false_colour_scale"
     _FC_SOURCE_KEY = "view/false_colour_zone_source"
@@ -2249,15 +2521,22 @@ class ImagePreview(QWidget):
         h, w = rgb.shape[:2]
         layer = QPixmap.fromImage(QImage(rgb.data, w, h, 3 * w,
                                          QImage.Format_RGB888).copy())
-        if self._crop_display_transform is not None:
-            crop = getattr(img, "crop_rect", None)
-            if crop is not None and self._crop_display_angle:
-                extracted = self._extract_rotated_crop(layer, crop,
-                                                       self._crop_display_angle)
-                layer = extracted[0] if extracted is not None else None
-            elif crop is not None:
-                px_rect = self._crop_rect_to_pixels(crop, layer)
-                layer = layer.copy(px_rect) if px_rect is not None else None
+        return self._crop_layer_like_display(layer, img)
+
+    def _crop_layer_like_display(self, layer, img, fill=None):
+        """A full-frame layer (the uncropped preview's geometry) cut as the
+        displayed picture is (as the HDR glow layer is); None when the cut
+        fails."""
+        if layer is None or self._crop_display_transform is None:
+            return layer
+        crop = getattr(img, "crop_rect", None)
+        if crop is not None and self._crop_display_angle:
+            extracted = self._extract_rotated_crop(layer, crop, self._crop_display_angle,
+                                                   fill=fill)
+            return extracted[0] if extracted is not None else None
+        if crop is not None:
+            px_rect = self._crop_rect_to_pixels(crop, layer)
+            return layer.copy(px_rect) if px_rect is not None else None
         return layer
 
     def _fc_pixmap_for(self, target):
@@ -2403,6 +2682,9 @@ class ImagePreview(QWidget):
         lab.move(8, max(0, vp.height() - lab.height() - 8))
         lab.show()
         lab.raise_()
+        fm = getattr(self, "_fm_legend", None)
+        if fm is not None and fm.isVisible():
+            self._place_flat_map_legend(fm.text())
 
     def _end_fine_rot_burst(self, show=False):
         self._fine_rot_burst_active = False

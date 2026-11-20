@@ -41,3 +41,9 @@ A **Film Presets** button, a 35 mm cassette with its leader out
 (`film-canister-icon.png`, square corners, a real cassette's proportions
 after the first draft "looked weird"), just left of Capture in the middle:
 `film_presets_action` → `open_film_presets` → Settings at Film Presets.
+
+## Revision 2026-11-20: Flat field map
+
+**Flat field map** (`spec/flat-field-map.md`) sits right before HDR: a frame
+whose corners are shaded (`flat-field-icon.png`, `tools/make_toolbar_icons.py`
+`flat_field`, the user's pick of three drafts, "1 shading").
