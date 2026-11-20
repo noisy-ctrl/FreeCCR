@@ -46,8 +46,19 @@ icons) answered:
     frames, sizes and heights varied, white space kept; a frame crosses from
     post to post only with ≥ 30 % of it on each side, else it moves clear of
     the edge), **Aligned height** (one band of equal-height frames running
-    through the posts, the same seam rule), **Each post its own** (a mosaic
-    per post). Coloured outlines show the posts on screen only.
+    through the posts, the same seam rule), **Full height** (the user,
+    signing the mock-ups off: "the option for full height or near full height
+    frames - so each photo occupies something like 95% of the full height and
+    are aligned, but are split between swipes still": every frame the same
+    height, **Height** 80–100 % of the post, default 95 %, centred, in one
+    row through the posts with the gap between them; frames are split
+    between swipes freely, but never leave a sliver: a frame showing less
+    than 12 % of its width, or under 60 px, on a post moves to start at the
+    edge instead), **Each post its own** (a mosaic per post). The number of
+    posts follows the frames in Full height (as many as their row needs,
+    rounded up; the last post's spare room spreads the gaps), or is set by
+    hand (2–10) in the others. Coloured outlines show the posts on screen
+    only.
   - **Triptych** (2–6 frames, default 3): in a row or a column, on the
     background colour or over one frame (blurred or sharp), plain or on a
     film strip.
@@ -62,7 +73,8 @@ icons) answered:
   **At most N %** (0–30, default 6) so rows fill; nothing is ever squashed,
   only trimmed.
 - **Film borders**: None / **Generated** (35 mm with KS holes at their real
-  size and place, 120 plain, the corrected geometry of
+  size and place and a clean gate edge, 120 plain with the gate measured on
+  the user's 6x6 reference, `spec/camera-gate.md`; the corrected geometry of
   `spec/contact-sheet-strips.md`) / **From the scan** (each frame's own scan
   around its crop, up to the film's edge where the scan shows it, else the
   generated border; "Camera's own" gate as on the contact sheet). Light leaks
@@ -149,7 +161,10 @@ QSettings `collage/*` for every setting but members and seeds.
   Tear's band), gaps ≥ the gap setting, Respect on keeps each shape to 0.5 %,
   off keeps the change ≤ the cap; the same seed gives the same cells; ◀ ▶
   walk the history; carousel seam rule (no frame crosses an edge by < 30 %);
-  Aligned height: one height for all; each post its own: no crossing.
+  Aligned height: one height for all; Full height: every frame 95 % of the
+  post's height (or the Height set), centred, no sliver under 12 % / 60 px on
+  a post, the posts' count following the row; each post its own: no
+  crossing.
 - Film border geometry: 35 mm holes 1.98 × 2.79 mm, 2.01 from the edge.
 - Members: opening takes the selection / everything; Add / Remove from the
   list's menu; the strip's Remove; reorder.
@@ -158,3 +173,9 @@ QSettings `collage/*` for every setting but members and seeds.
   that size.
 - Toolbar: Collage is the last picture on the left; Film + Capture still dead
   centre; the toolbar fits 900 px.
+
+## Signed off (2026-11-20)
+
+"Your mockups look good", with the Full height carousel added above. The
+icon stays draft A (a grid) at the end of the left-hand pictures unless the
+user picks another.
