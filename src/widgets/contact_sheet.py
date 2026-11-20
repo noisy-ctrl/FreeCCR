@@ -21,6 +21,7 @@ import os
 import threading
 import time
 
+import cv2
 import numpy as np
 from PySide6.QtCore import QObject, QPointF, QRectF, QSettings, Qt, Signal
 from PySide6.QtGui import (QColor, QFont, QImage, QPainter, QPainterPath, QPen,
@@ -494,7 +495,8 @@ def leak_blobs(k, length_mm, reach_mm, roll_start=False):
     rng = np.random.default_rng(20261120 + 7919 * k)
     out = []
     for edge in (0, 1):
-        for _ in range(int(rng.integers(0, 3))):        # some edges stay clean
+        # most edges stay clean (the user, 2026-11-20: "there should be fewer")
+        for _ in range(1 if rng.random() < 0.3 else 0):
             c = float(rng.uniform(0, length_mm))
             # a patch: a soft core and one or two narrow tongues reaching in
             out.append((edge, c, float(rng.uniform(4, 14)), float(rng.uniform(0.35, 0.9)),
@@ -516,7 +518,9 @@ def leak_streaks(k):
     sometimes both; each profile is a few slow waves along the film whose sum
     sets the streak's strength and its depth in from the edge."""
     rng = np.random.default_rng(20261121 + 7919 * k)
-    edges = [int(rng.integers(0, 2))] if rng.random() < 0.7 else [0, 1]
+    if rng.random() > 0.4:          # most strips have none ("there should be fewer")
+        return []
+    edges = [int(rng.integers(0, 2))]
     out = []
     for e in edges:
         def waves():
@@ -539,7 +543,7 @@ def streak_field(streaks, x_mm, y_mm, film_mm, reach_mm):
     first dips; fading in from the edge and gone by `reach_mm`."""
     field = np.zeros((y_mm.size, x_mm.size), np.float32)
     for edge, strength, w1, w2 in streaks:
-        a = strength * np.clip(0.5 + 0.7 * _wave(x_mm, w1), 0.0, 1.0) ** 1.2
+        a = strength * np.clip(0.3 + 0.9 * _wave(x_mm, w1), 0.0, 1.0) ** 1.2
         # a band with a soft inner edge (not a thin glow on the edge): full
         # from the edge, easing out by its depth, which wanders 45-100 % of
         # the reach (never past it)
@@ -582,6 +586,63 @@ def leak_field(blobs, x_mm, film_mm, ppm, peak, reach_mm, holes=(), streaks=()):
     out[..., :3] = np.clip(rgb * t[..., None], 0, 255).astype(np.uint8)
     out[..., 3] = np.clip(t * 255, 0, 255).astype(np.uint8)
     return out
+
+
+# A drawn ("Square") gate isn't a perfect rectangle (the user's references,
+# 2026-11-20): its corners are rounded, its edges wander a little and are
+# soft (the gate sits just off the film plane). mm on the film.
+GATE_RADIUS = {True: 0.5, False: 1.0}      # 35 mm (holes) / 120
+GATE_INSET, GATE_WOBBLE, GATE_SOFT = 0.10, 0.07, 0.05
+
+
+def gate_edge(w_px, h_px, ppm, seed, colour, radius_mm):
+    """An RGBA (premultiplied) image w x h: the film's colour over a frame's
+    outermost edge, inside it clear, the boundary a rounded rectangle whose
+    sides wander (two octaves, fixed by `seed`) with a soft edge."""
+    w, h = max(2, int(math.ceil(w_px))), max(2, int(math.ceil(h_px)))
+    rng = np.random.default_rng(424242 + 1009 * int(seed))
+    r = max(1.0, radius_mm * ppm)
+    base = GATE_INSET * ppm
+    path = QPainterPath()
+    path.addRoundedRect(QRectF(base, base, w - 2 * base, h - 2 * base), r, r)
+    n = max(64, int(2 * (w + h) / 2))
+    s = np.linspace(0.0, 1.0, n, endpoint=False)
+    perim_mm = 2 * (w + h) / ppm
+
+    def octave(step_mm, amp):
+        k = max(4, int(perim_mm / step_mm))
+        knots = rng.uniform(-1, 1, k + 1)
+        knots[-1] = knots[0]                                  # closes round the frame
+        return amp * np.interp(s * k, np.arange(k + 1), knots)
+    wob = (octave(4.0, 1.0) + octave(1.2, 0.45)) / 1.45 * GATE_WOBBLE * ppm
+    inner = QRectF(base + r, base + r, max(0.0, w - 2 * base - 2 * r),
+                   max(0.0, h - 2 * base - 2 * r))
+    pts = []
+    for t, dv in zip(s, wob):
+        q = path.pointAtPercent(float(t))
+        cx = min(max(q.x(), inner.left()), inner.right())
+        cy = min(max(q.y(), inner.top()), inner.bottom())
+        nx, ny = q.x() - cx, q.y() - cy
+        ln = math.hypot(nx, ny) or 1.0
+        pts.append(QPointF(q.x() - nx / ln * dv, q.y() - ny / ln * dv))
+    mask = QImage(w, h, QImage.Format_Grayscale8)
+    mask.fill(0)
+    mp = QPainter(mask)
+    mp.setRenderHint(QPainter.Antialiasing)
+    mp.setPen(Qt.NoPen)
+    mp.setBrush(QColor(255, 255, 255))
+    mp.drawPolygon(QPolygonF(pts))
+    mp.end()
+    a = np.frombuffer(mask.constBits(), np.uint8, mask.bytesPerLine() * h)
+    a = a.reshape(h, mask.bytesPerLine())[:, :w].astype(np.float32) / 255.0
+    sig = max(0.5, GATE_SOFT * ppm)
+    a = cv2.GaussianBlur(a, (0, 0), sig)
+    alpha = 1.0 - a                                         # film over the edge
+    col = np.array([colour.red(), colour.green(), colour.blue()], np.float32)
+    out = np.empty((h, w, 4), np.uint8)
+    out[..., :3] = np.clip(col[None, None, :] * alpha[..., None], 0, 255).astype(np.uint8)
+    out[..., 3] = np.clip(alpha * 255, 0, 255).astype(np.uint8)
+    return QImage(out.data, w, h, 4 * w, QImage.Format_RGBA8888_Premultiplied).copy()
 
 
 def lie_along(shown_w, shown_h, slot):
@@ -970,10 +1031,15 @@ class ContactSheet(QObject):
         if source is not None and not source.isNull():
             orient = orientation_of(img)
             W, H = shown_size(source.width(), source.height(), img.crop_rect, orient, True)
-            draw_frame(p, area, source, img.crop_rect, getattr(img, "crop_angle", 0.0),
-                       src, self.overlay, orient=orient, respect_crop=True,
-                       turn=lie_along(W, H, area),
-                       bleed=bleed_mm * ppm if self.gate == "camera" else 0.0)
+            fr = draw_frame(p, area, source, img.crop_rect, getattr(img, "crop_angle", 0.0),
+                            src, self.overlay, orient=orient, respect_crop=True,
+                            turn=lie_along(W, H, area),
+                            bleed=bleed_mm * ppm if self.gate == "camera" else 0.0)
+            if self.gate == "square":   # the scan's own gate shows with Camera's own
+                p.drawImage(QRectF(fr.x(), fr.y(), math.ceil(fr.width()),
+                                   math.ceil(fr.height())),
+                            gate_edge(fr.width(), fr.height(), ppm, i, self.edge_colour(),
+                                      GATE_RADIUS[bool(g.holes)]))
         else:
             p.setPen(QColor(110, 110, 110))
             p.drawText(area, Qt.AlignCenter, "reading scan…")

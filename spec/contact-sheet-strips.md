@@ -182,3 +182,18 @@ user's two references: a roll-film leak runs as one long wavy streak along
 an edge, coming and going): `leak_streaks` / `streak_field`, a soft-edged
 band whose strength and depth wander along the film (two slow waves), one
 edge usually, sometimes both. Fixed per strip, so the same on every redraw.
+
+Revision (the user, 2026-11-20: "there should be fewer"): a 35 mm edge has a
+patch in 30 % of strips' edges (was 1-2 on most), a 120 strip a streak in
+40 % (one edge, gaps along it more often); the roll's start is still fogged.
+
+## A drawn gate isn't perfectly square (DRAFT, same branch)
+
+The user's references (a 6x6 and a 35 mm print with their gates): the
+corners are rounded, the edges wander a little and are soft. With Gate
+"Square" (the drawn gate; "Camera's own" shows the scan's real one) the film's
+colour is laid over each frame's outermost edge (`gate_edge`): a rounded
+rectangle (r 0.5 mm on 35 mm, 1.0 mm on 120), inset 0.10 mm, its sides moved
+in by two octaves of smooth noise (steps of 4 mm and 1.2 mm, ±0.07 mm),
+fixed per frame, softened by σ 0.05 mm (the gate sits just off the film
+plane).
