@@ -20,7 +20,7 @@ HAIR = ((220, 250), (300, 285), 1.2)
 BARS = [((x, 180), (x + 4, 230)) for x in range(360, 470, 14)]   # fine dense detail
 
 
-def _scene(h=400, w=600, seed=3, k=0.2, shift=(0.0, 0.0)):
+def _scene(h=400, w=600, seed=3, k=0.2, shift=(0.0, 0.0), warp=None):
     """Block maps (visible, IR) of a frame with specks, a hair and dense bars.
     Visible = picture x dust; IR = picture^k x dust x hotspot, both noisy."""
     rng = np.random.default_rng(seed)
@@ -43,6 +43,8 @@ def _scene(h=400, w=600, seed=3, k=0.2, shift=(0.0, 0.0)):
     if shift != (0.0, 0.0):
         m = np.float32([[1, 0, shift[0]], [0, 1, shift[1]]])
         ir = cv2.warpAffine(ir, m, (w, h), borderMode=cv2.BORDER_REPLICATE)
+    if warp is not None:
+        ir = cv2.warpAffine(ir, np.float32(warp), (w, h), borderMode=cv2.BORDER_REPLICATE)
     ir = ir * (1 + rng.normal(0, 0.04, (h, w)))
     return vis.astype(np.float32), ir.astype(np.float32)
 
@@ -299,3 +301,101 @@ def test_flag_badge_heal_before_and_erase_in_the_window(tmp_path, monkeypatch):
     app.processEvents()
     assert len(img.ir_dust_pending) == flagged and prev._dust_badge is True
     del healed_key
+
+
+def _similarity(w, h, scale, turn_deg, tx, ty):
+    """IR moved about the centre: the camera refocused (scale), turned, shifted."""
+    import math
+    c, sn = scale * math.cos(math.radians(turn_deg)), scale * math.sin(math.radians(turn_deg))
+    cx, cy = w / 2, h / 2
+    return np.array([[c, -sn, cx - c * cx + sn * cy + tx],
+                     [sn, c, cy - sn * cx - c * cy + ty]], np.float64)
+
+
+def _film(h, w, warp, seed=5):
+    """A frame with picture detail everywhere (as film has), specks spread
+    over it, and its IR shot moved by `warp`."""
+    rng = np.random.default_rng(seed)
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    tex = cv2.GaussianBlur(rng.random((h, w)).astype(np.float32), (0, 0), 3.0)
+    tex = (tex - tex.mean()) / tex.std()
+    pic = np.clip(0.45 + 0.25 * xx / w + 0.08 * tex, 0.05, 1).astype(np.float32)
+    specks = [(int(x), int(y), 3) for x, y in rng.uniform([60, 60], [w - 60, h - 60], (14, 2))]
+    dust = np.ones((h, w), np.float32)
+    for x, y, r in specks:
+        cv2.circle(dust, (x, y), r, 0.12, -1)
+    dust = cv2.GaussianBlur(dust, (0, 0), 0.8)
+    vis = 9000 * pic * dust * (1 + rng.normal(0, 0.01, (h, w)))
+    ir = 600 * pic ** 0.2 * (1 - 0.85 * (1 - dust))
+    ir = cv2.warpAffine(ir, np.float32(warp), (w, h), borderMode=cv2.BORDER_REPLICATE)
+    ir = ir * (1 + rng.normal(0, 0.04, (h, w)))
+    return vis.astype(np.float32), ir.astype(np.float32), specks
+
+
+@pytest.mark.parametrize("move", [(1.012, 0.4, 9.0, -6.0), (0.99, -0.3, -14.0, 4.0)])
+def test_an_ir_shot_refocused_or_moved_is_lined_up(move):
+    """spec/ir-dust-and-flat-sets.md §6: scale (focus or rail), turn, shift."""
+    h, w = 800, 1200
+    M = _similarity(w, h, *move)
+    vis, ir, specks = _film(h, w, M)
+    dm = ir_dust.dust_map(ir, [vis])
+    al = dm.align
+    assert al.how == "similarity" and al.tiles >= 6
+    inv = np.linalg.inv(np.vstack([M, [0, 0, 1]]))[:2]
+    got = np.array(al.matrix)
+    err = max(np.hypot(*((got - inv) @ np.array([x, y, 1.0])))
+              for x in (0, w / 2, w - 1) for y in (0, h / 2, h - 1))
+    assert err < 0.5, err                                 # within half a block anywhere
+    spots = ir_dust.spots_from(dm)
+    for x, y, _r in specks:
+        assert _near(spots, x, y, w, h, tol=2.0), (x, y)
+    text = ir_dust.align_text(al)
+    assert text.startswith("The IR shot was lined up with the frame (it was ")
+    assert ("larger" if move[0] > 1 else "smaller") in text and " px off" in text
+
+
+def test_an_ir_shot_of_another_frame_says_so():
+    h, w = 400, 600
+    vis, _ir = _scene()
+    rng = np.random.default_rng(7)
+    other = cv2.GaussianBlur(rng.random((h, w)).astype(np.float32), (0, 0), 3) * 500 + 100
+    dm = ir_dust.dust_map(other, [vis])
+    assert dm.align.how == "none" and dm.align.matrix == ir_dust.IDENTITY
+    assert "couldn't be lined up" in ir_dust.align_text(dm.align)
+    still = ir_dust.dust_map(_scene()[1], [vis])           # in place: nothing to say
+    assert still.align.how != "none" and ir_dust.align_text(still.align) == ""
+
+
+@pytest.mark.skipif(not os.path.exists("/mnt/user-data/uploads/R0011_645_XP2_002_BW.raf"),
+                    reason="the user's pair isn't here")
+def test_the_users_pair_sits_together():
+    U = "/mnt/user-data/uploads/"
+    vis = ir_dust._log(ir_dust.read_blocks(U + "R0011_645_XP2_001_BW.raf"))
+    ir = ir_dust._log(ir_dust.read_blocks(U + "R0011_645_XP2_002_BW.raf"))
+    al = ir_dust.align(ir, vis)
+    assert al.how == "similarity" and al.tiles == 9
+    assert abs(al.scale - 1) < 2e-4 and abs(al.turn) < 0.02 and np.hypot(*al.shift) < 0.4
+
+
+def test_the_ir_flat_follows_the_ir_shots_own_opening():
+    """The flat corrects the IR shot before it is lined up, so it is moved
+    to that shot's carrier opening, not the frame's."""
+    import types
+    from core import flat_field as ff
+    sys.path.insert(0, os.path.dirname(__file__))
+    from test_flat_sets import _field, _shot, OPEN
+    ff.set_library([ff.build_tagged_profile(_shot()[0], "ir", light="ir", fmt="645")])
+    try:
+        move = dict(s=1.04, dx=0.03, dy=-0.01)
+        ir_blocks = _shot(**move)[0][..., 1].astype(np.float32)
+        img = types.SimpleNamespace(film_format="645", flat_opening=dict(OPEN),
+                                    merge_sources=None)
+        h, w = ir_blocks.shape
+        f, inside = _field(h=h, w=w, **move)
+        inner = inside & (cv2.erode(inside.astype(np.uint8), np.ones((25, 25))) > 0)
+        own = ir_dust.ir_flat_for(img, (h, w), ir_blocks=ir_blocks) / f
+        frames = ir_dust.ir_flat_for(img, (h, w)) / f
+        spread = lambda r: float(np.std(r[inner]) / np.mean(r[inner]))  # noqa: E731
+        assert spread(own) < 0.02 and spread(own) < 0.5 * spread(frames)
+    finally:
+        ff.set_library([])

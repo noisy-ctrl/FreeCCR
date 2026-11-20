@@ -3611,10 +3611,12 @@ class LiveCaptureMonitor(QWidget):
         self.start_flat_fields()
 
     def _flat_default_format(self):
-        """The roll's format, else the frame guide's."""
+        """The roll's format, else the frame guide's, else the last one shot
+        (a flat is for one format: spec/flat-format-match.md)."""
         sess = getattr(self._mw, "capture_session", None)   # with or without the hot folder
         fmt = sess.get("format") if isinstance(sess, dict) else None
-        return fmt or (self.canvas.guide or {}).get("format") or ""
+        return (fmt or (self.canvas.guide or {}).get("format")
+                or str(_settings().value("live/flat_format", "") or ""))
 
     def _ask_flat_fields(self, default_format):
         """The test seam: {"format", "lights"} or None (cancelled)."""
@@ -3643,6 +3645,7 @@ class LiveCaptureMonitor(QWidget):
             return False
         lights = [x for x in fc.LIGHT_ORDER if x in choice["lights"]]
         _settings().setValue("live/flat_lights", ",".join(lights))
+        _settings().setValue("live/flat_format", choice.get("format") or "")
         ir_start = {"shutter": self.ir_shutter_combo.currentData()
                     or str(self.IR_SHUTTER_DEFAULT),
                     "iso": self.ir_iso_combo.currentData() or str(int(self.IR_ISO_DEFAULT))}

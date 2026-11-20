@@ -36,10 +36,12 @@ def _clean_globals():
 
 
 def _lib(tmp_path):
-    """A library on disk: white 645, white 35mm, RGB 645, an untagged one."""
+    """A library on disk: white 645 (and a second, older-named one), white
+    35mm, RGB 645, an untagged one."""
     out = {}
     for name, light, fmt in (("w645", "white", "645"), ("w35", "white", "35mm"),
-                             ("rgb645", "rgb", "645"), ("old", None, None)):
+                             ("rgb645", "rgb", "645"), ("old", None, None),
+                             ("w645b", "white", "645")):
         arr = _shot()[0]
         p = (ff.build_tagged_profile(arr, name, light=light, fmt=fmt) if light
              else ff.build_profile(arr, name))
@@ -85,22 +87,28 @@ def test_the_preset_keeps_its_flats_and_new_version_copies_them():
 # --------------------------------------------------------------------------- #
 def test_a_presets_flat_wins_for_its_frames_of_that_scan_type(tmp_path):
     lib = _lib(tmp_path)
-    ff.set_preset_flats({"P": {"colour": "w35.ffc", "trichrome": "none"}})
+    auto = ff.profile_for(_frame())                              # automatic: the newest 645
+    pick = "w645" if auto is lib["w645b"] else "w645b"
+    ff.set_preset_flats({"P": {"colour": pick + ".ffc", "trichrome": "none"}})
     plain = _frame()
-    assert ff.profile_for(plain) is lib["w645"]                  # automatic
+    assert ff.profile_for(plain) is auto
     mine = _frame(film_preset="P")
-    assert ff.profile_for(mine).name == "w35"                    # pinned, whatever format
+    assert ff.profile_for(mine) is lib[pick]                     # pinned
     trip = _frame(film_preset="P", merge_sources=["r", "g", "b"], is_merged=True)
     assert ff.profile_for(trip) is None                          # None: no correction
     ff.set_active_profile(lib["old"])
     assert ff.profile_for(trip) is None                          # even with an active one
     bw = _frame(film_preset="P", color_profile="bw")
-    assert ff.profile_for(bw) is lib["w645"]                     # B&W not pinned: automatic
+    assert ff.profile_for(bw) is auto                            # B&W not pinned: automatic
     other = _frame(film_preset="Q")
-    assert ff.profile_for(other) is lib["w645"]
+    assert ff.profile_for(other) is auto
     ff.set_preset_flats({"P": {"colour": "gone.ffc"}})
     assert ff.pinned(mine) == ("missing", None)
-    assert ff.profile_for(mine) is lib["w645"]                   # missing: automatic
+    assert ff.profile_for(mine) is auto                          # missing: automatic
+    # a pinned flat of another format isn't used for this format's frames
+    ff.set_preset_flats({"P": {"colour": "w35.ffc"}})
+    assert ff.pinned(mine)[0] == "format" and ff.profile_for(mine) is auto
+    assert ff.profile_for(_frame(film_preset="P", film_format="35mm")) is lib["w35"]
 
 
 def test_presets_share_one_flat_and_a_reshoot_reaches_them_all(tmp_path):
@@ -121,16 +129,16 @@ def test_the_lists_for_each_scan_type():
     from pathlib import Path
     _lib(Path(tempfile.mkdtemp()))
     assert names("trichrome") == ["old", "rgb645"]
-    assert names("colour") == ["old", "w35", "w645"]
-    assert names("bw") == ["old", "w35", "w645"]
+    assert names("colour") == ["old", "w35", "w645", "w645b"]
+    assert names("bw") == ["old", "w35", "w645", "w645b"]
 
 
 def test_a_capture_is_corrected_with_its_rolls_preset_before_it_is_marked(tmp_path):
     lib = _lib(tmp_path)
     ff.set_preset_flats({"P": {"bw": "w35.ffc"}})
-    ff.note_capture(["/hot/R1_645_HP5_001_BW.raf"], "P", "bw")
-    cap = _frame(file_path="/hot/R1_645_HP5_001_BW.raf")         # not marked yet
-    assert ff.frame_preset(cap) == "P" and ff.frame_scan(cap) == "bw"
+    ff.note_capture(["/hot/R1_35_HP5_001_BW.raf"], "P", "bw")
+    cap = _frame(file_path="/hot/R1_35_HP5_001_BW.raf", film_format="35mm")
+    assert ff.frame_preset(cap) == "P" and ff.frame_scan(cap) == "bw"   # not marked yet
     assert ff.profile_for(cap) is lib["w35"]
     # a merge is found by any of its files
     ff.set_preset_flats({"P": {"trichrome": "rgb645.ffc"}})
@@ -165,7 +173,8 @@ def test_the_signature_is_per_frame(tmp_path):
     _lib(tmp_path)
     a, b = _frame(film_preset="P"), _frame()
     sa, sb = (ccr_backend.active_profile_signature(x) for x in (a, b))
-    ff.set_preset_flats({"P": {"colour": "w35.ffc"}})
+    other = "w645" if ff.profile_for(a).name == "w645b" else "w645b"
+    ff.set_preset_flats({"P": {"colour": other + ".ffc"}})
     assert ccr_backend.active_profile_signature(a) != sa         # its flat changed
     assert ccr_backend.active_profile_signature(b) == sb         # this one's didn't
     c = _frame(film_format="35mm")
@@ -242,7 +251,9 @@ def test_marking_frames_regrades_only_those_whose_flat_changes(tmp_path, monkeyp
     from core.ccr_backend import ccr_backend
     from widgets.sliders_panel import SlidersPanel
     _lib(tmp_path)
-    ff.set_preset_flats({"P": {"colour": "w35.ffc"}})
+    auto645 = ff.profile_for(_frame()).name
+    other = "w645" if auto645 == "w645b" else "w645b"
+    ff.set_preset_flats({"P": {"colour": other + ".ffc"}})
     imgs = [_frame(), _frame(film_format="35mm"), _frame()]
     for im in imgs:
         im.profile_signature = ccr_backend.active_profile_signature(im)
@@ -254,7 +265,8 @@ def test_marking_frames_regrades_only_those_whose_flat_changes(tmp_path, monkeyp
     me = types.SimpleNamespace(window=lambda: types.SimpleNamespace(thumbnail_list=tl))
     changed = SlidersPanel._mark_preset(me, [0, 1, 2], "P")
     assert all(im.film_preset == "P" for im in imgs)
-    # 0 was on the 645 flat (now w35: re-graded); 1 already had w35; 2 never decoded
+    # 0 moves to the pinned 645 flat (re-graded); 1 is 35mm: the pin is
+    # another format's, so its flat stays; 2 was never decoded
     assert changed == [0] and regraded == [0]
 
 

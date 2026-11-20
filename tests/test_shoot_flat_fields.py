@@ -338,16 +338,24 @@ def test_the_default_format_is_the_rolls_else_the_guides(flat_mon):
     assert mon._flat_default_format() == "6x7"
     mon._mw.capture_session = {"roll": "R0001", "format": "645"}
     assert mon._flat_default_format() == "645"
+    # neither: the format last shot
+    mon._mw.capture_session = None
+    mon.canvas.guide = dict(mon.canvas.guide, format=None)
+    assert mon.start_flat_fields({"format": "xpan", "lights": ["white"]})
+    mon._measure_stop()
+    assert _wait(lambda: mon._measure is None, 10)
+    assert mon._flat_default_format() == "xpan"
 
 
 def test_the_window_asks_format_and_lights():
     from widgets.flat_shoot_dialog import FlatShootDialog
     d = FlatShootDialog("645", ["white", "ir"])
     assert d.values() == {"format": "645", "lights": ["white", "ir"]}
+    assert FlatShootDialog("", []).values()["format"] is None    # nothing known: Any
     d.light_boxes["white"].setChecked(False)
     d.light_boxes["ir"].setChecked(False)
     from PySide6.QtWidgets import QDialogButtonBox
     assert not d.buttons.button(QDialogButtonBox.Ok).isEnabled()
-    d.format_combo.setCurrentIndex(0)
+    d.format_combo.setCurrentIndex(d.format_combo.count() - 1)   # Any format, last
     d.light_boxes["rgb"].setChecked(True)
     assert d.values() == {"format": None, "lights": ["rgb"]}

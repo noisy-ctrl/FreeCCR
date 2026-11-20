@@ -84,8 +84,8 @@ On 2×2 photosite blocks of both RAWs (no demosaic, camera-native linear):
 2. Crosstalk: `L −= k·ln(visible)`, k fitted per frame (0–0.4, the value that
    leaves the least high-pass variance). The visible frame is the shot's white
    / B&W frame, or the sum of a trichrome's three.
-3. Register the IR to the visible frame (phase correlation, ≤ 4 blocks;
-   measured < 1).
+3. Line the IR up with the visible frame (§6: a similarity from 3 × 3
+   tiles, so a refocus or rail move between the shots is undone too).
 4. Background = grey closing of `L` (disc of radius `r`, default 5 blocks,
    larger dust is rare), smoothed; `d = L − background` (≤ 0 at dust).
 5. `d` is centred on its local level (the background is an upper
@@ -259,7 +259,45 @@ film out, the empty carrier in at that format's height.
 - Stop (the button reads "Stop Flat Fields", or Esc) waits for the shot on
   its way and saves nothing; Measure is off meanwhile.
 
-## 6. Tests (planned)
+## 6. Lining the IR shot up with the frame (2026-11-20)
+
+The user, 2026-11-20: "making sure IR captures align with the RGB/white
+etc. All the while, flat fields need to track, remember." The first
+version registered a SHIFT only, ≤ 6 blocks, on the middle 1024². An IR
+shot refocused for IR (he found a slight focus change helps; a future rail
+step for IR would do it), a rail move or a knock between the colour shots
+and the IR one also changes the SCALE, and a shift bigger than 6 blocks
+was ignored.
+
+`ir_dust.align(ir_log, vis_log)`: phase correlation (high-passed logs,
+Hann window) in a 3 × 3 grid of tiles (512 blocks on a 50 MP RAW, at 20 /
+50 / 80 % of the width and 22 / 50 / 78 % of the height), each giving the
+move that puts the IR on the frame there; a similarity `d(q) = [a −b; b a]
+(q − c) + t` is fitted by least squares to the tiles whose peak is ≥ 0.05,
+dropping the worst while it is > 1.5 blocks off (≥ 4 tiles); then measured
+again on the moved IR and composed (two rounds). Too few tiles → the
+median shift of ≥ 2 agreeing tiles; nothing → no move, and the Dust panel
+says "The IR shot couldn't be lined up with this frame (is it this
+frame's?)". A scale beyond 3 % or a turn beyond 1.5° is not the same shot
+either. The move is applied to the IR's log before the crosstalk fit
+(`DustMap.align`; `DustMap.shift` = the move at the centre). When the shot
+was off, the Dust panel's line says how: "The IR shot was lined up with the
+frame (it was 1.2 % larger, 21 px off, turned 0.42°)."
+
+Measured: the user's pair (R0011 001 / 002) sits within 0.33 blocks in
+every tile (all 9 used, scale 1.0000, turn 0.000°); his IR shot moved
+synthetically by 1 % scale, 0.3° and (15, −8) blocks is recovered within
+0.25 blocks at every corner, 0.46 s.
+
+**The IR flat follows the IR shot's own opening**: it corrects the IR shot
+before it is lined up, so `ir_flat_for(img, shape, ir_blocks=)` tracks it
+to the opening found in the IR shot (else the frame's). Measured on the
+user's pair, the opening finder reads the left edge 1.4 % of the width
+further in under IR than under white light, so an IR flat read against an
+IR shot is also the like-for-like comparison. Every flat is tracked to the
+shot it corrects: white / RGB to the frame (a merge's), IR to the IR shot.
+
+## 7. Tests (planned)
 
 - Synthetic: a picture with fine dense detail + round specks and hairs; IR =
   picture^k × specks × hotspot + noise: IR-only finds the detail, IR + visible

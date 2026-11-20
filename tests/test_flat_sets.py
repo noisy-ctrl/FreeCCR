@@ -87,8 +87,8 @@ def test_each_frame_gets_the_flat_of_its_light_and_format():
     assert ff.profile_for(frame) is w35
     trip = types.SimpleNamespace(film_format="645", merge_sources=["r", "g", "b"], is_merged=True)
     assert ff.profile_for(trip) is rgb
-    trip.film_format = "6x7"                       # no RGB flat for 6x7: any RGB flat
-    assert ff.profile_for(trip) is rgb
+    trip.film_format = "6x7"                       # no RGB flat for 6x7: never another
+    assert ff.profile_for(trip) is plain           # format's (spec/flat-format-match.md)
     guided = types.SimpleNamespace(film_format=None, capture_guide={"format": "35mm"},
                                    merge_sources=None)
     assert ff.profile_for(guided) is w35
@@ -169,8 +169,8 @@ def test_the_ir_flat_reaches_the_dust_search():
     inner = (slice(60, 240), slice(80, 370))
     r = light[inner] / f[inner]
     assert r.std() / r.mean() < 0.02
-    img.film_format = "6x9"                      # no IR flat for it: any IR flat
-    assert ir_dust.ir_flat_for(img, (300, 450)) is not None
+    img.film_format = "6x9"                      # no IR flat for it: none (another
+    assert ir_dust.ir_flat_for(img, (300, 450)) is None   # format's would misfit)
     ff.set_library([_flat("white", "645")])
     assert ir_dust.ir_flat_for(img, (300, 450)) is None
 

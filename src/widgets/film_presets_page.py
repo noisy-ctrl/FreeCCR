@@ -93,8 +93,10 @@ class FilmPresetsPage(QWidget):
             cb = QComboBox()
             theme.shrinkable_combo(cb)
             cb.setToolTip("The flat this preset's frames scanned this way are corrected "
-                          "with. Automatic: the flat of their light and format. Flats "
-                          "live in their own folder (Color Management → Field "
+                          "with. Automatic: the flat of their light and format. A flat "
+                          "is for its own format: frames of another format (or whose "
+                          "carrier opening has another shape) keep the automatic one. "
+                          "Flats live in their own folder (Color Management → Field "
                           "correction → Show Folder); any number of presets can share one.")
             cb.currentIndexChanged.connect(lambda _i, sc=scan: self._flat_changed(sc))
             flat_grid.addWidget(cb, row, 1)

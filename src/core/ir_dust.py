@@ -50,6 +50,15 @@ SPOT_PAD = 1.0              # the threshold keeps the core, the heal needs the s
 HP_SIGMA = 25.0             # high-pass for the crosstalk fit and registration
 MAX_SHIFT = 6.0             # blocks: a larger registration answer is ignored
 NOISE_SIGMA = 25.0          # smoothing of the local noise map
+# aligning the IR shot with the frame (spec/ir-dust-and-flat-sets.md §6):
+# phase correlation in a 3 x 3 grid of tiles, a similarity fitted to them
+ALIGN_SPOTS = (0.2, 0.5, 0.8)       # tile centres, share of the width
+ALIGN_SPOTS_Y = (0.22, 0.5, 0.78)   # ... and of the height
+ALIGN_MIN_RESP = 0.05      # a tile's correlation peak under this says nothing
+ALIGN_RESID = 1.5          # blocks: a tile further than this from the fit is out
+ALIGN_MAX_SCALE = 0.03     # |scale - 1| over this: not the same shot
+ALIGN_MAX_TURN = 1.5       # degrees
+ALIGN_MIN_TILES = 4
 
 _cache_lock = threading.Lock()
 _block_cache: Dict[Tuple[str, float], np.ndarray] = {}
@@ -136,6 +145,155 @@ def register(ir_log: np.ndarray, vis_log: np.ndarray) -> Tuple[float, float]:
     return float(-dx), float(-dy)
 
 
+@dataclass
+class Alignment:
+    """How the IR shot was moved onto the frame: `matrix` (2 x 3, IR block
+    -> frame block), its scale, turn (degrees) and shift at the centre
+    (blocks), the tiles that agreed, and `how` ("similarity", "shift" or
+    "none": nothing agreed, the shot is used as it is)."""
+    matrix: List[List[float]]
+    scale: float = 1.0
+    turn: float = 0.0
+    shift: Tuple[float, float] = (0.0, 0.0)
+    tiles: int = 0
+    how: str = "none"
+
+    def moved(self) -> bool:
+        return (abs(self.scale - 1) > 2e-4 or abs(self.turn) > 0.01
+                or math.hypot(*self.shift) > 0.05)
+
+
+IDENTITY = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]
+
+
+def _tile_size(h, w):
+    if min(h, w) >= 1700:
+        return 512
+    return max(32, 1 << int(math.log2(max(32, min(h, w) * 0.32))))
+
+
+def tile_shifts(ir_log: np.ndarray, vis_log: np.ndarray):
+    """[(x, y, dx, dy, response)]: per tile of a 3 x 3 grid, the move (blocks)
+    that puts the IR's content on the frame's there."""
+    h, w = vis_log.shape
+    n = _tile_size(h, w)
+    win = cv2.createHanningWindow((n, n), cv2.CV_64F)
+    out = []
+    for fy in ALIGN_SPOTS_Y:
+        for fx in ALIGN_SPOTS:
+            y0 = int(min(max(0, fy * h - n / 2), h - n))
+            x0 = int(min(max(0, fx * w - n / 2), w - n))
+            a = vis_log[y0:y0 + n, x0:x0 + n]
+            b = ir_log[y0:y0 + n, x0:x0 + n]
+            a = cv2.GaussianBlur(a - cv2.GaussianBlur(a, (0, 0), 12), (0, 0), 1.5)
+            b = cv2.GaussianBlur(b - cv2.GaussianBlur(b, (0, 0), 12), (0, 0), 1.5)
+            (dx, dy), resp = cv2.phaseCorrelate(a.astype(np.float64), b.astype(np.float64),
+                                                win)
+            if not (np.isfinite(dx) and np.isfinite(dy)) or max(abs(dx), abs(dy)) > n / 4:
+                resp = 0.0
+            out.append((x0 + n / 2, y0 + n / 2, float(-dx), float(-dy), float(resp)))
+    return out
+
+
+def fit_similarity(tiles, w, h):
+    """(a, b, tx, ty, tiles used) of the move d(q) = [a -b; b a](q - c) + t
+    through the tiles that agree (the worst dropped while it is further than
+    ALIGN_RESID), or None."""
+    pts = [(x - w / 2, y - h / 2, dx, dy) for x, y, dx, dy, r in tiles if r >= ALIGN_MIN_RESP]
+    keep = list(range(len(pts)))
+    while len(keep) >= ALIGN_MIN_TILES:
+        A, rhs = [], []
+        for i in keep:
+            x, y, dx, dy = pts[i]
+            A.append([x, -y, 1.0, 0.0])
+            rhs.append(dx)
+            A.append([y, x, 0.0, 1.0])
+            rhs.append(dy)
+        p, *_ = np.linalg.lstsq(np.array(A), np.array(rhs), rcond=None)
+        res = [math.hypot(p[0] * x - p[1] * y + p[2] - dx, p[1] * x + p[0] * y + p[3] - dy)
+               for x, y, dx, dy in (pts[i] for i in keep)]
+        worst = int(np.argmax(res))
+        if res[worst] <= ALIGN_RESID:
+            return float(p[0]), float(p[1]), float(p[2]), float(p[3]), len(keep)
+        keep.pop(worst)
+    return None
+
+
+def _similarity_matrix(a, b, tx, ty, w, h):
+    cx, cy = w / 2.0, h / 2.0
+    return np.array([[1 + a, -b, tx - a * cx + b * cy],
+                     [b, 1 + a, ty - b * cx - a * cy]], np.float64)
+
+
+def _shift_only(tiles):
+    """The median move of the tiles that agree within ALIGN_RESID, or None."""
+    good = [(dx, dy) for _x, _y, dx, dy, r in tiles if r >= ALIGN_MIN_RESP]
+    if len(good) < 2:
+        return None
+    mx = float(np.median([g[0] for g in good]))
+    my = float(np.median([g[1] for g in good]))
+    near = [g for g in good if math.hypot(g[0] - mx, g[1] - my) <= ALIGN_RESID]
+    return (mx, my, len(near)) if len(near) >= 2 else None
+
+
+def align(ir_log: np.ndarray, vis_log: np.ndarray) -> Alignment:
+    """The IR shot moved onto the frame: a similarity (shift, scale from a
+    focus or rail move, a small turn) fitted to 3 x 3 tiles' phase
+    correlation, measured again after the first move and composed."""
+    h, w = vis_log.shape
+    total = np.eye(3)
+    used, how = 0, "none"
+    cur = ir_log
+    for _round in range(2):
+        tiles = tile_shifts(cur, vis_log)
+        fit = fit_similarity(tiles, w, h)
+        if fit is not None:
+            a, b, tx, ty, used = fit
+            step = _similarity_matrix(a, b, tx, ty, w, h)
+            how = "similarity"
+        else:
+            sh = _shift_only(tiles)
+            if sh is None:
+                break
+            step = np.array([[1, 0, sh[0]], [0, 1, sh[1]]], np.float64)
+            used = sh[2]
+            how = how if how == "similarity" else "shift"
+        total = np.vstack([step, [0, 0, 1]]) @ total
+        cur = cv2.warpAffine(ir_log, total[:2].astype(np.float32), (w, h),
+                             flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+    m = total[:2]
+    scale = math.hypot(m[0, 0], m[1, 0])
+    turn = math.degrees(math.atan2(m[1, 0], m[0, 0]))
+    centre = m @ np.array([w / 2.0, h / 2.0, 1.0]) - np.array([w / 2.0, h / 2.0])
+    if how == "none" or abs(scale - 1) > ALIGN_MAX_SCALE or abs(turn) > ALIGN_MAX_TURN:
+        return Alignment(IDENTITY, tiles=used, how="none")
+    return Alignment(m.tolist(), scale=scale, turn=turn,
+                     shift=(float(centre[0]), float(centre[1])), tiles=used, how=how)
+
+
+def align_text(al: Optional["Alignment"]) -> str:
+    """'' when the IR shot sat on the frame, else how it sat (in the frame's
+    pixels: a block is 2 x 2 photosites), before it was lined up."""
+    if al is None:
+        return ""
+    if al.how == "none":
+        return ("The IR shot couldn't be lined up with this frame (is it this "
+                "frame's?): spots may sit beside their specks.")
+    bits = []
+    ir_scale = 1.0 / al.scale if al.scale else 1.0
+    if abs(ir_scale - 1) >= 5e-4:
+        pct = (ir_scale - 1) * 100
+        bits.append(f"{abs(pct):.1f} % {'larger' if pct > 0 else 'smaller'}")
+    d = 2 * math.hypot(*al.shift)
+    if d >= 1:
+        bits.append(f"{d:.0f} px off")
+    if abs(al.turn) >= 0.05:
+        bits.append(f"turned {abs(al.turn):.2f}°")
+    if not bits:
+        return ""
+    return "The IR shot was lined up with the frame (it was " + ", ".join(bits) + ")."
+
+
 def fit_crosstalk(ir_log: np.ndarray, vis_logs: List[np.ndarray],
                   region: Optional[np.ndarray] = None) -> np.ndarray:
     """k per visible channel: ln IR's high-pass ~ sum_c k_c ln V_c's, least
@@ -163,6 +321,7 @@ class DustMap:
     k: List[float] = field(default_factory=list)
     shift: Tuple[float, float] = (0.0, 0.0)
     noise: float = 0.0               # median local noise (log units)
+    align: Optional[Alignment] = None
     size: Tuple[int, int] = (0, 0)   # (W_b, H_b)
 
 
@@ -179,13 +338,14 @@ def dust_map(ir: np.ndarray, visible: Optional[List[np.ndarray]] = None,
     vis_logs = [_log(v) for v in (visible or []) if v is not None and v.shape == ir.shape]
     shift = (0.0, 0.0)
     k = np.zeros(0, np.float32)
+    al = None
     if vis_logs:
         vsum = vis_logs[0] if len(vis_logs) == 1 else _log(sum(np.exp(v) for v in vis_logs))
-        shift = register(L, vsum)
-        if shift != (0.0, 0.0):
-            m = np.float32([[1, 0, shift[0]], [0, 1, shift[1]]])
-            L = cv2.warpAffine(L, m, (L.shape[1], L.shape[0]), flags=cv2.INTER_LINEAR,
-                               borderMode=cv2.BORDER_REPLICATE)
+        al = align(L, vsum)
+        shift = al.shift
+        if al.moved():
+            L = cv2.warpAffine(L, np.float32(al.matrix), (L.shape[1], L.shape[0]),
+                               flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
         k = fit_crosstalk(L, vis_logs, region)
         for kc, v in zip(k, vis_logs):
             if kc:
@@ -209,7 +369,8 @@ def dust_map(ir: np.ndarray, visible: Optional[List[np.ndarray]] = None,
     sig = np.sqrt(np.maximum(smooth_field(d2, NOISE_SIGMA), 0)) * 1.09 + 1e-4
     z = (dc / sig).astype(np.float16)
     return DustMap(z=z, k=[float(x) for x in k], shift=shift,
-                   noise=float(np.median(sig[::8, ::8])), size=(ir.shape[1], ir.shape[0]))
+                   noise=float(np.median(sig[::8, ::8])), size=(ir.shape[1], ir.shape[0]),
+                   align=al)
 
 
 # --------------------------------------------------------------------------- #
@@ -318,20 +479,26 @@ def can_find(img) -> Optional[str]:
     return None
 
 
-def ir_flat_for(img, shape) -> Optional[np.ndarray]:
+def ir_flat_for(img, shape, ir_blocks=None) -> Optional[np.ndarray]:
     """The library's IR flat for the frame's format, as a light map on the
     block grid (1 / gain), moved with the carrier opening when both know it
-    (spec/ir-dust-and-flat-sets.md §5); None when there is none."""
+    (spec/ir-dust-and-flat-sets.md §5); None when there is none. The opening
+    is the IR shot's own (`ir_blocks`): the flat corrects that shot, before
+    it is lined up, and an IR flat read against an IR shot reads the mask's
+    edge the same way (the white shot's left edge read 1.4 % of the width
+    further out than its IR pair's); else the frame's."""
     try:
         from core import flat_field as ff
         probe = type("IRFrame", (), {})()
         probe.scan_light = "ir"
         probe.merge_sources = None
         probe.film_format = ff.frame_format(img)
-        prof = ff.profile_for(probe)
+        opening = ff.opening_of(ir_blocks) if ir_blocks is not None else None
+        opening = opening or getattr(img, "flat_opening", None)
+        prof = ff.profile_for(probe, opening=opening)
         if prof is None or ff.profile_light(prof) != "ir":
             return None
-        move = ff.track(prof, getattr(img, "flat_opening", None))
+        move = ff.track(prof, opening)
         gain = ff.gain_for_size(ff.tracked_profile(prof, move), shape[1], shape[0])
         return (1.0 / np.maximum(gain.mean(axis=2), 1e-3)).astype(np.float32)
     except Exception:
@@ -342,7 +509,7 @@ def frame_dust_map(img, flat: Optional[np.ndarray] = None) -> DustMap:
     """The IR dust map of a frame (reads its IR shot and its own shots)."""
     ir = read_blocks(img.ir_source)
     if flat is None:
-        flat = ir_flat_for(img, ir.shape)
+        flat = ir_flat_for(img, ir.shape, ir_blocks=ir)
     vis = []
     for p in visible_paths(img):
         try:
