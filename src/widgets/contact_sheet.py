@@ -72,6 +72,13 @@ GATES = (("square", "Square"), ("camera", "Camera's own"))
 FILM_EDGES = (("black", "Black", (6, 6, 6)), ("grey", "Dark grey", (40, 40, 40)),
               ("brown", "Brown-black", (28, 19, 12)))
 HOLE_WHITE = (245, 245, 245)
+# Light leaks on the film's edges (DRAFT for sign-off): off / slight / strong
+LEAKS = (("off", "Off"), ("slight", "Slight"), ("strong", "Strong"))
+LEAK_PEAK = {"slight": 0.38, "strong": 0.8}
+# fog colour by how strong it is: deep red where faint, through orange to a
+# pale yellow at the core (a print of fogged negative edges)
+LEAK_RAMP = ((0.0, (150, 20, 5)), (0.4, (230, 70, 15)), (0.75, (255, 150, 40)),
+             (1.0, (255, 225, 150)))
 # 35 mm perforations (ISO 491 / KS), mm
 HOLE_PITCH, HOLE_ALONG, HOLE_ACROSS, HOLE_EDGE = 4.75, 2.8, 2.0, 2.0
 EDGE_FONT_MM = 1.5          # edge print lettering on the film
@@ -463,6 +470,52 @@ class StripLayout:
         return ("strips", self.n, self.fmt, self.direction, self.cell_w)
 
 
+def leak_blobs(k, length_mm, roll_start=False):
+    """Strip k's light leaks: [(edge 0|1, centre mm, width mm, height, depth
+    mm)], fixed per strip (the same every redraw and export). Each edge gets
+    one to three soft patches; the roll's first strip is fogged at its start
+    on both edges, deeper."""
+    rng = np.random.default_rng(20261120 + 7919 * k)
+    out = []
+    for edge in (0, 1):
+        for _ in range(int(rng.integers(1, 4))):
+            out.append((edge, float(rng.uniform(0, length_mm)),
+                        float(rng.uniform(6, 28)), float(rng.uniform(0.3, 1.0)),
+                        float(rng.uniform(0.8, 2.2))))
+    if roll_start:
+        for edge in (0, 1):
+            out.append((edge, 0.0, 22.0, 1.2, 4.0))
+    return out
+
+
+def leak_field(blobs, x_mm, film_mm, ppm, peak, holes=()):
+    """Premultiplied RGBA (h, w, 4) uint8 of the fog over strip columns at
+    `x_mm` (mm along the strip, one per pixel column), the film's whole
+    width; `holes` = slot rects (x0, y0, x1, y1 mm) left clear: the leaks
+    are on the edges only, never on a picture."""
+    h = max(1, int(round(film_mm * ppm)))
+    y = (np.arange(h, dtype=np.float32) + 0.5) / ppm
+    x = np.asarray(x_mm, dtype=np.float32)
+    field = np.zeros((h, x.size), np.float32)
+    for edge, c, w, a, depth in blobs:
+        along = a * np.exp(-((x - c) ** 2) / (2 * w * w))
+        d = y if edge == 0 else film_mm - y
+        field += np.exp(-d / depth)[:, None] * along[None, :]
+    for x0, y0, x1, y1 in holes:
+        inside = ((x[None, :] >= x0) & (x[None, :] <= x1)
+                  & (y[:, None] >= y0) & (y[:, None] <= y1))
+        field[inside] = 0.0
+    t = peak * (1.0 - np.exp(-1.6 * field))
+    u = np.clip(t / max(peak, 1e-6), 0, 1)
+    rgb = np.zeros(t.shape + (3,), np.float32)
+    for c in range(3):
+        rgb[..., c] = np.interp(u, [s for s, _c in LEAK_RAMP], [col[c] for _s, col in LEAK_RAMP])
+    out = np.empty(t.shape + (4,), np.uint8)
+    out[..., :3] = np.clip(rgb * t[..., None], 0, 255).astype(np.uint8)
+    out[..., 3] = np.clip(t * 255, 0, 255).astype(np.uint8)
+    return out
+
+
 def lie_along(shown_w, shown_h, slot):
     """-90 (its top to the left) when a frame shown w x h has the other
     shape from its slot on screen, else 0 (the user, 2026-11-20)."""
@@ -503,6 +556,7 @@ class ContactSheet(QObject):
         edge = self._settings.value("sheet/film_edge", "black", type=str) or "black"
         self.film_edge = edge if self._edge_ok(edge) else "black"
         self.holes_white = self._settings.value("sheet/holes_white", True, type=bool)
+        self.leaks = pick("sheet/leaks", "off", {k for k, _l in LEAKS})
         self._image = None
         self._layout = None
         self._sigs = []
@@ -613,6 +667,10 @@ class ContactSheet(QObject):
     def set_holes_white(self, on):
         self._set("holes_white", "sheet/holes_white", bool(on))
 
+    def set_leaks(self, level):
+        """Light leaks on the film's edges: "off", "slight" or "strong"."""
+        self._set("leaks", "sheet/leaks", level if level in {k for k, _l in LEAKS} else "off")
+
     def edge_colour(self):
         named = {k: c for k, _l, c in FILM_EDGES}
         if self.film_edge in named:
@@ -693,7 +751,8 @@ class ContactSheet(QObject):
             from core import film_presets as fp
             presets = fp.load(self._settings)
         look = (self.respect_crop, self.text_colour, self.text_info, self.overlay,
-                self.layout_mode, self.gate, self.film_edge, self.holes_white)
+                self.layout_mode, self.gate, self.film_edge, self.holes_white,
+                self.leaks)
         for i, img in enumerate(imgs):
             src, detail = crop_source(img)
             fmt = frame_format(img)
@@ -818,6 +877,8 @@ class ContactSheet(QObject):
         film_path = QPainterPath()
         film_path.addRoundedRect(QRectF(0, 0, end, F), 0.6 * ppm, 0.6 * ppm)
         p.fillPath(film_path, self.edge_colour())
+        if self.leaks in LEAK_PEAK:
+            self._draw_leaks(p, i, k, piece)
         if g.holes:
             hc = QColor(*HOLE_WHITE) if self.holes_white else QColor(*BG)
             pitch, ha, hx = HOLE_PITCH * ppm, HOLE_ALONG * ppm, HOLE_ACROSS * ppm
@@ -871,6 +932,25 @@ class ContactSheet(QObject):
             p.drawText(QRectF(slot.left(), 0, slot.width(), band),
                        Qt.AlignLeft | Qt.AlignVCenter, f" {film}")
         p.restore()
+
+    def _draw_leaks(self, p, i, k, piece):
+        """The fog on this piece of strip k's edges (strip coordinates, the
+        painter already on the strip's transform and clipped to the piece)."""
+        lay = self._layout
+        g, ppm = lay.geo, lay.ppm
+        x0 = int(piece.left())
+        cols = int(piece.width())
+        x_mm = (np.arange(x0, x0 + cols, dtype=np.float32) + 0.5) / ppm
+        slots = []
+        for j in range(k * lay.per, k * lay.per + lay.frames_in(k)):
+            r = lay.slot(j)
+            slots.append((r.left() / ppm, r.top() / ppm, r.right() / ppm, r.bottom() / ppm))
+        blobs = leak_blobs(k, lay.xs[lay.frames_in(k)] / ppm, roll_start=(k == 0))
+        rgba = leak_field(blobs, x_mm, g.film, ppm, LEAK_PEAK[self.leaks], slots)
+        rgba = np.ascontiguousarray(rgba[:lay.film_px])
+        h, w = rgba.shape[:2]
+        qi = QImage(rgba.data, w, h, 4 * w, QImage.Format_RGBA8888_Premultiplied).copy()
+        p.drawImage(QRectF(x0, 0, w, h), qi)
 
     def _draw_footer(self, summary=("", None, None)):
         lay = self._layout
@@ -1318,6 +1398,11 @@ class ContactSheetView(QWidget):
         custom.triggered.connect(self._pick_edge_colour)
         for b in group.buttons():
             b.toggled.connect(lambda on: on and custom.setChecked(False))
+        heading("Light leaks")
+        acts, _g = radios(LEAKS, sheet.leaks, sheet.set_leaks, tips={
+            "slight": "A little warm fog on the film's edges, never on a picture.",
+            "strong": "More fog on the film's edges, never on a picture."})
+        strip_rows += acts
         m.addSeparator()
         holes = _RowCheck("White sprocket holes")
         holes.setChecked(sheet.holes_white)
