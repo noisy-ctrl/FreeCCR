@@ -494,10 +494,15 @@ def leak_blobs(k, length_mm, reach_mm, roll_start=False):
     rng = np.random.default_rng(20261120 + 7919 * k)
     out = []
     for edge in (0, 1):
-        for _ in range(int(rng.integers(1, 4))):
-            out.append((edge, float(rng.uniform(0, length_mm)),
-                        float(rng.uniform(6, 28)), float(rng.uniform(0.3, 1.0)),
-                        float(rng.uniform(0.25, 0.6)) * reach_mm))
+        for _ in range(int(rng.integers(0, 3))):        # some edges stay clean
+            c = float(rng.uniform(0, length_mm))
+            # a patch: a soft core and one or two narrow tongues reaching in
+            out.append((edge, c, float(rng.uniform(4, 14)), float(rng.uniform(0.35, 0.9)),
+                        float(rng.uniform(0.2, 0.4)) * reach_mm))
+            for _t in range(int(rng.integers(1, 3))):
+                out.append((edge, c + float(rng.normal(0, 4)), float(rng.uniform(0.8, 2.5)),
+                            float(rng.uniform(0.4, 1.0)),
+                            float(rng.uniform(0.45, 0.8)) * reach_mm))
     if roll_start:
         for edge in (0, 1):
             out.append((edge, 0.0, 22.0, 1.2, 0.8 * reach_mm))
