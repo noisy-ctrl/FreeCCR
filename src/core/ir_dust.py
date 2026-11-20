@@ -83,6 +83,13 @@ JOIN_GAP = 4               # blocks: a fibre's pieces this close go together ...
 JOIN_P = 0.2               # ... when the weaker one is at least this likely ...
 LINE_LIKE = 5.0            # ... and line-like (line depth, or ELONGATED)
 DARK_IR = 0.20             # the IR shot under this share of its range: say so
+BRIDGE_GAP = 24            # blocks: a fibre's flagged pieces this far apart ...
+BRIDGE_TURN = 0.5          # ... each continuing towards the other (cos of the turn) ...
+BRIDGE_DARK = 2.5          # ... are joined where the colour shots darken between them
+BRIDGE_DARK_SHARE = 0.8    # (mean z below -BRIDGE_DARK, this share of the way below -1.5)
+BRIDGE_STRAIGHT = 1.6      # ... along a path at most this much longer than the gap
+BRIDGE_RIDGE = 0.7         # ... and a thin line there: this share of the way darker than
+BRIDGE_SIDE = 1.5          # both sides (z) a little out (a picture's edge is dark on one)
 IR_DEPTH_CAP = 8.0         # the model's IR depth and line features stop here: a
 LINE_CAP = 12.0            # deeper IR dip with nothing in the frame's own shots is
                            # a hot pixel or an IR-only blob, not dust that shows
@@ -609,7 +616,9 @@ class DustMap:
     cands: List[Candidate] = field(default_factory=list)
     kind: str = "single"             # "merged" | "single" | "ir-only": which model judges it
     ir_level: Optional[float] = None  # the IR shot's 99.5th percentile, share of its range
+    vz: Optional[np.ndarray] = None   # the frame's own shots' darkening (z), float16
     _nbrs: Optional[List[List[int]]] = None
+    _skel: Optional[Dict[int, np.ndarray]] = None
 
 
 def kind_for(n_visible: int) -> str:
@@ -669,7 +678,8 @@ def dust_map(ir: np.ndarray, visible: Optional[List[np.ndarray]] = None,
     cands = find_candidates(z, line, vz, vzmin, vd, dc, grad, gmed)
     return DustMap(z=z.astype(np.float16), k=[float(x) for x in k], shift=shift,
                    noise=float(np.median(sig[::8, ::8])), size=(ir.shape[1], ir.shape[0]),
-                   align=al, cands=cands, kind=kind_for(len(vis_logs)), ir_level=ir_level)
+                   align=al, cands=cands, kind=kind_for(len(vis_logs)), ir_level=ir_level,
+                   vz=vz.astype(np.float16) if vz is not None else None)
 
 
 # --------------------------------------------------------------------------- #
@@ -912,9 +922,176 @@ def spots_from(dm: DustMap, sensitivity: float = SENS_DEFAULT,
     carries its candidate's features ("ir_f") and number ("ir_c")."""
     w_b, h_b = dm.size
     spots: List[dict] = []
-    for i in flagged(dm, sensitivity, keep, model):
+    acc = flagged(dm, sensitivity, keep, model)
+    for i in acc:
         spots.extend(_spots_of(dm.cands[i], i, w_b, h_b))
+    spots.extend(bridges(dm, acc, spots))
     return spots
+
+
+# --------------------------------------------------------------------------- #
+# bridges: a fibre's pieces joined where the IR barely shows it (spec/ir-dust-v2.md §3.6)
+# --------------------------------------------------------------------------- #
+def _skeleton_of(dm: DustMap, i: int) -> np.ndarray:
+    """A candidate's skeleton points (x, y) in blocks, cached on the map."""
+    if dm._skel is None:
+        dm._skel = {}
+    if i not in dm._skel:
+        c = dm.cands[i]
+        ys, xs = np.nonzero(thin(c.mask))
+        if not len(xs):
+            ys, xs = np.nonzero(c.mask)
+        dm._skel[i] = np.stack([xs + c.x0, ys + c.y0], 1).astype(np.float64)
+    return dm._skel[i]
+
+
+def _heads_towards(pts: np.ndarray, end: np.ndarray, target: np.ndarray) -> bool:
+    """Whether a piece, at its point `end`, runs on towards `target`: the way
+    out of the piece there (end less the piece's points within 6 blocks of
+    it) is within BRIDGE_TURN of the way to the target. A piece too short to
+    have a way (a dab) agrees with anything."""
+    near = pts[np.hypot(*(pts - end).T) <= 6.0]
+    if len(near) < 3:
+        return True
+    out = end - near.mean(0)
+    to = target - end
+    no, nt = float(np.hypot(*out)), float(np.hypot(*to))
+    if no < 0.8 or nt < 1e-6:
+        return True
+    return float(out @ to) / (no * nt) >= BRIDGE_TURN
+
+
+def dark_path(vz: np.ndarray, a: Tuple[int, int], b: Tuple[int, int],
+              margin: int = 6) -> Optional[List[Tuple[int, int]]]:
+    """The cheapest 8-connected path from a to b ((x, y) blocks) where the
+    frame's own shots are darkest (step cost x clip(1 + vz / 4, 0.2, 2)),
+    searched in their box plus `margin`. None when there is none."""
+    import heapq
+    H, W = vz.shape
+    x0, x1 = max(0, min(a[0], b[0]) - margin), min(W, max(a[0], b[0]) + margin + 1)
+    y0, y1 = max(0, min(a[1], b[1]) - margin), min(H, max(a[1], b[1]) + margin + 1)
+    cost = np.clip(1.0 + vz[y0:y1, x0:x1].astype(np.float32) / 4.0, 0.2, 2.0)
+    h, w = cost.shape
+    start, goal = (a[1] - y0, a[0] - x0), (b[1] - y0, b[0] - x0)
+    dist = np.full((h, w), np.inf)
+    prev = -np.ones((h, w, 2), np.int32)
+    dist[start] = 0.0
+    heap = [(0.0, start)]
+    steps = [(dy, dx, math.hypot(dy, dx)) for dy in (-1, 0, 1) for dx in (-1, 0, 1) if dy or dx]
+    while heap:
+        d, (y, x) = heapq.heappop(heap)
+        if (y, x) == goal:
+            break
+        if d > dist[y, x]:
+            continue
+        for dy, dx, L in steps:
+            ny, nx = y + dy, x + dx
+            if 0 <= ny < h and 0 <= nx < w:
+                nd = d + L * 0.5 * (cost[y, x] + cost[ny, nx])
+                if nd < dist[ny, nx]:
+                    dist[ny, nx] = nd
+                    prev[ny, nx] = (y, x)
+                    heapq.heappush(heap, (nd, (ny, nx)))
+    if not np.isfinite(dist[goal]):
+        return None
+    path, cur = [], goal
+    while cur != start:
+        path.append((cur[1] + x0, cur[0] + y0))
+        cur = tuple(prev[cur])
+    path.append((a[0], a[1]))
+    return path[::-1]
+
+
+def _ridge_share(vz: np.ndarray, path: List[Tuple[int, int]], off: float) -> float:
+    """The share of a path's points darker (in the frame's own shots) than
+    both sides `off` blocks out across it by BRIDGE_SIDE: a fibre is a thin
+    dark line, the dark side of a picture's edge has dark on one side."""
+    H, W = vz.shape
+    pts = np.asarray(path, np.float64)
+    n = len(pts)
+    if n < 3:
+        return 1.0
+    good = 0
+    for t in range(n):
+        a, b = pts[max(0, t - 2)], pts[min(n - 1, t + 2)]
+        d = b - a
+        L = math.hypot(*d)
+        if L < 1e-6:
+            continue
+        nx, ny = -d[1] / L, d[0] / L
+        x, y = pts[t]
+        here = float(vz[int(y), int(x)])
+        sides = []
+        for sgn in (-1, 1):
+            sx, sy = int(round(x + sgn * off * nx)), int(round(y + sgn * off * ny))
+            if 0 <= sx < W and 0 <= sy < H:
+                sides.append(float(vz[sy, sx]))
+        if len(sides) == 2 and min(sides) - here >= BRIDGE_SIDE:
+            good += 1
+    return good / n
+
+
+def bridges(dm: DustMap, acc: List[int], spots: List[dict]) -> List[dict]:
+    """Strokes joining a fibre's flagged pieces where the IR barely shows the
+    stretch between them (a translucent fibre) but the frame's own shots do:
+    two line-like flagged pieces whose nearest skeleton points are at most
+    BRIDGE_GAP blocks apart, each running on towards the other, and a path
+    between them along which the colour shots are dark (mean z below
+    -BRIDGE_DARK, BRIDGE_DARK_SHARE of it below -1.5) and not much longer
+    than the gap. Bridges carry no features (nothing to learn from)."""
+    if dm.vz is None or len(acc) < 2:
+        return []
+    w_b, h_b = dm.size
+    vz = dm.vz
+    r_of: Dict[int, float] = {}
+    for s in spots:
+        c = s.get("ir_c")
+        if c is not None:
+            r_of[c] = min(r_of.get(c, 1e9), float(s["r"]) * w_b)
+    pieces = [i for i in acc if dm.cands[i].line_like]
+    out: List[dict] = []
+    done = set()
+    boxes = {i: (dm.cands[i].x0, dm.cands[i].y0, dm.cands[i].x0 + dm.cands[i].mask.shape[1],
+                 dm.cands[i].y0 + dm.cands[i].mask.shape[0]) for i in pieces}
+    for ai, i in enumerate(pieces):
+        bi = boxes[i]
+        for j in pieces[ai + 1:]:
+            bj = boxes[j]
+            if (bj[0] > bi[2] + BRIDGE_GAP or bi[0] > bj[2] + BRIDGE_GAP
+                    or bj[1] > bi[3] + BRIDGE_GAP or bi[1] > bj[3] + BRIDGE_GAP):
+                continue
+            A, B = _skeleton_of(dm, i), _skeleton_of(dm, j)
+            d = np.hypot(A[:, None, 0] - B[None, :, 0], A[:, None, 1] - B[None, :, 1])
+            k = int(np.argmin(d))
+            ka, kb = divmod(k, d.shape[1])
+            gap = float(d[ka, kb])
+            if gap > BRIDGE_GAP or gap < 2.0 or (i, j) in done:
+                continue
+            ea, eb = A[ka], B[kb]
+            if not (_heads_towards(A, ea, eb) and _heads_towards(B, eb, ea)):
+                continue
+            path = dark_path(vz, (int(ea[0]), int(ea[1])), (int(eb[0]), int(eb[1])))
+            if not path or len(path) < 2:
+                continue
+            length = sum(math.hypot(p[0] - q[0], p[1] - q[1]) for p, q in zip(path, path[1:]))
+            if length > BRIDGE_STRAIGHT * gap + 2.0:
+                continue
+            inner = path[1:-1] or path
+            vals = np.array([float(vz[y, x]) for x, y in inner])
+            if vals.mean() > -BRIDGE_DARK or (vals <= -1.5).mean() < BRIDGE_DARK_SHARE:
+                continue
+            r = min(r_of.get(i, SPOT_PAD + 1.5), r_of.get(j, SPOT_PAD + 1.5))
+            if _ridge_share(vz, path, max(3.0, r)) < BRIDGE_RIDGE:
+                continue                         # an edge of the picture, not a fibre
+            step = max(1, int(round(r)))
+            keep_i = list(range(0, len(path), step))
+            if keep_i[-1] != len(path) - 1:
+                keep_i.append(len(path) - 1)
+            out.append({"kind": KIND,
+                        "pts": [[(path[t][0] + 0.5) / w_b, (path[t][1] + 0.5) / h_b] for t in keep_i],
+                        "r": r / w_b, "ir_bridge": [int(i), int(j)]})
+            done.add((i, j))
+    return out
 
 
 def mask_from(dm: DustMap, sensitivity: float = SENS_DEFAULT,

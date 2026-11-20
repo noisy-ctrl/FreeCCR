@@ -207,6 +207,28 @@ match what ships.
   curl, and the spread measure healed a loop as one disc over its inside
   (synthetic loop: the strokes cover 100 % of it and 0 % of its inside).
 
+### 3.6 Bridges (2026-11-20, the user: "I see it not removing the full length")
+
+His wavy line on 002 came out as its top and its bottom: the IR barely shows
+its middle (13 blocks), where the colour shots still darken by z −3 to −4.
+So after flagging, two line-like flagged pieces are joined by a stroke
+(`bridges`, spots tagged `"ir_bridge"`, no features, nothing learned from
+them) when:
+- their nearest skeleton points are 2–24 blocks apart (`BRIDGE_GAP`);
+- each runs on towards the other (the way out of the piece at that point
+  within 60° of the way to the other; a dab agrees with anything);
+- the cheapest path between them through the colour shots' darkening
+  (`dark_path`, step cost × clip(1 + vz/4, 0.2, 2)) is at most 1.6 × the gap
+  + 2 long, its mean vz below −2.5 and 80 % of it below −1.5;
+- and it is a thin line: 70 % of its points are darker than both sides,
+  max(3, r) blocks out across it, by 1.5 (`_ridge_share`). Without this,
+  9 of 21 bridges ran along 004's frame edge against the carrier (dark on
+  one side only); with it 2 remain there (between edge pieces a crop leaves
+  out), and the rest are all along real fibres (checked by eye: 4 on 001,
+  5 on 002, 0 on 005).
+The stroke's radius is the smaller of the two pieces'. Measured cost:
+≈ 0.1 s a frame.
+
 ### 3.5 The dark IR hint
 
 `DustMap.ir_level` = the IR shot's 99.5th percentile over the white level.
@@ -271,5 +293,10 @@ dust."
   threshold; Forget restores the defaults; the store goes to the test path and
   caps at 3000; Heal Them adds weight-0.3 positives.
 - The dark IR hint appears under 20 % and not above.
+- Bridges: a line the IR loses for 16 blocks in the middle is covered end to
+  end (the pieces alone cover < 80 % of the gap) and the bridge carries no
+  features; with no darkening in the colour shots there is no bridge; a
+  path along a thin dark line is a ridge (≥ 0.9), along the dark side of an
+  edge not (< 0.2).
 - `tests/test_ir_dust.py` still passes (its synthetic scenes and the user's
   XP2 pair when present).
