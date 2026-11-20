@@ -9,7 +9,7 @@ from PySide6.QtGui import (QPixmap, QIcon, QTransform, QPen, QColor, QAction, QP
                            QCursor, QDesktopServices, QPainterPath,
                            QBrush, QPolygonF,
                            QImage)
-from PySide6.QtCore import Qt, QSize, Signal, QRect, QRectF, QPointF, QThread, QTimer, QUrl
+from PySide6.QtCore import Qt, QSize, Signal, QRect, QRectF, QPointF, QThread, QTimer, QUrl, QEvent
 from core.ccr_backend import ccr_backend
 from utils.qt_threads import WorkerThread
 from core.ccr_processor import (apply_dust_removal, DUST_FEATHER_DEFAULT,
@@ -842,8 +842,12 @@ def orientation_prompt(kind, frames):
     return prompt
 
 
-EXPORT_GAP_PX = 24     # the line-less break between Convert and Export (was 18, then 32;
-                       # 24 since the Capture button, 2026-11-19)
+EXPORT_GAP_PX = 12     # the least break between Convert and Export: a stretch with this
+                       # minimum since spec/toolbar-centred.md (2026-11-20; a fixed gap
+                       # of 18, 32, then 24 before), the boxed Export marks itself
+CONVERT_GAP_PX = 8     # ... and between Capture and Auto Crop
+EXPORT_BOX_PAD = 24    # the boxed Export's width past its bold words (2 x 10 padding,
+                       # the border, 2 px of air)
 ZOOM_GAP_PX = 8        # ... and the one between Export and the zoom box
 TEXT_BUTTON_PAD = 6    # a text button's width past its words (Qt's hint: ~17; 8 until
                        # the Capture button, 2026-11-19)
@@ -1114,14 +1118,30 @@ class ImagePreview(QWidget):
         self.toolbar.addAction(self.sample_action)
         add_spacer()
 
-        # Un-convert, Convert and Export sit at the far right, next to the
-        # histogram: everything before them stays left-aligned and this spacer
-        # takes up the slack.
-        # Capture sits in the middle, between the picture buttons and the
-        # words (the user, 2026-11-19): a stretch either side of it.
-        self.capture_push = QWidget()
-        self.capture_push.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        self.toolbar.addWidget(self.capture_push)
+        # Film Presets + Capture dead centre, Auto Crop / Un-convert / Convert
+        # midway between Capture and a boxed Export (spec/toolbar-centred.md,
+        # the user 2026-11-20): two stretches a side share the slack equally,
+        # and a measured balance spacer pads the lighter side
+        # (_balance_toolbar).
+        def fixed_gap(width):
+            gap = QWidget()
+            gap.setFixedWidth(width)
+            gap.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+            self.toolbar.addWidget(gap)
+            return gap
+
+        def push(minimum=0):
+            stretch = QWidget()
+            stretch.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            if minimum:
+                stretch.setMinimumWidth(minimum)
+            self.toolbar.addWidget(stretch)
+            return stretch
+
+        self._toolbar_balance = 0          # right minus left, px
+        self._balance_left = fixed_gap(0)
+        self.capture_push_2 = push()
+        self.capture_push = push()
         # the film presets, beside Capture (spec/film-presets.md §6, the
         # user 2026-11-19): Settings at its Film Presets page
         self.film_presets_action = QAction(
@@ -1134,9 +1154,8 @@ class ImagePreview(QWidget):
         self.film_presets_action.triggered.connect(self.open_film_presets)
         self.toolbar.addAction(self.film_presets_action)
         self.toolbar.addAction(self.capture_action)
-        self.export_push = QWidget()
-        self.export_push.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        self.toolbar.addWidget(self.export_push)
+        self._balance_right_a = fixed_gap(0)
+        self.convert_push = push(CONVERT_GAP_PX)
 
         self.toolbar.addAction(self.auto_crop_action)
         self.auto_crop_gap = QWidget()
@@ -1156,15 +1175,19 @@ class ImagePreview(QWidget):
         _conv_btn = self.toolbar.widgetForAction(self.convert_action)
         if _conv_btn is not None:                  # the main action: bold
             _conv_btn.setStyleSheet("QToolButton { font-weight: bold; }")
-        # A plain gap, no line, between the conversion pair and Export.
-        self.export_gap = QWidget()
-        self.export_gap.setFixedWidth(EXPORT_GAP_PX)
-        self.export_gap.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
-        self.toolbar.addWidget(self.export_gap)
+        # A stretch, no line, between the conversion words and Export (at
+        # least EXPORT_GAP_PX), then the other half of the right balance
+        self.export_push = push(EXPORT_GAP_PX)
+        self._balance_right_b = fixed_gap(0)
 
         self.export_action = QAction("Export…", self)
         self.export_action.triggered.connect(self.open_export_dialog)
         self.toolbar.addAction(self.export_action)
+        # boxed like the panel's Export… (the user, 2026-11-20)
+        _exp_btn = self.toolbar.widgetForAction(self.export_action)
+        if _exp_btn is not None:
+            theme.style_tool_button(_exp_btn, "primary")
+            _exp_btn.setFixedHeight(self.zoom_combo.sizeHint().height())
         # ... and the zoom box last, at the far right (a plain gap before it)
         self.zoom_gap = QWidget()
         self.zoom_gap.setFixedWidth(ZOOM_GAP_PX)
@@ -1176,6 +1199,8 @@ class ImagePreview(QWidget):
         export_margin.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
         self.toolbar.addWidget(export_margin)
         self._tighten_text_buttons()
+        self._balance_pending = False
+        self.toolbar.installEventFilter(self)
 
         self.layout.addWidget(self.toolbar)
 
@@ -3058,8 +3083,54 @@ class ImagePreview(QWidget):
             font = btn.font()
             if "font-weight: bold" in btn.styleSheet():
                 font.setBold(True)
-            btn.setFixedWidth(QFontMetrics(font).horizontalAdvance(act.text())
-                              + TEXT_BUTTON_PAD)
+            pad = EXPORT_BOX_PAD if act is self.export_action else TEXT_BUTTON_PAD
+            btn.setFixedWidth(QFontMetrics(font).horizontalAdvance(act.text()) + pad)
+
+    def eventFilter(self, obj, event):
+        if obj is self.toolbar and event.type() in (QEvent.Resize, QEvent.LayoutRequest):
+            self._schedule_toolbar_balance()
+        return super().eventFilter(obj, event)
+
+    def _schedule_toolbar_balance(self):
+        if getattr(self, "_balance_pending", True):
+            return
+        self._balance_pending = True
+        QTimer.singleShot(0, self._balance_toolbar)
+
+    def _balance_toolbar(self):
+        """Keep Film Presets + Capture dead centre (spec/toolbar-centred.md):
+        measure how far right of the toolbar's middle their middle sits, `d`,
+        and move the balance (right minus left) by 2d. `d` doesn't depend on
+        the width, so this settles in one step. The balance is only spent
+        from room the toolbar has to spare: at the narrowest canvas it
+        shrinks to nothing rather than push Export into the overflow arrow.
+        Returns the px the signed balance moved."""
+        self._balance_pending = False
+        tb = self.toolbar
+        film = tb.widgetForAction(self.film_presets_action)
+        cap = tb.widgetForAction(self.capture_action)
+        if film is None or cap is None or not tb.isVisible() or not cap.isVisible():
+            return 0
+        spacers = (self._balance_left, self._balance_right_a, self._balance_right_b)
+        applied = sum(s.width() for s in spacers)
+        b = self._toolbar_balance
+        pushes = (self.capture_push_2, self.capture_push, self.convert_push, self.export_push)
+        fits = tb.sizeHint().width() <= tb.width()     # nothing in the overflow arrow
+        if fits and applied == abs(b) and all(p.width() > p.minimumWidth() for p in pushes):
+            mid = (film.geometry().left() + cap.geometry().right() + 1) / 2.0
+            d = mid - tb.width() / 2.0
+            if abs(d) >= 1.0:
+                b = max(-400, min(400, int(round(b + 2 * d))))
+        moved = b - self._toolbar_balance
+        self._toolbar_balance = b
+        room = max(0, tb.width() - (tb.sizeHint().width() - applied))
+        spend = min(abs(b), room)
+        left = spend if b < 0 else 0
+        right = spend if b > 0 else 0
+        for s, w in zip(spacers, (left, right // 2, right - right // 2)):
+            if s.width() != w:
+                s.setFixedWidth(w)
+        return moved
 
     def open_film_presets(self):
         """The toolbar's film canister: a menu of the roll's film and format,

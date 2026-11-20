@@ -62,3 +62,10 @@ The user asked for the full name. The 13 three-pixel spacers between toolbar
 buttons are gone (`add_spacer()` is now a no-op unless given a width): every
 button is already sized to its content with padding, so they still read
 apart. Measured at 1.06× the UI font: 885 of 900 px.
+
+
+## Revision 2026-11-20
+
+Film Presets + Capture dead centre, the conversion words midway between
+Capture and Export, Export boxed like the panel's Export…: see
+`spec/toolbar-centred.md`.

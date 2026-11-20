@@ -1,5 +1,6 @@
 """Export sits at the right-hand end of the preview toolbar, next to the
-histogram, with the other tools left-aligned."""
+histogram, with the other tools left-aligned; Film Presets + Capture dead
+centre, the conversion words midway, Export boxed (spec/toolbar-centred.md)."""
 import os
 import sys
 
@@ -57,7 +58,6 @@ def test_convert_and_un_convert_sit_with_export_behind_a_plain_gap():
     fc = tb.widgetForAction(ip.fc_action).geometry()
     assert un.right() < conv.left() and conv.right() < exp.left()
     assert exp.left() - conv.right() >= EXPORT_GAP_PX           # the break
-    assert EXPORT_GAP_PX > 18                                 # wider than it was
     assert un.left() - fc.right() > 100                       # pushed right, away from the rest
     assert ip.zoom_combo.geometry().left() > exp.right()      # zoom box last
 
@@ -129,3 +129,79 @@ def test_the_auto_crop_question_offers_selected_only_for_a_selection(monkeypatch
     assert not any(t.startswith("Auto Crop Selected") for t in one[0])
     assert one[1] == "Auto Crop Current"
     assert "Auto Crop Selected (4)" in many[0] and many[1] == "Auto Crop Selected (4)"
+
+
+def _shown(width):
+    from ui.main_window import MainWindow
+    w = MainWindow()
+    _KEEP.append(w)
+    w.resize(width, 900)
+    w.show()
+    for _ in range(4):
+        _app.processEvents()
+    return w, w.image_preview, w.image_preview.toolbar
+
+
+def _geo(tb, action):
+    return tb.widgetForAction(action).geometry()
+
+
+def test_film_and_capture_sit_dead_centre_at_any_width():
+    """The user, 2026-11-20: 'keeping film and capture buttons dead centre'."""
+    for width in (1600, 2400, 1900):
+        w, ip, tb = _shown(width)
+        film, cap = _geo(tb, ip.film_presets_action), _geo(tb, ip.capture_action)
+        mid = (film.left() + cap.right() + 1) / 2.0
+        assert abs(mid - tb.width() / 2.0) <= 1.0, (width, mid, tb.width())
+        assert ip._balance_toolbar() == 0                         # settled
+        # the pictures and the words differ in width: the balance pads one side
+        assert ip._toolbar_balance != 0
+
+
+def test_the_conversion_words_sit_midway_between_capture_and_export():
+    w, ip, tb = _shown(1800)
+    cap, ac = _geo(tb, ip.capture_action), _geo(tb, ip.auto_crop_action)
+    conv, exp = _geo(tb, ip.convert_action), _geo(tb, ip.export_action)
+    before, after = ac.left() - cap.right(), exp.left() - conv.right()
+    assert before > 60 and abs(before - after) <= 2, (before, after)
+
+
+def test_export_is_boxed_like_the_panels_export():
+    from ui import theme
+    from widgets.image_preview import EXPORT_BOX_PAD
+    w, ip, tb = _shown(1600)
+    btn = tb.widgetForAction(ip.export_action)
+    qss = btn.styleSheet()
+    assert "border: 1px solid " + theme.BORDER_STRONG in qss
+    assert "background-color: " + theme.SURFACE_ACTIVE in qss and "font-weight: bold" in qss
+    assert btn.height() == ip.zoom_combo.height()
+    from PySide6.QtGui import QFont, QFontMetrics
+    f = QFont(btn.font())
+    f.setBold(True)
+    assert btn.width() == QFontMetrics(f).horizontalAdvance("Export…") + EXPORT_BOX_PAD
+    # the panel's Export… carries the same look
+    assert theme.SURFACE_ACTIVE in w.sliders_panel.export_button.styleSheet()
+
+
+def test_the_balance_gives_way_at_the_narrowest_canvas():
+    """No room to spare: the balance shrinks rather than push Export and the
+    zoom box into the overflow arrow."""
+    w, ip, tb = _shown(2000)
+    learned = ip._toolbar_balance
+    assert learned != 0
+    w.resize(1100, 900)
+    for _ in range(4):
+        _app.processEvents()
+    assert tb.width() == ip.minimumWidth()
+    assert ip._toolbar_balance == learned            # kept, only not spent
+    assert tb.sizeHint().width() <= tb.width()
+    assert tb.widgetForAction(ip.export_action).isVisible() and ip.zoom_combo.isVisible()
+    spent = (ip._balance_left.width() + ip._balance_right_a.width()
+             + ip._balance_right_b.width())
+    assert spent < abs(ip._toolbar_balance)
+    # wide again: the whole balance comes back and it is centred again
+    w.resize(2000, 900)
+    for _ in range(4):
+        _app.processEvents()
+    film, cap = _geo(tb, ip.film_presets_action), _geo(tb, ip.capture_action)
+    assert abs((film.left() + cap.right() + 1) / 2.0 - tb.width() / 2.0) <= 1.0
