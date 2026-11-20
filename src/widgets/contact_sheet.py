@@ -25,7 +25,7 @@ import numpy as np
 from PySide6.QtCore import QObject, QPointF, QRectF, QSettings, Qt, Signal
 from PySide6.QtGui import (QColor, QFont, QImage, QPainter, QPainterPath, QPen,
                            QPixmap, QPolygonF)
-from PySide6.QtWidgets import (QApplication, QCheckBox, QFileDialog,
+from PySide6.QtWidgets import (QApplication, QCheckBox, QFileDialog, QRadioButton,
                                QGraphicsPixmapItem, QGraphicsScene,
                                QGraphicsView, QHBoxLayout, QLabel, QMenu,
                                QPushButton, QSizePolicy, QVBoxLayout, QWidget)
@@ -735,6 +735,36 @@ class _SheetGraphicsView(QGraphicsView):
         self.menuAt.emit(pt.x(), pt.y(), event.globalPos())
 
 
+class _RowCheck(QCheckBox):
+    """A check box that takes a click anywhere on itself (in a menu row a
+    click it ignored would reach the menu, which closes)."""
+
+    def hitButton(self, pos):
+        return self.rect().contains(pos)
+
+
+class _RowRadio(QRadioButton):
+    def hitButton(self, pos):
+        return self.rect().contains(pos)
+
+
+class _MenuRow(QWidget):
+    """A menu row around a button: a click on its margins clicks the button
+    and never reaches the menu (which would close)."""
+
+    def __init__(self, button, parent=None):
+        super().__init__(parent)
+        self._button = button
+
+    def mousePressEvent(self, e):
+        e.accept()
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.LeftButton and self.rect().contains(e.position().toPoint()):
+            self._button.click()
+        e.accept()
+
+
 class ContactSheetView(QWidget):
     """The sheet in place of the main image view: a bar (title, Negatives,
     Overlay, Fit / 100%, Export…, Back to frame) over the zoomable image."""
@@ -868,41 +898,67 @@ class ContactSheetView(QWidget):
     # --- Text… ---------------------------------------------------------------------
     def text_menu(self):
         """Text…'s menu (the test seam): Colour (the choices, Custom…), then
-        Show (what the captions carry)."""
-        from PySide6.QtGui import QActionGroup
+        Show (what the captions carry). The choices are real radio buttons
+        and check boxes in the menu, so it stays open while you tick (the
+        user, 2026-11-20: it closed after every click); click away when done.
+        Each row's action carries its label as text and its button as
+        `action.box`."""
+        from PySide6.QtWidgets import QButtonGroup
         sheet = self.sheet
         m = QMenu(self)
         head = m.addAction("Colour")
         head.setEnabled(False)
-        group = QActionGroup(m)
-        group.setExclusive(True)
         named = {k for k, _l, _c in TEXT_COLOURS}
+        group = QButtonGroup(m)
+        group.setExclusive(True)
         for key, label, _c in TEXT_COLOURS:
-            a = m.addAction(label)
-            a.setCheckable(True)
-            a.setChecked(sheet.text_colour == key)
-            group.addAction(a)
-            a.triggered.connect(lambda _=False, k=key: sheet.set_text_colour(k))
+            rb = _RowRadio(label)
+            rb.setChecked(sheet.text_colour == key)
+            group.addButton(rb)
+            rb.toggled.connect(lambda on, k=key: on and sheet.set_text_colour(k))
+            self._menu_row(m, label, rb)
         custom = m.addAction("Custom…")
         custom.setCheckable(True)
         custom.setChecked(sheet.text_colour not in named)
-        group.addAction(custom)
         custom.triggered.connect(self._pick_text_colour)
+        for b in group.buttons():
+            b.toggled.connect(lambda on: on and custom.setChecked(False))
         m.addSeparator()
         head = m.addAction("Show")
         head.setEnabled(False)
         for key, label in TEXT_INFO:
-            a = m.addAction(label)
-            a.setCheckable(True)
-            a.setChecked(key in sheet.text_info)
+            cb = _RowCheck(label)
+            cb.setChecked(key in sheet.text_info)
 
             def flip(on, k=key):
                 keys = set(sheet.text_info)
                 (keys.add if on else keys.discard)(k)
                 sheet.set_text_info(keys)
-            a.toggled.connect(flip)
+            cb.toggled.connect(flip)
+            self._menu_row(m, label, cb)
         m._group = group
         return m
+
+    @staticmethod
+    def _menu_row(menu, label, button):
+        """A row holding a check box or radio button: clicking it doesn't
+        close the menu. The whole row is the button's (it fills the width)."""
+        from PySide6.QtWidgets import QWidgetAction
+        row = _MenuRow(button, menu)
+        row.setObjectName("sheetMenuRow")
+        row.setAttribute(Qt.WA_StyledBackground, True)
+        row.setAttribute(Qt.WA_Hover, True)
+        row.setStyleSheet(f"#sheetMenuRow:hover {{ background-color: {theme.SURFACE_HOVER}; }}")
+        lay = QHBoxLayout(row)
+        lay.setContentsMargins(12, 3, 16, 3)
+        button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        lay.addWidget(button)
+        act = QWidgetAction(menu)
+        act.setText(label)
+        act.setDefaultWidget(row)
+        act.box = button
+        menu.addAction(act)
+        return act
 
     def _choose_colour(self, current):
         """The colour picker's answer, a QColor (invalid on Cancel). The seam."""

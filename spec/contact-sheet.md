@@ -170,3 +170,15 @@ the back to frame button stand out more."
 - The text colour and each info switch change the caption (and are
   remembered); custom colours are kept as #rrggbb.
 - Back to Frame has the inverse role.
+
+## Revision 2026-11-20: Text… stays open while you tick
+
+The user: "In this contact sheet menu, can we have little check boxes. At
+the moment, you need to reopen the menu after every click." Text…'s menu
+now holds real radio buttons (Colour) and check boxes (Show) in its rows
+(`QWidgetAction`, `ContactSheetView._menu_row`), so a click changes the
+sheet and the menu stays open; click away when done. The whole row takes
+the click (`_RowCheck` / `_RowRadio.hitButton`, `_MenuRow`): a click a
+button ignored used to reach the menu, which closed. Custom… is still an
+ordinary item (it opens the colour picker). Each row's action keeps its
+label as text and its button as `action.box` (the tests use them).
