@@ -657,6 +657,46 @@ def gate_edge(w_px, h_px, ppm, seed, colour, radius_mm):
     return QImage(out.data, w, h, 4 * w, QImage.Format_RGBA8888_Premultiplied).copy()
 
 
+def measured_gate_edge(w_px, h_px, ppm, colour, fmt):
+    """The film's colour over a frame's edge where its camera's gate is
+    measured (core.film_gate, the user 2026-11-20: 35 mm a clean edge, 120
+    the gate of his 6x6 reference), the same for every frame of the format,
+    softened by GATE_SOFT as the gate sits just off the film plane. None
+    when the format keeps a clean edge."""
+    from core import film_gate
+    w, h = max(2, int(math.ceil(w_px))), max(2, int(math.ceil(h_px)))
+    key = (w, h, round(float(ppm), 3), colour.rgb(), fmt)
+    if key in _GATE_CACHE:
+        return _GATE_CACHE[key]
+    outline = film_gate.outline_for(fmt, w / ppm, h / ppm)
+    if not outline:
+        return None
+    mask = QImage(w, h, QImage.Format_Grayscale8)
+    mask.fill(0)
+    mp = QPainter(mask)
+    mp.setRenderHint(QPainter.Antialiasing)
+    mp.setPen(Qt.NoPen)
+    mp.setBrush(QColor(255, 255, 255))
+    mp.drawPolygon(QPolygonF([QPointF(x * ppm, y * ppm) for x, y in outline]))
+    mp.end()
+    a = np.frombuffer(mask.constBits(), np.uint8, mask.bytesPerLine() * h)
+    a = a.reshape(h, mask.bytesPerLine())[:, :w].astype(np.float32) / 255.0
+    a = cv2.GaussianBlur(a, (0, 0), max(0.5, GATE_SOFT * ppm))
+    alpha = 1.0 - a
+    col = np.array([colour.red(), colour.green(), colour.blue()], np.float32)
+    out = np.empty((h, w, 4), np.uint8)
+    out[..., :3] = np.clip(col[None, None, :] * alpha[..., None], 0, 255).astype(np.uint8)
+    out[..., 3] = np.clip(alpha * 255, 0, 255).astype(np.uint8)
+    img = QImage(out.data, w, h, 4 * w, QImage.Format_RGBA8888_Premultiplied).copy()
+    if len(_GATE_CACHE) > 64:
+        _GATE_CACHE.clear()
+    _GATE_CACHE[key] = img
+    return img
+
+
+_GATE_CACHE = {}
+
+
 def lie_along(shown_w, shown_h, slot):
     """-90 (its top to the left) when a frame shown w x h has the other
     shape from its slot on screen, else 0 (the user, 2026-11-20)."""
@@ -1048,10 +1088,13 @@ class ContactSheet(QObject):
                             turn=lie_along(W, H, area),
                             bleed=bleed_mm * ppm if self.gate == "camera" else 0.0)
             if self.gate == "square":   # the scan's own gate shows with Camera's own
-                p.drawImage(QRectF(fr.x(), fr.y(), math.ceil(fr.width()),
-                                   math.ceil(fr.height())),
-                            gate_edge(fr.width(), fr.height(), ppm, i, self.edge_colour(),
-                                      GATE_RADIUS[bool(g.holes)]))
+                # 35 mm keeps a clean edge, 120 its camera's gate, the same on
+                # every frame (the user, 2026-11-20)
+                edge = measured_gate_edge(fr.width(), fr.height(), ppm, self.edge_colour(),
+                                          g.key)
+                if edge is not None:
+                    p.drawImage(QRectF(fr.x(), fr.y(), math.ceil(fr.width()),
+                                       math.ceil(fr.height())), edge)
         else:
             p.setPen(QColor(110, 110, 110))
             p.drawText(area, Qt.AlignCenter, "reading scan…")
