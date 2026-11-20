@@ -26,6 +26,10 @@ GEOMETRY = ("crop", "rotation", "flip_h", "flip_v", "fine_rotation")
 # Temperature and Tint are set per frame (auto white balance): a preset only
 # keeps them when the user ticks them.
 UNTICKED_BY_DEFAULT = ("adj:temperature", "adj:tint")
+# a flat field per scan type, by its file name in the flat library, or
+# "none" (spec/preset-flat-fields.md); a missing key is Automatic
+FLAT_SCANS = ("trichrome", "colour", "bw")
+NO_FLAT = "none"
 
 
 # --------------------------------------------------------------------------- #
@@ -116,10 +120,19 @@ def new_id():
     return uuid.uuid4().hex[:12]
 
 
-def make(film, push=0, version=1, notes="", clip=None, chosen=(), when=None, pid=None):
+def make(film, push=0, version=1, notes="", clip=None, chosen=(), when=None, pid=None,
+         flats=None):
     return clean({"id": pid or new_id(), "film": film, "push": push, "version": version,
                   "notes": notes, "clip": clip, "chosen": list(chosen or ()),
-                  "when": when or datetime.date.today().isoformat()})
+                  "when": when or datetime.date.today().isoformat(),
+                  "flats": flats or {}})
+
+
+def _clean_flats(f):
+    if not isinstance(f, dict):
+        return {}
+    return {k: str(v).strip() for k, v in f.items()
+            if k in FLAT_SCANS and isinstance(v, str) and str(v).strip()}
 
 
 def _clean_clip(c):
@@ -152,7 +165,8 @@ def clean(p):
     return {"id": pid, "film": film, "push": clamp_push(p.get("push")), "version": ver,
             "notes": str(p.get("notes") or "").strip(),
             "when": str(p.get("when") or ""),
-            "clip": _clean_clip(p.get("clip")), "chosen": chosen}
+            "clip": _clean_clip(p.get("clip")), "chosen": chosen,
+            "flats": _clean_flats(p.get("flats"))}
 
 
 def normalise(data):
@@ -274,7 +288,8 @@ def new_version(presets, pid):
     if p is None:
         return lst, None
     v = next_version(lst, p["film"], p["push"])
-    return add(lst, make(p["film"], p["push"], v, "", copy.deepcopy(p["clip"]), p["chosen"]))
+    return add(lst, make(p["film"], p["push"], v, "", copy.deepcopy(p["clip"]), p["chosen"],
+                         flats=dict(p.get("flats") or {})))
 
 
 def write_clip(presets, pid, clip, chosen):
@@ -302,6 +317,31 @@ def set_look(presets, pid, look):
     return update(lst, pid, clip=clip, chosen=chosen)
 
 
+def set_flat(presets, pid, scan, ref):
+    """The preset's flat for a scan type: a library file name, "none", or
+    "" / None for Automatic. (presets, the preset or None)."""
+    lst = normalise(presets)
+    p = find(lst, pid)
+    if p is None or scan not in FLAT_SCANS:
+        return lst, None
+    flats = dict(p.get("flats") or {})
+    if ref:
+        flats[scan] = str(ref)
+    else:
+        flats.pop(scan, None)
+    return update(lst, pid, flats=flats)
+
+
+def flat_of(p, scan):
+    """The preset's flat for a scan type: a file name, "none", or "" (Automatic)."""
+    return ((p or {}).get("flats") or {}).get(scan, "")
+
+
+def flats_map(presets):
+    """{preset id: flats} of the presets that name any (for flat_field)."""
+    return {p["id"]: dict(p["flats"]) for p in normalise(presets) if p.get("flats")}
+
+
 def look_of(p):
     if not p or not p.get("clip") or "look_lut" not in (p.get("chosen") or ()):
         return ""
@@ -323,6 +363,9 @@ def summary(p):
         n -= 1
     if n > 0:
         bits.append(f"{n} setting{'' if n == 1 else 's'}")
+    k = len((p or {}).get("flats") or {})
+    if k:
+        bits.append(f"{k} flat field{'' if k == 1 else 's'}")
     return " · ".join(bits) if bits else "no settings yet"
 
 

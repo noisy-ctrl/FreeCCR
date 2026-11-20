@@ -2144,8 +2144,7 @@ class SlidersPanel(QWidget):
             self.set_temporary_hint("That film preset no longer exists.", duration=3000)
             return
         film_presets.save(self._settings, presets)
-        img = ccr_backend.get_image_by_index(idx)
-        img.film_preset = p["id"]
+        self._mark_preset([idx], p["id"])
         self._sync_preset_button(idx)
         n = len(p["chosen"])
         self.set_temporary_hint(f"Wrote {n} setting{'' if n == 1 else 's'} to "
@@ -2203,7 +2202,8 @@ class SlidersPanel(QWidget):
         indices = [i for i in (indices or []) if ccr_backend.get_image_by_index(i) is not None]
         if not indices:
             return
-        presets = [p for p in self._film_presets() if film_presets.carried(p)]
+        presets = [p for p in self._film_presets()
+                   if film_presets.carried(p) or p.get("flats")]
         if not presets:
             self.set_temporary_hint("No film preset carries settings yet: Write Preset "
                                     "first.", duration=4000)
@@ -2213,20 +2213,42 @@ class SlidersPanel(QWidget):
         p = film_presets.find(presets, pid)
         if p is None:
             return
-        options = [o for o in paste_options(p["clip"], self._default_for)
-                   if o[1] in p["chosen"]]
-        chosen = self._apply_preset_rows(options, len(indices))
-        if not chosen:
-            return
-        old = self.clipboard
-        self.clipboard = p["clip"]
-        try:
-            self._paste_chosen(indices, chosen, verb="Applied")
-        finally:
-            self.clipboard = old
-        for i in indices:
-            ccr_backend.get_image_by_index(i).film_preset = p["id"]
+        if film_presets.carried(p):
+            options = [o for o in paste_options(p["clip"], self._default_for)
+                       if o[1] in p["chosen"]]
+            chosen = self._apply_preset_rows(options, len(indices))
+            if not chosen:
+                return
+            old = self.clipboard
+            self.clipboard = p["clip"]
+            try:
+                self._paste_chosen(indices, chosen, verb="Applied")
+            finally:
+                self.clipboard = old
+        else:
+            # a preset of flats only: nothing to paste, it just marks them
+            self.set_temporary_hint(f"Marked as {film_presets.label(p)}.", duration=3000)
+        self._mark_preset(indices, p["id"])
         self._sync_preset_button(self.current_idx)
+
+    def _mark_preset(self, indices, pid):
+        """Mark frames as of a film preset and re-grade those whose flat field
+        that changes (spec/preset-flat-fields.md §2)."""
+        imgs = [(i, ccr_backend.get_image_by_index(i)) for i in indices]
+        before = {i: ccr_backend.active_profile_signature(img) for i, img in imgs if img}
+        for _i, img in imgs:
+            if img is not None:
+                img.film_preset = pid
+        changed = [i for i, img in imgs if img is not None
+                   and getattr(img, "profile_signature", None) is not None
+                   and ccr_backend.active_profile_signature(img) != before[i]]
+        if changed:
+            tl = getattr(self.window(), "thumbnail_list", None)
+            if tl is not None and hasattr(tl, "replace_with_current_profile"):
+                tl.replace_with_current_profile(changed)
+            else:
+                ccr_backend.regrade_images_by_indices(changed)
+        return changed
 
     def _sync_color_profile_combo(self, idx):
         try:

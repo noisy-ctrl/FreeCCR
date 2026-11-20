@@ -82,6 +82,26 @@ class FilmPresetsPage(QWidget):
         look_row.addWidget(self.look_combo, 1)
         right.addLayout(look_row)
 
+        # a flat field per scan type, pointing into the flat library
+        # (spec/preset-flat-fields.md)
+        right.addWidget(QLabel("Flat fields"))
+        flat_grid = QGridLayout()
+        flat_grid.setHorizontalSpacing(theme.GAP_BTN)
+        self.flat_combos = {}
+        for row, scan in enumerate(fp.FLAT_SCANS):
+            flat_grid.addWidget(QLabel(SCAN_NAMES[scan]), row, 0, Qt.AlignRight)
+            cb = QComboBox()
+            theme.shrinkable_combo(cb)
+            cb.setToolTip("The flat this preset's frames scanned this way are corrected "
+                          "with. Automatic: the flat of their light and format. Flats "
+                          "live in their own folder (Color Management → Field "
+                          "correction → Show Folder); any number of presets can share one.")
+            cb.currentIndexChanged.connect(lambda _i, sc=scan: self._flat_changed(sc))
+            flat_grid.addWidget(cb, row, 1)
+            self.flat_combos[scan] = cb
+        flat_grid.setColumnStretch(1, 1)
+        right.addLayout(flat_grid)
+
         set_row = QHBoxLayout()
         self.settings_note = _muted()
         set_row.addWidget(self.settings_note, 1)
@@ -131,6 +151,7 @@ class FilmPresetsPage(QWidget):
         self.version_btn.clicked.connect(self.new_version)
         self.delete_btn.clicked.connect(self.delete_preset)
         self.adopt_btn.clicked.connect(self.make_presets)
+        self._read_flat_library()
         self.refresh()
 
     # --- data ---------------------------------------------------------------
@@ -139,6 +160,9 @@ class FilmPresetsPage(QWidget):
 
     def _save(self, presets):
         fp.save(self._st, presets)
+        mw = self._mw
+        if mw is not None and hasattr(mw, "push_preset_flats"):
+            mw.push_preset_flats()
 
     def bases(self):
         mw = self._mw
@@ -203,12 +227,64 @@ class FilmPresetsPage(QWidget):
             self.look_combo.setCurrentIndex(i)
         self.look_combo.blockSignals(False)
 
+    def _read_flat_library(self):
+        """Read the flat library once as the page opens (a flat shot
+        meanwhile is listed)."""
+        try:
+            from core.ccr_backend import ccr_backend
+            ccr_backend.refresh_field_library()
+        except Exception as e:
+            print(f"Flat library: {e}")
+
+    def _fill_flats(self, p):
+        from core import film_formats
+        from core import flat_field as ff
+        for scan, cb in self.flat_combos.items():
+            cb.blockSignals(True)
+            cb.clear()
+            cb.addItem("Automatic (by light and format)", "")
+            cb.addItem("None", fp.NO_FLAT)
+            for prof in sorted(ff.flats_for_scan(scan), key=lambda x: x.name.casefold()):
+                ref = ff.flat_ref(prof)
+                if not ref:
+                    continue
+                light, fmt = ff.profile_light(prof), ff.profile_format(prof)
+                tag = ff.LIGHT_LABELS.get(light, "") if light else "any light"
+                if fmt:
+                    tag += " · " + film_formats.short_label(fmt)
+                cb.addItem(f"{prof.name}  ({tag})", ref)
+            want = fp.flat_of(p, scan) if p is not None else ""
+            i = cb.findData(want)
+            if i < 0:
+                cb.addItem(f"{want} (missing: Automatic is used)", want)
+                i = cb.count() - 1
+            cb.setCurrentIndex(i)
+            cb.setEnabled(p is not None)
+            cb.blockSignals(False)
+
+    def _flat_changed(self, scan):
+        p = self.current()
+        if p is None:
+            return
+        ref = self.flat_combos[scan].currentData() or ""
+        if ref == fp.flat_of(p, scan):
+            return
+        presets, new = fp.set_flat(self.presets(), p["id"], scan, ref)
+        if new is None:
+            return
+        self._save(presets)
+        mw = self._mw
+        if mw is not None and hasattr(mw, "_refresh_profile_mismatch"):
+            mw._refresh_profile_mismatch()       # open frames of it flagged ⚠
+        self.refresh(select=new["id"])
+
     def _show(self, _row=-1):
         p = self.current()
         on = p is not None
         for w in (self.film_edit, self.push, self.version, self.notes, self.look_combo,
                   self.clear_btn, self.version_btn, self.delete_btn):
             w.setEnabled(on)
+        self._fill_flats(p)
         for w in (self.film_edit, self.push, self.version, self.notes):
             w.blockSignals(True)
         self.film_edit.setText(p["film"] if on else "")

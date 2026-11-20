@@ -1302,11 +1302,13 @@ class CCRBackend:
             except Exception as e:
                 print(f"Failed to convert image at index {idx}: {e}")
 
-    def active_profile_signature(self) -> str:
+    def active_profile_signature(self, img=None) -> str:
         """The grading signature an image decoded NOW would carry: the camera
         profile ('none' in Positive mode or when disabled/unset, else
-        'icc:<desc>' / 'dcp:<name>' / 'camera_matrix') composed with the active
-        field correction ('+ff:<id>'). Field correction applies in Positive mode
+        'icc:<desc>' / 'dcp:<name>' / 'camera_matrix') composed with the
+        field correction ('+ff:<id>'): with `img`, the flat THAT frame would
+        get (its preset's, its light and format's: spec/preset-flat-fields.md
+        §5), else the active one. Field correction applies in Positive mode
         too, so it is composed on independently. Drives the per-image thumbnail
         mismatch warning; compared only for equality."""
         from core import color_management, flat_field
@@ -1316,7 +1318,8 @@ class CCRBackend:
             base = "camera_matrix"          # Adobe+autoscale decode, distinct from RAW "none"
         else:
             base = color_management.active_profile_signature()
-        ff = flat_field.active_field_signature()
+        ff = (flat_field.frame_field_signature(img) if img is not None
+              else flat_field.active_field_signature())
         return base if ff == "none" else f"{base}+{ff}"
 
     @staticmethod

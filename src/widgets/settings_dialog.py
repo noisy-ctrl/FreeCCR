@@ -637,7 +637,16 @@ class SettingsDialog(QDialog):
         self._btn_field_delete = QPushButton("Delete")
         theme.style_button(self._btn_field_delete, "danger")
         self._btn_field_delete.clicked.connect(self._delete_field)
+        # the flats live in their own folder; a film preset points at one
+        # (spec/preset-flat-fields.md)
+        self._btn_field_folder = QPushButton("Show Folder")
+        self._btn_field_folder.setToolTip(
+            "Open the folder the flat fields are kept in (one .ffc file each, beside "
+            "the camera profiles and film looks). Film presets point at these files "
+            "(Film Presets → Flat fields), so any number of presets can share one.")
+        self._btn_field_folder.clicked.connect(self._show_field_folder)
         ff_btns.addWidget(btn_create)
+        ff_btns.addWidget(self._btn_field_folder)
         ff_btns.addWidget(self._btn_field_delete)
         ff_btns.addStretch(1)
         gf.addLayout(ff_btns)
@@ -754,6 +763,17 @@ class SettingsDialog(QDialog):
         self.refresh_color_management()
 
     # --- Field correction: immediate, like the camera-profile selection ---- #
+    def _field_folder_opener(self, path):
+        """The test seam."""
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+        QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+    def _show_field_folder(self):
+        path = ccr_backend.field_profiles_dir()
+        self._field_folder_opener(path)
+        return path
+
     def _create_field(self):
         self._mw.create_field_correction_profile()
         self.refresh_color_management()
