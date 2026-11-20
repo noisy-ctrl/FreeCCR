@@ -140,3 +140,19 @@ fixed per strip (the same every redraw), with an amount.
 - Settings remembered; roll format reaches the sheet; Export size.
 - Layout… menu rows, greying, stays open while ticking; Text… greys name /
   format / status in strips; Layout… sits before Text….
+
+## Revision 2026-11-20: 35 mm perforations as they are
+
+The user: "fix the proportions a little for 35mm, looking at reference
+images of the dimensions and crucially - actual scanned full height 35mm
+film". The holes were drawn the wrong way round (2.8 along x 2.0 across:
+wide and short). 135 film carries KS perforations, 0.078 x 0.110 in = 1.98 mm
+ALONG the film x 2.79 mm ACROSS it, corner radius 0.51 mm, pitch 4.75 mm,
+2.01 mm from the edge (ISO 1007; SMPTE KS). Measured on the user's own
+full-width scans (half-size decodes, holes found as clear blobs, the pitch as
+the scale): 1.98-2.01 mm along x 2.77-2.80 mm across on three rolls, and
+25.35 mm between the two rows' inner edges (KS gives 25.37). That leaves
+~0.7 mm of rebate between a hole and the 24 mm picture, and the 2.01 mm
+band between the holes and the edge is where the edge print sits, as on the
+film. `HOLE_ALONG`, `HOLE_ACROSS`, `HOLE_EDGE`, `HOLE_RADIUS` in
+`widgets/contact_sheet.py`; a test pins them.

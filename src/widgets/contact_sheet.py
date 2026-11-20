@@ -79,8 +79,13 @@ LEAK_PEAK = {"slight": 0.38, "strong": 0.8}
 # pale yellow at the core (a print of fogged negative edges)
 LEAK_RAMP = ((0.0, (150, 20, 5)), (0.4, (230, 70, 15)), (0.75, (255, 150, 40)),
              (1.0, (255, 225, 150)))
-# 35 mm perforations (ISO 491 / KS), mm
-HOLE_PITCH, HOLE_ALONG, HOLE_ACROSS, HOLE_EDGE = 4.75, 2.8, 2.0, 2.0
+# 35 mm perforations, mm: KS (0.078 x 0.110 in), 1.98 ALONG the film by 2.79
+# ACROSS it, corners r 0.51, every 4.75, 2.01 from the edge. Measured on the
+# user's own full-width scans (2026-11-20): 1.98-2.01 along x 2.77-2.80
+# across, 25.35 between the two rows (2.79 / 2.01 had been the wrong way
+# round: wide, short holes).
+HOLE_PITCH, HOLE_ALONG, HOLE_ACROSS, HOLE_EDGE = 4.75, 1.98, 2.79, 2.01
+HOLE_RADIUS = 0.51
 EDGE_FONT_MM = 1.5          # edge print lettering on the film
 EDGE_BAND_MM = 1.6          # 120's edge print: the outer band of its rebate
 CAMERA_BLEED_MM = 1.5       # "Camera's own": at most this much scan past the crop
@@ -470,29 +475,41 @@ class StripLayout:
         return ("strips", self.n, self.fmt, self.direction, self.cell_w)
 
 
-def leak_blobs(k, length_mm, roll_start=False):
+def leak_reach(geo):
+    """How far in from the film's edge a leak may reach, mm: past the
+    sprocket holes' outer half on 35 mm (the holes' inner edge is 0.7 mm
+    from the picture), 60 % of the rebate on 120. Always well short of the
+    picture, so it's plausible the pictures took no light (the user,
+    2026-11-20: "never extend to the images")."""
+    if geo.holes:
+        return HOLE_EDGE + 0.6 * HOLE_ACROSS
+    return 0.6 * geo.rebate
+
+
+def leak_blobs(k, length_mm, reach_mm, roll_start=False):
     """Strip k's light leaks: [(edge 0|1, centre mm, width mm, height, depth
     mm)], fixed per strip (the same every redraw and export). Each edge gets
-    one to three soft patches; the roll's first strip is fogged at its start
-    on both edges, deeper."""
+    one to three soft patches, as deep as a third to a whole `reach_mm`; the
+    roll's first strip is fogged at its start on both edges, the deepest."""
     rng = np.random.default_rng(20261120 + 7919 * k)
     out = []
     for edge in (0, 1):
         for _ in range(int(rng.integers(1, 4))):
             out.append((edge, float(rng.uniform(0, length_mm)),
                         float(rng.uniform(6, 28)), float(rng.uniform(0.3, 1.0)),
-                        float(rng.uniform(0.8, 2.2))))
+                        float(rng.uniform(0.25, 0.6)) * reach_mm))
     if roll_start:
         for edge in (0, 1):
-            out.append((edge, 0.0, 22.0, 1.2, 4.0))
+            out.append((edge, 0.0, 22.0, 1.2, 0.8 * reach_mm))
     return out
 
 
-def leak_field(blobs, x_mm, film_mm, ppm, peak, holes=()):
+def leak_field(blobs, x_mm, film_mm, ppm, peak, reach_mm, holes=()):
     """Premultiplied RGBA (h, w, 4) uint8 of the fog over strip columns at
     `x_mm` (mm along the strip, one per pixel column), the film's whole
-    width; `holes` = slot rects (x0, y0, x1, y1 mm) left clear: the leaks
-    are on the edges only, never on a picture."""
+    width. A leak fades in from the film's edge and is gone, smoothly, by
+    `reach_mm` in; `holes` = slot rects (x0, y0, x1, y1 mm) are left clear
+    as well, so no picture is ever fogged."""
     h = max(1, int(round(film_mm * ppm)))
     y = (np.arange(h, dtype=np.float32) + 0.5) / ppm
     x = np.asarray(x_mm, dtype=np.float32)
@@ -500,7 +517,9 @@ def leak_field(blobs, x_mm, film_mm, ppm, peak, holes=()):
     for edge, c, w, a, depth in blobs:
         along = a * np.exp(-((x - c) ** 2) / (2 * w * w))
         d = y if edge == 0 else film_mm - y
-        field += np.exp(-d / depth)[:, None] * along[None, :]
+        t = np.clip(d / max(reach_mm, 1e-6), 0.0, 1.0)
+        fade = 1.0 - t * t * (3.0 - 2.0 * t)          # smoothstep to 0 at the reach
+        field += (np.exp(-d / max(depth, 1e-6)) * fade)[:, None] * along[None, :]
     for x0, y0, x1, y1 in holes:
         inside = ((x[None, :] >= x0) & (x[None, :] <= x1)
                   & (y[:, None] >= y0) & (y[:, None] <= y1))
@@ -890,7 +909,8 @@ class ContactSheet(QObject):
                     continue                    # never a hole cut by the strip's end
                 for y in (HOLE_EDGE * ppm, F - (HOLE_EDGE + HOLE_ACROSS) * ppm):
                     hole = QPainterPath()
-                    hole.addRoundedRect(QRectF(x, y, ha, hx), 0.4 * ppm, 0.4 * ppm)
+                    hole.addRoundedRect(QRectF(x, y, ha, hx), HOLE_RADIUS * ppm,
+                                        HOLE_RADIUS * ppm)
                     p.fillPath(hole, hc)
         p.restore()
 
@@ -945,8 +965,9 @@ class ContactSheet(QObject):
         for j in range(k * lay.per, k * lay.per + lay.frames_in(k)):
             r = lay.slot(j)
             slots.append((r.left() / ppm, r.top() / ppm, r.right() / ppm, r.bottom() / ppm))
-        blobs = leak_blobs(k, lay.xs[lay.frames_in(k)] / ppm, roll_start=(k == 0))
-        rgba = leak_field(blobs, x_mm, g.film, ppm, LEAK_PEAK[self.leaks], slots)
+        reach = leak_reach(g)
+        blobs = leak_blobs(k, lay.xs[lay.frames_in(k)] / ppm, reach, roll_start=(k == 0))
+        rgba = leak_field(blobs, x_mm, g.film, ppm, LEAK_PEAK[self.leaks], reach, slots)
         rgba = np.ascontiguousarray(rgba[:lay.film_px])
         h, w = rgba.shape[:2]
         qi = QImage(rgba.data, w, h, 4 * w, QImage.Format_RGBA8888_Premultiplied).copy()
@@ -1400,8 +1421,10 @@ class ContactSheetView(QWidget):
             b.toggled.connect(lambda on: on and custom.setChecked(False))
         heading("Light leaks")
         acts, _g = radios(LEAKS, sheet.leaks, sheet.set_leaks, tips={
-            "slight": "A little warm fog on the film's edges, never on a picture.",
-            "strong": "More fog on the film's edges, never on a picture."})
+            "slight": "A little warm fog along the film's edges, fading out before "
+                      "the sprocket holes' inner side: never near a picture.",
+            "strong": "More fog along the film's edges, still fading out before the "
+                      "sprocket holes' inner side: never near a picture."})
         strip_rows += acts
         m.addSeparator()
         holes = _RowCheck("White sprocket holes")
