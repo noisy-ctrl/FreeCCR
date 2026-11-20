@@ -308,7 +308,8 @@ def test_layout_menu(monkeypatch):
     assert texts == ["Layout", "Grid", "Respect crop", "Film strips", "Strips run",
                      "By format (down for 6x4.5)", "Across", "Down", "Gate", "Square",
                      "Camera's own", "Film edge", "Black", "Dark grey", "Brown-black",
-                     "Custom…", "White sprocket holes"]
+                     "Custom…", "Light leaks", "Off", "Slight", "Strong",
+                     "White sprocket holes"]
     by = {a.text(): a for a in m.actions()}
     assert by["Grid"].box.isChecked()
     # the strips' rows are greyed in the grid, and Respect crop is the grid's
