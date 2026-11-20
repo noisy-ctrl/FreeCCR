@@ -945,17 +945,37 @@ class ContactSheet(QObject):
         f.setPixelSize(max(8, int(round(min(EDGE_FONT_MM, 0.85 * band_mm) * ppm))))
         f.setBold(True)
         p.setFont(f)
-        if "number" in self.text_info:
-            p.setPen(num_c)
-            tb = QRectF(slot.left(), F - band, slot.width(), band)
-            p.drawText(tb, Qt.AlignLeft | Qt.AlignVCenter, f" {i + 1}")
-            p.drawText(tb, Qt.AlignHCenter | Qt.AlignVCenter, f"{i + 1}A ▸")
-        if film and "film" in self.text_info and i % lay.per == 0:
-            f.setBold(False)
-            p.setFont(f)
-            p.setPen(word_c)
-            p.drawText(QRectF(slot.left(), 0, slot.width(), band),
-                       Qt.AlignLeft | Qt.AlignVCenter, f" {film}")
+        tb = QRectF(slot.left(), F - band, slot.width(), band)
+        top = QRectF(slot.left(), 0, slot.width(), band)
+        if g.holes:
+            # 35 mm: the number at the frame's start and "NA" with its arrow
+            if "number" in self.text_info:
+                p.setPen(num_c)
+                p.drawText(tb, Qt.AlignLeft | Qt.AlignVCenter, f" {i + 1}")
+                p.drawText(tb, Qt.AlignHCenter | Qt.AlignVCenter, f"{i + 1}A ▸")
+            if film and "film" in self.text_info and i % lay.per == 0:
+                f.setBold(False)
+                p.setFont(f)
+                p.setPen(word_c)
+                p.drawText(top, Qt.AlignLeft | Qt.AlignVCenter, f" {film}")
+        else:
+            # 120, as the film is printed (the user's reference, 2026-11-20):
+            # arrows along the bottom edge, the number after the second;
+            # the film's name twice along the top
+            w4 = slot.width() / 4.0
+            if "number" in self.text_info:
+                p.setPen(num_c)
+                for cx, text in ((slot.left() + w4, "►"),
+                                 (slot.left() + 3 * w4, f"► {i + 1}")):
+                    p.drawText(QRectF(cx - w4, tb.top(), 2 * w4, band),
+                               Qt.AlignHCenter | Qt.AlignVCenter, text)
+            if film and "film" in self.text_info:
+                f.setBold(False)
+                p.setFont(f)
+                p.setPen(word_c)
+                inset = 0.04 * slot.width()
+                p.drawText(top.adjusted(inset, 0, 0, 0), Qt.AlignLeft | Qt.AlignVCenter, film)
+                p.drawText(top.adjusted(0, 0, -inset, 0), Qt.AlignRight | Qt.AlignVCenter, film)
         p.restore()
 
     def _draw_leaks(self, p, i, k, piece):

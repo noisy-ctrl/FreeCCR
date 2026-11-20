@@ -156,3 +156,15 @@ the scale): 1.98-2.01 mm along x 2.77-2.80 mm across on three rolls, and
 band between the holes and the edge is where the edge print sits, as on the
 film. `HOLE_ALONG`, `HOLE_ACROSS`, `HOLE_EDGE`, `HOLE_RADIUS` in
 `widgets/contact_sheet.py`; a test pins them.
+
+## Revision 2026-11-20 b: 120's edge print as the film's
+
+The user's reference (a full-border 6x7 Portra 400 scan; "this is a
+horizontal format like 6x7, unlike 645"): 120 carries no "NA" half numbers.
+Its bottom edge has arrows, the frame's number after the second; its top edge
+the film's name, at both ends. Strips without holes now print that way: "►"
+at a quarter of the frame and "► N" at three quarters along the bottom, the
+film (when Text… has Film and the roll's film is known) at the frame's start
+and end along the top. 35 mm is unchanged. The 6x7 rebate measured on the
+reference, ~2.3-2.75 mm of a 61.5 mm film, matches the geometry
+(`STRIPS["6x7"]`, 2.75 mm), so no size changed.
