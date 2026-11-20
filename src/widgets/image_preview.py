@@ -2839,8 +2839,12 @@ class ImagePreview(QWidget):
             # a film typed in the Start window, not a preset: shown, inert
             film_action(film, False, True).setToolTip(
                 "Typed in Start Hot Folder Tether, not a film preset.")
+        flat_formats, flat_presets = self._flat_marks(presets)
         for p in presets:
-            film_action(fp.label(p), p["id"], p["id"] == pid)
+            # "flat field" in the shortcut column: this preset names one
+            # (spec/flat-field-info.md §2)
+            film_action(fp.label(p) + ("\tflat field" if p["id"] in flat_presets else ""),
+                        p["id"], p["id"] == pid)
         menu.addSeparator()
         head = menu.addAction("Format")
         head.setEnabled(False)
@@ -2848,7 +2852,7 @@ class ImagePreview(QWidget):
         formats.setExclusive(True)
         for key, label in [("", "Not set")] + [(k, lb) for k, lb, _r, _c in
                                                 film_formats.FILM_FORMATS]:
-            a = menu.addAction(label)
+            a = menu.addAction(label + ("\tflat field" if key and key in flat_formats else ""))
             a.setCheckable(True)
             a.setChecked(key == (fmt or ""))
             formats.addAction(a)
@@ -2857,9 +2861,65 @@ class ImagePreview(QWidget):
             elif hasattr(mw, "set_roll_format"):
                 a.triggered.connect(lambda _=False, k=key: mw.set_roll_format(k))
         menu.addSeparator()
+        head = menu.addAction("Flat field")
+        head.setEnabled(False)
+        for line in self.flat_field_lines():
+            a = menu.addAction(line)
+            a.setEnabled(False)
+        menu.addSeparator()
         menu.addAction("Edit Film Presets…").triggered.connect(self.edit_film_presets)
         menu._groups = (films, formats)          # keep the groups alive
         return menu
+
+    def _flat_marks(self, presets):
+        """(formats with a flat of the roll's light in the library, ids of
+        presets that name a flat): the film menu marks them."""
+        from core import film_presets as fp
+        from core import flat_field
+        light = "rgb" if getattr(ccr_backend, "scan_type", "colour") == "trichrome" else "white"
+        fmts = {flat_field.profile_format(p) for p in flat_field.library()
+                if flat_field.profile_light(p) == light and flat_field.profile_format(p)}
+        named = {pid for pid, flats in fp.flats_map(presets).items()
+                 if any(v and v != fp.NO_FLAT for v in flats.values())}
+        return fmts, named
+
+    def flat_field_lines(self):
+        """The film menu's lines about the frame on screen's flat field
+        (spec/flat-field-info.md §2): what its decode applied, how it lined
+        up and with what camera and lens, and whether re-grading would give
+        it another."""
+        from core import flat_field
+        idx = self.current_idx
+        img = ccr_backend.get_image_by_index(idx) if idx is not None else None
+        if img is None:
+            return ["No frame open"]
+        missing = object()
+        applied = getattr(img, "flat_applied", missing)
+        if applied is missing:                 # decoded before this was kept
+            applied = flat_field.applied_record(flat_field.profile_for(img))
+        lines = [f"Frame {idx + 1}: " + (applied["label"] if applied else "no flat field")]
+        if applied:
+            bits = []
+            carrier = applied.get("carrier")
+            if carrier in ("moved", "same"):
+                bits.append("followed the carrier")
+            elif carrier == "not found":
+                bits.append("the carrier wasn't found: applied as shot")
+            bits += [b for b in (applied.get("camera"), applied.get("lens")) if b]
+            if bits:
+                lines.append("   " + " · ".join(bits))
+        sig = getattr(img, "profile_signature", None)
+        try:
+            now_sig = ccr_backend.active_profile_signature(img)
+        except Exception:
+            now_sig = sig
+        if sig is not None and now_sig != sig:
+            now = flat_field.profile_for(img)
+            if flat_field.flat_id(now) != (applied.get("id") if applied else None):
+                lines.append("⚠ Re-grade to apply "
+                             + (flat_field.flat_label(now) if now is not None else "no flat")
+                             + ": right-click its thumbnail")
+        return lines
 
     def open_crop(self):
         """The toolbar's Crop: what the panel's Crop button does."""

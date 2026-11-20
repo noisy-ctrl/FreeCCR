@@ -254,8 +254,8 @@ def flat_mon(film_mon, tmp_path, monkeypatch):
     mon._read_flat = read
     seen = []
     decode, merge = _fake_decoders(seen)
-    mon._build_flats = lambda result, fmt, out, demosaic=True: fc.build_flats(
-        result, fmt, out, decode=decode, merge=merge)
+    mon._build_flats = lambda result, fmt, out, demosaic=True, details=None: fc.build_flats(
+        result, fmt, out, decode=decode, merge=merge, details=details)
     mon._flats_threaded = False
     return mon, usb, light, lib, seen
 
@@ -350,7 +350,8 @@ def test_the_default_format_is_the_rolls_else_the_guides(flat_mon):
 def test_the_window_asks_format_and_lights():
     from widgets.flat_shoot_dialog import FlatShootDialog
     d = FlatShootDialog("645", ["white", "ir"])
-    assert d.values() == {"format": "645", "lights": ["white", "ir"]}
+    assert d.values() == {"format": "645", "lights": ["white", "ir"],
+                          "camera": "", "lens": ""}
     assert FlatShootDialog("", []).values()["format"] is None    # nothing known: Any
     d.light_boxes["white"].setChecked(False)
     d.light_boxes["ir"].setChecked(False)
@@ -358,4 +359,4 @@ def test_the_window_asks_format_and_lights():
     assert not d.buttons.button(QDialogButtonBox.Ok).isEnabled()
     d.format_combo.setCurrentIndex(d.format_combo.count() - 1)   # Any format, last
     d.light_boxes["rgb"].setChecked(True)
-    assert d.values() == {"format": None, "lights": ["rgb"]}
+    assert d.values() == {"format": None, "lights": ["rgb"], "camera": "", "lens": ""}
