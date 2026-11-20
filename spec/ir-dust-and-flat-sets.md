@@ -77,6 +77,12 @@ R0016 003 (IR, no film: 8 s ISO 3200); R0015 019 (IR, 5 s ISO 4000).
 
 ## 3. Finding the dust (`core/ir_dust.py`)
 
+> Revised 2026-11-20 by `spec/ir-dust-v2.md`: local crosstalk, a line stage,
+> each candidate judged by a model on the IR and the frame's own shots
+> (Sensitivity = the probability needed), fibres healed as strokes along
+> their skeleton, and learning from the user's corrections. What follows
+> is revision 1.
+
 On 2×2 photosite blocks of both RAWs (no demosaic, camera-native linear):
 
 1. `L = ln(IR) − ln(IR flat)` (the IR flat of §5; none → a heavily smoothed

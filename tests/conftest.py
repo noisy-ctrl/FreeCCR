@@ -32,6 +32,10 @@ _os.environ.setdefault(
 # A failed film-base Measure keeps its test shot (spec/film-base-exposure.md):
 # never in the user's app folder from a test.
 _os.environ.setdefault("FREECCR_MEASURE_KEEP", _tempfile.mkdtemp(prefix="freeccr-measure-kept-"))
+# IR dust learns from corrections (spec/ir-dust-v2.md §4): a throwaway store.
+_os.environ.setdefault(
+    "FREECCR_IR_DUST_LEARNED",
+    _os.path.join(_tempfile.mkdtemp(prefix="freeccr-ir-dust-"), "ir_dust_learned.json"))
 
 
 # Background renders give way while the UI is busy (spec/background-yields.md).
