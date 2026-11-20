@@ -754,8 +754,11 @@ def flats_for_scan(scan) -> List[FieldProfile]:
             if not profile_light(p) or profile_light(p) in lights]
 
 
-def pinned(img):
-    """("auto" | "none" | "flat" | "missing", profile or None)."""
+def pinned(img, opening=None):
+    """("auto" | "none" | "flat" | "missing" | "format", profile or None).
+    "format": the pinned flat is of another format than the frame, or its
+    opening has another shape, so the automatic choice is used
+    (spec/flat-format-match.md)."""
     pins = _preset_flats.get(frame_preset(img) or "")
     ref = (pins or {}).get(frame_scan(img)) if pins else None
     if not ref:
@@ -763,17 +766,62 @@ def pinned(img):
     if ref == NO_FLAT:
         return "none", None
     p = flat_by_ref(ref)
-    return ("flat", p) if p is not None else ("missing", None)
+    if p is None:
+        return "missing", None
+    fmt, pf = frame_format(img), profile_format(p)
+    op = opening if opening is not None else getattr(img, "flat_opening", None)
+    if (fmt and pf and pf != fmt) or opening_fits(p, op) is False:
+        return "format", p
+    return "flat", p
 
 
-def profile_for(img) -> Optional[FieldProfile]:
-    """The flat for a frame: its preset's flat for its scan type when the
-    preset names one (spec/preset-flat-fields.md), else a tagged library
-    flat of its light and format, else of its light, else the active profile
-    (with no tagged flat in the library: always the active profile, as
-    before)."""
+ASPECT_TOL = 0.08          # two openings whose axes scale this differently: another shape
+
+
+def opening_fits(p: Optional[FieldProfile], frame_sides) -> Optional[bool]:
+    """Whether a flat's carrier opening has the frame's shape and size (a move
+    the rail could make): True / False, None when either isn't known. A 6x4.5
+    carrier's opening stood up doesn't fit a 6x7 one lying down."""
+    ref = profile_opening(p) if p is not None else None
+    if not ref or not frame_sides:
+        return None
+    scales = []
+    for a, b in (("left", "right"), ("top", "bottom")):
+        if all(k in ref and k in frame_sides for k in (a, b)):
+            span_ref = ref[b] - ref[a]
+            span = frame_sides[b] - frame_sides[a]
+            if span_ref > 0.02 and span > 0.02:
+                scales.append(span / span_ref)
+    if not scales:
+        return None
+    if any(not (TRACK_S[0] <= x <= TRACK_S[1]) for x in scales):
+        return False
+    if len(scales) == 2 and abs(scales[0] / scales[1] - 1) > ASPECT_TOL:
+        return False
+    return True
+
+
+def _newest(pool):
+    return max(pool, key=lambda p: str((p.meta or {}).get("created", "")))
+
+
+def needs_opening() -> bool:
+    """Whether choosing a frame's flat looks at its carrier opening."""
+    return any(profile_opening(p) for p in _library)
+
+
+def profile_for(img, opening=None) -> Optional[FieldProfile]:
+    """The flat for a frame (spec/flat-format-match.md): its preset's flat for
+    its scan type when the preset names one of the frame's format
+    (spec/preset-flat-fields.md), else a library flat of its light and
+    format, else a format-less one whose opening fits; with the format
+    unknown, the flat whose carrier opening has the frame's shape. Never
+    another format's flat: a carrier stands one format up and another lying
+    down. Nothing that fits: the active profile (with no tagged flat in the
+    library: always the active profile, as before). `opening`: the frame's
+    carrier opening (else the one kept on it)."""
     if img is not None and _preset_flats:
-        state, p = pinned(img)
+        state, p = pinned(img, opening)
         if state == "flat":
             return p
         if state == "none":
@@ -785,10 +833,24 @@ def profile_for(img) -> Optional[FieldProfile]:
     cands = [p for p in tagged if profile_light(p) == light]
     if not cands:
         return _active_profile
+    op = opening if opening is not None else getattr(img, "flat_opening", None)
     fmt = frame_format(img)
-    exact = [p for p in cands if fmt and profile_format(p) == fmt]
-    pool = exact or [p for p in cands if not profile_format(p)] or cands
-    return max(pool, key=lambda p: str((p.meta or {}).get("created", "")))
+    free = [p for p in cands if not profile_format(p) and opening_fits(p, op) is not False]
+    if fmt:
+        exact = [p for p in cands if profile_format(p) == fmt]
+        if exact:
+            return _newest([p for p in exact if opening_fits(p, op) is not False] or exact)
+        return _newest(free) if free else _active_profile
+    # the format unknown: the flat whose opening has the frame's shape
+    fit = [p for p in cands if opening_fits(p, op) is True]
+    if fit:
+        return _newest(fit)
+    if free:
+        return _newest(free)
+    if (len({profile_format(p) for p in cands}) == 1
+            and all(opening_fits(p, op) is not False for p in cands)):
+        return _newest(cands)            # one format, nothing says otherwise
+    return _active_profile
 
 
 def _to_view8(arr_u16: np.ndarray) -> np.ndarray:
@@ -857,7 +919,34 @@ def build_tagged_profile(arr_u16: np.ndarray, name: str, *, light: str,
     src = fill_outside(arr_u16, sides) if sides else arr_u16
     meta = dict(meta or {})
     meta.update({"light": light, "film_format": fmt or None, "opening": sides or None})
-    return build_profile(src, name, meta=meta, max_gain=max_gain)
+    prof = build_profile(src, name, meta=meta, max_gain=max_gain)
+    share = coverage(prof)
+    if share is not None and share < COVER_MIN:
+        prof.meta.setdefault("warnings", [])
+        prof.meta["warnings"] = list(prof.meta["warnings"]) + [
+            f"The light falls to {share * 100:.0f} % of its brightest at the edge of "
+            "the carrier's opening: is it big enough for this format? Where it is "
+            "darker than the flat can lift, the frame stays dark."]
+    return prof
+
+
+COVER_MIN = 0.30           # light at the opening's edge under this share of its peak: warned
+
+
+def coverage(p: FieldProfile) -> Optional[float]:
+    """The dimmest light inside the flat's opening as a share of its
+    brightest (each channel; the lowest), or None with no opening."""
+    sides = profile_opening(p)
+    if not sides or p.gain is None:
+        return None
+    g = np.asarray(p.gain, np.float32)
+    h, w = g.shape[:2]
+    m = opening_mask(sides, w, h)
+    if not m.any():
+        return None
+    light = 1.0 / np.maximum(g.reshape(h, w, -1), 1e-6)
+    inside = light[m]
+    return float(np.min(inside.min(axis=0) / np.maximum(inside.max(axis=0), 1e-6)))
 
 
 def track(profile: Optional[FieldProfile], frame_sides: Optional[Dict[str, float]]):

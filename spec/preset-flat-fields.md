@@ -82,6 +82,11 @@ over (`flat_field.note_capture(paths, pid, scan)`, `_dispatch_to_worker` /
 start); the note is read by path (`file_path` or any `merge_sources`),
 bounded at 2,000 entries.
 
+A pinned flat of another format than the frame's, or whose carrier opening
+has another shape, is left for the automatic choice (`pinned` → "format";
+spec/flat-format-match.md, the user the same day: a carrier stands one
+format up and another lying down).
+
 ## 5. Flagging per frame
 
 The grading signature was global: any change to the library flagged every

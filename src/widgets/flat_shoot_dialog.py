@@ -26,21 +26,23 @@ class FlatShootDialog(QDialog):
             "the test shots aren't kept.\n\nThe flats go into the field-correction "
             "library, replacing that light and format's flats shot here before, and "
             "frames of that light and format use them, moved with the carrier's "
-            "opening.")
+            "opening. A flat is for its format only: a carrier stands one format up "
+            "and another lying down, and a wider one needs more of the light.")
         text.setWordWrap(True)
         text.setMinimumWidth(420)
         lay.addWidget(text)
         r = QHBoxLayout()
         r.addWidget(QLabel("Format"))
         self.format_combo = QComboBox()
-        self.format_combo.addItem("Any format", "")
         for key, label, _ratio, _cols in film_formats.FILM_FORMATS:
             self.format_combo.addItem(label, key)
+        self.format_combo.addItem("Any format (no format of its own)", "")
         i = self.format_combo.findData(default_format or "")
-        self.format_combo.setCurrentIndex(max(0, i))
-        self.format_combo.setToolTip("The carrier's format. Frames of this format use "
-                                     "these flats; Any format: frames with no flat of "
-                                     "their own.")
+        self.format_combo.setCurrentIndex(i if i >= 0 else self.format_combo.count() - 1)
+        self.format_combo.setToolTip(
+            "The carrier's format. Frames of this format use these flats; a flat of "
+            "Any format is used only where a frame's format has none and its carrier "
+            "opening has the same shape.")
         r.addWidget(self.format_combo, 1)
         lay.addLayout(r)
         self.light_boxes = {}

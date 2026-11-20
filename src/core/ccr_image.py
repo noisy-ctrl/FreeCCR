@@ -748,13 +748,23 @@ class CCRImage:
         if arr is None:
             return arr
         from core import flat_field
-        profile = flat_field.profile_for(self)
+        # the opening first: it picks the flat when the format isn't known,
+        # and keeps another shape's flat off (spec/flat-format-match.md)
+        opening = None
+        if flat_field.needs_opening():
+            try:
+                opening = self._carrier_opening(arr)
+            except Exception as e:
+                logging.warning(f"Carrier opening not found: {e}")
+        profile = flat_field.profile_for(self, opening=opening)
         if profile is None:
             return arr
         try:
             if flat_field.profile_opening(profile):
+                if opening is None:
+                    opening = self._carrier_opening(arr)
                 profile = flat_field.tracked_profile(
-                    profile, flat_field.track(profile, self._carrier_opening(arr)))
+                    profile, flat_field.track(profile, opening))
             return flat_field.apply_field(arr, profile, encoded=encoded, mono=mono)
         except Exception as e:
             logging.warning(f"Field correction could not be applied: {e}")

@@ -574,6 +574,12 @@ class DustRemovalPanel(QWidget):
             text = "No dust found in the IR shot at this sensitivity."
         else:
             text = "IR shot attached: Find Again looks for dust."
+        dm = getattr(img, "_ir_dust_map", None) if img is not None else None
+        if has_ir and not busy and why is None and dm is not None:
+            # how the IR shot was lined up (spec/ir-dust-and-flat-sets.md §6)
+            extra = ir_dust.align_text(getattr(dm, "align", None))
+            if extra:
+                text += " " + extra
         self.ir_status.setText(text)
 
     def _ask_ir_file(self, img=None):
