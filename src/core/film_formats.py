@@ -37,6 +37,24 @@ LONG_MM = {"35mm": 36.0, "half": 24.0, "xpan": 65.0, "645": 56.0, "6x6": 56.0,
            "6x7": 69.0, "6x8": 76.0, "6x9": 84.0, "6x12": 112.0, "6x17": 168.0,
            "4x5": 120.0, "8x10": 245.0}
 
+# The contact sheet's film strips (spec/contact-sheet-strips.md): the image
+# area ALONG and ACROSS the film, the gap between frames and the film's
+# width (mm), whether it has sprocket holes, and the way the strip runs by
+# default: "down" where the picture's long side lies across the film (6x4.5),
+# so its frames read the right way up. Sheet film is not cut into strips.
+STRIPS = {
+    "35mm": (36.0, 24.0, 2.0, 35.0, True, "across"),
+    "half": (18.0, 24.0, 1.0, 35.0, True, "across"),
+    "xpan": (65.0, 24.0, 2.5, 35.0, True, "across"),
+    "645": (41.5, 56.0, 4.0, 61.5, False, "down"),
+    "6x6": (56.0, 56.0, 4.0, 61.5, False, "across"),
+    "6x7": (69.0, 56.0, 4.0, 61.5, False, "across"),
+    "6x8": (76.0, 56.0, 4.0, 61.5, False, "across"),
+    "6x9": (84.0, 56.0, 4.0, 61.5, False, "across"),
+    "6x12": (112.0, 56.0, 4.0, 61.5, False, "across"),
+    "6x17": (168.0, 56.0, 4.0, 61.5, False, "across"),
+}
+
 # auto crop's format names (core.auto_crop.FORMATS) -> film keys
 DETECTOR_TO_FILM = {"35mm 3:2": "35mm", "645": "645", "6x6": "6x6", "6x7": "6x7",
                     "6x9": "6x9", "half-frame": "half", "xpan": "xpan"}
@@ -91,6 +109,26 @@ def long_mm(name):
     """The frame's long side on the film in mm, or None if unknown."""
     k = film_key(name)
     return LONG_MM.get(k) if k else None
+
+
+class StripGeometry:
+    """One format's film strip, mm: `along` x `across` image area, `gap`
+    between frames, `film` wide, `holes`, default `direction`."""
+
+    def __init__(self, key, along, across, gap, film, holes, direction):
+        self.key, self.along, self.across, self.gap = key, along, across, gap
+        self.film, self.holes, self.direction = film, holes, direction
+        self.pitch = along + gap
+        self.rebate = (film - across) / 2.0
+        self.per_strip = strip_length(key)
+
+
+def strip_geometry(name):
+    """The format's StripGeometry, or None (sheet film, or unknown)."""
+    k = film_key(name)
+    if k not in STRIPS:
+        return None
+    return StripGeometry(k, *STRIPS[k])
 
 
 def short_label(name):
