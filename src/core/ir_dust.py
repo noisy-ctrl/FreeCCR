@@ -46,6 +46,7 @@ import cv2
 import numpy as np
 
 KIND = "ir"
+MARK_KIND = "mark"          # a mark found in the colour shots (core/film_marks.py)
 RADIUS = 5                  # closing disc radius, blocks: dust larger is rare
 SENS_DEFAULT = 50           # the Dust panel's IR Sensitivity, 0..100
 SIGMA_AT_0 = 10.0           # seeds deeper than this many sigma at sensitivity 0
@@ -1218,10 +1219,27 @@ def rethreshold(img, sensitivity: Optional[float] = None) -> List[dict]:
     sens = SENS_DEFAULT if sensitivity is None else int(sensitivity)
     img.ir_dust_sens = sens
     if dm is None:
-        return list(img.ir_dust_pending or [])
+        return [s for s in (img.ir_dust_pending or []) if s.get("kind") == KIND]
     spots = spots_from(dm, sens, keep_mask_for(img, dm.size))
-    img.ir_dust_pending = spots
+    marks = [s for s in (img.ir_dust_pending or []) if s.get("kind") == MARK_KIND]
+    img.ir_dust_pending = (spots + marks) or None
     return spots
+
+
+def find_all(img, sensitivity: Optional[float] = None,
+             mark_sensitivity: Optional[float] = None) -> List[dict]:
+    """Find a frame's dust with its IR shot (when it has one) and the marks
+    in its own shots (spec/colour-shot-marks.md), both flagged, not healed.
+    Raises only when neither can be looked for."""
+    from core import film_marks
+    why_ir, why_marks = can_find(img), film_marks.can_find(img)
+    if why_ir and why_marks:
+        raise ValueError(why_ir if getattr(img, "ir_source", None) else why_marks)
+    if why_ir is None:
+        find(img, sensitivity)
+    if why_marks is None:
+        film_marks.find(img, mark_sensitivity)
+    return pending(img)
 
 
 def pending(img) -> List[dict]:
@@ -1253,6 +1271,27 @@ def _examples_from(spots: List[dict], label: int, weight: float) -> List[tuple]:
     return out
 
 
+def _marks_examples(spots, label, weight):
+    try:
+        from core import film_marks
+        return film_marks.examples_from(spots, label, weight)
+    except Exception:
+        return {}
+
+
+def _learn_marks(by_kind) -> None:
+    """Marks' corrections are kept for a later fitted model (spec
+    colour-shot-marks §4); nothing reads them yet."""
+    if not by_kind:
+        return
+    try:
+        from core import ir_dust_learn
+        for kind, ex in by_kind.items():
+            ir_dust_learn.add(kind, ex)
+    except Exception:
+        pass
+
+
 def _learn(img, examples: List[tuple]) -> None:
     if not examples:
         return
@@ -1274,7 +1313,9 @@ def heal(img, learn: bool = True) -> int:
     if learn:
         from core import ir_dust_learn
         _learn(img, _examples_from(new, 1, ir_dust_learn.HEAL_WEIGHT))
-    img.dust_spots = [s for s in (img.dust_spots or []) if s.get("kind") != KIND] + new
+        _learn_marks(_marks_examples(new, 1, ir_dust_learn.HEAL_WEIGHT))
+    img.dust_spots = [s for s in (img.dust_spots or [])
+                      if s.get("kind") not in (KIND, MARK_KIND)] + new
     img.ir_dust_pending = None
     return len(new)
 def _touches(spot: dict, pts: List[List[float]], r: float, aspect: float) -> bool:
@@ -1302,6 +1343,7 @@ def erase(img, pts: List[List[float]], r: float, aspect: float,
     if learn and (n_h or n_f):
         gone = [s for s in spots if s not in kept] + [s for s in flagged_spots if s not in kept_f]
         _learn(img, _examples_from(gone, 0, 1.0))
+        _learn_marks(_marks_examples(gone, 0, 1.0))
     if n_h:
         img.dust_spots = kept
     if n_f:

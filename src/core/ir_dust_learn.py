@@ -31,6 +31,8 @@ PRIOR_N = 60.0             # the defaults count as this many examples
 MIN_EXPLICIT = 10          # weight-1 corrections before the model moves
 HEAL_WEIGHT = 0.3
 KINDS = ("merged", "single")
+MARK_KINDS = ("marks-light", "marks-dark")   # kept for a later model, not read yet
+N_FEATURES = {"merged": 8, "single": 8, "marks-light": 7, "marks-dark": 7}
 
 _lock = threading.Lock()
 _state: Dict[str, object] = {"path": None, "data": None, "models": {}}
@@ -81,12 +83,12 @@ def _save(data: dict) -> None:
 def add(kind: str, examples: Sequence[Tuple[Sequence[float], int, float]]) -> int:
     """Record examples (features, 1 dust / 0 not, weight) for a kind of scan.
     Returns how many were kept."""
-    if kind not in KINDS or not examples:
+    if kind not in N_FEATURES or not examples:
         return 0
     rows = []
     for feats, label, weight in examples:
         f = [float(v) for v in feats]
-        if len(f) != 8 or not all(np.isfinite(f)):
+        if len(f) != N_FEATURES[kind] or not all(np.isfinite(f)):
             continue
         rows.append([round(v, 4) for v in f] + [1 if label else 0, float(weight)])
     if not rows:
