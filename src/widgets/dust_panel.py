@@ -144,15 +144,17 @@ class _IrFindWorker(QObject):
     done = Signal(object, object)      # img, spots
     failed = Signal(object, str)       # img, message
 
-    def __init__(self, img, sensitivity):
+    def __init__(self, img, sensitivity, mark_sensitivity=None):
         super().__init__()
         self.img = img
         self.sensitivity = sensitivity
+        self.mark_sensitivity = mark_sensitivity
 
     def run(self):
         from core import ir_dust
         try:
-            spots = ir_dust.find(self.img, self.sensitivity)
+            # the IR shot's dust and the colour shots' marks (spec/colour-shot-marks.md)
+            spots = ir_dust.find_all(self.img, self.sensitivity, self.mark_sensitivity)
             self.done.emit(self.img, spots)
         except Exception as e:
             self.failed.emit(self.img, str(e))
@@ -196,6 +198,10 @@ class DustRemovalPanel(QWidget):
         self._ir_sens_timer.setSingleShot(True)
         self._ir_sens_timer.setInterval(120)
         self._ir_sens_timer.timeout.connect(self._apply_ir_sensitivity)
+        self._mark_sens_timer = QTimer(self)
+        self._mark_sens_timer.setSingleShot(True)
+        self._mark_sens_timer.setInterval(120)
+        self._mark_sens_timer.timeout.connect(self._apply_mark_sensitivity)
 
         self._build_ui()
         self._refresh_ai_section()
@@ -211,7 +217,7 @@ class DustRemovalPanel(QWidget):
         layout.addWidget(header)
 
         # --- IR dust (spec/ir-dust-and-flat-sets.md) ---
-        self.ir_heading = self._section_label("IR Dust")
+        self.ir_heading = self._section_label("Dust and Marks")
         # right-click: forget what IR dust learned (spec/ir-dust-v2.md §4)
         self.ir_heading.setContextMenuPolicy(Qt.CustomContextMenu)
         self.ir_heading.customContextMenuRequested.connect(self._ir_heading_menu)
@@ -228,8 +234,9 @@ class DustRemovalPanel(QWidget):
             "IR light on, nothing moved). Capture's IR for dust option does "
             "this for every shot.")
         self.ir_attach_btn.clicked.connect(self._on_ir_attach)
-        self.ir_find_btn = QPushButton("Find Again")
-        self.ir_find_btn.setToolTip("Look for dust in the IR shot again.")
+        self.ir_find_btn = QPushButton("Find")
+        self.ir_find_btn.setToolTip("Look for dust in the IR shot (when there is one) and for "
+                                    "marks in the frame's own shots.")
         self.ir_find_btn.clicked.connect(lambda: self.find_ir(self._current_image()))
         ir_row1.addWidget(self.ir_attach_btn)
         ir_row1.addWidget(self.ir_find_btn)
@@ -251,6 +258,26 @@ class DustRemovalPanel(QWidget):
         ir_sens.addWidget(self.ir_sens_slider)
         ir_sens.addWidget(self.ir_sens_value)
         layout.addLayout(ir_sens)
+        # the colour shots' marks (spec/colour-shot-marks.md): their own sensitivity
+        from core import film_marks
+        mk_row = QHBoxLayout()
+        mk_row.setSpacing(theme.GAP_TIGHT)
+        mk_lbl = QLabel("Marks")
+        mk_lbl.setFixedWidth(theme.LABEL_COL_W)
+        mk_lbl.setToolTip("Marks the IR can't see, found in the frame's own shots and "
+                          "outlined in blue: damage that prints dark, and dust and fibres "
+                          "the IR misses. Higher finds fainter ones, and more of the picture.")
+        self.mark_sens_slider = QSlider(Qt.Horizontal)
+        self.mark_sens_slider.setRange(0, 100)
+        self.mark_sens_slider.setValue(film_marks.SENS_DEFAULT)
+        self.mark_sens_slider.setFixedHeight(theme.CONTROL_H)
+        self.mark_sens_value = QLabel(str(film_marks.SENS_DEFAULT))
+        self.mark_sens_value.setFixedWidth(theme.VALUE_COL_W)
+        self.mark_sens_slider.valueChanged.connect(self._on_mark_sens)
+        mk_row.addWidget(mk_lbl)
+        mk_row.addWidget(self.mark_sens_slider)
+        mk_row.addWidget(self.mark_sens_value)
+        layout.addLayout(mk_row)
         ir_row2 = QHBoxLayout()
         theme.apply_button_row(ir_row2)
         self.ir_heal_btn = QPushButton("Heal Them")
@@ -482,6 +509,12 @@ class DustRemovalPanel(QWidget):
             self.ir_sens_slider.setValue(int(sens))
             self.ir_sens_slider.blockSignals(False)
             self.ir_sens_value.setText(str(int(sens)))
+        msens = getattr(img, "mark_sens", None) if img is not None else None
+        if msens is not None:
+            self.mark_sens_slider.blockSignals(True)
+            self.mark_sens_slider.setValue(int(msens))
+            self.mark_sens_slider.blockSignals(False)
+            self.mark_sens_value.setText(str(int(msens)))
         self.refresh_ir_section()
 
     def sync_brush_size(self, r_norm: float):
@@ -544,40 +577,64 @@ class DustRemovalPanel(QWidget):
 
     # --- IR dust ----------------------------------------------------------
     def refresh_ir_section(self):
-        """Buttons and the status line for the frame on screen."""
-        from core import ir_dust
+        """Buttons and the status line for the frame on screen: the IR shot's
+        dust (amber) and the colour shots' marks (blue,
+        spec/colour-shot-marks.md)."""
+        from core import ir_dust, film_marks
         img = self._current_image()
         has_ir = img is not None and bool(getattr(img, "ir_source", None))
-        flagged = len(ir_dust.pending(img)) if img is not None else 0
+        pend = ir_dust.pending(img) if img is not None else []
+        n_ir = sum(1 for sp in pend if sp.get("kind") == ir_dust.KIND)
+        n_mk = len({(sp.get("mk_c"), tuple(sp.get("mk_f") or ())) for sp in pend
+                    if sp.get("kind") == ir_dust.MARK_KIND})
+        flagged = len(pend)
         healed = (sum(1 for sp in (getattr(img, "dust_spots", None) or [])
-                      if sp.get("kind") == ir_dust.KIND) if img is not None else 0)
+                      if sp.get("kind") in (ir_dust.KIND, ir_dust.MARK_KIND))
+                  if img is not None else 0)
         busy = img is not None and (img is self._ir_busy_img or img in self._ir_queue)
         why = ir_dust.can_find(img) if img is not None else "No frame."
+        why_mk = film_marks.can_find(img) if img is not None else "No frame."
+        searched = img is not None and (getattr(img, "ir_dust_sens", None) is not None
+                                        or getattr(img, "mark_sens", None) is not None)
         self.ir_attach_btn.setEnabled(img is not None and not busy)
         self.ir_attach_btn.setText("Change IR Shot…" if has_ir else "Attach IR Shot…")
-        self.ir_find_btn.setEnabled(has_ir and not busy and why is None)
+        self.ir_find_btn.setEnabled(img is not None and not busy
+                                    and (why is None or why_mk is None))
         self.ir_sens_slider.setEnabled(has_ir and not busy)
+        self.mark_sens_slider.setEnabled(img is not None and not busy and why_mk is None)
         self.ir_heal_btn.setEnabled(flagged > 0 and not busy)
         self.ir_before_btn.setEnabled(self.image_preview.has_dust_before())
         if img is None:
             text = ""
-        elif not has_ir:
-            text = ("No IR shot for this frame. Capture's IR for dust option "
-                    "takes one with every shot; Attach IR Shot… pairs one by hand.")
         elif busy:
-            text = "Looking for dust in the IR shot…"
-        elif why is not None:
-            text = why
+            text = ("Looking for dust in the IR shot and marks in the frame's shots…"
+                    if why is None else "Looking for marks in the frame's shots…")
         elif flagged:
-            text = (f"The IR shot shows {flagged} speck{'s' if flagged != 1 else ''} "
-                    "(outlined in amber), not healed yet.")
+            bits = []
+            if n_ir:
+                bits.append(f"the IR shot shows {n_ir} speck{'s' if n_ir != 1 else ''} (amber)")
+            if n_mk:
+                bits.append(f"the colour shots {n_mk} mark{'s' if n_mk != 1 else ''} (blue)")
+            text = (" and ".join(bits) + ", not healed yet.")
+            text = text[0].upper() + text[1:]
         elif healed:
-            text = (f"{healed} IR spot{'s' if healed != 1 else ''} healed. Before "
+            text = (f"{healed} spot{'s' if healed != 1 else ''} healed. Before "
                     "shows the picture without them; Erase Spots removes a wrong one.")
-        elif getattr(img, "ir_dust_sens", None) is not None:
-            text = "No dust found in the IR shot at this sensitivity."
+        elif searched:
+            text = ("No dust or marks found at these sensitivities." if has_ir
+                    else "No marks found at this sensitivity.")
+        elif why is not None and why_mk is not None:
+            text = (why if has_ir else
+                    "No IR shot for this frame. Capture's IR for dust option takes one with "
+                    "every shot; Attach IR Shot… pairs one by hand. " + why_mk)
+        elif not has_ir:
+            text = ("No IR shot for this frame: Find looks for marks in its own shots. "
+                    "Capture's IR for dust option takes an IR shot with every shot; "
+                    "Attach IR Shot… pairs one by hand.")
         else:
-            text = "IR shot attached: Find Again looks for dust."
+            text = "IR shot attached: Find looks for dust and marks."
+        if has_ir and why is not None and why_mk is None and not busy:
+            text += " " + why
         dm = getattr(img, "_ir_dust_map", None) if img is not None else None
         if has_ir and not busy and why is None and dm is not None:
             # how the IR shot was lined up (spec/ir-dust-and-flat-sets.md §6)
@@ -680,8 +737,9 @@ class DustRemovalPanel(QWidget):
     def find_ir(self, img, sensitivity=None):
         """Look for a frame's IR dust in the background (queued behind any
         other frame being searched); flagged, never healed by itself."""
-        from core import ir_dust
-        if img is None or ir_dust.can_find(img) is not None:
+        from core import ir_dust, film_marks
+        if img is None or (ir_dust.can_find(img) is not None
+                           and film_marks.can_find(img) is not None):
             self.refresh_ir_section()
             return False
         if sensitivity is None:
@@ -712,7 +770,10 @@ class DustRemovalPanel(QWidget):
         img = self._ir_queue.pop(0)
         self._ir_busy_img = img
         self._ir_thread = new_thread()
-        self._ir_worker = _IrFindWorker(img, getattr(img, "_ir_find_sens", None))
+        self._ir_worker = _IrFindWorker(img, getattr(img, "_ir_find_sens", None),
+                                        (getattr(img, "mark_sens", None)
+                                         if getattr(img, "mark_sens", None) is not None
+                                         else self.mark_sens_slider.value()))
         self._ir_worker.moveToThread(self._ir_thread)
         self._ir_thread.started.connect(self._ir_worker.run)
         self._ir_worker.done.connect(self._on_ir_found)
@@ -745,7 +806,26 @@ class DustRemovalPanel(QWidget):
 
     def _on_ir_failed(self, img, msg):
         if img is self._current_image():
-            self.ir_status.setText(f"The IR shot couldn't be read: {msg}")
+            self.ir_status.setText(f"The shots couldn't be read: {msg}")
+
+    def _on_mark_sens(self, value):
+        self.mark_sens_value.setText(str(value))
+        self._mark_sens_timer.start()
+
+    def _apply_mark_sensitivity(self):
+        from core import film_marks
+        img = self._current_image()
+        if img is None or film_marks.can_find(img) is not None:
+            return
+        v = self.mark_sens_slider.value()
+        img.mark_sens = v
+        if getattr(img, "_mark_map", None) is None:
+            self.find_ir(img)              # no map in memory: look again (both)
+            return
+        film_marks.rethreshold(img, v)
+        self.image_preview._draw_ir_pending()
+        self.image_preview.refresh_dust_badge()
+        self.refresh_ir_section()
 
     def _on_ir_sens(self, value):
         self.ir_sens_value.setText(str(value))

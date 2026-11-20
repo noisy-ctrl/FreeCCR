@@ -5404,8 +5404,11 @@ class ImagePreview(QWidget):
             tip += f"\n\nIR dust found and waiting to be healed: open Dust removal."
         self.dust_action.setToolTip(tip)
 
+    MARK_PENDING_COLOUR = QColor(80, 170, 255, 170)  # blue: a mark from the colour shots
+
     def _draw_ir_pending(self):
-        """Outline the flagged IR spots in amber (dust mode only)."""
+        """Outline the flagged IR spots in amber and the colour shots' marks
+        in blue (dust mode only; spec/colour-shot-marks.md §3)."""
         for item in self._ir_pending_items:
             try:
                 self.scene.removeItem(item)
@@ -5436,11 +5439,12 @@ class ImagePreview(QWidget):
                 pt = to_display.map(pt)
             return t.map(pt)
 
-        path = QPainterPath()
+        paths = {"ir": QPainterPath(), "mark": QPainterPath()}
         for sp in spots:
             pts = sp.get("pts") or []
             if not pts:
                 continue
+            path = paths["mark" if sp.get("kind") == ir_dust.MARK_KIND else "ir"]
             r = float(sp.get("r", 0.0)) * w
             if len(pts) == 1:
                 c = scene_pt(pts[0])
@@ -5455,14 +5459,21 @@ class ImagePreview(QWidget):
                 stroker.setCapStyle(Qt.RoundCap)
                 stroker.setJoinStyle(Qt.RoundJoin)
                 path.addPath(stroker.createStroke(sub))
-        item = QGraphicsPathItem(path.simplified())
-        pen = QPen(self.IR_PENDING_COLOUR, 1.6)
-        pen.setCosmetic(True)
-        item.setPen(pen)
-        item.setBrush(QColor(255, 176, 32, 40))
-        item.setZValue(4)
-        self.scene.addItem(item)
-        self._ir_pending_items = [item]
+        self._ir_pending_items = []
+        for key, colour in (("ir", self.IR_PENDING_COLOUR), ("mark", self.MARK_PENDING_COLOUR)):
+            if paths[key].isEmpty():
+                continue
+            item = QGraphicsPathItem(paths[key].simplified())
+            pen = QPen(colour, 1.6)
+            pen.setCosmetic(True)
+            item.setPen(pen)
+            fill = QColor(colour)
+            fill.setAlpha(40)
+            item.setBrush(fill)
+            item.setZValue(4)
+            item.setData(0, key)
+            self.scene.addItem(item)
+            self._ir_pending_items.append(item)
 
     @staticmethod
     def dust_detect_source_for(img):
