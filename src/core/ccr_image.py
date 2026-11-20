@@ -757,15 +757,22 @@ class CCRImage:
             except Exception as e:
                 logging.warning(f"Carrier opening not found: {e}")
         profile = flat_field.profile_for(self, opening=opening)
+        # what this decode applied, for the film menu (spec/flat-field-info.md)
+        self.flat_applied = None
         if profile is None:
             return arr
         try:
+            carrier = None
             if flat_field.profile_opening(profile):
                 if opening is None:
                     opening = self._carrier_opening(arr)
-                profile = flat_field.tracked_profile(
-                    profile, flat_field.track(profile, opening))
-            return flat_field.apply_field(arr, profile, encoded=encoded, mono=mono)
+                move, carrier = flat_field.track_state(profile, opening)
+                profile_used = flat_field.tracked_profile(profile, move)
+            else:
+                profile_used = profile
+            out = flat_field.apply_field(arr, profile_used, encoded=encoded, mono=mono)
+            self.flat_applied = flat_field.applied_record(profile, carrier)
+            return out
         except Exception as e:
             logging.warning(f"Field correction could not be applied: {e}")
             return arr

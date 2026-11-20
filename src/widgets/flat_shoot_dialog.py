@@ -1,7 +1,7 @@
 """Capture → Shoot Flat Fields…: which format and which lights
 (spec/ir-dust-and-flat-sets.md §5)."""
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QHBoxLayout,
-                               QLabel, QVBoxLayout)
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox,
+                               QFormLayout, QHBoxLayout, QLabel, QLineEdit, QVBoxLayout)
 
 from core import film_formats
 from core import flat_capture as fc
@@ -16,7 +16,8 @@ LIGHT_TEXTS = (("white", "White light", "One shot under the white LED."),
 
 
 class FlatShootDialog(QDialog):
-    def __init__(self, default_format="", lights=("white", "rgb"), parent=None):
+    def __init__(self, default_format="", lights=("white", "rgb"), parent=None,
+                 camera="", lens=""):
         super().__init__(parent)
         self.setWindowTitle("Shoot Flat Fields")
         lay = QVBoxLayout(self)
@@ -45,6 +46,19 @@ class FlatShootDialog(QDialog):
             "opening has the same shape.")
         r.addWidget(self.format_combo, 1)
         lay.addLayout(r)
+        # what the flats were shot with (spec/flat-field-info.md §3): the
+        # shots' metadata has the camera; an adapted lens records nothing
+        form = QFormLayout()
+        self.camera_edit = QLineEdit(camera or "")
+        self.camera_edit.setPlaceholderText("From the shots' metadata")
+        self.lens_edit = QLineEdit(lens or "")
+        self.lens_edit.setPlaceholderText("None in the metadata? Type it")
+        for w in (self.camera_edit, self.lens_edit):
+            w.setToolTip("Kept with the flats, so you can tell later what they were "
+                         "shot with. Typed names win over the shots' metadata.")
+        form.addRow("Camera", self.camera_edit)
+        form.addRow("Lens", self.lens_edit)
+        lay.addLayout(form)
         self.light_boxes = {}
         for key, label, tip in LIGHT_TEXTS:
             cb = QCheckBox(label)
@@ -68,4 +82,6 @@ class FlatShootDialog(QDialog):
         return [k for k in fc.LIGHT_ORDER if self.light_boxes[k].isChecked()]
 
     def values(self):
-        return {"format": self.format_combo.currentData() or None, "lights": self.lights()}
+        return {"format": self.format_combo.currentData() or None, "lights": self.lights(),
+                "camera": self.camera_edit.text().strip(),
+                "lens": self.lens_edit.text().strip()}

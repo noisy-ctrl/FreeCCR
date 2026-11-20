@@ -3621,8 +3621,11 @@ class LiveCaptureMonitor(QWidget):
     def _ask_flat_fields(self, default_format):
         """The test seam: {"format", "lights"} or None (cancelled)."""
         from widgets.flat_shoot_dialog import FlatShootDialog
+        from core import flat_field as ff
         saved = str(_settings().value("live/flat_lights", "white,rgb") or "")
-        dlg = FlatShootDialog(default_format, [x for x in saved.split(",") if x], parent=self)
+        typed = ff.remembered_details()
+        dlg = FlatShootDialog(default_format, [x for x in saved.split(",") if x], parent=self,
+                              camera=typed["camera"], lens=typed["lens"])
         self.light_dialog(dlg)
         if dlg.exec() != QDialog.Accepted:
             return None
@@ -3646,6 +3649,9 @@ class LiveCaptureMonitor(QWidget):
         lights = [x for x in fc.LIGHT_ORDER if x in choice["lights"]]
         _settings().setValue("live/flat_lights", ",".join(lights))
         _settings().setValue("live/flat_format", choice.get("format") or "")
+        details = {k: str(choice.get(k) or "").strip() for k in ("camera", "lens")}
+        from core import flat_field as _ff
+        _ff.remember_details(**details)
         ir_start = {"shutter": self.ir_shutter_combo.currentData()
                     or str(self.IR_SHUTTER_DEFAULT),
                     "iso": self.ir_iso_combo.currentData() or str(int(self.IR_ISO_DEFAULT))}
@@ -3663,6 +3669,7 @@ class LiveCaptureMonitor(QWidget):
             "kind": "flat", "cal": cal, "name": "", "index": None, "rect": None,
             "where": "the carrier's opening", "read": self._read_flat, "read_arg": None,
             "format": choice.get("format") or None, "lights": lights,
+            "details": details,
             "temp": tempfile.mkdtemp(prefix="freeccr-flats-"),
             "levels": dict(self._levels),
             "exposure": {f: self._exposure.get(f) for f in ("shutter", "iso")
@@ -3695,10 +3702,11 @@ class LiveCaptureMonitor(QWidget):
         demosaic = bool(getattr(ccr_backend, "merge_demosaic", True))
         temp, notes = m["temp"], list(cal.notes)
         build = self._build_flats
+        details = m.get("details") or None
 
         def work():
             try:
-                out = (build(*args, demosaic=demosaic), notes, cal.result)
+                out = (build(*args, demosaic=demosaic, details=details), notes, cal.result)
             except Exception as e:
                 out = e
             finally:

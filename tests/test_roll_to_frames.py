@@ -98,7 +98,10 @@ def test_the_menus_format_asks_and_goes_to_the_chosen_frames(mw):
     mw.thumbnail_list.selected_indices = lambda: [1]
     mw._ask_roll_to_frames = lambda what, n_sel, n: asked.append((what, n_sel, n)) or None
     menu = mw.image_preview.film_menu()
-    {a.text(): a for a in menu.actions()}["120: 6x7"].trigger()
+    # a format with a flat carries "flat field" in the shortcut column
+    by = {a.text().split("\t")[0]: a for a in menu.actions()}
+    assert by["120: 6x7"].text() == "120: 6x7\tflat field"
+    by["120: 6x7"].trigger()
     assert mw.capture_session["format"] == "6x7"                  # the roll, as before
     assert asked == [("format", 1, 3)] and all(f.film_format == "645" for f in frames)
     assert mw.regraded == []                                      # Just the Roll

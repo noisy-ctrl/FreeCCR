@@ -459,8 +459,9 @@ def test_the_canister_menu_shows_the_rolls_film_and_format(mw):
     t = _texts(menu)
     n = len(film_formats.FILM_FORMATS)
     assert t[:4] == ["Film", "None", "Portra400 V1", "XP2 V1 (Lisbon 2026)"]
-    assert t[4:6] == ["Format", "Not set"] and len(t) == 6 + n + 1
-    assert t[-1] == "Edit Film Presets…"
+    # then the frame on screen's flat field (spec/flat-field-info.md)
+    assert t[4:6] == ["Format", "Not set"] and len(t) == 6 + n + 3
+    assert t[-3:] == ["Flat field", "No frame open", "Edit Film Presets…"]
     ticked = [a.text() for a in menu.actions() if a.isChecked()]
     assert ticked == ["XP2 V1 (Lisbon 2026)", "120: 6x7"]
     assert not menu.actions()[0].isEnabled()                      # a heading
