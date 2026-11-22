@@ -53,6 +53,7 @@ class _ScopeWidgetBase(QWidget):
         self._probe = None     # (r, g, b, x_frac) or None
         self._trace_version = 0
         self._trace_cache = None   # (key, QPixmap) — scaled trace for repaints
+        self.region = False        # reading part of the picture: outlined red
 
     def set_probe(self, probe):
         self._probe = probe
@@ -94,12 +95,33 @@ class _ScopeWidgetBase(QWidget):
         self._bg_path = bg_path
         return p, bg_rect.adjusted(_PAD, _PAD, -_PAD, -_PAD)
 
+    def set_region(self, on):
+        """Outline the scope in red while it reads only part of the picture
+        (a sample circle, the Skin tool's faces, the reference frame), so its
+        changed source can't be missed (spec/scope-outline-and-zoom.md)."""
+        on = bool(on)
+        if on != self.region:
+            self.region = on
+            self.update()
+
+    REGION_COLOUR = QColor(230, 50, 45)
+
     def _end_paint(self, p):
         p.setClipping(False)
-        p.setPen(QPen(QColor(theme.BORDER), 1))
-        p.setBrush(Qt.NoBrush)
-        p.drawPath(self._bg_path)
+        if self.region:
+            p.setPen(QPen(self.REGION_COLOUR, 2))
+            p.setBrush(Qt.NoBrush)
+            p.drawPath(self._region_path())
+        else:
+            p.setPen(QPen(QColor(theme.BORDER), 1))
+            p.setBrush(Qt.NoBrush)
+            p.drawPath(self._bg_path)
         p.end()
+
+    def _region_path(self):
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(self.rect()).adjusted(1, 1, -1, -1), _RADIUS, _RADIUS)
+        return path
 
 
 class ParadeScopeWidget(_ScopeWidgetBase):
@@ -201,7 +223,38 @@ class ParadeScopeWidget(_ScopeWidgetBase):
 
 class VectorscopeWidget(_ScopeWidgetBase):
     """Chroma distribution on the CbCr plane (+Cb right, +Cr up) with the
-    standard 75% R/Mg/B/Cy/G/Yl targets; the trace is tinted by its hue."""
+    standard 75% R/Mg/B/Cy/G/Yl targets; the trace is tinted by its hue.
+    The wheel zooms into the middle (×1 … ×8; double-click: ×1), so a
+    low-saturation picture, skin above all, spreads out
+    (spec/scope-outline-and-zoom.md)."""
+    zoom_changed = Signal(float)
+    ZOOM_MAX = 8.0
+    ZOOM_STEP = 1.25            # a notch
+
+    zoom = 1.0
+
+    def set_zoom(self, z):
+        z = float(min(max(z, 1.0), self.ZOOM_MAX))
+        if abs(z - 1.0) < 0.02:
+            z = 1.0
+        if z != self.zoom:
+            self.zoom = z
+            self.update()
+            self.zoom_changed.emit(z)
+
+    def wheelEvent(self, event):
+        notches = event.angleDelta().y() / 120.0
+        if notches == 0:
+            notches = event.pixelDelta().y() / 60.0
+        if notches == 0:
+            event.ignore()
+            return
+        self.set_zoom(self.zoom * self.ZOOM_STEP ** notches)
+        event.accept()
+
+    def mouseDoubleClickEvent(self, event):
+        self.set_zoom(1.0)
+        event.accept()
 
     def set_data(self, counts):
         """counts (S, S) raw vectorscope counts, or None to clear."""
@@ -223,7 +276,7 @@ class VectorscopeWidget(_ScopeWidgetBase):
         return QRectF(cx - side / 2.0, cy - side / 2.0, side, side)
 
     def _chroma_point(self, sq, cb, cr):
-        radius = sq.width() / 2.0
+        radius = sq.width() / 2.0 * self.zoom
         return QPointF(sq.center().x() + cb / 128.0 * radius,
                        sq.center().y() - cr / 128.0 * radius)
 
@@ -240,12 +293,31 @@ class VectorscopeWidget(_ScopeWidgetBase):
             p.setClipPath(scope_circle, Qt.IntersectClip)
             p.drawPixmap(sq.topLeft(), trace)
             p.restore()
-        # Graticule: outer circle, faint 75% circle, crosshair.
+        # Graticule: outer circle, faint 75% circle (where it still shows
+        # when zoomed), crosshair; past the face everything is clipped.
         grid = QColor(*theme.Paint.SCOPE_GRID)
         p.setBrush(Qt.NoBrush)
         p.setPen(QPen(grid, 1))
         p.drawEllipse(sq.center(), radius, radius)
-        p.drawEllipse(sq.center(), radius * 0.75, radius * 0.75)
+        p.save()
+        p.setClipPath(scope_circle, Qt.IntersectClip)
+        if radius * 0.75 * self.zoom < radius:
+            p.drawEllipse(sq.center(), radius * 0.75 * self.zoom, radius * 0.75 * self.zoom)
+        if self.zoom > 1.0:
+            # zoomed in: rings at a half, a quarter and an eighth of full
+            # saturation, where they fall on the face, labelled on the +Cb axis
+            small = p.font()
+            small.setPixelSize(8)
+            p.setFont(small)
+            for frac in (0.5, 0.25, 0.125):
+                rr = radius * frac * self.zoom
+                if 0.15 * radius < rr < 0.98 * radius:
+                    p.setPen(QPen(grid, 1, Qt.DotLine))
+                    p.drawEllipse(sq.center(), rr, rr)
+                    p.setPen(QColor(*theme.Paint.SCOPE_LABEL))
+                    p.drawText(QPointF(sq.center().x() + rr + 2, sq.center().y() - 2),
+                               f"{frac * 100:g}%")
+            p.setPen(QPen(grid, 1))
         p.drawLine(QPointF(sq.left(), sq.center().y()),
                    QPointF(sq.right(), sq.center().y()))
         p.drawLine(QPointF(sq.center().x(), sq.top()),
@@ -272,8 +344,9 @@ class VectorscopeWidget(_ScopeWidgetBase):
             if which != chosen:
                 pen.setStyle(Qt.DotLine)
             p.setPen(pen)
-            p.drawLine(sq.center(),
-                       self._chroma_point(sq, ucb * 128.0, ucr * 128.0))
+            # to the face's edge whatever the zoom
+            p.drawLine(sq.center(), QPointF(sq.center().x() + ucb * radius,
+                                            sq.center().y() - ucr * radius))
         # 75% targets, derived from the same RGB→CbCr mapping as the trace.
         label = QColor(*theme.Paint.SCOPE_LABEL)
         font = p.font()
@@ -289,6 +362,12 @@ class VectorscopeWidget(_ScopeWidgetBase):
             norm = max((dx * dx + dy * dy) ** 0.5, 1e-6)
             p.drawText(QPointF(pt.x() + dx / norm * 10 - 4,
                                pt.y() + dy / norm * 10 + 4), name)
+        p.restore()
+        if self.zoom != 1.0:
+            # how far in: the face now spans this much saturation
+            p.setPen(QColor(*theme.Paint.SCOPE_LABEL))
+            p.drawText(QRectF(sq.right() - 44, sq.top(), 44, 14),
+                       Qt.AlignRight | Qt.AlignTop, f"\u00d7{self.zoom:.1f}")
         if self._probe is not None:
             r, g, b, _x_frac = self._probe
             cb, cr = scopes.rgb_to_cbcr(np.array([r, g, b], dtype=np.float32))
@@ -422,6 +501,11 @@ class ScopesPanel(QWidget):
 
         self.parade = ParadeScopeWidget()
         self.vectorscope = VectorscopeWidget()
+        self.vectorscope.setToolTip("Vectorscope: the wheel zooms into the middle, to "
+                                    "see low saturation (skin) spread out; "
+                                    "double-click for the whole.")
+        self.vectorscope.zoom_changed.connect(self._on_vector_zoom)
+        self._last_frame = None
 
         self._body = QWidget()
         body_layout = QHBoxLayout(self._body)
@@ -462,12 +546,16 @@ class ScopesPanel(QWidget):
         """True when the user asked to sample the reference frame."""
         return self._sample_btn.isChecked()
 
-    def set_sampling_note(self, text):
+    def set_sampling_note(self, text, region=None):
         """Short status shown after the title, e.g. 'reference frame' or
-        'whole image (no frame)'. Empty string clears it."""
+        'whole image (no frame)'. Empty string clears it. `region`: the
+        scopes read only part of the picture, so both are outlined red."""
         if text != self._sampling_note:
             self._sampling_note = text
             self._sync_toggle_text()
+        if region is not None:
+            self.parade.set_region(region)
+            self.vectorscope.set_region(region)
 
     def _on_sample_toggled(self, checked):
         self._settings.setValue("scopes/sample_reference", bool(checked))
@@ -498,11 +586,20 @@ class ScopesPanel(QWidget):
         """Feed the displayed-image pixels: rgb (H, W, 3) uint8 + mask (H, W)
         bool (False = uncovered pixels, e.g. fine-rotation corner gaps,
         excluded from the statistics)."""
+        self._last_frame = (rgb, mask)
         self.parade.set_data(scopes.compute_parade(rgb, mask))
-        self.vectorscope.set_data(scopes.compute_vectorscope(rgb, mask))
+        self.vectorscope.set_data(scopes.compute_vectorscope(
+            rgb, mask, zoom=self.vectorscope.zoom))
+
+    def _on_vector_zoom(self, _z):
+        if self._last_frame is not None:
+            rgb, mask = self._last_frame
+            self.vectorscope.set_data(scopes.compute_vectorscope(
+                rgb, mask, zoom=self.vectorscope.zoom))
 
     def clear(self):
         """No image displayed — empty both scopes and the probe."""
+        self._last_frame = None
         self.parade.set_data(None)
         self.vectorscope.set_data(None)
         self.clear_probe()

@@ -47,22 +47,35 @@ def compute_parade(rgb, mask):
     return counts
 
 
-def compute_vectorscope(rgb, mask, size=VECTOR_SIZE):
+def compute_vectorscope(rgb, mask, size=VECTOR_SIZE, zoom=1.0):
     """2D chroma histogram on the CbCr plane.
 
     Returns (size, size) float32 counts; x = Cb (left→right), y = Cr with
     +Cr UP (row 0 = strongest red direction) — broadcast-vectorscope
-    orientation, matching :func:`cbcr_to_plot`.
+    orientation, matching :func:`cbcr_to_plot`. `zoom` > 1 spreads the
+    middle out (spec/scope-outline-and-zoom.md): the plot then spans
+    ±128/zoom, and what lies beyond it is left out rather than piled on
+    the edge.
     """
     px = np.asarray(rgb)[np.asarray(mask, dtype=bool)]
     if px.size == 0:
         return np.zeros((size, size), dtype=np.float32)
     cb, cr = rgb_to_cbcr(px)
     scale = size / 256.0
+    if zoom != 1.0:
+        cb, cr = cb * np.float32(zoom), cr * np.float32(zoom)
+        inside = (np.abs(cb) < 128.0) & (np.abs(cr) < 128.0)
+        cb, cr = cb[inside], cr[inside]
     ix = np.clip(((cb + 128.0) * scale).astype(np.intp), 0, size - 1)
     iy = np.clip(((128.0 - cr) * scale).astype(np.intp), 0, size - 1)
     counts = np.bincount(iy * size + ix, minlength=size * size)
-    return counts.reshape(size, size).astype(np.float32)
+    counts = counts.reshape(size, size).astype(np.float32)
+    if zoom > 1.5:
+        # the display values are 8-bit, so zoomed in their chroma steps show as
+        # a grid of empty bins; spread each count over its step
+        import cv2
+        counts = cv2.GaussianBlur(counts, (0, 0), 0.3 * zoom * size / 256.0 * 2.0)
+    return counts
 
 
 def cbcr_to_plot(cb, cr, size):
