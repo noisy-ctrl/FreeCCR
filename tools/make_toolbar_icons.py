@@ -422,6 +422,23 @@ def collage():
     return img
 
 
+def skin():
+    """The skin tool (spec/skin-picker.md): a head and shoulders, filled (the
+    user's pick of three drafts, 2026-11-22)."""
+    img, p = canvas()
+    p.setPen(Qt.NoPen)
+    p.setBrush(QBrush(BLACK))
+    p.drawEllipse(QRectF(7.2, 2.6, 9.6, 11.6))
+    S = QPainterPath()
+    S.moveTo(2.8, 21.8)
+    S.cubicTo(3.0, 17.4, 6.6, 15.4, 12.0, 15.4)
+    S.cubicTo(17.4, 15.4, 21.0, 17.4, 21.2, 21.8)
+    S.closeSubpath()
+    p.drawPath(S)
+    p.end()
+    return img
+
+
 # (file in src/icons, drawing): the names the app loads
 ICONS = [
     ("rotate-left-icon-size_512.png", lambda: rotate(True)),
@@ -439,6 +456,7 @@ ICONS = [
     ("scope-sample-icon.png", scope_sample),
     ("flat-field-icon.png", flat_field),
     ("collage-icon.png", collage),
+    ("skin-icon.png", skin),
 ]
 # Capture keeps its camera (camera-icon.png, the user's choice, 2026-11-19).
 

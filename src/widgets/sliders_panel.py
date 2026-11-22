@@ -4599,6 +4599,27 @@ class SlidersPanel(QWidget):
             f"Auto WB applied — Temperature: {temp_value}, Tint: {tint_value}.",
             duration=5000)
 
+    def on_skin_sampled(self, values, text=""):
+        """Apply a Skin pull (spec/skin-picker.md): the Printer Lights' R/G/B
+        Shift or Temperature/Tint, as one undo step, rendered now."""
+        self.end_undo_burst()
+        for key, val in values.items():
+            try:
+                idx = self.adjustment_keys.index(key)
+            except ValueError:
+                continue
+            sl = self.sliders[idx]
+            sl.blockSignals(True)
+            sl.setValue(val)
+            sl.blockSignals(False)
+            label = self.slider_value_labels[idx]
+            label.setText(sl.value_text() if hasattr(sl, "value_text") else str(sl.value()))
+        self.on_slider_changed()
+        self._settle_preview()
+        self._update_printer_readout()
+        if text:
+            self.set_temporary_hint(text, duration=8000)
+
     # Step for the Channel Balance nudge hotkeys (U/I/O raise R/G/B, J/K/L
     # lower). 5 gives 20 presses of full travel — the "nudge" feel of the
     # rotate keys, rather than a jump. See spec/channel-balance.md.

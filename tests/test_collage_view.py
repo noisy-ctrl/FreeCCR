@@ -317,7 +317,7 @@ def test_the_toolbar_button_shows_the_collage_and_back(roll):
     mw = MainWindow()
     ip = mw.image_preview
     names = [a.text() for a in ip.toolbar.actions() if a.text()]
-    assert names.index("Collage") == names.index("Sample circle") + 1
+    assert names.index("Collage") == names.index("Skin") + 1
     ip.collage_action.trigger()
     assert mw.collage_shown() and ip.isHidden() and ip.collage_action.isChecked()
     assert mw.collage_view.members() == roll
