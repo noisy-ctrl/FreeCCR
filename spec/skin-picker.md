@@ -227,3 +227,32 @@ Positive mode → Temperature/Tint.
 - A pull that finds the face already inside the range after earlier pulls
   this session puts those pulls back ("earlier pull undone"); a value
   changed by hand since the last pull becomes the new starting point.
+
+## Revision 2026-11-23 (the user's first use)
+
+- **"I don't see it working" was a bug.** A circle was mapped to the picture
+  twice: through the picture item's own transform, then through the
+  display transform. On a sharp (Retina) view the item's transform also
+  holds the hi-res prescale, so every circle landed at twice its place,
+  usually off the picture, and the pull read nothing and said nothing; a
+  mirrored frame read the other side. `_skin_patch` now maps scene points
+  through the inverse display transform only, exactly as the WB Picker's
+  click does (tested on a mirrored frame and with a prescale). Nothing
+  fails silently now: "Couldn't read the picture under the circles".
+- **Every drag adds a circle**, and all of them are read together (their
+  pixels pooled); no Shift needed. A drag too small to be a circle is a
+  click. **Right-click a circle to remove it.**
+- **A circle is a button.** Each carries a small label, "Pull" or "Read"
+  (the right-click choice), lit with the circle's inside while the pointer
+  is over it (pointing-hand cursor); **a click on any circle acts on them
+  all**: Read names the hue, Pull balances. Nothing happens on release of a
+  drag any more. The answer is written under the circles ("Skin 112° · 17°
+  towards magenta", "Pulled 112° → 129°", "already inside the range:
+  nothing to pull") as well as in the panel's hint line, and goes when the
+  circles change. Changing a right-click choice after an answer gives the
+  new answer; before one it only relabels the buttons. `_SkinLabel` (fixed
+  screen size), `skin_circle_at`, `skin_remove_at`, `skin_hover`,
+  `skin_act`, `skin_show`, `_skin_set_result`.
+- **The picture is a dotted outline** of the head and shoulders (dots 1.7
+  units, 2.0 apart; the shoulders drawn from the middle out so the dots
+  meet evenly), the user's choice of three spacings.
