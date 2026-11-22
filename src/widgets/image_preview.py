@@ -4311,7 +4311,7 @@ class ImagePreview(QWidget):
         hist_widget = getattr(panel, "histogram", None)
         if hist_widget is not None and hasattr(hist_widget, "set_caption"):
             hist_widget.set_caption(caption)
-        self.scopes_panel.set_sampling_note(note)
+        self.scopes_panel.set_sampling_note(note, region=bool(caption))
 
     # --- the sample circle (spec/scope-sample-circle.md) --------------------
     SAMPLE_RIM_PX = 7          # a press this close to the rim resizes it (view px)
@@ -4944,7 +4944,8 @@ class ImagePreview(QWidget):
         if self.current_idx is not None and self.pixmap_item is not None:
             self._push_histogram(self.current_idx)
         else:
-            self.scopes_panel.set_sampling_note(self._sampling_status()[1])
+            caption, note = self._sampling_status()
+            self.scopes_panel.set_sampling_note(note, region=bool(caption))
         self._schedule_scope_update()
 
     def _capture_display_image(self, region=None, max_w=None, circle=False, circles=None):
