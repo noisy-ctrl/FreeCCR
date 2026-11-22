@@ -110,3 +110,50 @@ read both the new names and the older `RED` / `GREEN` / `BLUE`, so rolls
 already shot still group and number correctly. Tests:
 `test_new_names_sort_red_green_blue_and_old_names_still_read`,
 `test_next_shot_reads_old_and_new_names`.
+
+## Revision 2026-11-22: a file joins the shot its name says; the estimate is logged
+
+**The fault** (the user's test roll R0023, twice): shot 7's line listed shot
+6's IR file as its red, its own red as green, green as blue, blue as IR, and
+lost its own IR; on the next roll shot 4 did the same with shot 3's IR. Shot
+6's IR file was added twice: by Capture's USB `file_saved` (in time, to shot
+6) and again by the main window's hot-folder route when the file became ready
+there, a few seconds after Shoot had started shot 7. `add_file` only refused
+a name already in the CURRENT shot, so the late report took shot 7's first
+free slot and pushed every later file one slot along. Open then refused the
+shot ("1 rejected combination"), and a merge from the log would have built
+the frame from the wrong files.
+
+**The fix.** FreeCCR's own names already say the shot and the colour
+(`capture_log.name_slot(name)` → (prefix `<roll>_<format>_<film>` lower case,
+shot number, slot), reading `1RED`/`RED`, `2GREEN`/`GREEN`, `3BLUE`/`BLUE`,
+`WHITE`, `BW`, `4IR`, with or without a `_N` retake suffix):
+- `add_file`: a file with such a name joins the shot being recorded ONLY when
+  its prefix and shot are that shot's, and then goes into the slot its name
+  says (refused when that slot is filled or the shot has no such slot). A
+  file of another shot is refused. Any other name (a camera's own, the cable
+  route) still takes the next free slot, as before.
+- Reading (`read_log`): every entry's `files` are put right the same way
+  (`entry_files`): a FreeCCR-named file of another shot is dropped, one of
+  this shot goes to the slot its name says, other names stay where they
+  were. So logs already written with the fault read correctly (R0023 shot 7:
+  red, green, blue are its own three again; its IR is found by name beside
+  them, as `ir_for` already does).
+
+**The live estimate is logged with each shot.** To measure Capture's
+per-frame exposure estimate against the RAWs without guessing what it said,
+a USB shot's line gains `estimate` (taken when Shoot decides the exposures,
+in `_prepare_shot`): `auto` (the "Per shot, scale exposure…" box), `film_base`
+(its name), `ratio` (the median live ratio used) and `ratios` {R, G, B} (the
+last live reading's), `readings`, `source` ("click" / "beside" /
+"remembered"), `metered` (a Meter result was used), `stops` {r, g, b} and
+`live` from the suggestion, or `reason` when there was none, and `note` (what
+Shoot said). Absent for cable shots and when there is no film base context.
+Nothing reads it yet: it is for measurement (and later a learned correction).
+
+Tests (`tests/test_capture_log.py`): a late file of the previous shot is
+refused and the shot's own files land in their named slots; a FreeCCR-named
+file goes to its named slot whatever order it arrives in; other names keep
+the old next-slot behaviour; a log written with the fault reads correctly
+(the R0023 shot 7 line, verbatim) and `logged_sets` then gives the right
+triplet; the estimate record is written with the shot.

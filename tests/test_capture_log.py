@@ -314,3 +314,134 @@ def test_next_shot_reads_old_and_new_names(tmp_path):
     (tmp_path / "R0005_004_BLUE.RAF").write_bytes(b"x")
     (tmp_path / "R0005_007_3BLUE.RAF").write_bytes(b"x")
     assert cl.next_shot(str(tmp_path), "R0005") == 8
+
+
+# --- revision 2026-11-22: a file joins the shot its name says -------------- #
+def test_a_late_file_of_the_last_shot_doesnt_take_this_shots_slot(tmp_path):
+    """The user's roll R0023: shot 6's IR file was reported again by the hot
+    folder after shot 7 began, and took shot 7's red."""
+    f = str(tmp_path)
+    shot6 = {"roll": "R0023", "shot": 6, "scan_type": "trichrome", "format": "645",
+             "film": "Gold 200 120", "route": "usb", "ir": True}
+    cl.begin_shot(f, shot6)
+    for w in ("1RED", "2GREEN", "3BLUE", "4IR"):
+        assert cl.add_file(os.path.join(f, f"R0023_645_Gold200120_006_{w}.raf"), now=0)
+    cl.end_shot("done", now=1)
+    cl.begin_shot(f, dict(shot6, shot=7))
+    # the hot folder's late report of shot 6's IR file: refused
+    assert not cl.add_file(os.path.join(f, "R0023_645_Gold200120_006_4IR.raf"), now=2)
+    for w in ("1RED", "2GREEN", "3BLUE", "4IR"):
+        assert cl.add_file(os.path.join(f, f"R0023_645_Gold200120_007_{w}.raf"), now=3)
+    e6, e7 = cl.read_log(f)
+    assert e7["files"] == {"red": "R0023_645_Gold200120_007_1RED.raf",
+                           "green": "R0023_645_Gold200120_007_2GREEN.raf",
+                           "blue": "R0023_645_Gold200120_007_3BLUE.raf",
+                           "ir": "R0023_645_Gold200120_007_4IR.raf"}
+    assert e6["files"]["ir"] == "R0023_645_Gold200120_006_4IR.raf"
+
+
+def test_a_named_file_goes_to_its_own_slot_in_any_order(tmp_path):
+    f = str(tmp_path)
+    cl.begin_shot(f, {"roll": "R1", "shot": 2, "scan_type": "trichrome", "route": "usb"})
+    assert cl.add_file(os.path.join(f, "R1_002_3BLUE.RAF"), now=0)
+    assert cl.add_file(os.path.join(f, "R1_002_RED.RAF"), now=0)          # older word
+    assert not cl.add_file(os.path.join(f, "R1_002_3BLUE_1.RAF"), now=0)  # slot taken
+    assert not cl.add_file(os.path.join(f, "R1_002_WHITE.RAF"), now=0)    # no such slot
+    assert not cl.add_file(os.path.join(f, "R2_002_2GREEN.RAF"), now=0)   # another roll
+    assert cl.add_file(os.path.join(f, "DSCF0001.RAF"), now=0)            # a camera's name
+    (e,) = cl.read_log(f)
+    assert e["files"] == {"blue": "R1_002_3BLUE.RAF", "red": "R1_002_RED.RAF",
+                          "green": "DSCF0001.RAF"}
+
+
+def test_name_slot_reads_every_word():
+    assert cl.name_slot("R0023_645_Gold200120_006_4IR.raf") == ("r0023_645_gold200120", 6, "ir")
+    assert cl.name_slot("R1_013_2GREEN_1.RAF") == ("r1", 13, "green")
+    assert cl.name_slot("R1_013_BW.RAF") == ("r1", 13, "bw")
+    assert cl.name_slot("R1_013_WHITE.RAF") == ("r1", 13, "white")
+    assert cl.name_slot("DSCF0001_13.raf") is None
+    assert cl.name_slot("x_GREEN.RAF") is None
+
+
+def test_a_log_written_with_the_fault_reads_right(tmp_path):
+    """The R0023 shot 7 line as the fault wrote it, verbatim: read back, its
+    own three are red, green, blue, and Open's log sets take them."""
+    f = str(tmp_path)
+    bad = {"done": True, "exposures": None, "film": "Gold 200 120", "format": "645",
+           "ir": True, "preset": None, "roll": "R0023", "route": "usb",
+           "scan_type": "trichrome", "shot": 7, "time": "2026-11-22T14:26:05+00:00", "v": 1,
+           "files": {"blue": "R0023_645_Gold200120_007_2GREEN.raf",
+                     "green": "R0023_645_Gold200120_007_1RED.raf",
+                     "ir": "R0023_645_Gold200120_007_3BLUE.raf",
+                     "red": "R0023_645_Gold200120_006_4IR.raf"}}
+    cl.append(f, bad)
+    (e,) = cl.read_log(f)
+    assert e["files"] == {"red": "R0023_645_Gold200120_007_1RED.raf",
+                          "green": "R0023_645_Gold200120_007_2GREEN.raf",
+                          "blue": "R0023_645_Gold200120_007_3BLUE.raf"}
+    names = ["R0023_645_Gold200120_006_4IR.raf"] + [
+        f"R0023_645_Gold200120_007_{w}.raf" for w in ("1RED", "2GREEN", "3BLUE", "4IR")]
+    paths = [os.path.join(f, n) for n in names]
+    for p in paths:
+        open(p, "wb").close()
+    sets, used = cl.logged_sets(paths)
+    assert sets == [tuple(paths[1:4])]
+    assert cl.ir_for(list(paths[1:4])) == paths[4]
+
+
+def test_the_estimate_is_logged_with_a_usb_shot(tmp_path, monkeypatch):
+    from test_capture_routes import mon_usb, _wait  # noqa: F401
+    from core.ccr_backend import ccr_backend
+    gen = mon_usb.__wrapped__(tmp_path, monkeypatch)
+    mon, feed, light, usb, mw, asked, lm = next(gen)
+    try:
+        lm._settings().setValue("live/shutter", "usb")
+        usb.opened()
+        _app.processEvents()
+        monkeypatch.setattr(ccr_backend, "scan_type", "colour", raising=False)
+        mon._apply_scan_type("colour")
+        mw._tether_active = True
+        mw._tether_folder = mw.folder
+        mw.capture_session = {"roll": "R0050", "format": "645", "film": "Gold 200"}
+        rec = {"auto": True, "ratio": 0.55, "source": "beside",
+               "stops": {"w": 0.8}, "live": True}
+        monkeypatch.setattr(mon, "_estimate_record", lambda metered=False: dict(rec))
+        mon.shoot()
+        assert mon.sequence.running
+        (e,) = cl.read_log(mw.folder)
+        assert e["estimate"] == rec
+    finally:
+        try:
+            next(gen)
+        except StopIteration:
+            pass
+
+
+def test_the_estimate_record_says_what_the_line_said(tmp_path, monkeypatch):
+    from test_capture_routes import mon_usb  # noqa: F401
+    from core import frame_meter as fm
+    gen = mon_usb.__wrapped__(tmp_path, monkeypatch)
+    mon, feed, light, usb, mw, asked, lm = next(gen)
+    try:
+        assert mon._estimate_record() is None             # no film base: nothing to say
+        monkeypatch.setattr(mon, "_frame_context", lambda: ({"name": "Gold"}, True, ["1/8"], ["100"]))
+        monkeypatch.setattr(mon, "_film_base", lambda: {"name": "Gold 200"})
+        mon._frame_est = [0.5, 0.6, 0.55]
+        mon._frame_live_ratios = {"R": 0.5, "G": 0.55, "B": 0.4}
+        mon._frame_live_source = "beside"
+        mon._frame_suggestion = fm.Suggestion(stops={"r": 0.81234, "g": 0.6, "b": 0.7}, live=True)
+        mon._frame_shot_note = "Shooting at this frame's own exposures."
+        r = mon._estimate_record(metered=False)
+        assert r["film_base"] == "Gold 200" and r["ratio"] == 0.55 and r["readings"] == 3
+        assert r["ratios"] == {"R": 0.5, "G": 0.55, "B": 0.4} and r["source"] == "beside"
+        assert r["stops"]["r"] == 0.812 and r["live"] is True and "reason" not in r
+        assert r["note"].startswith("Shooting")
+        mon._frame_suggestion = None
+        mon._frame_reason = "the film base is clipped in the live view"
+        r = mon._estimate_record(metered=True)
+        assert r["reason"] == "the film base is clipped in the live view" and r["metered"]
+    finally:
+        try:
+            next(gen)
+        except StopIteration:
+            pass

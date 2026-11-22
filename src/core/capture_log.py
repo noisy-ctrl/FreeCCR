@@ -93,6 +93,61 @@ def _shot_from_name(name, roll):
     return int(m.group(1)) if m else None
 
 
+_NAME_SLOT_RE = re.compile(
+    r"^(.*)_(\d{3,})_((?:[123]?(?:RED|GREEN|BLUE))|WHITE|BW|4IR)(?:_\d+)?$", re.I)
+_WORD_SLOTS = {"RED": "red", "GREEN": "green", "BLUE": "blue", "WHITE": "white",
+               "BW": "bw", "IR": "ir"}
+
+
+def name_slot(name):
+    """(prefix '<roll>_<format>_<film>' lower case, shot number, slot) for a
+    file FreeCCR named (`..._013_1RED`, `..._013_RED_1`, `..._013_4IR`,
+    `..._013_WHITE`), else None (spec revision 2026-11-22)."""
+    stem = os.path.splitext(os.path.basename(str(name or "")))[0]
+    m = _NAME_SLOT_RE.match(stem)
+    if not m:
+        return None
+    word = m.group(3).upper().lstrip("1234")
+    slot = _WORD_SLOTS.get(word)
+    if slot is None:
+        return None
+    return m.group(1).lower(), int(m.group(2)), slot
+
+
+def _entry_key(entry):
+    """(prefix lower case, shot) of a log entry, as `name_slot` reads names."""
+    try:
+        shot = int(entry.get("shot"))
+        stem = shot_stem(entry.get("roll"), entry.get("format"), entry.get("film"),
+                         shot, "white")
+    except (TypeError, ValueError):
+        return None
+    return stem.rsplit("_", 2)[0].lower(), shot
+
+
+def entry_files(entry):
+    """An entry's files put right by their names: a file FreeCCR named for
+    another shot is dropped, one named for this shot sits in the slot its
+    name says; other names stay where they were."""
+    files = dict(entry.get("files") or {})
+    key = _entry_key(entry)
+    if key is None:
+        return files
+    named, other = {}, {}
+    for slot, name in files.items():
+        if not name:
+            continue
+        ns = name_slot(name)
+        if ns is None:
+            other[slot] = name
+        elif (ns[0], ns[1]) == key and ns[2] not in named:
+            named[ns[2]] = name
+    for slot, name in other.items():
+        if slot not in named:
+            named[slot] = name
+    return named
+
+
 def next_shot(folder, roll):
     """1 + the highest shot of `roll` in the folder's log or file names."""
     roll = clean_roll(roll) or DEFAULT_ROLL
@@ -146,7 +201,14 @@ def read_log(folder):
         if key not in last:
             order.append(key)
         last[key] = e
-    return [last[k] for k in order]
+    out = []
+    for k in order:
+        e = last[k]
+        if e.get("files"):
+            e = dict(e)
+            e["files"] = entry_files(e)
+        out.append(e)
+    return out
 
 
 def append(folder, entry):
@@ -249,10 +311,20 @@ def add_file(path, now=None):
         files = e["files"]
         if name in files.values():
             return False
-        free = [s for s in slots_of(e) if s not in files]
-        if not free:
-            return False
-        files[free[0]] = name
+        ns = name_slot(name)
+        if ns is not None:
+            # FreeCCR named it: it belongs to the shot and slot its name says
+            # (a late report of the previous shot's file must not take this
+            # shot's next slot: spec revision 2026-11-22)
+            if (ns[0], ns[1]) != _entry_key(e) or ns[2] not in slots_of(e) \
+                    or ns[2] in files:
+                return False
+            files[ns[2]] = name
+        else:
+            free = [s for s in slots_of(e) if s not in files]
+            if not free:
+                return False
+            files[free[0]] = name
         snap = json.loads(json.dumps(e))
     if folder:
         append(folder, snap)
