@@ -5828,7 +5828,7 @@ def apply_dust_removal(img16: np.ndarray, spots, inpaint_radius: int = 3,
     (one whole-stroke window would demand a clean area the size of the
     stroke's bbox, which rarely exists — a curl would silently fall back to
     diffusion and ghost). Patches with no clean source window (image border,
-    dense dust) fall back to cv2.inpaint (Telea, 8-bit). The fill is
+    dense dust) fall back to cv2.inpaint (Telea, per channel at 16 bits). The fill is
     composited through a feathered alpha that ramps inward from each hole's
     boundary (thickness-relative, capped by the hole's defect-free rim); ONLY
     masked pixels change, the rest of the frame is bit-for-bit untouched.
@@ -5876,7 +5876,7 @@ def apply_dust_removal(img16: np.ndarray, spots, inpaint_radius: int = 3,
         return _heal_impl(img16, spots, inpaint_radius, feather,
                           collect=collect_plan, plan=prior_plan,
                           plan_tol=_DUST_EDIT_TOL, crop=crop,
-                          ws_windowed=ws_windowed)
+                          ws_windowed=ws_windowed, retry_fallbacks=True)
     scale = long_side / float(_DUST_PLAN_LONG)
     if plan is None:
         # No preview plan supplied — derive one from this buffer's own
@@ -5894,12 +5894,37 @@ def apply_dust_removal(img16: np.ndarray, spots, inpaint_radius: int = 3,
                       ws_windowed=ws_windowed)
 
 
+def _telea16(img16: np.ndarray, mask: np.ndarray, radius: int) -> np.ndarray:
+    """cv2.inpaint (Telea) per channel at the buffer's own 16 bits, only in
+    the masked areas' boxes (padded by the radius + 2)."""
+    out = img16.copy()
+    n, lab, st, _c = cv2.connectedComponentsWithStats((mask > 0).astype(np.uint8), 8)
+    h, w = mask.shape[:2]
+    pad = int(radius) + 2
+    for k in range(1, n):
+        x, y, bw, bh = (int(v) for v in st[k, :4])
+        x0, y0 = max(0, x - pad), max(0, y - pad)
+        x1, y1 = min(w, x + bw + pad), min(h, y + bh + pad)
+        m = mask[y0:y1, x0:x1]
+        win = img16[y0:y1, x0:x1]
+        chans = [cv2.inpaint(np.ascontiguousarray(win[..., c]), m, int(radius),
+                             cv2.INPAINT_TELEA) for c in range(win.shape[2])]
+        sel = m > 0
+        out[y0:y1, x0:x1][sel] = np.stack(chans, axis=-1)[sel]
+    return out
+
+
 def _heal_impl(img16: np.ndarray, spots, inpaint_radius: int,
                feather: float, plan=None, collect=None,
                scale_up: float = 1.0, plan_only: bool = False,
                plan_tol: float = 0.06, crop=None,
-               ws_windowed: bool = False) -> np.ndarray:
-    """apply_dust_removal's engine at ONE resolution. With `collect` (a list),
+               ws_windowed: bool = False,
+               retry_fallbacks: bool = False) -> np.ndarray:
+    """apply_dust_removal's engine at ONE resolution. `retry_fallbacks`
+    (the same-scale edit replay only): a segment the prior plan filled by
+    diffusion searches for a clean source again, as its surroundings may
+    have changed; cross-scale replays keep the plan's choice
+    (spec/dust-heal-fallback.md). With `collect` (a list),
     appends a plan record per heal segment:
     (cy_norm, cx_norm, offset, genuine, dlike_on, manual) where offset is
     the chosen source displacement normalized over (h, w) — None for a
@@ -6056,7 +6081,10 @@ def _heal_impl(img16: np.ndarray, spots, inpaint_radius: int,
                     rec = _nearest_plan_record(plan, cyn, cxn, tol=plan_tol)
                     if rec is not None:
                         if rec[2] is None:
-                            forced_fb = True  # the plan chose diffusion here
+                            # the plan chose diffusion here; an edit at the
+                            # plan's own scale looks again (a fallback isn't a
+                            # source, so nothing on screen is re-sampled)
+                            forced_fb = not retry_fallbacks
                         else:
                             src_off = (int(round(rec[2][0] * h)),
                                        int(round(rec[2][1] * w)))
@@ -6106,11 +6134,12 @@ def _heal_impl(img16: np.ndarray, spots, inpaint_radius: int,
 
     t0 = time.time()
     if fallback.any():
-        # Diffusion fallback (cv2.inpaint supports 8-bit only).
-        bgr8 = cv2.cvtColor(cv2.convertScaleAbs(img16, alpha=255.0 / 65535.0),
-                            cv2.COLOR_RGB2BGR)
-        telea8 = cv2.inpaint(bgr8, fallback, telea_r, cv2.INPAINT_TELEA)
-        telea16 = cv2.cvtColor(telea8, cv2.COLOR_BGR2RGB).astype(np.uint16) * 257
+        # Diffusion fallback, per channel at 16 bits (spec/dust-heal-fallback.md).
+        # It used to run on an 8-bit copy: on a converted base the window packs
+        # a sky into a few 8-bit codes, and the steps, stretched by the grade,
+        # came out as a checkerboard at preview size and a white textured blob
+        # at export size (the user's sky frame, 2026-11-22).
+        telea16 = _telea16(img16, fallback, telea_r)
         fb = fallback > 0
         filled[fb] = telea16[fb]
     t_telea = time.time() - t0
