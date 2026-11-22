@@ -164,3 +164,41 @@ def test_cover_trim_keeps_the_middle():
     assert cl.cover_trim(1.5, 1.5) == (0.0, 0.0, 1.0, 1.0)
     x, y, w, h = cl.cover_trim(1.5, 1.0)          # a 3:2 frame in a square: sides trimmed
     assert y == 0 and h == 1 and abs(w - 1 / 1.5) < 1e-9 and abs(x - (1 - w) / 2) < 1e-9
+
+
+# --- film strip (revision 2026-11-22: one film, end to end) -------------------
+
+@pytest.mark.parametrize("W,H,n,direction", [(1080, 1920, 8, "down"), (1080, 1350, 8, "down"),
+                                             (1080, 566, 6, "across"), (1080, 1080, 3, "down")])
+def test_film_strips_lay_the_frames_end_to_end(W, H, n, direction):
+    st = cl.Settings(width=W, height=H, layout="strip", gap=20, piece_aspect=35 / 38)
+    arr = cl.arrange([1.5] * n, st, 7)
+    assert arr.strip_dir == direction
+    assert sorted(c.index for c in arr.cells) == list(range(n))
+    assert sum(len(s) for s in arr.strips) == n
+    for c in arr.cells:
+        assert c.x >= -1e-6 and c.y >= -1e-6 and c.x + c.w <= W + 1e-6 and c.y + c.h <= H + 1e-6
+        a = c.w / c.h
+        assert a == pytest.approx(35 / 38 if direction == "down" else 38 / 35, rel=1e-6)
+    for run in arr.strips:                        # each strip one film: no gaps in it
+        cs = [arr.cells[k] for k in run]
+        for a, b in zip(cs, cs[1:]):
+            if direction == "down":
+                assert b.y == pytest.approx(a.y + a.h) and b.x == pytest.approx(a.x)
+            else:
+                assert b.x == pytest.approx(a.x + a.w) and b.y == pytest.approx(a.y)
+    firsts = [arr.cells[run[0]] for run in arr.strips]
+    for a, b in zip(firsts, firsts[1:]):          # strips side by side, the gap between
+        if direction == "down":
+            assert b.x == pytest.approx(a.x + a.w + 20) and b.y == pytest.approx(a.y)
+        else:
+            assert b.y == pytest.approx(a.y + a.h + 20) and b.x == pytest.approx(a.x)
+    # in reading order: down each strip, then the next
+    assert [arr.cells[k].index for run in arr.strips for k in run] == list(range(n))
+
+
+def test_more_strips_only_when_it_gives_bigger_frames():
+    one = cl.film_strips(2, 35 / 38, 1080, 1920, 20)
+    assert len(one[1]) == 1                       # two frames fit one strip best
+    many = cl.film_strips(12, 35 / 38, 1080, 1920, 20)
+    assert len(many[1]) > 1

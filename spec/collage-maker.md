@@ -179,3 +179,49 @@ QSettings `collage/*` for every setting but members and seeds.
 "Your mockups look good", with the Full height carousel added above. The
 icon stays draft A (a grid) at the end of the left-hand pictures unless the
 user picks another.
+
+## Revision 2026-11-22 (as built)
+
+- **Opening**: a NEW selection of more than one frame becomes the collage;
+  otherwise it keeps the collage it had (every frame the first time). A
+  selection already used, taken when the view opened or acted on by the
+  list's Add to / Remove from Collage, never rebuilds it: the list keeps its
+  selection after Back to Frame, and reopening with it still selected must
+  not throw away the frames added since. While the view shows, clicks in the
+  list only select (`ThumbnailList._in_collage`).
+- The list's menu says how many (`collage_menu_texts`): **Add to Collage
+  (N)** while any selected frame is out, **Remove from Collage (N)** while
+  any is in.
+- **Film strip is one film, end to end** (the first build stacked each
+  frame's own piece, mixed ways round): the strip takes the members' most
+  common format (`collage_render.strip_format`; 35 mm when none), every
+  frame is a piece of THAT film (one frame + its share of the gaps, holes
+  continuous on 35 mm: 8 perforations a frame), and a frame shaped the
+  slot's other way lies along it turned top to the left, as on the contact
+  sheet's strips (`Piece(img, fmt, across).turn`). Strips run along the
+  canvas's long side (down a portrait or square canvas, across a landscape
+  one); `collage.film_strips` tries every pieces-a-strip count and keeps the
+  one with the biggest frames (fewer strips within 2 %), the **Gap** between
+  strips, filling 86 % of the canvas, centred, in reading order (down a
+  strip, then the next). Measured: 8 frames on a story = 2 strips of 4,
+  frames 380 × 413 px; on a post 3 strips (3, 3, 2), 300 × 326.
+- A frame of another format on the strip is fitted inside the slot, the
+  film's colour round it.
+- **The blurred background** is blurred on a reduced copy (sigma ≥ 8 px
+  there) and scaled back: within 1 code of a full-size blur, 0.33 s instead
+  of tens of seconds on an 11-post carousel.
+- **Export** (`collage_render.ExportSource`): each member is rendered by
+  `CCRBackend.export_image_by_index(…, jpg_output=False,
+  output_colorspace="srgb", max_long_side=what its biggest cell needs)` to a
+  temporary 16-bit TIFF (removed after reading), with "From the scan" a
+  second render of a SHALLOW COPY whose crop is widened by the bleed
+  (`image_obj=`, new, appended last; the frame's own crop is untouched); in
+  a background `WorkerThread` behind a cancellable progress dialog. Each is
+  resized to its cell in 16 bits, given the screen sharpening, then drawn.
+  Measured: with no sharpening a cell of the frame's size is Export's own
+  TIFF exactly (`np.array_equal`).
+- Toolbar room as planned: `ICON_BUTTON_PAD` 5, `AUTO_CROP_GAP_PX` 8,
+  `ZOOM_GAP_PX` 4, `CONVERT_GAP_PX` 4; `tests/test_panel_width.py` and the
+  centring tests pass.
+- Not yet: Tear stays a drawn edge until the user's card textures; no
+  catalogue saving (as the non-goals).

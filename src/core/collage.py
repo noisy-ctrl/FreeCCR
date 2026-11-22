@@ -8,7 +8,7 @@ is used), so Shuffle's history can walk back and forth.
 """
 import math
 import random
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
 
 FORMATS = (
@@ -58,6 +58,8 @@ class Arrangement:
     posts: int = 1
     band: Optional[Tuple[float, float]] = None   # tear: the band's top and bottom
     worst_change: float = 0.0                 # the largest crop change made (share)
+    strips: Optional[List[List[int]]] = None  # film strip: each strip's cells, in order
+    strip_dir: str = ""                       # film strip: "down" or "across"
 
 
 @dataclass
@@ -74,6 +76,7 @@ class Settings:
     frames: int = 3                           # triptych
     direction: str = "across"                 # triptych: across / down
     margin: Optional[int] = None              # canvas edge; None = the gap
+    piece_aspect: float = 35.0 / 38.0         # film strip: a frame's piece (w / h) running down
 
     @property
     def edge(self):
@@ -421,6 +424,58 @@ def triptych(aspects, W, H, gap, direction="across", scale=0.86) -> List[Cell]:
     return out
 
 
+STRIP_SCALE = 0.86         # film strip: the strips fill this much of the canvas
+
+
+def film_strips(n, piece_aspect, W, H, gap, scale=STRIP_SCALE):
+    """Film strip (spec/collage-maker.md, revision 2026-11-22): the frames as
+    pieces of ONE film, laid end to end in strips that run along the
+    canvas's long side (down a portrait or square canvas, across a landscape
+    one), as many strips side by side as gives the biggest frames (fewer when
+    within 2 %), `gap` between strips, centred, every strip starting level.
+    `piece_aspect` is a piece's w / h with the film running down. Returns
+    (cells, strips = each strip's cell numbers in order, direction)."""
+    if n == 0:
+        return [], [], "down"
+    down = H >= W
+    pa = piece_aspect if down else 1.0 / piece_aspect
+    best = None
+    for m in range(1, n + 1):                  # pieces a strip
+        k = -(-n // m)                         # strips
+        if down:
+            ph = min(H * scale / m, (W * scale - gap * (k - 1)) / k / pa)
+            pw = ph * pa
+        else:
+            pw = min(W * scale / m, (H * scale - gap * (k - 1)) / k * pa)
+            ph = pw / pa
+        if pw <= 0 or ph <= 0:
+            continue
+        if best is None or pw * ph > best[0] * 1.02:
+            best = (pw * ph, m, k, pw, ph)
+    if best is None:
+        return [], [], "down" if down else "across"
+    _area, m, k, pw, ph = best
+    cells, strips = [], []
+    if down:
+        x0, y0 = (W - (k * pw + (k - 1) * gap)) / 2, (H - m * ph) / 2
+    else:
+        x0, y0 = (W - m * pw) / 2, (H - (k * ph + (k - 1) * gap)) / 2
+    for j in range(k):
+        run = []
+        for q in range(m):
+            i = j * m + q
+            if i >= n:
+                break
+            if down:
+                c = Cell(i, x0 + j * (pw + gap), y0 + q * ph, pw, ph)
+            else:
+                c = Cell(i, x0 + q * pw, y0 + j * (ph + gap), pw, ph)
+            run.append(len(cells))
+            cells.append(c)
+        strips.append(run)
+    return cells, strips, "down" if down else "across"
+
+
 def tear_band(H, rng) -> Tuple[float, float]:
     """Where a torn band sits: a third to a half of the height, placed by the seed."""
     t = H * rng.uniform(0.28, 0.45)
@@ -488,9 +543,9 @@ def arrange(aspects: Sequence[float], st: Settings, seed: int) -> Arrangement:
         back = Cell(a, 0, 0, W, H, cover_trim(aspects[a], W / H))
         band = Cell(b, 0, top, W, bottom - top, cover_trim(aspects[b], W / (bottom - top)))
         return Arrangement([back, band], W, H, 1, band=(top, bottom))
-    # film strip: the frames' slots are the drawing's business; one cell each
-    cells = triptych(aspects, W, H, gap, "down" if H > W else "across", scale=0.8)
-    return Arrangement(cells, W, H, 1)
+    # film strip: the frames end to end on one film, in the members' order
+    cells, strips, direction = film_strips(len(aspects), st.piece_aspect, W, H, gap)
+    return Arrangement(cells, W, H, 1, strips=strips, strip_dir=direction)
 
 
 class SeedHistory:

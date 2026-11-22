@@ -278,6 +278,13 @@ class MainWindow(QMainWindow):
         self.layout.addWidget(self.thumbnail_list, 0)
         self.layout.addWidget(self.image_preview, 3)
         self.layout.addWidget(self.contact_sheet, 3)
+        # The collage maker (spec/collage-maker.md): another sibling, the same way
+        from widgets.collage_view import CollageView
+        self.collage_view = CollageView(self)
+        self.collage_view.setMinimumWidth(900)
+        self.collage_view.setVisible(False)
+        self.collage_view.closeRequested.connect(lambda: self.show_collage(False))
+        self.layout.addWidget(self.collage_view, 3)
         self.layout.addWidget(self.sliders_panel, 0)
         self.layout.addWidget(self.dust_panel, 0)
         self.layout.addWidget(self.crop_panel, 0)
@@ -613,6 +620,56 @@ class MainWindow(QMainWindow):
         pass
 
     # --- Contact sheet (spec/contact-sheet.md) ------------------------------
+    def collage_shown(self) -> bool:
+        cv = getattr(self, "collage_view", None)
+        return cv is not None and not cv.isHidden()
+
+    def show_collage(self, on=True) -> bool:
+        """Show the collage maker in place of the image view (or go back),
+        greying the per-frame controls as the contact sheet does
+        (spec/collage-maker.md). True when the state changed as asked."""
+        ip, sp, cv = self.image_preview, self.sliders_panel, self.collage_view
+        action = getattr(ip, "collage_action", None)
+        if on:
+            if ip.crop_mode or getattr(ip, "dust_mode", False) or not ccr_backend.images:
+                if ip.crop_mode or getattr(ip, "dust_mode", False):
+                    sp.set_temporary_hint(
+                        "Finish cropping or dust removal first (Done or Esc), then "
+                        "open the collage.", duration=5000)
+                if action is not None:
+                    action.setChecked(False)
+                return False
+            if self.contact_sheet_shown():
+                self.show_contact_sheet(False)
+            ip.setVisible(False)
+            cv.setVisible(True)
+            sel = [ccr_backend.images[i] for i in self.thumbnail_list.selected_indices()
+                   if i < len(ccr_backend.images)]
+            cv.activate(sel)
+            sp.set_sliders_enabled(False)
+            for btn in ("convert_current_bwp_btn", "auto_crop_btn", "wp_combo", "wp_show_btn"):
+                if hasattr(sp, btn):
+                    getattr(sp, btn).setEnabled(False)
+        else:
+            was = self.collage_shown()
+            cv.deactivate()
+            cv.setVisible(False)
+            ip.setVisible(True)
+            if was:
+                if hasattr(sp, "auto_crop_btn"):
+                    sp.auto_crop_btn.setEnabled(True)
+                row = self.thumbnail_list.thumbnail_list.currentRow()
+                idx = row if row is not None and row >= 0 else ip.current_idx
+                if idx is not None and 0 <= idx < len(ccr_backend.images):
+                    ip.update_preview(idx)
+                    sp.set_current_idx(idx)
+                ip._update_unconvert_action_state()
+        if action is not None:
+            action.blockSignals(True)
+            action.setChecked(bool(on))
+            action.blockSignals(False)
+        return True
+
     def contact_sheet_shown(self) -> bool:
         return not self.contact_sheet.isHidden()
 
@@ -634,6 +691,8 @@ class MainWindow(QMainWindow):
             if not ccr_backend.images:
                 self.thumbnail_list.set_sheet_checked(False)
                 return False
+            if self.collage_shown():
+                self.show_collage(False)
             ip.setVisible(False)
             self.contact_sheet.setVisible(True)
             self.contact_sheet.activate()

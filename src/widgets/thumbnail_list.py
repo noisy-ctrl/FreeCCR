@@ -86,6 +86,17 @@ class LoadingDialog(QDialog):
         ccr_backend.clear()
         self.accept()
 
+def collage_menu_texts(collage_view, imgs):
+    """(Add to Collage text or None, Remove from Collage text or None) for
+    the right-clicked frames (spec/collage-maker.md): Add while any of them
+    is out of the collage, Remove while any is in it, with how many."""
+    n_in = sum(1 for im in imgs if collage_view.has_member(im))
+    n_out = len(imgs) - n_in
+    add = ("Add to Collage" + (f" ({n_out})" if n_out > 1 else "")) if n_out else None
+    remove = ("Remove from Collage" + (f" ({n_in})" if n_in > 1 else "")) if n_in else None
+    return add, remove
+
+
 class ThumbnailList(QWidget):
     # A greyed-out "needs attention" tile was acted on: (entry id, action),
     # action in "choose" | "merge" | "singles" | "remove" (spec/scan-type.md).
@@ -533,13 +544,23 @@ class ThumbnailList(QWidget):
         if getattr(mw, "contact_sheet_shown", lambda: False)():
             mw.show_contact_sheet(False)
 
+    def _in_collage(self):
+        """While the collage shows, picking frames in the list only selects
+        them, for Add to / Remove from Collage (spec/collage-maker.md)."""
+        mw = self._main_window()
+        return bool(getattr(mw, "collage_shown", lambda: False)())
+
     def on_thumbnail_clicked(self, item):
+        if self._in_collage():
+            return
         self._leave_sheet()
         idx = item.data(Qt.UserRole)
         self._main_window().image_preview.update_preview(idx)
         self._main_window().sliders_panel.set_current_idx(idx)
 
     def on_current_item_changed(self, current, previous):
+        if current and self._in_collage():
+            return
         if current:
             self._leave_sheet()
             idx = current.data(Qt.UserRole)
@@ -670,6 +691,17 @@ class ThumbnailList(QWidget):
             ir_img = ccr_backend.get_image_by_index(indices[0])
             has_ir = bool(getattr(ir_img, "ir_source", None))
             ir_action = menu.addAction("Change IR Shot…" if has_ir else "Attach IR Shot…")
+        # spec/collage-maker.md: the collage's members
+        collage_add = collage_remove = None
+        cv = getattr(self._main_window(), "collage_view", None)
+        if cv is not None:
+            menu.addSeparator()
+            add_text, remove_text = collage_menu_texts(
+                cv, [ccr_backend.images[i] for i in indices if i < len(ccr_backend.images)])
+            if add_text:
+                collage_add = menu.addAction(add_text)
+            if remove_text:
+                collage_remove = menu.addAction(remove_text)
         menu.addSeparator()
         export_action = menu.addAction("Export…")
         reset_action = menu.addAction(f"Reset{suffix}")
@@ -707,6 +739,12 @@ class ThumbnailList(QWidget):
             dp = getattr(self._main_window(), "dust_panel", None)
             if dp is not None:
                 dp.attach_ir(ccr_backend.get_image_by_index(indices[0]))
+        elif collage_add is not None and action == collage_add:
+            cv.add_members([ccr_backend.images[i] for i in indices
+                            if i < len(ccr_backend.images)])
+        elif collage_remove is not None and action == collage_remove:
+            cv.remove_members([ccr_backend.images[i] for i in indices
+                               if i < len(ccr_backend.images)])
         elif action == export_action:
             # Open the export dialog pre-scoped to the right-clicked selection.
             self._main_window().image_preview.open_export_dialog(default_scope="selected")
