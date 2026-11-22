@@ -7,6 +7,7 @@ micro-rotation fold-in on enter/confirm. See spec/crop-panel.md §8.
 
 import os
 import sys
+import types
 
 import pytest
 
@@ -480,3 +481,70 @@ class TestHorizonTool:
         ip, panel = self._armed()
         ip._exit_crop_mode()                       # every crop exit goes here
         assert not ip._horizon_tool and not panel.horizon_btn.isChecked()
+
+
+# --------------------------------------------------------------------------
+# The Format follows the frame's (spec/film-formats.md, revision 2026-11-22)
+# --------------------------------------------------------------------------
+class _Store(dict):
+    def value(self, k, d=None, type=None):
+        v = self.get(k, d)
+        return type(v) if (type is not None and v is not None) else v
+
+    def setValue(self, k, v):
+        self[k] = v
+
+
+class TestCropFollowsFormat:
+    def _panel(self, monkeypatch, remembered, img_attrs=None, roll=""):
+        from core.ccr_backend import ccr_backend
+        ip, host = _make_preview()
+        host.roll_film_and_format = lambda: (None, "", roll)
+        panel = CropPanel(host, ip)
+        panel._settings = _Store()
+        ip.set_crop_panel(panel)
+        panel._suppress = True
+        panel.aspect_combo.setCurrentIndex(panel.aspect_combo.findData(remembered))
+        panel._suppress = False
+        attrs = {"film_format": None, "capture_guide": None, "converted": False}
+        attrs.update(img_attrs or {})
+        img = types.SimpleNamespace(**attrs)
+        monkeypatch.setattr(ccr_backend, "images", [img])
+        ip.current_idx = 0
+        return panel
+
+    def test_a_remembered_film_format_follows_the_roll(self, monkeypatch):
+        panel = self._panel(monkeypatch, "645", roll="35mm")
+        assert panel.follow_frame_format() is True
+        assert panel._active_key() == "35mm"
+        assert panel._settings["crop/aspect_key"] == "35mm"
+
+    def test_the_frame_beats_the_guide_beats_the_roll(self, monkeypatch):
+        panel = self._panel(monkeypatch, "645", roll="35mm",
+                            img_attrs={"capture_guide": {"format": "6x7"}})
+        assert panel.frame_format() == "6x7"
+        panel = self._panel(monkeypatch, "645", roll="35mm",
+                            img_attrs={"capture_guide": {"format": "6x7"},
+                                       "film_format": "6x6"})
+        panel.follow_frame_format()
+        assert panel._active_key() == "6x6"
+
+    def test_a_print_ratio_or_free_stays(self, monkeypatch):
+        for key in ("5:4", "free", "original", "custom"):
+            panel = self._panel(monkeypatch, key, roll="35mm")
+            assert panel.follow_frame_format() is False
+            assert panel._active_key() == key
+
+    def test_nothing_known_leaves_it(self, monkeypatch):
+        panel = self._panel(monkeypatch, "645", roll="")
+        assert panel.frame_format() is None
+        assert panel.follow_frame_format() is False and panel._active_key() == "645"
+
+    def test_an_existing_crop_keeps_its_box(self, monkeypatch):
+        panel = self._panel(monkeypatch, "645", roll="35mm")
+        ip = panel.image_preview
+        calls = []
+        monkeypatch.setattr(ip, "reapply_crop_ratio", lambda *a, **k: calls.append(1))
+        ip.crop_mode = True
+        panel.follow_frame_format()
+        assert calls == [] and panel._active_key() == "35mm"
