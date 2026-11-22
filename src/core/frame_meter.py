@@ -396,6 +396,120 @@ def read_frame(path, guide):
 
 
 # --------------------------------------------------------------------------- #
+# does a shot clip inside the frame? (spec/capture-clip-warning.md)
+# --------------------------------------------------------------------------- #
+CLIP_FROM = 0.5            # a top value under this share of the range is no clip
+CLIP_SHARE = 0.001         # this share of a colour's photosites on its top value: clipped
+CLIP_NO_GUIDE = 0.20       # with no guide, the sensor's middle, this far in from each side
+                           # (open light round the film clips at the sensor's edges)
+
+
+def clipping_in_guide(mosaic, colors, desc, black, white, guide=None):
+    """{colour letter: share} of the colours that clip inside `guide` (view
+    fractions, `METER_INSET` in from its sides; None: the sensor's middle
+    60 %). A colour clips when its highest value in the area is at least
+    CLIP_FROM of black-to-white and CLIP_SHARE of its photosites there sit
+    within one code of it: a sensor's clip piles values on one top value,
+    noise spreads an unclipped maximum over many."""
+    H, W = mosaic.shape
+    if guide is not None:
+        g = inset_guide(guide)
+        pts = guide_corners(g, W, H)
+        c0 = max(0, int(math.floor(pts[:, 0].min())))
+        r0 = max(0, int(math.floor(pts[:, 1].min())))
+        c1 = min(W, int(math.ceil(pts[:, 0].max())) + 1)
+        r1 = min(H, int(math.ceil(pts[:, 1].max())) + 1)
+        if c1 <= c0 or r1 <= r0:
+            return {}
+        mask = np.zeros((r1 - r0, c1 - c0), np.uint8)
+        cv2.fillConvexPoly(mask, np.round(pts - np.float32([c0, r0])).astype(np.int32), 1)
+        inside = mask.astype(bool)
+    else:
+        m = CLIP_NO_GUIDE
+        r0, r1 = int(H * m), int(H * (1 - m))
+        c0, c1 = int(W * m), int(W * (1 - m))
+        inside = None
+    letters = {}
+    for i, ch in enumerate(desc):
+        letters.setdefault(ch, []).append(i)
+    sub = np.asarray(mosaic[r0:r1, c0:c1])
+    cols = np.asarray(colors[r0:r1, c0:c1])
+    # the values of each CFA index in the area: a 2 x 2 pattern is read by
+    # slicing (fast); anything else by masks
+    pat = cols[:2, :2]
+    k = min(64, cols.shape[0] // 2 * 2), min(64, cols.shape[1] // 2 * 2)
+    periodic = (pat.shape == (2, 2) and k[0] >= 2 and k[1] >= 2 and np.array_equal(
+        cols[:k[0], :k[1]], np.tile(pat, (k[0] // 2, k[1] // 2))))
+    parts = {}                                   # index -> [value arrays]
+    if periodic:
+        for pr in range(2):
+            for pc in range(2):
+                v = sub[pr::2, pc::2]
+                if inside is not None:
+                    v = v[inside[pr::2, pc::2]]
+                parts.setdefault(int(pat[pr, pc]), []).append(v.ravel())
+    else:
+        for i in range(len(desc)):
+            sel = cols == i
+            if inside is not None:
+                sel &= inside
+            parts.setdefault(i, []).append(sub[sel])
+    out = {}
+    for ch, idxs in letters.items():
+        vs = [v for i in idxs for v in parts.get(i, []) if v.size]
+        n = sum(int(v.size) for v in vs)
+        if n == 0:
+            continue
+        top = max(int(v.max()) for v in vs)
+        blk = float(np.mean([float(black[i]) for i in idxs]))
+        span = max(1e-6, float(white) - blk)
+        if (top - blk) / span < CLIP_FROM:
+            continue
+        at_top = sum(int(np.count_nonzero(v >= top - 1)) for v in vs)
+        share = at_top / float(n)
+        if share >= CLIP_SHARE:
+            out[ch] = share
+    return out
+
+
+def read_clipping(path, guide=None):
+    """`clipping_in_guide` of a RAW file."""
+    import rawpy
+    with rawpy.imread(path) as raw:
+        vis = np.array(raw.raw_image_visible, copy=True)
+        cols = np.array(raw.raw_colors_visible, copy=True)
+        desc = bytes(raw.color_desc).decode("ascii", "ignore")
+        black = list(raw.black_level_per_channel)
+        white = float(raw.white_level)
+    return clipping_in_guide(vis, cols, desc, black, white, guide)
+
+
+CLIP_NAMES = {"R": "red", "G": "green", "B": "blue"}
+
+
+def clip_text(clips, in_frame=True):
+    """The warning for a shot whose files clipped: `clips` = {file name:
+    {letter: share}}; '' when nothing clipped."""
+    worst = {}
+    for per in (clips or {}).values():
+        for ch, share in (per or {}).items():
+            worst[ch] = max(worst.get(ch, 0.0), float(share))
+    if not worst:
+        return ""
+    order = [c for c in ("R", "G", "B") if c in worst] + sorted(
+        c for c in worst if c not in ("R", "G", "B"))
+    parts = []
+    for c in order:
+        pct = worst[c] * 100.0
+        amount = f"{pct:.1f} %" if pct >= 0.1 else "a little"
+        parts.append(f"{CLIP_NAMES.get(c, c)} {amount}")
+    where = "inside the frame" if in_frame else "in the shot"
+    return (f"This shot clips {where}: {', '.join(parts)}. That detail is lost. If the "
+            "lens, light or camera changed since the film base was measured, Measure it "
+            "again; otherwise shoot shorter.")
+
+
+# --------------------------------------------------------------------------- #
 # the suggestion
 # --------------------------------------------------------------------------- #
 def stops_text(stops):

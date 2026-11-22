@@ -1,7 +1,7 @@
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QToolBar, QMessageBox, QSlider, QGraphicsView, QGraphicsScene,
     QGraphicsPixmapItem, QGraphicsRectItem, QGraphicsPathItem, QGraphicsEllipseItem,
-    QGraphicsLineItem, QGraphicsPolygonItem, QStyleOptionSlider, QDialog,
+    QGraphicsLineItem, QGraphicsPolygonItem, QStyleOptionSlider, QDialog, QGraphicsItem,
     QLabel, QPushButton, QStyle, QSizePolicy, QApplication, QComboBox, QToolButton
 )
 from PySide6.QtGui import (QPixmap, QIcon, QTransform, QPen, QColor, QAction, QPainter,
@@ -181,6 +181,39 @@ def resource_path(relative_path):
         return fallback_path
     # Not found, return as-is (QIcon will fail gracefully)
     return relative_path
+
+
+class _ToolTag(QGraphicsItem):
+    """The dust cursor's name tag ("Brush" / "Eraser"), drawn at a fixed
+    screen size just up and to the right of its point
+    (spec/dust-brush-eraser.md). Display only."""
+    PAD_X, PAD_Y, GAP = 6, 2, 4
+
+    def __init__(self, text, parent=None):
+        super().__init__(parent)
+        self.text = text
+        self.setFlag(QGraphicsItem.ItemIgnoresTransformations, True)
+        self.setAcceptedMouseButtons(Qt.NoButton)
+        from PySide6.QtGui import QFont, QFontMetrics
+        self._font = QFont()
+        self._font.setPixelSize(11)
+        self._font.setBold(True)
+        fm = QFontMetrics(self._font)
+        w = fm.horizontalAdvance(text) + 2 * self.PAD_X
+        h = fm.height() + 2 * self.PAD_Y
+        self._rect = QRectF(self.GAP, -self.GAP - h, w, h)
+
+    def boundingRect(self):
+        return self._rect.adjusted(-1, -1, 1, 1)
+
+    def paint(self, painter, option, widget=None):
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(20, 28, 48, 225))
+        painter.drawRoundedRect(self._rect, 3, 3)
+        painter.setPen(QColor(255, 255, 255))
+        painter.setFont(self._font)
+        painter.drawText(self._rect, Qt.AlignCenter, self.text)
 
 
 class GraphicsImageView(QGraphicsView):
@@ -632,9 +665,16 @@ class GraphicsImageView(QGraphicsView):
         if place is not None:
             place()
 
+    def _grid_shown(self):
+        """The fixed straightening grid, while the rotate slider is held; not
+        in Crop mode, where the box carries its own grid turning with it and
+        a second, fixed one only confused (spec/crop-rotate-fit.md)."""
+        return bool(getattr(self.parent_widget, "show_grid", False)
+                    and not getattr(self.parent_widget, "crop_mode", False))
+
     def drawForeground(self, painter, rect):
         super().drawForeground(painter, rect)
-        if hasattr(self.parent_widget, "show_grid") and self.parent_widget.show_grid:
+        if self._grid_shown():
             painter.save()
             painter.setRenderHint(QPainter.Antialiasing, False)  # <-- Use QPainter.Antialiasing
             pen = QPen(QColor(0, 80, 0, 80), 2)
@@ -1257,6 +1297,9 @@ class ImagePreview(QWidget):
         self._crop_rerender = False          # guards update_preview while entering crop mode
         self._pending_crop_local = None      # QRectF box (un-rotated) in full-pixmap coords
         self._pending_crop_angle = 0.0       # box rotation, degrees (Qt clockwise-positive)
+        # (box as fitted, box it started from) while the box is only being
+        # turned, so turning back grows it back (spec/crop-rotate-fit.md)
+        self._crop_turn_memo = None
         self._crop_fold_fine = False         # did entry fold a nonzero fine_rotation in?
         self._crop_box_is_seed = False       # is the pending box an auto-seed (vs a user crop)?
         self._crop_panel = None              # set by MainWindow (aspect ratio + straighten sync)
@@ -5004,7 +5047,27 @@ class ImagePreview(QWidget):
                 "r": self._dust_fitted_r(pts, float(self._dust_brush_r))}
         img.dust_spots.append(spot)
         self._dust_selected = spot
+        self._learn_ir_from_stroke(img, pts, spot["r"])
         self._commit_dust_change(img)
+
+    def _learn_ir_from_stroke(self, img, pts, r):
+        """A hand stroke over a candidate IR dust (or the marks finder) didn't
+        flag teaches it that it missed one (spec/ir-dust-v2.md §4,
+        spec/marks-learning.md)."""
+        if (getattr(img, "_ir_dust_map", None) is None
+                and getattr(img, "_mark_map", None) is None):
+            return
+        try:
+            from core import ir_dust, film_marks
+            size = self._dust_full_frame_size()
+            if size is None or size[0] <= 0:
+                return
+            n = ir_dust.learn_from_stroke(img, pts, float(r), size[1] / size[0])
+            n += film_marks.learn_from_stroke(img, pts, float(r), size[1] / size[0])
+            if n and hasattr(getattr(self, "dust_panel", None), "refresh_ir_section"):
+                self.dust_panel.refresh_ir_section()
+        except Exception:
+            pass
 
     dust_fit_spot = True     # Dust panel → Fit each click to the speck
 
@@ -5280,6 +5343,30 @@ class ImagePreview(QWidget):
         self._commit_dust_change(img)
         return True
 
+    DUST_UNDO_KEYS = ("dust_spots", "dust_plan", "ir_dust_pending")
+
+    def dust_undo(self) -> bool:
+        """↶ / Ctrl+Z in dust mode (spec/dust-brush-eraser.md): take back the
+        newest undo step when it was dust work only (a Brush stroke, an Eraser
+        stroke, a Paint Over, a re-picked source), keeping the view. False
+        when the newest step was something else (the general undo has it)."""
+        img = (ccr_backend.get_image_by_index(self.current_idx)
+               if self.current_idx is not None else None)
+        if img is None or not getattr(img, "undo_stack", None):
+            return False
+        top, now = img.undo_stack[-1], img.capture_undo_state()
+        keys = (set(top) | set(now)) - set(self.DUST_UNDO_KEYS)
+        if any(top.get(k) != now.get(k) for k in keys):
+            return False
+        if all(top.get(k) == now.get(k) for k in self.DUST_UNDO_KEYS):
+            return False
+        img.pop_undo_state()
+        self._commit_dust_change(img)
+        if hasattr(self, "_draw_ir_pending"):
+            self._draw_ir_pending()
+        self.refresh_dust_badge()
+        return True
+
     def dust_clear_all(self) -> bool:
         img = ccr_backend.get_image_by_index(self.current_idx)
         if img is None or not img.dust_spots:
@@ -5295,6 +5382,7 @@ class ImagePreview(QWidget):
     def set_dust_tool(self, tool: str):
         """"brush" paints spots; "erase" removes every spot it touches."""
         self._dust_tool = "erase" if tool == "erase" else "brush"
+        self._update_dust_cursor(getattr(self, "_dust_cursor_pos", None))
 
     def _dust_erase(self, img, pts):
         """Remove the spots an eraser stroke touched (healed ones of any kind,
@@ -5308,7 +5396,7 @@ class ImagePreview(QWidget):
         trial = type("T", (), {})()
         trial.dust_spots = list(img.dust_spots or [])
         trial.ir_dust_pending = getattr(img, "ir_dust_pending", None)
-        n_h, n_f = ir_dust.erase(trial, pts, r, aspect)
+        n_h, n_f = ir_dust.erase(trial, pts, r, aspect, learn=False)
         if not (n_h or n_f):
             return
         img.push_undo_state()
@@ -5387,8 +5475,11 @@ class ImagePreview(QWidget):
             tip += f"\n\nIR dust found and waiting to be healed: open Dust removal."
         self.dust_action.setToolTip(tip)
 
+    MARK_PENDING_COLOUR = QColor(80, 170, 255, 170)  # blue: a mark from the colour shots
+
     def _draw_ir_pending(self):
-        """Outline the flagged IR spots in amber (dust mode only)."""
+        """Outline the flagged IR spots in amber and the colour shots' marks
+        in blue (dust mode only; spec/colour-shot-marks.md §3)."""
         for item in self._ir_pending_items:
             try:
                 self.scene.removeItem(item)
@@ -5419,11 +5510,12 @@ class ImagePreview(QWidget):
                 pt = to_display.map(pt)
             return t.map(pt)
 
-        path = QPainterPath()
+        paths = {"ir": QPainterPath(), "mark": QPainterPath()}
         for sp in spots:
             pts = sp.get("pts") or []
             if not pts:
                 continue
+            path = paths["mark" if sp.get("kind") == ir_dust.MARK_KIND else "ir"]
             r = float(sp.get("r", 0.0)) * w
             if len(pts) == 1:
                 c = scene_pt(pts[0])
@@ -5438,14 +5530,21 @@ class ImagePreview(QWidget):
                 stroker.setCapStyle(Qt.RoundCap)
                 stroker.setJoinStyle(Qt.RoundJoin)
                 path.addPath(stroker.createStroke(sub))
-        item = QGraphicsPathItem(path.simplified())
-        pen = QPen(self.IR_PENDING_COLOUR, 1.6)
-        pen.setCosmetic(True)
-        item.setPen(pen)
-        item.setBrush(QColor(255, 176, 32, 40))
-        item.setZValue(4)
-        self.scene.addItem(item)
-        self._ir_pending_items = [item]
+        self._ir_pending_items = []
+        for key, colour in (("ir", self.IR_PENDING_COLOUR), ("mark", self.MARK_PENDING_COLOUR)):
+            if paths[key].isEmpty():
+                continue
+            item = QGraphicsPathItem(paths[key].simplified())
+            pen = QPen(colour, 1.6)
+            pen.setCosmetic(True)
+            item.setPen(pen)
+            fill = QColor(colour)
+            fill.setAlpha(40)
+            item.setBrush(fill)
+            item.setZValue(4)
+            item.setData(0, key)
+            self.scene.addItem(item)
+            self._ir_pending_items.append(item)
 
     @staticmethod
     def dust_detect_source_for(img):
@@ -5803,7 +5902,10 @@ class ImagePreview(QWidget):
         self._dust_stroke_item = item
 
     def _update_dust_cursor(self, scene_pos):
-        """Move the brush-circle cursor ring to the pointer (sized by brush)."""
+        """Move the brush-circle cursor ring to the pointer (sized by brush),
+        with the tool's name beside it; the Eraser's ring is struck through
+        (spec/dust-brush-eraser.md)."""
+        self._dust_cursor_pos = scene_pos
         if self._dust_cursor_item is not None:
             try:
                 self.scene.removeItem(self._dust_cursor_item)
@@ -5825,6 +5927,14 @@ class ImagePreview(QWidget):
         pen.setCosmetic(True)
         item.setPen(pen)
         item.setBrush(QBrush(Qt.NoBrush))
+        erase = self._dust_tool == "erase"
+        if erase:
+            k = r * 0.7071
+            slash = QGraphicsLineItem(scene_pos.x() - k, scene_pos.y() - k,
+                                      scene_pos.x() + k, scene_pos.y() + k, item)
+            slash.setPen(pen)
+        tag = _ToolTag("Eraser" if erase else "Brush", item)
+        tag.setPos(scene_pos.x() + r * 0.7071, scene_pos.y() - r * 0.7071)
         self.scene.addItem(item)
         self._dust_cursor_item = item
 
@@ -5992,7 +6102,37 @@ class ImagePreview(QWidget):
         if not self.crop_mode:
             return
         self._pending_crop_angle = float(degrees)
+        self._fit_pending_box()
         self._draw_crop_overlay()
+
+    @staticmethod
+    def _rect_key(r):
+        return (r.x(), r.y(), r.width(), r.height())
+
+    def _fit_pending_box(self):
+        """The pending box at its angle: the box it started turning from,
+        scaled about its centre by the largest factor <= 1 that keeps it,
+        turned, inside the picture (core.straighten.fit_box), so no black
+        corner reaches the crop (spec/crop-rotate-fit.md)."""
+        from core import straighten as st
+        sel = self._pending_crop_local
+        if sel is None or self.current_pixmap is None or sel.width() < 2 or sel.height() < 2:
+            return
+        w, h = float(self.current_pixmap.width()), float(self.current_pixmap.height())
+        if w < 2 or h < 2:
+            return
+        memo = self._crop_turn_memo
+        cur = self._rect_key(sel)
+        if memo is not None and all(abs(a - b) <= 1e-6 for a, b in zip(memo[0], cur)):
+            base = memo[1]
+        else:
+            base = cur
+        bx, by, bw, bh = base
+        x1, y1, x2, y2 = st.fit_box((bx / w, by / h, (bx + bw) / w, (by + bh) / h),
+                                    self._pending_crop_angle, w, h)
+        fitted = QRectF(x1 * w, y1 * h, (x2 - x1) * w, (y2 - y1) * h)
+        self._pending_crop_local = fitted
+        self._crop_turn_memo = (self._rect_key(fitted), base)
 
     def auto_detect_crop(self):
         """Crop panel Auto: exactly what Auto Crop would set (the same
@@ -6056,6 +6196,8 @@ class ImagePreview(QWidget):
         cx, cy, bw, bh = res
         self._pending_crop_local = QRectF(cx - bw / 2.0, cy - bh / 2.0, bw, bh)
         self._crop_box_is_seed = False
+        if abs(self._pending_crop_angle) >= 0.05:
+            self._fit_pending_box()          # a turned box stays inside the picture
         self._draw_crop_overlay()
         self._sync_crop_panel()
 
@@ -6347,7 +6489,11 @@ class ImagePreview(QWidget):
         base = drag["angle0"]
         angle = max(min(-45.0, base), min(max(45.0, base), angle))
         self._pending_crop_angle = angle
-        self._pending_crop_local = QRectF(box0)
+        # the box shrinks to stay inside the picture and grows back when
+        # turned back: fitted from the box it started turning from
+        if self._pending_crop_local is None:
+            self._pending_crop_local = QRectF(box0)
+        self._fit_pending_box()
 
     def _drag_corner(self, drag, p, which):
         box0 = drag["box0"]
@@ -6554,6 +6700,14 @@ class ImagePreview(QWidget):
                 # Without rotation, anything outside the image is empty —
                 # commit only the visible part of the box.
                 sel = sel.intersected(QRectF(0, 0, w, h))
+            else:
+                # A turned box moved against an edge: fit it once more (only
+                # ever smaller), so no corner outside the picture is kept
+                # (spec/crop-rotate-fit.md)
+                from core import straighten as st
+                x1, y1, x2, y2 = st.fit_box((sel.left() / w, sel.top() / h,
+                                             sel.right() / w, sel.bottom() / h), angle, w, h)
+                sel = QRectF(x1 * w, y1 * h, (x2 - x1) * w, (y2 - y1) * h)
             if sel.width() >= 10 and sel.height() >= 10:
                 new_crop = (sel.left() / w, sel.top() / h,
                             sel.right() / w, sel.bottom() / h)

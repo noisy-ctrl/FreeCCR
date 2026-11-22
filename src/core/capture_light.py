@@ -25,6 +25,10 @@ H2D_SHUTTER = 3
 H2D_FOCUS = 7
 D2H_TEMP = 1
 D2H_VBUS = 2
+D2H_FW_VERSION = 3      # the answer to H2D_FW_VERSION (the user's light: 4 bytes)
+# What a Scanlight sends: only these count as the light answering (a board
+# that sends other bytes is another device; spec/light-really-answers.md)
+D2H_KNOWN = frozenset({D2H_TEMP, D2H_VBUS, D2H_FW_VERSION})
 
 CHANNELS = ("r", "g", "b", "w", "ir")
 RGB = ("r", "g", "b")

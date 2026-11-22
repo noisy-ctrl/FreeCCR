@@ -521,6 +521,16 @@ class MainWindow(QMainWindow):
             self._balance_shortcuts.append(sc)
         self._apply_balance_hotkey_state()
 
+        # Dust removal's tools: B = Brush, E = Eraser (spec/dust-brush-eraser.md).
+        # Enabled only while dust mode is on (_sync_dust_action), so the
+        # letters aren't taken at other times.
+        self._dust_tool_shortcuts = []
+        for key, tool in (("B", "brush"), ("E", "erase")):
+            sc = QShortcut(QKeySequence(key), self)
+            sc.activated.connect(lambda t=tool: self._shortcut_dust_tool(t))
+            sc.setEnabled(False)
+            self._dust_tool_shortcuts.append(sc)
+
 
         # Non-blocking startup update check (2s network timeout, off-thread)
         self._update_worker = UpdateCheckWorker(self)
@@ -798,12 +808,18 @@ class MainWindow(QMainWindow):
             action.blockSignals(True)
             action.setChecked(checked)
             action.blockSignals(False)
+        for sc in getattr(self, "_dust_tool_shortcuts", ()):
+            sc.setEnabled(bool(checked))
+
+    def _shortcut_dust_tool(self, tool):
+        if getattr(self.image_preview, "dust_mode", False):
+            self.dust_panel.set_tool(tool)
 
     def undo_last_action(self):
         """Restore the current image's previous state (adjustments, crop,
         rotation, flips). Each Ctrl+Z press pops one more snapshot."""
-        # In dust mode, Ctrl+Z means "undo the last dust spot" (same as the
-        # panel's button) and must PRESERVE the viewport — the general undo
+        # In dust mode, Ctrl+Z means "undo the last dust step" (same as the
+        # panel's ↶, spec/dust-brush-eraser.md) and must PRESERVE the viewport — the general undo
         # below resets zoom (crop/rotation can move the displayed content),
         # which read as "Ctrl+Z unzoomed" while spotting dust zoomed-in.
         if getattr(self.image_preview, "dust_mode", False):
@@ -2481,6 +2497,7 @@ class MainWindow(QMainWindow):
             # (rotation/flips/crop are applied by update_preview on selection).
             img.update_thumbnail_and_preview()
         self.thumbnail_list.append_image_item(idx, select=True)
+        self._queue_preset_radius(img)            # spec/preset-auto-radius.md
         name = getattr(img, "display_name", None) or os.path.basename(img.file_path)
         if self._tether_active:
             self._tether_count += 1
@@ -2513,6 +2530,16 @@ class MainWindow(QMainWindow):
             # Late arrival after Stop: persist immediately (the debounced timer
             # is gone) so the photo isn't lost on close.
             ccr_backend.save_catalog()
+
+    def _queue_preset_radius(self, img):
+        """A capture of a film preset with Auto radius gets its own radius
+        measured (spec/preset-auto-radius.md)."""
+        pid = getattr(img, "film_preset", None)
+        if not pid:
+            return
+        from core import film_presets as fp
+        if fp.auto_radius_of(fp.find(fp.load(self._settings), pid)):
+            self.sliders_panel.queue_auto_radius([img])
 
     def _tether_template(self):
         """The look of the frame on screen, for the next capture to inherit
