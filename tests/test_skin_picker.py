@@ -213,12 +213,19 @@ def _face(ip, k=0):
             br.width() * (10 / 260))
 
 
-def _draw(ip, k=0, add=False, r_scale=1.0):
+def _draw(ip, k=0, r_scale=1.0):
     c, r = _face(ip, k)
     end = QPointF(c.x() + r * r_scale, c.y())
-    ip.skin_press(c, add=add)
+    ip.skin_press(c)
     ip.skin_move(end)
     ip.skin_release(end)
+
+
+def _click(ip, k=0):
+    """A click on circle k's button."""
+    c, _r = _face(ip, k)
+    ip.skin_press(c)
+    ip.skin_release(c)
 
 
 def test_the_face_sits_beside_the_sample_circle(win):
@@ -238,23 +245,49 @@ def test_show_reads_the_face_and_moves_nothing(win):
     _draw(ip)
     assert len(ip.skin_circles) == 1
     assert ip.scopes_panel._toggle_btn.text().endswith("Scopes  ·  skin")
+    assert "Click the circle to read" in win._hints[-1]
+    assert [lab.text for lab in ip._skin_labels if lab.isVisible()] == ["Read"]
+    _click(ip)
     assert win._hints[-1].startswith("Skin at 112°") and "towards magenta" in win._hints[-1]
+    assert ip._skin_result_item.isVisible()
+    assert ip._skin_result_item.text == "Skin 112° · 17° towards magenta"
     assert dict(img.adjustment_settings) == before
 
 
-def test_shift_adds_a_face_a_plain_drag_replaces_and_small_ones_dont_count(win):
+def test_every_drag_adds_a_circle_a_right_click_removes_one(win):
     ip = win.image_preview
     ip.set_skin_mode(True)
     _draw(ip, 0)
-    _draw(ip, 1, add=True)
+    _draw(ip, 1)
     assert len(ip.skin_circles) == 2
-    _draw(ip, 1, add=True, r_scale=0.01)                 # a click: ignored
+    _draw(ip, 1, r_scale=0.01)                 # too small to be a circle: a click
     assert len(ip.skin_circles) == 2
-    _draw(ip, 2)
+    c1, _r = _face(ip, 1)
+    ip.skin_hover(c1)
+    assert ip._skin_hot == 1 and ip._skin_labels[1].hot
+    assert ip.skin_remove_at(c1)
+    assert len(ip.skin_circles) == 1
+    assert not ip.skin_remove_at(c1)           # nothing there now
+    c2, _r = _face(ip, 2)
+    ip.skin_press(c2)
+    ip.skin_release(c2)                         # a click off the circles: nothing
     assert len(ip.skin_circles) == 1
     ip._on_escape_key()
     assert not ip.skin_mode and ip.skin_circles == []
     assert not ip.skin_action.isChecked()
+
+
+def test_a_click_reads_every_circle_together(win):
+    ip = win.image_preview
+    ip.set_skin_mode(True)
+    _draw(ip, 0)
+    _click(ip, 0)
+    one = ip._skin_result_item.text
+    _draw(ip, 1)
+    assert not ip._skin_result_item.isVisible()            # changed: no old answer
+    _click(ip, 1)
+    two = ip._skin_result_item.text
+    assert one != two and two.startswith("Skin 10")         # 112 and 103 together
 
 
 def test_the_skin_tool_and_the_sample_circle_take_turns(win):
@@ -272,6 +305,9 @@ def test_pull_moves_the_printer_lights_once_and_repeats_the_same(win):
     ip._skin_settings.setValue("skin/mode", "pull")
     ip.set_skin_mode(True)
     _draw(ip)
+    assert [lab.text for lab in ip._skin_labels if lab.isVisible()] == ["Pull"]
+    assert not any(img.adjustment_settings.get(k) for k in ("ch_r_shift", "ch_g_shift"))
+    _click(ip)
     def now():
         st = img.adjustment_settings
         return {k: st.get(k) for k in ("ch_r_shift", "ch_g_shift", "ch_b_shift")}
@@ -279,6 +315,7 @@ def test_pull_moves_the_printer_lights_once_and_repeats_the_same(win):
     assert any(v for v in moved.values())
     assert win._hints[-1].startswith("Skin pulled from 112° to 12")
     assert "Printer Lights" in win._hints[-1]
+    assert ip._skin_result_item.text.startswith("Pulled 112° → 12")
     ip.update_preview(0)
     _app.processEvents()
     assert sb.angle_of(ip.skin_reading()) == pytest.approx(sb.LAB_RANGE[0], abs=1.5)
@@ -301,6 +338,7 @@ def test_pull_refuses_with_an_area_layer_and_show_refuses_black_and_white(win, m
     monkeypatch.setattr(img, "active_area_id", "a1", raising=False)
     before = dict(img.adjustment_settings)
     _draw(ip)
+    _click(ip)
     assert "Whole Image layer" in win._hints[-1]
     assert dict(img.adjustment_settings) == before
     ip.set_skin_mode(False)
@@ -351,3 +389,32 @@ def test_the_vectorscope_draws_the_range(win):
     vs.skin_line = "video"
     video = vs.grab().toImage()
     assert at(125.0, video) > at(125.0, lab) + 10
+
+
+def test_a_pull_reads_the_right_place_on_a_mirrored_or_sharp_view(win):
+    """The first build mapped a circle twice (the item's own transform, then
+    the display transform): on a mirrored frame it read the other side, on a
+    sharp (Retina) view twice as far out, and a pull did nothing."""
+    ip, img = win.image_preview, ccr_backend.images[0]
+    ip._skin_settings.setValue("skin/mode", "pull")
+    ip.mirror_horizontal()
+    _app.processEvents()
+    assert ip.current_horizontal_flip
+    ip.set_skin_mode(True)
+    br = ip._picture_scene_rect()
+    # patch 0 is now on the RIGHT of the picture
+    c = QPointF(br.right() - br.width() * (24 / 260), br.top() + br.height() / 2)
+    r = br.width() * (10 / 260)
+    ip.skin_press(c)
+    ip.skin_move(QPointF(c.x() + r, c.y()))
+    ip.skin_release(QPointF(c.x() + r, c.y()))
+    patch, mask = ip._skin_patch(img)
+    measure, _ = img._neutral_measure_fn(patch, None, None)
+    assert sb.angle_of(sb.ycc(measure({}) / 257.0)) == pytest.approx(112.3, abs=2.0)
+    ip.skin_press(c)
+    ip.skin_release(c)
+    assert ip._skin_result_item.text.startswith("Pulled 112°")
+    # a hi-res pixmap is prescaled: the mapping must not see it
+    ip._item_prescale = 0.5
+    p2, m2 = ip._skin_patch(img)
+    assert p2.shape == patch.shape and np.array_equal(m2, mask)

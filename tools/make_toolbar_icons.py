@@ -422,19 +422,24 @@ def collage():
     return img
 
 
-def skin():
-    """The skin tool (spec/skin-picker.md): a head and shoulders, filled (the
-    user's pick of three drafts, 2026-11-22)."""
+def skin(gap=2.0, width=1.7):
+    """The skin tool (spec/skin-picker.md): a head and shoulders as a DOTTED
+    outline (the user, 2026-11-23: "a dotted outline of someone"; the
+    filled head and shoulders before it was his pick of three drafts)."""
     img, p = canvas()
-    p.setPen(Qt.NoPen)
-    p.setBrush(QBrush(BLACK))
-    p.drawEllipse(QRectF(7.2, 2.6, 9.6, 11.6))
-    S = QPainterPath()
-    S.moveTo(2.8, 21.8)
-    S.cubicTo(3.0, 17.4, 6.6, 15.4, 12.0, 15.4)
-    S.cubicTo(17.4, 15.4, 21.0, 17.4, 21.2, 21.8)
-    S.closeSubpath()
-    p.drawPath(S)
+    dots = QPen(BLACK, width, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+    dots.setDashPattern([0.001, gap / width])
+    p.setPen(dots)
+    p.setBrush(Qt.NoBrush)
+    p.drawEllipse(QRectF(7.6, 2.6, 8.8, 10.6))
+    # the shoulders from the middle out each way, so the dots meet evenly at
+    # the top and the corners; the base along the bottom on its own
+    for side in (-1, 1):
+        S = QPainterPath()
+        S.moveTo(12.0, 15.8)
+        S.cubicTo(12.0 + side * 5.0, 15.8, 12.0 + side * 8.4, 17.6, 12.0 + side * 8.6, 21.4)
+        p.drawPath(S)
+    p.drawLine(QPointF(12.0 - 8.6, 21.4), QPointF(12.0 + 8.6, 21.4))
     p.end()
     return img
 
