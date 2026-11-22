@@ -28,10 +28,12 @@ import numpy as np
 
 MAX_EXAMPLES = 3000
 PRIOR_N = 60.0             # the defaults count as this many examples
+MARK_PRIOR_N = 20.0        # ... for marks: the rule's fit is far sharper than IR's
+                           # defaults, so the same pull holds it harder (spec/marks-learning.md)
 MIN_EXPLICIT = 10          # weight-1 corrections before the model moves
 HEAL_WEIGHT = 0.3
 KINDS = ("merged", "single")
-MARK_KINDS = ("marks-light", "marks-dark")   # kept for a later model, not read yet
+MARK_KINDS = ("marks-light", "marks-dark")   # the colour shots' marks (spec/marks-learning.md)
 N_FEATURES = {"merged": 8, "single": 8, "marks-light": 7, "marks-dark": 7}
 
 _lock = threading.Lock()
@@ -132,32 +134,61 @@ def fit_map(X: np.ndarray, y: np.ndarray, wts: np.ndarray, base=None,
     tau = prior_n * 0.25
     y = np.asarray(y, np.float64)
     wts = np.asarray(wts, np.float64)
-    for _ in range(50):
+
+    def loss(t):
+        z = Z @ t
+        # -log p = log(1 + e^-z), -log(1 - p) = log(1 + e^z), stably
+        nll = wts * (y * np.logaddexp(0.0, -z) + (1 - y) * np.logaddexp(0.0, z))
+        return float(nll.sum() + 0.5 * tau * np.sum((t - th0) ** 2))
+
+    cur = loss(th)
+    for _ in range(100):
         p = 1.0 / (1.0 + np.exp(-np.clip(Z @ th, -40, 40)))
         g = Z.T @ (wts * (p - y)) + tau * (th - th0)
         H = (Z * (wts * p * (1 - p))[:, None]).T @ Z + tau * np.eye(len(th))
         step = np.linalg.solve(H, g)
-        th -= step
-        if np.max(np.abs(step)) < 1e-8:
+        # Newton's step, halved while it makes things worse: started far from
+        # the data's answer (a model sure of the opposite) the full step
+        # overshoots onto a flat part and stalls (spec/marks-learning.md)
+        a = 1.0
+        while a > 1e-6:
+            new = loss(th - a * step)
+            if new <= cur + 1e-12:
+                break
+            a *= 0.5
+        th = th - a * step
+        cur = loss(th)
+        if np.max(np.abs(a * step)) < 1e-8:
             break
     return mu, sd, th[:-1], float(th[-1])
 
 
 def model_for(kind: str):
     """The model a kind of scan is judged by: the defaults until it has
-    MIN_EXPLICIT corrections, then the defaults moved by its examples."""
+    MIN_EXPLICIT corrections, then the defaults moved by its examples. For
+    a kind of mark ("marks-light" / "marks-dark") None until then: the rule
+    stands (spec/marks-learning.md); after, the rule's fit moved by them."""
     with _lock:
         cache = _state["models"]
         data = _data()
         if kind in cache:
             return cache[kind]
         ex = list(data.get(kind, {}).get("examples", []))
-    base = default_model()
-    if kind not in KINDS or sum(1 for e in ex if e[-1] >= 0.999) < MIN_EXPLICIT:
-        model = base
+    enough = sum(1 for e in ex if e[-1] >= 0.999) >= MIN_EXPLICIT
+    n = N_FEATURES.get(kind, 8)
+    if kind in MARK_KINDS:
+        if not enough:
+            model = None
+        else:
+            from core import marks_model
+            A = np.asarray(ex, np.float64)
+            model = fit_map(marks_model.features(A[:, :n]), A[:, n], A[:, n + 1],
+                            marks_model.default(kind.split("-", 1)[1]), MARK_PRIOR_N)
+    elif kind not in KINDS or not enough:
+        model = default_model()
     else:
         A = np.asarray(ex, np.float64)
-        model = fit_map(A[:, :8], A[:, 8], A[:, 9], base)
+        model = fit_map(A[:, :n], A[:, n], A[:, n + 1], default_model())
     with _lock:
         _state["models"][kind] = model
     return model

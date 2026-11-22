@@ -752,7 +752,10 @@ class DustRemovalPanel(QWidget):
             dark = ir_dust.dark_ir_text(getattr(dm, "ir_level", None))
             if dark:
                 text += " " + dark
-            learned = self._ir_learned_text(dm.kind)
+        if img is not None and not busy and (
+                dm is not None or getattr(img, "_mark_map", None) is not None):
+            ir_kind = dm.kind if (has_ir and why is None and dm is not None) else None
+            learned = self._ir_learned_text(ir_kind)
             if learned:
                 text += " " + learned
         self.ir_status.setText(text)
@@ -760,15 +763,22 @@ class DustRemovalPanel(QWidget):
     @staticmethod
     def _ir_learned_text(kind) -> str:
         """'Learned from N of your corrections on this kind of scan.' once
-        the model has moved (spec/ir-dust-v2.md §4)."""
+        the model has moved (spec/ir-dust-v2.md §4); the marks' too, once
+        either kind of mark has (spec/marks-learning.md)."""
         try:
             from core import ir_dust_learn
-            n = ir_dust_learn.explicit_count(kind)
+            n = ir_dust_learn.explicit_count(kind) if kind else 0
+            m = {k: ir_dust_learn.explicit_count(k) for k in ir_dust_learn.MARK_KINDS}
         except Exception:
             return ""
-        if n < getattr(ir_dust_learn, "MIN_EXPLICIT", 10):
-            return ""
-        return f"Learned from {n} of your corrections on this kind of scan."
+        need = getattr(ir_dust_learn, "MIN_EXPLICIT", 10)
+        out = []
+        if n >= need:
+            out.append(f"Learned from {n} of your corrections on this kind of scan.")
+        nm = sum(v for v in m.values())
+        if any(v >= need for v in m.values()):
+            out.append(f"Marks learned from {nm} of your corrections.")
+        return " ".join(out)
 
     def ir_heading_actions(self):
         """The IR Dust heading's right-click entries: [(text, callback, enabled)]
@@ -777,6 +787,7 @@ class DustRemovalPanel(QWidget):
         img = self._current_image()
         kind = ir_dust.scan_kind(img) if img is not None else None
         n = len(ir_dust_learn.examples(kind)) if kind in ir_dust_learn.KINDS else 0
+        n += sum(len(ir_dust_learn.examples(k)) for k in ir_dust_learn.MARK_KINDS)
         return [("Forget What It Learned…", lambda: self._forget_ir_learning(kind), n > 0)]
 
     def _ir_heading_menu(self, pos):
@@ -793,21 +804,29 @@ class DustRemovalPanel(QWidget):
         what = "trichrome" if kind == "merged" else "single-shot"
         return QMessageBox.question(
             self, "Forget What It Learned",
-            f"Forget every correction IR dust has learned from on {what} scans? "
-            "It goes back to how it judged dust at first.",
+            f"Forget every correction dust finding has learned from on {what} scans, "
+            "and every correction to marks? It goes back to how it judged them at first.",
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes
 
     def _forget_ir_learning(self, kind):
-        from core import ir_dust, ir_dust_learn
-        if kind not in ir_dust_learn.KINDS or not self._confirm_forget_ir(kind):
+        from core import ir_dust, ir_dust_learn, film_marks
+        if not self._confirm_forget_ir(kind):
             return
-        ir_dust_learn.forget(kind)
+        if kind in ir_dust_learn.KINDS:
+            ir_dust_learn.forget(kind)
+        for k in ir_dust_learn.MARK_KINDS:          # spec/marks-learning.md
+            ir_dust_learn.forget(k)
         img = self._current_image()
+        redraw = False
         if img is not None and getattr(img, "_ir_dust_map", None) is not None:
             ir_dust.rethreshold(img, getattr(img, "ir_dust_sens", None))
-            if hasattr(self.image_preview, "_draw_ir_pending"):
-                self.image_preview._draw_ir_pending()
-                self.image_preview.refresh_dust_badge()
+            redraw = True
+        if img is not None and getattr(img, "_mark_map", None) is not None:
+            film_marks.rethreshold(img, getattr(img, "mark_sens", None))
+            redraw = True
+        if redraw and hasattr(self.image_preview, "_draw_ir_pending"):
+            self.image_preview._draw_ir_pending()
+            self.image_preview.refresh_dust_badge()
         self.refresh_ir_section()
 
     def _ask_ir_file(self, img=None):
