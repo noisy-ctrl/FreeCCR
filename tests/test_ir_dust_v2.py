@@ -397,3 +397,34 @@ def test_a_shot_at_the_reference_noise_is_read_as_before(monkeypatch):
     monkeypatch.setattr(ir_dust, "NOISE_REF", 0.0)
     without = ir_dust.dust_map(ir, [vis])
     assert np.array_equal(with_ref.z, without.z)
+
+
+# --- revision 2026-11-22 b: a found speck covers what shows in the colour shots
+def test_a_speck_the_ir_sees_only_part_of_is_healed_whole():
+    """The user's hooked speck: the IR saw its top, the colour shots the hook."""
+    h, w = 400, 600
+    vis, ir = _scene(h=h, w=w)
+    dv = np.ones((h, w), np.float32)
+    cv2.circle(dv, (300, 200), 3, 0.5, -1)                    # the part the IR sees too
+    cv2.line(dv, (300, 200), (306, 212), 0.5, 3)              # the hook it doesn't
+    dv = cv2.GaussianBlur(dv, (0, 0), 0.6)
+    di = np.ones((h, w), np.float32)
+    cv2.circle(di, (300, 200), 3, 0.78, -1)
+    di = cv2.GaussianBlur(di, (0, 0), 0.9)
+    dm = ir_dust.dust_map((ir * di).astype(np.float32), [(vis * dv).astype(np.float32)])
+    spots = ir_dust.spots_from(dm, 50)
+    from core.ccr_processor import rasterize_dust_mask
+    cov = rasterize_dust_mask(spots, h, w) > 0
+    hook = dv < 0.8
+    assert cov[hook].mean() >= 0.9                             # the hook too
+    assert cov.sum() < 6 * hook.sum()                          # not a big disc round it
+
+
+def test_with_visible_leaves_a_find_alone_when_nothing_more_shows():
+    vis, ir = _scene(specks=[(300, 200, 3)])
+    dm = ir_dust.dust_map(ir, [vis])
+    i, c = _cand_near(dm, 300, 200)
+    assert c is not None
+    assert ir_dust.with_visible(c, None) is c
+    grown = ir_dust.with_visible(c, dm.vz)
+    assert grown.mask.sum() <= ir_dust.VIS_REACH_MAX ** 2 * max(c.mask.sum(), 4)

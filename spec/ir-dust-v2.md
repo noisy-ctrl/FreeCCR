@@ -338,3 +338,30 @@ reference against 20), flags at most one more, and flags every planted speck
 the noisy twin flags; a shot at the reference noise gives exactly the same z
 with and without it. The older "dust in both shots" test pins `NOISE_REF` to
 0, as it checks the model at its scene's own (cleaner) noise.
+
+## Revision 2026-11-22 b: a found speck is healed whole
+
+The user's sky frame (R0023 005, Find + Heal at the defaults) left a cyan
+hook beside a healed dot. The IR saw the speck's top only (part of it is
+translucent in infrared); the colour shots showed it all. The dab was sized
+from the IR's piece, so the rest stayed, and the heal's source could even
+come from it.
+
+**Change** (`with_visible`, `_spots_of(..., vz=)`, `spots_from` passes
+`DustMap.vz`): before a find is made into a DAB, it grows over the
+connected region the colour shots show darker than −`VIS_REACH_Z` (3) z
+that touches it, if that region is larger than the find and no more than
+`VIS_REACH_MAX` (3) times its size across (9× its area: a find in front
+of a dark part of the picture is left alone). The grown find is then made
+into spots afresh, so a hook becomes strokes along its skeleton. Finds
+already made into strokes (fibres, loops) and the bridges are untouched:
+growing those changed what the IR followed and broke the loop and bridge
+tests. Marks (`film_marks`) call `_spots_of` without `vz` and are
+unchanged. Nothing changes what is flagged, only how much a flagged find
+covers.
+
+**Measured** on that frame: of 118 finds flagged at 50, 27 grew (median
+2.1× the area, largest 4.7×); the hook and the white blob's speck are
+fully healed at a 2000 px and a 6000 px render. Test:
+`test_a_speck_the_ir_sees_only_part_of_is_healed_whole` (fails with the
+growth turned off) and `test_with_visible_leaves_a_find_alone_when_nothing_more_shows`.

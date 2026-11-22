@@ -57,6 +57,8 @@ MAX_AREA_MIN = 1500         # ... but never under this many blocks (a long hair)
 ELONGATED = 3.5             # length / width above this: a hair, a polyline
 SPOT_SCALE = 1.35           # area-equivalent radius x this, + SPOT_PAD blocks:
 SPOT_PAD = 1.0              # the threshold keeps the core, the heal needs the skirt
+VIS_REACH_Z = 3.0           # a found speck grows over what touches it this dark (z) in the colour shots ...
+VIS_REACH_MAX = 3.0         # ... up to this many times its size across (spec/ir-dust-v2.md rev. 2026-11-22 b)
 HP_SIGMA = 25.0             # high-pass for the crosstalk fit and registration
 MAX_SHIFT = 6.0             # blocks: a larger registration answer is ignored
 NOISE_SIGMA = 25.0          # smoothing of the local noise map
@@ -885,9 +887,47 @@ def skeleton_paths(sk: np.ndarray) -> List[List[Tuple[int, int]]]:
     return paths
 
 
-def _spots_of(c: Candidate, idx: int, w_b: int, h_b: int) -> List[dict]:
+def with_visible(c: Candidate, vz: Optional[np.ndarray]) -> Candidate:
+    """The candidate with its mask grown over the speck as it shows in the
+    colour shots: the connected area darker than -VIS_REACH_Z (z) that
+    touches it, within VIS_REACH_MAX x its size (bigger = picture: left
+    alone). The IR saw only part of the user's hooked speck and its heal left
+    the rest (spec/ir-dust-v2.md revision 2026-11-22 b)."""
+    if vz is None or not c.mask.any():
+        return c
+    H, W = vz.shape[:2]
+    area = int(c.mask.sum())
+    r = math.sqrt(area / math.pi)
+    pad = int(math.ceil(max(4.0, (VIS_REACH_MAX - 1.0) * r)))
+    x0, y0 = max(0, c.x0 - pad), max(0, c.y0 - pad)
+    x1 = min(W, c.x0 + c.mask.shape[1] + pad)
+    y1 = min(H, c.y0 + c.mask.shape[0] + pad)
+    seed = np.zeros((y1 - y0, x1 - x0), np.uint8)
+    seed[c.y0 - y0:c.y0 - y0 + c.mask.shape[0], c.x0 - x0:c.x0 - x0 + c.mask.shape[1]] = c.mask
+    dark = (vz[y0:y1, x0:x1].astype(np.float32) < -VIS_REACH_Z).astype(np.uint8)
+    n, lab = cv2.connectedComponents(dark | seed, connectivity=8)
+    touch = np.unique(lab[cv2.dilate(seed, np.ones((3, 3), np.uint8)) > 0])
+    grown = np.isin(lab, touch[touch > 0]) | (seed > 0)
+    if int(grown.sum()) <= area or int(grown.sum()) > VIS_REACH_MAX ** 2 * max(area, 4):
+        return c
+    ys, xs = np.nonzero(grown)
+    gx0, gy0 = int(xs.min()), int(ys.min())
+    m = grown[gy0:int(ys.max()) + 1, gx0:int(xs.max()) + 1]
+    nb = int(m.sum())
+    ev = np.linalg.eigvalsh(np.cov(np.stack([xs, ys]).astype(np.float64)) + 1e-6 * np.eye(2))
+    length = 4.0 * math.sqrt(max(ev[-1], 1e-6))
+    import dataclasses
+    return dataclasses.replace(c, x0=x0 + gx0, y0=y0 + gy0, mask=m, length=length,
+                               width=max(1.0, nb / max(length, 1.0)))
+
+
+def _spots_of(c: Candidate, idx: int, w_b: int, h_b: int,
+              vz: Optional[np.ndarray] = None) -> List[dict]:
     """A candidate as dust spots: a dab at the centre, or for a long one
-    strokes along its skeleton (a curled fibre is followed, not averaged)."""
+    strokes along its skeleton (a curled fibre is followed, not averaged).
+    With the colour shots' darkening `vz`, the spots cover the speck as it
+    shows there too (`with_visible`; a find made into a dab only: a fibre
+    is already followed along its skeleton)."""
     ys, xs = np.nonzero(c.mask)
     area = len(xs)
     tag = {"ir_f": [round(float(v), 3) for v in c.feats], "ir_c": int(idx)}
@@ -920,6 +960,10 @@ def _spots_of(c: Candidate, idx: int, w_b: int, h_b: int) -> List[dict]:
             return out
         pts = _polyline(ys + c.y0 + 0.5, xs + c.x0 + 0.5, step=r)
         return [spot(pts, r)]
+    if vz is not None:
+        grown = with_visible(c, vz)
+        if grown is not c:
+            return _spots_of(grown, idx, w_b, h_b)     # a dab, or strokes if it's a hook
     r = math.sqrt(area / math.pi) * SPOT_SCALE + SPOT_PAD
     cx, cy = c.centre()
     return [spot([(cx, cy)], r)]
@@ -934,7 +978,7 @@ def spots_from(dm: DustMap, sensitivity: float = SENS_DEFAULT,
     spots: List[dict] = []
     acc = flagged(dm, sensitivity, keep, model)
     for i in acc:
-        spots.extend(_spots_of(dm.cands[i], i, w_b, h_b))
+        spots.extend(_spots_of(dm.cands[i], i, w_b, h_b, vz=dm.vz))
     spots.extend(bridges(dm, acc, spots))
     return spots
 
