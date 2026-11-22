@@ -89,13 +89,16 @@ choice is the same range moved onto the video line (−7.9°): **121–138°**
 
 ## 4. UX
 
-- **The face button** (`skin_btn`): a filled head in profile (draft A of
-  three, pending the user's pick), in the white balance row: WB Picker,
-  AWB, face, Crop, Slice; an icon button as tall as the row
-  (`theme.CONTROL_H`), the row still fits the panel
-  (`tests/test_panel_width.py`). Checkable: lit while picking. Same gating
-  as WB Picker (a converted frame or Positive mode); disabled with the B&W
-  profile and while an area layer is active (tooltip says why).
+- **The face button** (`ImagePreview.skin_action`, "Skin"): a head and
+  shoulders, filled (the user's pick of three drafts), in the canvas toolbar
+  right after the **Sample circle** (the user: "next to the area
+  vectorscope tool"), before Collage; `src/icons/skin-icon.png`, drawn by
+  `tools/make_toolbar_icons.py` (`skin`). To fit the 900 px toolbar every
+  picture button lost 2 px (`ICON_BUTTON_PAD` 5 → 3; 896 of 900 px at the
+  Mac-wide font). Checkable: lit while drawing; the Sample circle and Skin
+  take turns. Switching it on refuses, with a hint, an unconverted negative
+  ("Convert the frame first") and a black and white frame; a Pull refuses
+  while an area layer is active.
 - Tooltip: "Skin: drag a circle on a face, from its centre (Shift-drag adds
   another face). Shows the skin on the vectorscope against the range of
   hues your labs print skin at. Right-click to have it pull a face that's
@@ -175,12 +178,16 @@ Positive mode → Temperature/Tint.
   `solve`, `refusal`.
 - `CCRImage.solve_skin(patch, mask, knobs, line_deg, amount)` → (values,
   report) using `_neutral_measure_fn`.
-- `ImagePreview`: `skin_mode`, `set_skin_mode(on)`, `skin_press/move/
-  release` (Shift adds), `skin_circles` (scene), `_refresh_skin_items`,
-  `_skin_patch()`; the scopes' region follows the circles.
-- `SlidersPanel`: `skin_btn` (the face icon, `src/icons/skin-icon.png` drawn by
-  `tools/make_toolbar_icons.py`) in the WB row, `_skin_menu`, `on_skin_sampled`,
-  gating with the WB Picker's.
+- `ImagePreview`: `skin_action`, `skin_mode`, `set_skin_mode(on)`,
+  `skin_press/move/release` (Shift adds), `skin_circles` (picture shares),
+  `_refresh_skin_items`, `skin_reading()` (Show, on the displayed pixels),
+  `_skin_patch(img)` (Pull, on `resized_raw`), `skin_pull()`,
+  `skin_menu()` (the seam), `skin_options()` / `set_skin_option()` with
+  `_skin_settings` injectable; `_reference_sample_region` and
+  `_capture_display_image(circles=)` make the scopes and the histogram read
+  the faces; the view's `_skin_owns_mouse`.
+- `SlidersPanel.on_skin_sampled(values, text)`: one undo step, rendered
+  now, the Printer Lights readout updated.
 - `ScopesPanel`: the chosen range as a wedge with its centre line, the
   other's centre line dotted.
 - QSettings `skin/mode`, `skin/range`, `skin/amount`.
@@ -204,3 +211,19 @@ Positive mode → Temperature/Tint.
   clears; B&W and an active area layer disable the button.
 - The vectorscope draws the wedge; the right-click choices persist and How
   far greys with Show; the WB row fits the panel.
+
+## 8. As built (2026-11-22)
+
+- On a converted synthetic negative with pink "skin" (112°, 103°, 67°): a
+  pull lands 0.4–0.5° short of the range's edge (the shifts' half-unit
+  step), brightness within 0.4 levels, chroma within 1 %, in 7–11 renders
+  of the patch (≈ 0.02 s); 50 % lands within 1–2° of half way; the same pull
+  twice gives the same values. On a positive, Temperature/Tint: 101° →
+  128.8°.
+- In the window: Show "Skin at 112°: 17° outside your labs' range, towards
+  magenta."; Pull "Skin pulled from 112° to 128° (Printer Lights C +1.7,
+  M −0.7, Y +1.3)."; 50 % then 100 % gives back exactly the 100 % values;
+  the video range pulls to 121°.
+- A pull that finds the face already inside the range after earlier pulls
+  this session puts those pulls back ("earlier pull undone"); a value
+  changed by hand since the last pull becomes the new starting point.

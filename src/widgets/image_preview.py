@@ -9,7 +9,7 @@ from PySide6.QtGui import (QPixmap, QIcon, QTransform, QPen, QColor, QAction, QP
                            QCursor, QDesktopServices, QPainterPath,
                            QBrush, QPolygonF,
                            QImage)
-from PySide6.QtCore import Qt, QSize, Signal, QRect, QRectF, QPointF, QThread, QTimer, QUrl, QEvent
+from PySide6.QtCore import Qt, QSize, Signal, QRect, QRectF, QPointF, QThread, QTimer, QUrl, QEvent, QSettings
 from core.ccr_backend import ccr_backend
 from utils.qt_threads import WorkerThread
 from core.ccr_processor import (apply_dust_removal, DUST_FEATHER_DEFAULT,
@@ -300,6 +300,10 @@ class GraphicsImageView(QGraphicsView):
             elif event.button() == Qt.RightButton:
                 self.parent_widget.slice_delete_at(self.mapToScene(event.pos()))
             return
+        if event.button() == Qt.LeftButton and self._skin_owns_mouse():
+            self.parent_widget.skin_press(self.mapToScene(event.pos()),
+                                          add=bool(event.modifiers() & Qt.ShiftModifier))
+            return
         if event.button() == Qt.LeftButton and self._sampling_owns_mouse():
             self.parent_widget.sample_press(self.mapToScene(event.pos()))
             return
@@ -377,6 +381,9 @@ class GraphicsImageView(QGraphicsView):
             return
         if self.parent_widget.slice_mode:
             self.parent_widget.slice_move(self.mapToScene(event.pos()))
+            return
+        if self._skin_owns_mouse() and self.parent_widget._skin_drag is not None:
+            self.parent_widget.skin_move(self.mapToScene(event.pos()))
             return
         if self._sampling_owns_mouse():
             self.parent_widget.sample_move(self.mapToScene(event.pos()))
@@ -506,6 +513,10 @@ class GraphicsImageView(QGraphicsView):
         if self.parent_widget.slice_mode:
             if event.button() == Qt.LeftButton:
                 self.parent_widget.slice_release()
+            return
+        if (event.button() == Qt.LeftButton and self._skin_owns_mouse()
+                and self.parent_widget._skin_drag is not None):
+            self.parent_widget.skin_release(self.mapToScene(event.pos()))
             return
         if (event.button() == Qt.LeftButton and self._sampling_owns_mouse()
                 and self.parent_widget._sample_drag is not None):
@@ -727,10 +738,19 @@ class GraphicsImageView(QGraphicsView):
             self.setCursor(_eyedropper_cursor())
         elif self.bwpoint_mode:
             self.setCursor(Qt.CrossCursor)
-        elif pw is not None and getattr(pw, "sample_mode", False):
-            self.setCursor(Qt.CrossCursor)        # the sample circle
+        elif pw is not None and (getattr(pw, "sample_mode", False)
+                                 or getattr(pw, "skin_mode", False)):
+            self.setCursor(Qt.CrossCursor)        # the sample circle, the Skin tool
         else:
             self.setCursor(Qt.ArrowCursor)
+
+    def _skin_owns_mouse(self):
+        """The Skin tool takes the left button when it is on and no other
+        tool has the mouse (spec/skin-picker.md)."""
+        pw = self.parent_widget
+        return (getattr(pw, "skin_mode", False) and pw.pixmap_item is not None
+                and not (pw.dust_mode or pw.crop_mode or pw.area_mode or pw.slice_mode
+                         or self.wb_pick_mode or self.bwpoint_mode))
 
     def _sampling_owns_mouse(self, event=None):
         """The sample circle takes the left button when it is on and no
@@ -1163,12 +1183,18 @@ class ImagePreview(QWidget):
                                    on_color=theme.ICON_ON),
             "Skin", self)
         self.skin_action.setCheckable(True)
+        self.skin_action.triggered.connect(self.set_skin_mode)
         self.skin_action.setToolTip(
             "Skin: drag a circle on a face, from its centre (Shift-drag adds "
             "another face). The scopes read the faces and the vectorscope shows "
             "the range of hues your labs print skin at. Right-click to have it "
             "pull a face that's outside that range back in.")
         self.toolbar.addAction(self.skin_action)
+        _skin_btn = self.toolbar.widgetForAction(self.skin_action)
+        if _skin_btn is not None:
+            _skin_btn.setContextMenuPolicy(Qt.CustomContextMenu)
+            _skin_btn.customContextMenuRequested.connect(
+                lambda pos, b=_skin_btn: self._show_skin_menu(b.mapToGlobal(pos)))
         # The collage maker (spec/collage-maker.md): the last picture on the left
         self.collage_action = QAction(
             theme.load_tinted_icon(resource_path("icons/collage-icon.png"),
@@ -1406,6 +1432,13 @@ class ImagePreview(QWidget):
         # Coalesce a fine-rotation drag into a single undo step
         # the scope sample circle (spec/scope-sample-circle.md)
         self.sample_mode = False
+        # Skin (spec/skin-picker.md): circles on faces as picture shares
+        self.skin_mode = False
+        self.skin_circles = []            # [(cx, cy, r)] shares of the picture
+        self._skin_drag = None
+        self._skin_items = []
+        self._skin_start = None           # the pull's starting values this session
+        self._skin_last_set = None        # what the last pull set
         self.sample_circle = None          # (cx, cy, r) as shares of the picture
         self._sample_item = None
         self._sample_drag = None
@@ -1588,6 +1621,8 @@ class ImagePreview(QWidget):
         elif self.view.bwpoint_mode:
             # Esc abandons a black / white point pick (and re-crops the view)
             self.set_bwpoint_mode(None)
+        elif self.skin_mode:
+            self.set_skin_mode(False)
 
     # --- Tethering banner (watch-folder mode) ----------------------------
     def set_tether_banner(self, banner):
@@ -1613,6 +1648,9 @@ class ImagePreview(QWidget):
         if idx is None or not (0 <= idx < len(ccr_backend.images)):
             print("Invalid index for update_preview:", idx)
             return
+        # Another frame ends the Skin tool's circles (spec/skin-picker.md)
+        if self.skin_mode and idx != self.current_idx:
+            self.set_skin_mode(False)
         # Any external refresh while picking a crop abandons crop mode
         # (image switch, slider change, conversion, ...).
         if self.crop_mode and not self._crop_rerender:
@@ -4117,7 +4155,8 @@ class ImagePreview(QWidget):
         self._scopes_dirty = False
         region = self._reference_sample_region()
         frame = self._capture_display_image(
-            region=region, circle=region is not None and self._sample_circle_scene() is not None)
+            region=region, circle=region is not None and self._sample_circle_scene() is not None,
+            circles=self._skin_circles_scene() or None)
         if frame is None:
             self.scopes_panel.clear()
         else:
@@ -4137,6 +4176,9 @@ class ImagePreview(QWidget):
         inside the red box, so a fine rotation is reflected exactly as seen.
         None also when no frame is drawn (e.g. under a rotated crop, where the
         frame isn't displayed)."""
+        skin = self._skin_circles_scene()
+        if skin:
+            return self._circles_rect(skin)
         circle = self._sample_circle_scene()
         if circle is not None:
             (cx, cy), r = circle
@@ -4156,6 +4198,10 @@ class ImagePreview(QWidget):
 
     def _sampling_status(self):
         """(histogram caption, scopes note) for the current sample area."""
+        if self.skin_mode:
+            if self._skin_circles_scene():
+                return "Skin", "skin"
+            return "", "skin (drag a circle on a face)"
         if self.sample_mode:
             if self._sample_circle_scene() is not None:
                 return "Sample", "sample circle"
@@ -4175,7 +4221,8 @@ class ImagePreview(QWidget):
         if region is not None:
             frame = self._capture_display_image(
                 region=region, max_w=self.HIST_SAMPLE_MAX_W,
-                circle=self._sample_circle_scene() is not None)
+                circle=self._sample_circle_scene() is not None,
+                circles=self._skin_circles_scene() or None)
             if frame is not None:
                 rgb, mask = frame
                 px = rgb[mask]
@@ -4195,6 +4242,359 @@ class ImagePreview(QWidget):
     SAMPLE_CLICK_PX = 4        # a drag shorter than this is a click
     SAMPLE_MIN_R = 0.004       # the smallest radius, a share of the width
 
+    # --- Skin (spec/skin-picker.md) ------------------------------------------
+    SKIN_MIN_PX = 4            # a circle smaller than this (view px) is ignored
+    SKIN_HINT_MS = 8000
+
+    def _skin_panel(self):
+        try:
+            return self.parent().parent().sliders_panel
+        except AttributeError:
+            return None
+
+    def _skin_hint(self, text):
+        panel = self._skin_panel()
+        if panel is not None and text:
+            panel.set_temporary_hint(text, duration=self.SKIN_HINT_MS)
+
+    def _skin_store(self):
+        """Where the right-click choices live (tests set `_skin_settings`)."""
+        st = getattr(self, "_skin_settings", None)
+        return st if st is not None else QSettings("FreeCCR", "FreeCCR")
+
+    def skin_options(self):
+        """(mode, range, amount 0..1) from the right-click choices."""
+        from core import skin_balance as sb
+        st = self._skin_store()
+        mode = str(st.value("skin/mode", sb.DEFAULT_MODE) or sb.DEFAULT_MODE)
+        which = str(st.value("skin/range", sb.DEFAULT_RANGE) or sb.DEFAULT_RANGE)
+        try:
+            amount = int(st.value("skin/amount", sb.DEFAULT_AMOUNT))
+        except (TypeError, ValueError):
+            amount = sb.DEFAULT_AMOUNT
+        if mode not in dict(sb.MODES):
+            mode = sb.DEFAULT_MODE
+        if which not in dict(sb.RANGES):
+            which = sb.DEFAULT_RANGE
+        if amount not in sb.AMOUNTS:
+            amount = sb.DEFAULT_AMOUNT
+        return mode, which, amount / 100.0
+
+    def set_skin_option(self, key, value):
+        """A right-click choice: remembered; the vectorscope follows the
+        range; with faces drawn, Show/Pull runs again on them."""
+        self._skin_store().setValue("skin/" + key, value)
+        if key == "range":
+            self._sync_scope_skin_range()
+        if self.skin_mode and self.skin_circles:
+            self._skin_after_draw()
+
+    def _sync_scope_skin_range(self):
+        vs = getattr(getattr(self, "scopes_panel", None), "vectorscope", None)
+        if vs is not None:
+            vs.skin_line = self.skin_options()[1]
+            vs.update()
+
+    def skin_menu(self):
+        """The face button's right-click menu (the test seam)."""
+        from PySide6.QtWidgets import QMenu
+        from PySide6.QtGui import QActionGroup
+        from core import skin_balance as sb
+        mode, which, amount = self.skin_options()
+        menu = QMenu(self)
+        groups = []
+
+        def section(title, choices, current, key, enabled=True):
+            head = menu.addAction(title)
+            head.setEnabled(False)
+            group = QActionGroup(menu)
+            for value, text in choices:
+                a = menu.addAction(text)
+                a.setCheckable(True)
+                a.setChecked(value == current)
+                a.setEnabled(enabled)
+                group.addAction(a)
+                a.triggered.connect(lambda _c=False, k=key, v=value: self.set_skin_option(k, v))
+            groups.append(group)
+
+        section("When you draw a circle", sb.MODES, mode, "mode")
+        menu.addSeparator()
+        ranges = []
+        for key, label in sb.RANGES:
+            lo, hi = sb.skin_range(key)
+            ranges.append((key, f"{label} ({lo:.0f}\u2013{hi:.0f}\u00b0)"))
+        section("Skin range", ranges, which, "range")
+        menu.addSeparator()
+        section("How far a pull goes", [(v, f"{v} %") for v in sb.AMOUNTS],
+                int(round(amount * 100)), "amount", enabled=(mode == "pull"))
+        menu._groups = groups
+        return menu
+
+    def _show_skin_menu(self, global_pos):
+        self._skin_menu_open = self.skin_menu()
+        self._skin_menu_open.popup(global_pos)
+
+    def _skin_unready(self):
+        """Why the Skin tool can't read this frame, or None."""
+        if self.current_idx is None or self.pixmap_item is None:
+            return "Open a frame first."
+        img = ccr_backend.get_image_by_index(self.current_idx)
+        if img is None:
+            return "Open a frame first."
+        if not (img.converted or ccr_backend.positive_mode):
+            return "Convert the frame first: skin is read on the converted picture."
+        if img.renders_monochrome():
+            return "This frame is black and white: there's no skin colour to read."
+        return None
+
+    def set_skin_mode(self, on):
+        on = bool(on)
+        if on:
+            why = self._skin_unready()
+            if why:
+                self._skin_hint(why)
+                on = False
+        if on and self.sample_mode:
+            self.set_sample_mode(False)
+        self.skin_mode = on
+        if self.skin_action.isChecked() != on:
+            was = self.skin_action.blockSignals(True)
+            self.skin_action.setChecked(on)
+            self.skin_action.blockSignals(was)
+        self._skin_drag = None
+        self.skin_circles = []
+        self._skin_start = self._skin_last_set = None
+        self._refresh_skin_items()
+        if hasattr(self.view, "_restore_mode_cursor"):
+            self.view._restore_mode_cursor()
+        if on:
+            self._sync_scope_skin_range()
+            self._skin_hint("Drag a circle on a face, from its centre. Shift-drag adds "
+                            "another. Esc when done.")
+        self._on_sample_area_changed()
+
+    def _skin_circles_scene(self):
+        """[((cx, cy), r)] of the faces in scene coordinates ([] when off)."""
+        if not self.skin_mode or not self.skin_circles:
+            return []
+        br = self._picture_scene_rect()
+        if br is None:
+            return []
+        return [((br.left() + cx * br.width(), br.top() + cy * br.height()), r * br.width())
+                for cx, cy, r in self.skin_circles]
+
+    @staticmethod
+    def _circles_rect(circles):
+        rect = None
+        for (cx, cy), r in circles:
+            c = QRectF(cx - r, cy - r, 2 * r, 2 * r)
+            rect = c if rect is None else rect.united(c)
+        return rect
+
+    def _skin_share(self, centre, radius):
+        br = self._picture_scene_rect()
+        if br is None:
+            return None
+        cx = min(max((centre.x() - br.left()) / br.width(), 0.0), 1.0)
+        cy = min(max((centre.y() - br.top()) / br.height(), 0.0), 1.0)
+        return cx, cy, radius / br.width()
+
+    def skin_press(self, scene_pos, add=False):
+        self._skin_drag = {"start": QPointF(scene_pos), "add": bool(add),
+                           "before": list(self.skin_circles)}
+
+    def skin_move(self, scene_pos):
+        drag = self._skin_drag
+        if drag is None:
+            return
+        start = drag["start"]
+        r = math.hypot(scene_pos.x() - start.x(), scene_pos.y() - start.y())
+        share = self._skin_share(start, r)
+        if share is None:
+            return
+        self.skin_circles = (drag["before"] if drag["add"] else []) + [share]
+        self._refresh_skin_items()
+
+    def skin_release(self, scene_pos):
+        drag = self._skin_drag
+        if drag is None:
+            return
+        self._skin_drag = None
+        start = drag["start"]
+        r = math.hypot(scene_pos.x() - start.x(), scene_pos.y() - start.y())
+        if r * max(self._view_scale(), 1e-6) < self.SKIN_MIN_PX:
+            self.skin_circles = drag["before"]           # too small: ignored
+            self._refresh_skin_items()
+            return
+        share = self._skin_share(start, r)
+        if share is None:
+            return
+        self.skin_circles = (drag["before"] if drag["add"] else []) + [share]
+        self._refresh_skin_items()
+        self._on_sample_area_changed()
+        self._skin_after_draw()
+
+    def _refresh_skin_items(self):
+        """A dark ring under a warm-white dotted one per face (never in the
+        picture's pixels)."""
+        circles = self._skin_circles_scene()
+        items = [it for it in self._skin_items if self._item_alive(it)]
+        need = 2 * len(circles)
+        while len(items) < need:
+            it = QGraphicsEllipseItem()
+            dark = len(items) % 2 == 0
+            pen = (QPen(QColor(0, 0, 0, 200), 3) if dark
+                   else QPen(QColor(255, 226, 190, 240), 1.6, Qt.DotLine))
+            pen.setCosmetic(True)
+            it.setPen(pen)
+            it.setBrush(Qt.NoBrush)
+            it.setZValue(3.0 if dark else 3.1)
+            self.scene.addItem(it)
+            items.append(it)
+        for k, it in enumerate(items):
+            if k < need:
+                (cx, cy), r = circles[k // 2]
+                it.setRect(QRectF(cx - r, cy - r, 2 * r, 2 * r))
+                it.setVisible(True)
+            else:
+                it.setVisible(False)
+        self._skin_items = items
+
+    def skin_reading(self):
+        """(Y, Cb, Cr) of the faces as displayed (the vectorscope's pixels,
+        eyes, brows and shine left out), or None."""
+        from core import skin_balance as sb
+        circles = self._skin_circles_scene()
+        if not circles:
+            return None
+        frame = self._capture_display_image(region=self._circles_rect(circles),
+                                            max_w=self.HIST_SAMPLE_MAX_W, circles=circles)
+        if frame is None:
+            return None
+        rgb, mask = frame
+        px = rgb[mask].astype(np.float64)
+        if px.size == 0:
+            return None
+        keep = sb.keep_pixels(px)
+        return sb.ycc(px[keep].mean(axis=0))
+
+    def _skin_after_draw(self):
+        from core import skin_balance as sb
+        mode, which, amount = self.skin_options()
+        if mode == "pull":
+            self.skin_pull()
+            return
+        y = self.skin_reading()
+        if y is None:
+            return
+        rng = sb.skin_range(which)
+        self._skin_hint(sb.refusal_range(y, rng) or sb.describe(sb.angle_of(y), rng, which))
+
+    def _skin_patch(self, img):
+        """(patch, mask) of the base pixels under the faces: each circle's box
+        of `resized_raw` side by side, padded with edge pixels outside the
+        mask."""
+        circles = self._skin_circles_scene()
+        data = getattr(img, "resized_raw", None)
+        if not circles or data is None:
+            return None, None
+        inv = self.view._display_transform().inverted()[0]
+        h, w = data.shape[:2]
+        boxes = []
+        for (cx, cy), r in circles:
+            c = self.pixmap_item.mapFromScene(QPointF(cx, cy))
+            e = self.pixmap_item.mapFromScene(QPointF(cx + r, cy))
+            c, e = inv.map(c), inv.map(e)
+            fx, fy = self.map_displayed_to_full(c.x(), c.y())
+            ex, ey = self.map_displayed_to_full(e.x(), e.y())
+            rr = max(math.hypot(ex - fx, ey - fy), 1.0)
+            x0, x1 = int(max(0, math.floor(fx - rr))), int(min(w, math.ceil(fx + rr) + 1))
+            y0, y1 = int(max(0, math.floor(fy - rr))), int(min(h, math.ceil(fy + rr) + 1))
+            if x1 - x0 < 1 or y1 - y0 < 1:
+                continue
+            yy, xx = np.mgrid[y0:y1, x0:x1]
+            m = (xx + 0.5 - fx) ** 2 + (yy + 0.5 - fy) ** 2 <= rr * rr
+            boxes.append((data[y0:y1, x0:x1], m))
+        if not boxes:
+            return None, None
+        hh = max(b.shape[0] for b, _ in boxes)
+        parts, masks = [], []
+        for b, m in boxes:
+            pad = hh - b.shape[0]
+            parts.append(np.pad(b, ((0, pad), (0, 0), (0, 0)), mode="edge"))
+            masks.append(np.pad(m, ((0, pad), (0, 0)), constant_values=False))
+        return np.ascontiguousarray(np.concatenate(parts, axis=1)), np.concatenate(masks, axis=1)
+
+    def skin_pull(self):
+        """Pull the faces' hue into the skin range (spec/skin-picker.md):
+        Printer Lights on a negative's density, Temperature/Tint otherwise;
+        each pull starts from the values the frame had before the first pull
+        (unless they were changed by hand since), so pulls replace each other."""
+        from core import skin_balance as sb
+        img = ccr_backend.get_image_by_index(self.current_idx)
+        panel = self._skin_panel()
+        if img is None or panel is None:
+            return
+        if getattr(img, "active_area_id", None) is not None:
+            self._skin_hint("A pull balances the whole frame: choose the Whole Image "
+                            "layer first.")
+            return
+        mode, which, amount = self.skin_options()
+        keys = sb.knobs_for(img, ccr_backend.positive_mode)
+        st = dict(img.adjustment_settings)
+        now = {k: st.get(k, 0) or 0 for k in keys}
+        if self._skin_start is None or now != self._skin_last_set:
+            self._skin_start = now
+        settings = dict(st)
+        settings.update(self._skin_start)
+        patch, mask = self._skin_patch(img)
+        if patch is None:
+            return
+        rng = sb.skin_range(which)
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            values, info = img.solve_skin(patch, mask, keys, rng, amount, settings=settings)
+        finally:
+            QApplication.restoreOverrideCursor()
+        if info.get("reason"):
+            self._skin_hint(info["reason"])
+            return
+        if values is None:
+            whose = "your labs' range" if which == "lab" else "the video skin range"
+            back = {k: v for k, v in self._skin_start.items() if now.get(k) != v}
+            if back:
+                # inside now, from the session's start: put back what an
+                # earlier pull moved
+                panel.on_skin_sampled(back, f"Skin at {info['before']:.0f}\u00b0: already "
+                                            f"inside {whose}, earlier pull undone.")
+                self._skin_last_set = dict(self._skin_start)
+            else:
+                self._skin_hint(f"Skin at {info['before']:.0f}\u00b0: already inside "
+                                f"{whose}. Nothing moved.")
+            return
+        self._skin_last_set = dict(values)
+        panel.on_skin_sampled(values, self._skin_report(info, values, keys))
+
+    def _skin_report(self, info, values, keys):
+        start = info.get("start", {})
+        parts = []
+        if keys[0] == "temperature":
+            for k, name in (("temperature", "Temperature"), ("tint", "Tint")):
+                d = values[k] - start.get(k, 0)
+                if d:
+                    parts.append(f"{name} {d:+g}")
+        else:
+            from widgets.sliders_panel import SlidersPanel as _SP
+            for k, ch in (("ch_r_shift", "C"), ("ch_g_shift", "M"), ("ch_b_shift", "Y")):
+                pts = -(values[k] - start.get(k, 0)) / _SP.PRINTER_POINT_UNITS
+                if abs(pts) > 1e-9:
+                    parts.append(f"{ch} {_SP._fmt_points(pts)}")
+            parts = (["Printer Lights " + ", ".join(parts)] if parts else [])
+        moved = f" ({'; '.join(parts)})" if parts else ""
+        tail = "" if info.get("err", 0) <= 2.0 else ", as far as the sliders go"
+        return (f"Skin pulled from {info['before']:.0f}\u00b0 to {info['after']:.0f}\u00b0"
+                f"{tail}{moved}.")
+
     def _toggle_collage(self, on):
         mw = self.window()
         if hasattr(mw, "show_collage"):
@@ -4204,6 +4604,8 @@ class ImagePreview(QWidget):
 
     def set_sample_mode(self, on):
         on = bool(on)
+        if on and self.skin_mode:
+            self.set_skin_mode(False)
         self.sample_mode = on
         if self.sample_action.isChecked() != on:
             was = self.sample_action.blockSignals(True)
@@ -4354,7 +4756,7 @@ class ImagePreview(QWidget):
             self.scopes_panel.set_sampling_note(self._sampling_status()[1])
         self._schedule_scope_update()
 
-    def _capture_display_image(self, region=None, max_w=None, circle=False):
+    def _capture_display_image(self, region=None, max_w=None, circle=False, circles=None):
         """Render the displayed image (crop applied, orientation as shown,
         hi-res prescale included — zoom/pan excluded) into a small RGBA image;
         returns (rgb (h,w,3) uint8, mask (h,w) bool) or None. Alpha stays 0 in
@@ -4364,7 +4766,9 @@ class ImagePreview(QWidget):
 
         `region` (scene QRectF) limits the capture to that rectangle — the
         reference frame — instead of the whole item; `max_w` caps the capture
-        width (default SCOPE_CAPTURE_W)."""
+        width (default SCOPE_CAPTURE_W). `circles` [((cx, cy), r)] in scene
+        coordinates keeps only what is inside any of them (the Skin tool's
+        faces, spec/skin-picker.md)."""
         if self.pixmap_item is None or self.current_pixmap is None:
             return None
         br = self.pixmap_item.mapToScene(
@@ -4396,6 +4800,13 @@ class ImagePreview(QWidget):
             yy, xx = np.mgrid[0:h, 0:w]
             rx, ry = w / 2.0, h / 2.0
             mask &= ((xx + 0.5 - rx) / rx) ** 2 + ((yy + 0.5 - ry) / ry) ** 2 <= 1.0
+        if circles:
+            yy, xx = np.mgrid[0:h, 0:w]
+            inside = np.zeros((h, w), bool)
+            for (cx, cy), r in circles:
+                ccx, ccy, cr = (cx - br.left()) * s, (cy - br.top()) * s, r * s
+                inside |= (xx + 0.5 - ccx) ** 2 + (yy + 0.5 - ccy) ** 2 <= cr * cr
+            mask &= inside
         return rgb, mask
 
     def probe_color_at(self, vp_pos):

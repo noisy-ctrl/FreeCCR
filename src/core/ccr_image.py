@@ -2020,6 +2020,67 @@ class CCRImage:
             best = list(tt)
         return (int(best[0]), int(best[1]))
 
+    def solve_skin(self, patch, mask, keys, rng, amount, settings=None):
+        """The Skin tool's pull (spec/skin-picker.md): slider values for
+        `keys` (the Printer Lights' R/G/B Shift, or Temperature/Tint) that turn
+        the skin under `mask` in the RENDERED `patch` to the nearest edge of the
+        hue range `rng` (degrees on the vectorscope), `amount` (0..1) of the
+        way, keeping its brightness (Printer Lights) and saturation. A closed
+        loop on the real render, as the WB Picker's: no model of the pipeline.
+
+        Returns (values or None, info): info has "before" (the skin's angle),
+        and "after" / "target" when it moved, "inside" when already in the
+        range, "reason" when it can't be read."""
+        from core import skin_balance as sb
+        mask = np.asarray(mask, bool)
+        sel = {}
+
+        def combine(out):
+            flat = np.asarray(out, dtype=np.float64).reshape(-1, 3)
+            if "idx" not in sel:
+                # the pixels that count are chosen once, on the render at the
+                # starting values, so every later render reads the same ones
+                sel["idx"] = sb.keep_pixels(flat / 257.0, mask)
+            idx = sel["idx"]
+            return flat[idx].mean(axis=0) if idx.size else None
+
+        if not mask.any():
+            return None, {"reason": "Nothing under the circles to read."}
+        setup = self._neutral_measure_fn(patch, settings, combine)
+        if setup is None:
+            return None, {"reason": "Nothing under the circles to read."}
+        measure, base = setup
+        keys = list(keys)
+        start = [float(base.get(k, 0) or 0) for k in keys]
+
+        def ycc_at(vals):
+            return sb.ycc(np.asarray(measure(dict(zip(keys, vals))), dtype=np.float64) / 257.0)
+
+        y0 = ycc_at(start)
+        info = {"before": sb.angle_of(y0)}
+        reason = sb.refusal_range(y0, rng)
+        if reason:
+            info["reason"] = reason
+            return None, info
+        target = sb.range_target(y0, rng, amount)
+        if target is None:
+            info["inside"] = True
+            return None, info
+        if len(keys) == 3:
+            f, want, quantum = ycc_at, target, 0.5
+        else:
+            f, want, quantum = (lambda v: ycc_at(v)[1:]), target[1:], 1.0
+        vals, err, renders = sb.solve(f, start, want, step=4.0, lo=-100.0, hi=100.0,
+                                      quantum=quantum)
+        y1 = ycc_at(vals)
+        info.update(after=sb.angle_of(y1), target=sb.angle_of(target), err=err,
+                    renders=renders, start=dict(zip(keys, start)))
+        out = {}
+        for k, v in zip(keys, vals):
+            v = float(v)
+            out[k] = int(v) if v == int(v) else v
+        return out, info
+
     def solve_neutral_balance(self, sample_patch, settings=None,
                               passes=None, combine=None) -> tuple:
         """Balance slider ints that drive the RENDERED `sample_patch` to grey.

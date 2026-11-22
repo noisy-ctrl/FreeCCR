@@ -124,6 +124,29 @@ def refusal(y_cb_cr, line: float):
     return None
 
 
+def refusal_range(y_cb_cr, rng):
+    """refusal() against a range: too little colour, or too far outside it
+    to be skin."""
+    if chroma_of(y_cb_cr) < MIN_CHROMA:
+        return "There's no colour in that circle to read."
+    off = abs(outside_by(angle_of(y_cb_cr), rng))
+    if off > MAX_OFF_DEG:
+        return (f"That doesn't look like skin: its colour is {off:.0f}\u00b0 "
+                f"from the skin range.")
+    return None
+
+
+def knobs_for(img, positive=False):
+    """Which sliders a pull moves: the Printer Lights (R/G/B Shift: a density
+    offset) on a negative converted on its density ("bw" conversions,
+    anchored or not), Temperature/Tint on a positive or a reference-frame
+    conversion, where they are a true white balance."""
+    ci = getattr(img, "conversion_inputs", None) or {}
+    if not positive and ci.get("mode") == "bw":
+        return ("ch_r_shift", "ch_g_shift", "ch_b_shift")
+    return ("temperature", "tint")
+
+
 def target_point(y_cb_cr, line: float, amount: float):
     """(Y, Cb, Cr) the skin should end at: its hue turned `amount` (0..1) of
     the way to `line` the short way round, its luma and chroma kept."""
