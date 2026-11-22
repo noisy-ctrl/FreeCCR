@@ -331,6 +331,26 @@ def add_file(path, now=None):
     return True
 
 
+def note(path, key, value, now=None):
+    """Something learnt about one of the recorded shot's files (e.g. that it
+    clipped, spec/capture-clip-warning.md): kept under `key` by its slot and
+    the shot written again. False when the file isn't in the shot."""
+    now = time.monotonic() if now is None else float(now)
+    name = os.path.basename(str(path or ""))
+    with _lock:
+        e, folder, until = _shot["entry"], _shot["folder"], _shot["until"]
+        if e is None or (until is not None and now > until):
+            return False
+        slot = next((s for s, f in e["files"].items() if f == name), None)
+        if slot is None:
+            return False
+        e.setdefault(key, {})[slot] = value
+        snap = json.loads(json.dumps(e))
+    if folder:
+        append(folder, snap)
+    return True
+
+
 def end_shot(reason=None, now=None):
     """The sequence ended: mark the shot done (with why, if it stopped early).
     Files arriving in the next GRACE_S still join it."""

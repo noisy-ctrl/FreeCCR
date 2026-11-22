@@ -326,6 +326,7 @@ class LiveCaptureMonitor(QWidget):
     _flats_built = Signal(object)        # Shoot Flat Fields: the saved flats (or error)
     _base_bp_read = Signal(int, object)  # (name, black point or error), from a thread
     _zoom_spot_found = Signal(int, object)   # where the magnifier looked (or None)
+    _clip_read = Signal(int, str, object)    # (shot, file, clipped colours or error)
 
     def __init__(self, main_window=None, feed=None, light=None, usb=None, rail=None,
                  parent=None):
@@ -1211,6 +1212,13 @@ class LiveCaptureMonitor(QWidget):
         self._patch_read.connect(self._on_patch_read)
         self._flats_built.connect(self._on_flats_built)
         self._base_bp_read.connect(self._on_base_bp_read)
+        # does a shot clip inside the frame? (spec/capture-clip-warning.md)
+        self._clip_read.connect(self._on_clip_read)
+        self._clip_token = 0
+        self._clip_shot = {}
+        self._clip_guide = None
+        self._clip_threaded = True          # tests read it in line
+        self._read_clipping = fm.read_clipping
         self._base_bp_token = 0
         self._base_bp_threaded = True       # tests read it in line
         self._load_base_shots = None        # the decoder (None: base_black_point.load_shots)
@@ -2493,6 +2501,7 @@ class LiveCaptureMonitor(QWidget):
             self._log_shot = None
         if started:
             self._begin_log_shot(p)
+            self._clip_begin(p)
             self._await_exposure = True
             self.shoot_btn.setText("Stop   (Esc)")
             self.measure_btn.setEnabled(False)
@@ -2780,7 +2789,62 @@ class LiveCaptureMonitor(QWidget):
         elif reason == "camera lost":
             self._warn_caption("Stopped: the camera disconnected.")
         # "no file": _on_usb_skipped says why
+        if reason == "done":
+            self._show_clip_warning()
         self._refresh_shoot_enabled()
+
+    # ------------------------------------------------------------------ #
+    # a shot that clips inside the frame (spec/capture-clip-warning.md)
+    # ------------------------------------------------------------------ #
+    def _clip_begin(self, p):
+        """A Shoot started: its files are checked against its frame guide."""
+        self._clip_token += 1
+        self._clip_shot = {}
+        rec = p.get("guide")
+        guide = rec.get("guide") if isinstance(rec, dict) else None
+        if guide is None and self.actions["guide"].isChecked():
+            g = getattr(self.canvas, "guide", None)
+            guide = dict(g) if g else None
+        self._clip_guide = guide
+
+    def _clip_check(self, path):
+        if self._clip_token == 0:
+            return                               # not from a Shoot
+        ns = capture_log.name_slot(path)
+        if (ns is not None and ns[2] == "ir") or capture_log.is_ir_file(path):
+            return                               # the IR shot aims elsewhere
+        token, guide, read = self._clip_token, self._clip_guide, self._read_clipping
+
+        def work():
+            try:
+                out = read(path, guide)
+            except Exception as e:
+                out = e
+            self._clip_read.emit(token, path, out)
+
+        if not self._clip_threaded:
+            work()
+            return
+        import threading
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_clip_read(self, token, path, result):
+        if token != self._clip_token or isinstance(result, Exception):
+            return
+        self._clip_shot[os.path.basename(path)] = dict(result or {})
+        if result:
+            capture_log.note(path, "clip", {k: round(float(v), 5) for k, v in result.items()})
+            if not self.sequence.running:
+                self._show_clip_warning()
+
+    def clip_warning_text(self):
+        return fm.clip_text({n: r for n, r in self._clip_shot.items() if r},
+                            in_frame=self._clip_guide is not None)
+
+    def _show_clip_warning(self):
+        text = self.clip_warning_text()
+        if text:
+            self._warn_caption(text)
 
     # ------------------------------------------------------------------ #
     # film bases (spec/film-base-exposure.md)
@@ -4246,6 +4310,7 @@ class LiveCaptureMonitor(QWidget):
             return
         capture_guide.remember(path)             # the shot's own file: its guide
         capture_log.add_file(path)               # ... and its line in the log
+        self._clip_check(path)                   # ... and whether it clipped
         if self.sequence.running and self.sequence.camera_shutter:
             self.sequence.frame_done(path)
         elif not self.sequence.running:
