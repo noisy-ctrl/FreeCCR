@@ -632,9 +632,16 @@ class GraphicsImageView(QGraphicsView):
         if place is not None:
             place()
 
+    def _grid_shown(self):
+        """The fixed straightening grid, while the rotate slider is held; not
+        in Crop mode, where the box carries its own grid turning with it and
+        a second, fixed one only confused (spec/crop-rotate-fit.md)."""
+        return bool(getattr(self.parent_widget, "show_grid", False)
+                    and not getattr(self.parent_widget, "crop_mode", False))
+
     def drawForeground(self, painter, rect):
         super().drawForeground(painter, rect)
-        if hasattr(self.parent_widget, "show_grid") and self.parent_widget.show_grid:
+        if self._grid_shown():
             painter.save()
             painter.setRenderHint(QPainter.Antialiasing, False)  # <-- Use QPainter.Antialiasing
             pen = QPen(QColor(0, 80, 0, 80), 2)
@@ -1257,6 +1264,9 @@ class ImagePreview(QWidget):
         self._crop_rerender = False          # guards update_preview while entering crop mode
         self._pending_crop_local = None      # QRectF box (un-rotated) in full-pixmap coords
         self._pending_crop_angle = 0.0       # box rotation, degrees (Qt clockwise-positive)
+        # (box as fitted, box it started from) while the box is only being
+        # turned, so turning back grows it back (spec/crop-rotate-fit.md)
+        self._crop_turn_memo = None
         self._crop_fold_fine = False         # did entry fold a nonzero fine_rotation in?
         self._crop_box_is_seed = False       # is the pending box an auto-seed (vs a user crop)?
         self._crop_panel = None              # set by MainWindow (aspect ratio + straighten sync)
@@ -6020,7 +6030,37 @@ class ImagePreview(QWidget):
         if not self.crop_mode:
             return
         self._pending_crop_angle = float(degrees)
+        self._fit_pending_box()
         self._draw_crop_overlay()
+
+    @staticmethod
+    def _rect_key(r):
+        return (r.x(), r.y(), r.width(), r.height())
+
+    def _fit_pending_box(self):
+        """The pending box at its angle: the box it started turning from,
+        scaled about its centre by the largest factor <= 1 that keeps it,
+        turned, inside the picture (core.straighten.fit_box), so no black
+        corner reaches the crop (spec/crop-rotate-fit.md)."""
+        from core import straighten as st
+        sel = self._pending_crop_local
+        if sel is None or self.current_pixmap is None or sel.width() < 2 or sel.height() < 2:
+            return
+        w, h = float(self.current_pixmap.width()), float(self.current_pixmap.height())
+        if w < 2 or h < 2:
+            return
+        memo = self._crop_turn_memo
+        cur = self._rect_key(sel)
+        if memo is not None and all(abs(a - b) <= 1e-6 for a, b in zip(memo[0], cur)):
+            base = memo[1]
+        else:
+            base = cur
+        bx, by, bw, bh = base
+        x1, y1, x2, y2 = st.fit_box((bx / w, by / h, (bx + bw) / w, (by + bh) / h),
+                                    self._pending_crop_angle, w, h)
+        fitted = QRectF(x1 * w, y1 * h, (x2 - x1) * w, (y2 - y1) * h)
+        self._pending_crop_local = fitted
+        self._crop_turn_memo = (self._rect_key(fitted), base)
 
     def auto_detect_crop(self):
         """Crop panel Auto: exactly what Auto Crop would set (the same
@@ -6084,6 +6124,8 @@ class ImagePreview(QWidget):
         cx, cy, bw, bh = res
         self._pending_crop_local = QRectF(cx - bw / 2.0, cy - bh / 2.0, bw, bh)
         self._crop_box_is_seed = False
+        if abs(self._pending_crop_angle) >= 0.05:
+            self._fit_pending_box()          # a turned box stays inside the picture
         self._draw_crop_overlay()
         self._sync_crop_panel()
 
@@ -6375,7 +6417,11 @@ class ImagePreview(QWidget):
         base = drag["angle0"]
         angle = max(min(-45.0, base), min(max(45.0, base), angle))
         self._pending_crop_angle = angle
-        self._pending_crop_local = QRectF(box0)
+        # the box shrinks to stay inside the picture and grows back when
+        # turned back: fitted from the box it started turning from
+        if self._pending_crop_local is None:
+            self._pending_crop_local = QRectF(box0)
+        self._fit_pending_box()
 
     def _drag_corner(self, drag, p, which):
         box0 = drag["box0"]
@@ -6582,6 +6628,14 @@ class ImagePreview(QWidget):
                 # Without rotation, anything outside the image is empty —
                 # commit only the visible part of the box.
                 sel = sel.intersected(QRectF(0, 0, w, h))
+            else:
+                # A turned box moved against an edge: fit it once more (only
+                # ever smaller), so no corner outside the picture is kept
+                # (spec/crop-rotate-fit.md)
+                from core import straighten as st
+                x1, y1, x2, y2 = st.fit_box((sel.left() / w, sel.top() / h,
+                                             sel.right() / w, sel.bottom() / h), angle, w, h)
+                sel = QRectF(x1 * w, y1 * h, (x2 - x1) * w, (y2 - y1) * h)
             if sel.width() >= 10 and sel.height() >= 10:
                 new_crop = (sel.left() / w, sel.top() / h,
                             sel.right() / w, sel.bottom() / h)
