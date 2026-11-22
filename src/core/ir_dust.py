@@ -82,6 +82,10 @@ MAX_CAND_AREA = 4000       # blocks: a larger component is picture
 RING_IN, RING_OUT = 3, 8   # blocks: the ring a candidate is compared with
 JOIN_GAP = 4               # blocks: a fibre's pieces this close go together ...
 JOIN_P = 0.2               # ... when the weaker one is at least this likely ...
+# The IR noise the model was fitted at (the user's 8 s ISO 3200 shots: median
+# local noise 0.0150-0.0162 log). A cleaner IR shot is read in these units, so
+# its depths mean what they meant to the model (spec/ir-dust-v2.md rev. 2026-11-22)
+NOISE_REF = 0.015
 LINE_LIKE = 5.0            # ... and line-like (line depth, or ELONGATED)
 DARK_IR = 0.20             # the IR shot under this share of its range: say so
 BRIDGE_GAP = 24            # blocks: a fibre's flagged pieces this far apart ...
@@ -659,6 +663,11 @@ def dust_map(ir: np.ndarray, visible: Optional[List[np.ndarray]] = None,
         L = -L
     dc, sig = _residual(L, radius)
     z = dc / sig
+    noise = float(np.median(sig[::8, ::8]))
+    if 0.0 < noise < NOISE_REF:
+        # a cleaner shot: the picture's leftovers aren't noise and would score
+        # deeper in its own sigma; read it at the noise the model knows
+        z = z * (noise / NOISE_REF)
     line = line_map(z)
     vz = vzmin = vd = grad = None
     gmed = 1.0
