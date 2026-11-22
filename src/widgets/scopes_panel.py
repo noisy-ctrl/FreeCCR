@@ -250,11 +250,30 @@ class VectorscopeWidget(_ScopeWidgetBase):
                    QPointF(sq.right(), sq.center().y()))
         p.drawLine(QPointF(sq.center().x(), sq.top()),
                    QPointF(sq.center().x(), sq.bottom()))
-        # Skin-tone indicator: center → 100% circle along the +I axis.
-        ucb, ucr = scopes.skin_tone_direction()
-        p.setPen(QPen(QColor(*theme.Paint.SCOPE_SKIN), 1))
-        p.drawLine(sq.center(),
-                   self._chroma_point(sq, ucb * 128.0, ucr * 128.0))
+        # Skin lines: the video +I axis and the lab scans' line (the Skin
+        # picker's, spec/skin-picker.md); the one Skin aims for solid, the
+        # other dotted.
+        from core import skin_balance
+        chosen = getattr(self, "skin_line", None) or skin_balance.DEFAULT_RANGE
+        lo, hi = skin_balance.skin_range(chosen)
+        skin_col = QColor(*theme.Paint.SCOPE_SKIN)
+        wedge = QColor(skin_col)
+        wedge.setAlpha(46)
+        p.setPen(Qt.NoPen)
+        p.setBrush(wedge)
+        # Qt's angles run anticlockwise from 3 o'clock, as the scope's do
+        # (+Cb right, +Cr up), in 1/16 degree
+        p.drawPie(QRectF(sq.center().x() - radius, sq.center().y() - radius,
+                         2 * radius, 2 * radius), int(lo * 16), int((hi - lo) * 16))
+        p.setBrush(Qt.NoBrush)
+        for which, _label in skin_balance.RANGES:
+            ucb, ucr = skin_balance.line_direction(skin_balance.line_deg(which))
+            pen = QPen(skin_col, 1)
+            if which != chosen:
+                pen.setStyle(Qt.DotLine)
+            p.setPen(pen)
+            p.drawLine(sq.center(),
+                       self._chroma_point(sq, ucb * 128.0, ucr * 128.0))
         # 75% targets, derived from the same RGB→CbCr mapping as the trace.
         label = QColor(*theme.Paint.SCOPE_LABEL)
         font = p.font()

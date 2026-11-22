@@ -891,7 +891,7 @@ EXPORT_BOX_PAD = 24    # the boxed Export's width past its bold words (2 x 10 pa
 ZOOM_GAP_PX = 4        # ... and the one between Export and the zoom box
 TEXT_BUTTON_PAD = 6    # a text button's width past its words (Qt's hint: ~17; 8 until
                        # the Capture button, 2026-11-19)
-ICON_BUTTON_PAD = 5    # a picture button's width past its icon (Qt's hint: 8)
+ICON_BUTTON_PAD = 3    # a picture button's width past its icon (Qt's hint: 8)
 AUTO_CROP_GAP_PX = 8   # the plain gap between Auto Crop and Un-convert (2026-11-08)
 
 
@@ -1156,6 +1156,19 @@ class ImagePreview(QWidget):
             "Measuring only: the picture is not changed.")
         self.sample_action.triggered.connect(self.set_sample_mode)
         self.toolbar.addAction(self.sample_action)
+        # Skin (spec/skin-picker.md): circles on faces, read against the range
+        # of hues your labs print skin at; beside the Sample circle
+        self.skin_action = QAction(
+            theme.load_tinted_icon(resource_path("icons/skin-icon.png"),
+                                   on_color=theme.ICON_ON),
+            "Skin", self)
+        self.skin_action.setCheckable(True)
+        self.skin_action.setToolTip(
+            "Skin: drag a circle on a face, from its centre (Shift-drag adds "
+            "another face). The scopes read the faces and the vectorscope shows "
+            "the range of hues your labs print skin at. Right-click to have it "
+            "pull a face that's outside that range back in.")
+        self.toolbar.addAction(self.skin_action)
         # The collage maker (spec/collage-maker.md): the last picture on the left
         self.collage_action = QAction(
             theme.load_tinted_icon(resource_path("icons/collage-icon.png"),

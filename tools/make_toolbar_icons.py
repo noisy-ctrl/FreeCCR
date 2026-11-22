@@ -422,6 +422,37 @@ def collage():
     return img
 
 
+def face_profile_path():
+    """A head in profile, facing left (spec/skin-picker.md)."""
+    P = QPainterPath()
+    P.moveTo(13.6, 2.4)
+    P.cubicTo(18.6, 2.2, 21.8, 5.6, 21.6, 10.2)          # crown to back of head
+    P.cubicTo(21.5, 13.4, 20.0, 15.2, 18.6, 16.4)        # back of head to nape
+    P.cubicTo(18.4, 18.4, 18.8, 20.4, 19.6, 21.8)        # neck, back
+    P.lineTo(10.4, 21.8)                                  # base
+    P.cubicTo(10.8, 20.6, 10.9, 19.6, 10.7, 18.7)        # neck, front
+    P.cubicTo(9.4, 18.6, 8.3, 18.0, 8.2, 16.9)           # jaw to chin
+    P.cubicTo(8.1, 16.2, 7.5, 15.7, 7.6, 15.0)           # chin to the lips
+    P.cubicTo(7.7, 14.4, 7.3, 13.9, 7.8, 13.3)           # lips to under the nose
+    P.cubicTo(6.8, 13.1, 5.7, 12.7, 5.9, 12.0)           # nose tip
+    P.cubicTo(6.6, 11.0, 7.4, 10.0, 7.6, 9.0)            # bridge
+    P.cubicTo(7.3, 8.4, 7.4, 7.8, 7.6, 7.3)              # brow
+    P.cubicTo(8.0, 4.4, 10.4, 2.5, 13.6, 2.4)            # forehead to crown
+    P.closeSubpath()
+    return P
+
+
+def skin():
+    """The skin tool (spec/skin-picker.md, draft A): a head in profile,
+    filled."""
+    img, p = canvas()
+    p.setPen(Qt.NoPen)
+    p.setBrush(QBrush(BLACK))
+    p.drawPath(face_profile_path())
+    p.end()
+    return img
+
+
 # (file in src/icons, drawing): the names the app loads
 ICONS = [
     ("rotate-left-icon-size_512.png", lambda: rotate(True)),
@@ -439,6 +470,7 @@ ICONS = [
     ("scope-sample-icon.png", scope_sample),
     ("flat-field-icon.png", flat_field),
     ("collage-icon.png", collage),
+    ("skin-icon.png", skin),
 ]
 # Capture keeps its camera (camera-icon.png, the user's choice, 2026-11-19).
 
