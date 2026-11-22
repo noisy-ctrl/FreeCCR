@@ -111,7 +111,7 @@ def test_a_region_outlines_both_scopes_red():
 
     def edge_red(w):
         img = w.grab().toImage()
-        c = img.pixelColor(img.width() // 2, 1)
+        c = img.pixelColor(img.width() // 2, 0)       # the 1 px border's row
         return c.red() > 180 and c.green() < 90
 
     sp.set_sampling_note("skin", region=True)
