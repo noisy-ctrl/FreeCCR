@@ -6,7 +6,7 @@ the film bases Capture measured for it. Changes are saved as they are made.
 Film bases go through the main window (`film_bases_data` /
 `set_film_bases_data`) so an open Capture reloads them."""
 from PySide6.QtCore import QSettings, Qt
-from PySide6.QtWidgets import (QComboBox, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
                                QListWidget, QListWidgetItem, QMessageBox, QPushButton,
                                QSpinBox, QVBoxLayout, QWidget)
 
@@ -81,6 +81,16 @@ class FilmPresetsPage(QWidget):
         theme.shrinkable_combo(self.look_combo)
         look_row.addWidget(self.look_combo, 1)
         right.addLayout(look_row)
+
+        # Auto Radius on each frame (spec/preset-auto-radius.md)
+        self.auto_radius_cb = QCheckBox("Measure each frame's sharpening radius (Auto)")
+        self.auto_radius_cb.setToolTip(
+            "When this preset's settings reach a frame (Apply Preset, or a capture in a "
+            "roll of this film), Details → Radius is measured on that frame's own grain, "
+            "as its Auto button does. Runs in the background; a radius you set by hand "
+            "meanwhile is kept.")
+        self.auto_radius_cb.toggled.connect(self._auto_radius_changed)
+        right.addWidget(self.auto_radius_cb)
 
         # a flat field per scan type, pointing into the flat library
         # (spec/preset-flat-fields.md)
@@ -280,12 +290,25 @@ class FilmPresetsPage(QWidget):
             mw._refresh_profile_mismatch()       # open frames of it flagged ⚠
         self.refresh(select=new["id"])
 
+    def _auto_radius_changed(self, on):
+        p = self.current()
+        if p is None or bool(on) == fp.auto_radius_of(p):
+            return
+        presets, new = fp.set_auto_radius(self.presets(), p["id"], on)
+        if new is None:
+            return
+        self._save(presets)
+        self.refresh(select=new["id"])
+
     def _show(self, _row=-1):
         p = self.current()
         on = p is not None
         for w in (self.film_edit, self.push, self.version, self.notes, self.look_combo,
-                  self.clear_btn, self.version_btn, self.delete_btn):
+                  self.clear_btn, self.version_btn, self.delete_btn, self.auto_radius_cb):
             w.setEnabled(on)
+        self.auto_radius_cb.blockSignals(True)
+        self.auto_radius_cb.setChecked(fp.auto_radius_of(p))
+        self.auto_radius_cb.blockSignals(False)
         self._fill_flats(p)
         for w in (self.film_edit, self.push, self.version, self.notes):
             w.blockSignals(True)

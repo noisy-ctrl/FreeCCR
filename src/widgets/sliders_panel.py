@@ -2203,7 +2203,8 @@ class SlidersPanel(QWidget):
         if not indices:
             return
         presets = [p for p in self._film_presets()
-                   if film_presets.carried(p) or p.get("flats")]
+                   if film_presets.carried(p) or p.get("flats")
+                   or film_presets.auto_radius_of(p)]
         if not presets:
             self.set_temporary_hint("No film preset carries settings yet: Write Preset "
                                     "first.", duration=4000)
@@ -2230,6 +2231,8 @@ class SlidersPanel(QWidget):
             self.set_temporary_hint(f"Marked as {film_presets.label(p)}.", duration=3000)
         self._mark_preset(indices, p["id"])
         self._sync_preset_button(self.current_idx)
+        if film_presets.auto_radius_of(p):          # spec/preset-auto-radius.md
+            self.queue_auto_radius([ccr_backend.get_image_by_index(i) for i in indices])
 
     def _mark_preset(self, indices, pid):
         """Mark frames as of a film preset and re-grade those whose flat field
@@ -4453,6 +4456,104 @@ class SlidersPanel(QWidget):
         self.end_undo_burst()
         self._settle_preview()
         self.set_temporary_hint(res.reason, duration=8000)
+
+    # --- Auto Radius for a film preset's frames (spec/preset-auto-radius.md) ---
+    def queue_auto_radius(self, images):
+        """Measure Auto Radius on each of `images` in the background, one at
+        a time, and set it on those whose radius hasn't been changed since."""
+        q = getattr(self, "_radius_queue", None)
+        if q is None:
+            q = self._radius_queue = []
+            self._radius_tally = {"set": [], "kept": 0, "failed": 0, "total": 0}
+        for img in images or []:
+            if img is None or any(e[0] is img for e in q) or \
+                    getattr(self, "_radius_queue_img", None) is img:
+                continue
+            q.append((img, img.adjustment_settings.get("sharpen_radius")))
+            self._radius_tally["total"] += 1
+        self._radius_next()
+
+    def _radius_next(self):
+        if getattr(self, "_radius_queue_worker", None) is not None:
+            return
+        q = getattr(self, "_radius_queue", None) or []
+        if not q:
+            self._radius_finish()
+            return
+        img, before = q.pop(0)
+        self._radius_queue_img, self._radius_queue_before = img, before
+        t = self._radius_tally
+        done = len(t["set"]) + t["kept"] + t["failed"]
+        self.set_temporary_hint(
+            f"<b>Auto Radius:</b> measuring {done + 1} of {t['total']}…", duration=20000)
+        if not self._auto_radius_threaded:
+            self._radius_queue_worker = True
+            self._radius_landed(img, self._run_measure_radius(img))
+            return
+        worker = AutoRadiusWorker(img, self._run_measure_radius, parent=self)
+        worker.done.connect(self._radius_landed)
+        worker.finished.connect(worker.deleteLater)
+        self._radius_queue_worker = worker
+        worker.start()
+
+    def _radius_landed(self, img, res):
+        self._radius_queue_worker = None
+        before = getattr(self, "_radius_queue_before", None)
+        self._radius_queue_img = None
+        t = self._radius_tally
+        idx = next((i for i, x in enumerate(ccr_backend.images) if x is img), None)
+        if idx is None or res is None or res.slider is None:
+            t["failed"] += 1
+        elif img.adjustment_settings.get("sharpen_radius") != before:
+            t["kept"] += 1                       # set by hand meanwhile
+        else:
+            img.push_undo_state()
+            img.adjustment_settings["sharpen_radius"] = int(res.slider)
+            t["set"].append(int(res.slider))
+            if idx == self.current_idx:
+                i = self.adjustment_keys.index("sharpen_radius")
+                slider = self.sliders[i]
+                slider.blockSignals(True)
+                slider.setValue(int(res.slider))
+                slider.blockSignals(False)
+                self.slider_value_labels[i].setText(slider.value_text())
+                self.end_undo_burst()
+                img.update_thumbnail_and_preview()
+                self._show_rendered()
+            else:
+                img.update_thumbnail_and_preview()
+                tl = getattr(self.window(), "thumbnail_list", None)
+                if tl is not None and hasattr(tl, "update_thumbnail"):
+                    try:
+                        tl.update_thumbnail(idx)
+                    except Exception:
+                        pass
+        self._radius_next()
+
+    def _radius_finish(self):
+        t = getattr(self, "_radius_tally", None)
+        if not t or not t["total"]:
+            return
+        n = len(t["set"])
+        msg = "<b>Auto Radius</b> "
+        if n:
+            lo, hi = min(t["set"]), max(t["set"])
+            rng = str(lo) if lo == hi else f"{lo}–{hi}"
+            msg += f"set on {n} frame{'s' if n != 1 else ''} (radius {rng})"
+        else:
+            msg += "set on no frames"
+        if t["kept"]:
+            msg += f"; {t['kept']} kept {'its' if t['kept'] == 1 else 'their'} own"
+        if t["failed"]:
+            msg += f"; {t['failed']} couldn't be measured"
+        self.set_temporary_hint(msg + ".", duration=8000)
+        self._radius_queue = None
+        self._radius_tally = None
+        if n:
+            try:
+                ccr_backend.save_catalog()
+            except Exception:
+                pass
 
     def _run_awb(self, guard=True):
         """AWB, guarded by the roll unless `guard` is False (right-click:
