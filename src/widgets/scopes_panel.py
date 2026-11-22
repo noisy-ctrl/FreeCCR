@@ -108,20 +108,11 @@ class _ScopeWidgetBase(QWidget):
 
     def _end_paint(self, p):
         p.setClipping(False)
-        if self.region:
-            p.setPen(QPen(self.REGION_COLOUR, 2))
-            p.setBrush(Qt.NoBrush)
-            p.drawPath(self._region_path())
-        else:
-            p.setPen(QPen(QColor(theme.BORDER), 1))
-            p.setBrush(Qt.NoBrush)
-            p.drawPath(self._bg_path)
+        colour = self.REGION_COLOUR if self.region else QColor(theme.BORDER)
+        p.setPen(QPen(colour, 1))
+        p.setBrush(Qt.NoBrush)
+        p.drawPath(self._bg_path)
         p.end()
-
-    def _region_path(self):
-        path = QPainterPath()
-        path.addRoundedRect(QRectF(self.rect()).adjusted(1, 1, -1, -1), _RADIUS, _RADIUS)
-        return path
 
 
 class ParadeScopeWidget(_ScopeWidgetBase):

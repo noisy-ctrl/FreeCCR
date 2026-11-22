@@ -10,7 +10,7 @@ fairly flat."
 
 While the scopes read only part of the picture (the Sample circle, the Skin
 tool's faces, the reference frame with Ref frame ticked), the parade and the
-vectorscope are each outlined in red, 2 px, round their rounded boxes
+vectorscope are each outlined in red, 1 px (the user, 2026-11-22: 2 px was too heavy), round their rounded boxes
 (`_ScopeWidgetBase.set_region`, `REGION_COLOUR` (230, 50, 45)); reading the
 whole picture they keep their grey 1 px border. The same test as the
 histogram's caption decides it: `ImagePreview._sampling_status()` gives a
