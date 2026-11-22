@@ -4487,8 +4487,8 @@ class ImagePreview(QWidget):
     def skin_circle_at(self, scene_pos):
         """The index of the drawn circle under `scene_pos` (the newest on
         top), or None."""
-        for k in range(len(self.skin_circles) - 1, -1, -1):
-            circles = self._skin_circles_scene()
+        circles = self._skin_circles_scene()
+        for k in range(len(circles) - 1, -1, -1):
             (cx, cy), r = circles[k]
             if math.hypot(scene_pos.x() - cx, scene_pos.y() - cy) <= r:
                 return k
