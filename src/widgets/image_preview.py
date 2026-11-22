@@ -5051,18 +5051,21 @@ class ImagePreview(QWidget):
         self._commit_dust_change(img)
 
     def _learn_ir_from_stroke(self, img, pts, r):
-        """A hand stroke over a candidate IR dust didn't flag teaches it that
-        it missed one (spec/ir-dust-v2.md §4)."""
-        if getattr(img, "_ir_dust_map", None) is None:
+        """A hand stroke over a candidate IR dust (or the marks finder) didn't
+        flag teaches it that it missed one (spec/ir-dust-v2.md §4,
+        spec/marks-learning.md)."""
+        if (getattr(img, "_ir_dust_map", None) is None
+                and getattr(img, "_mark_map", None) is None):
             return
         try:
-            from core import ir_dust
+            from core import ir_dust, film_marks
             size = self._dust_full_frame_size()
             if size is None or size[0] <= 0:
                 return
-            if ir_dust.learn_from_stroke(img, pts, float(r), size[1] / size[0]):
-                if hasattr(getattr(self, "dust_panel", None), "refresh_ir_section"):
-                    self.dust_panel.refresh_ir_section()
+            n = ir_dust.learn_from_stroke(img, pts, float(r), size[1] / size[0])
+            n += film_marks.learn_from_stroke(img, pts, float(r), size[1] / size[0])
+            if n and hasattr(getattr(self, "dust_panel", None), "refresh_ir_section"):
+                self.dust_panel.refresh_ir_section()
         except Exception:
             pass
 

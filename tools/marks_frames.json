@@ -1,0 +1,14 @@
+{
+  "_about": "Frames the marks' default model was fitted on (spec/marks-learning.md): his scans, found by name under --folder.",
+  "frames": {
+    "R0023_005": {"visible": ["R0023_645_Gold200120_005_1RED.raf", "R0023_645_Gold200120_005_2GREEN.raf", "R0023_645_Gold200120_005_3BLUE.raf"], "ir": "R0023_645_Gold200120_005_4IR.raf"},
+    "R0020_001": {"visible": ["R0020_645_Gold200120_001_1RED.raf", "R0020_645_Gold200120_001_2GREEN.raf", "R0020_645_Gold200120_001_3BLUE.raf"], "ir": "R0020_645_Gold200120_001_4IR.raf"},
+    "R0020_002": {"visible": ["R0020_645_Gold200120_002_1RED.raf", "R0020_645_Gold200120_002_2GREEN.raf", "R0020_645_Gold200120_002_3BLUE.raf"], "ir": "R0020_645_Gold200120_002_4IR.raf"},
+    "R0020_004": {"visible": ["R0020_645_Gold200120_004_BW.raf"], "ir": "R0020_645_Gold200120_004_4IR.raf"},
+    "R0020_005": {"visible": ["R0020_645_Gold200120_005_BW.raf"], "ir": "R0020_645_Gold200120_005_4IR.raf"},
+    "R0011_001": {"visible": ["R0011_645_XP2_001_BW.raf"], "ir": null},
+    "R0011_002": {"visible": ["R0011_645_XP2_002_BW.raf"], "ir": null},
+    "R0015_019": {"visible": ["R0015_645_XP2_019_BW.raf"], "ir": null},
+    "R0016_003": {"visible": ["R0016_645_XP2_003_BW.raf"], "ir": null}
+  }
+}

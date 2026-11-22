@@ -212,13 +212,13 @@ def thresholds(sensitivity: float) -> Tuple[float, float]:
     return 8.0 + (6.0 - 8.0) * u, 7.0 + (5.5 - 7.0) * u
 
 
-def passes(mk: Mark, sensitivity: float = SENS_DEFAULT, has_ir: bool = False) -> bool:
-    """The test (spec §2): deep, standing out from an even ring, small; a
-    prints-dark mark not a long line and not dark in the IR (dust's halo);
-    a prints-white one, when there is an IR shot, a little darker in it."""
-    depth, stand, step, larea, _elong, irs, _colour = (float(v) for v in mk.feats)
-    need_d, need_s = thresholds(sensitivity)
-    if depth < need_d or stand < need_s or step > STEP_MAX or larea > math.log(AREA_MAX):
+def gate(mk: Mark, has_ir: bool = False) -> bool:
+    """What a mark is not, whatever its depth (spec/marks-learning.md): an
+    edge (uneven ring), picture-sized; a prints-dark mark that is a long line
+    or dark in the IR (dust's halo); a prints-white one with no IR support
+    when there is an IR shot."""
+    _depth, _stand, step, larea, _elong, irs, _colour = (float(v) for v in mk.feats)
+    if step > STEP_MAX or larea > math.log(AREA_MAX):
         return False
     if mk.kind == "light":
         ys, xs = np.nonzero(mk.mask)
@@ -227,6 +227,28 @@ def passes(mk: Mark, sensitivity: float = SENS_DEFAULT, has_ir: bool = False) ->
     elif has_ir and irs < DARK_IR_MIN:
         return False
     return True
+
+
+def rule_passes(mk: Mark, sensitivity: float = SENS_DEFAULT) -> bool:
+    """The rule's degree test: deep enough and standing out enough."""
+    need_d, need_s = thresholds(sensitivity)
+    return float(mk.feats[0]) >= need_d and float(mk.feats[1]) >= need_s
+
+
+def passes(mk: Mark, sensitivity: float = SENS_DEFAULT, has_ir: bool = False) -> bool:
+    """The test (spec §2): through the gate, then deep and standing out from
+    an even ring by the rule, or, once a kind has been corrected enough, by
+    the model learnt from the corrections (spec/marks-learning.md)."""
+    if not gate(mk, has_ir):
+        return False
+    try:
+        from core import marks_model
+        verdict = marks_model.decide(mk.kind, mk.feats, sensitivity)
+    except Exception:
+        verdict = None
+    if verdict is not None:
+        return verdict
+    return rule_passes(mk, sensitivity)
 
 
 def likely(mk: Mark) -> bool:
@@ -339,6 +361,37 @@ def rethreshold(img, sensitivity: Optional[float] = None) -> List[dict]:
     rest = [s for s in pending if s.get("kind") != SPOT_KIND]
     img.ir_dust_pending = (rest + spots) or None
     return spots
+
+
+def learn_from_stroke(img, pts, r: float, aspect: float) -> int:
+    """A Brush stroke (normalised points, radius a share of the width) over a
+    mark the finder saw but didn't flag: a missed mark, weight 1
+    (spec/marks-learning.md). Only while the frame's mark map is in memory.
+    Returns how many."""
+    mm = getattr(img, "_mark_map", None)
+    if mm is None or not mm.marks or not pts:
+        return 0
+    w_b, h_b = mm.size
+    shown = list(getattr(img, "ir_dust_pending", None) or []) + list(
+        getattr(img, "dust_spots", None) or [])
+    taken = {(s.get("mk_c"), s.get("mk_k")) for s in shown if s.get("kind") == SPOT_KIND}
+    P = np.asarray(pts, np.float64) * np.array([w_b, h_b])
+    rad = float(r) * w_b
+    by_kind = {}
+    for i, mk in enumerate(mm.marks):
+        if (i, mk.kind) in taken or not gate(mk, mm.has_ir):
+            continue
+        cx, cy = mk.centre()
+        cr = math.sqrt(mk.mask.sum() / math.pi)
+        if np.min(np.hypot(P[:, 0] - cx, P[:, 1] - cy)) <= rad + cr:
+            by_kind.setdefault("marks-" + mk.kind, []).append(
+                ([round(float(v), 4) for v in mk.feats], 1, 1.0))
+    n = 0
+    if by_kind:
+        from core import ir_dust_learn
+        for kind, ex in by_kind.items():
+            n += ir_dust_learn.add(kind, ex)
+    return n
 
 
 def examples_from(spots: List[dict], label: int, weight: float):
