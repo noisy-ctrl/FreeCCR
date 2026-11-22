@@ -160,6 +160,24 @@ class _IrFindWorker(QObject):
             self.failed.emit(self.img, str(e))
 
 
+def found_counts(pending):
+    """(IR dust, marks) the pending list holds as FINDS, not spots: a fibre's
+    strokes are one find (`ir_c`; bridges join pieces and don't count), a
+    mark's pieces one (`mk_c`, `mk_f`) (spec/dust-brush-eraser.md)."""
+    from core import ir_dust
+    ir, mk = set(), set()
+    for sp in pending or []:
+        kind = sp.get("kind")
+        if kind == ir_dust.KIND:
+            if sp.get("ir_bridge") is not None:
+                continue
+            c = sp.get("ir_c")
+            ir.add(("c", c) if c is not None else ("s", id(sp)))
+        elif kind == ir_dust.MARK_KIND:
+            mk.add((sp.get("mk_c"), tuple(sp.get("mk_f") or ())))
+    return len(ir), len(mk)
+
+
 class DustRemovalPanel(QWidget):
     def __init__(self, main_window, image_preview, parent=None):
         super().__init__(parent)
@@ -208,6 +226,10 @@ class DustRemovalPanel(QWidget):
 
     # --- UI ---------------------------------------------------------------
     def _build_ui(self):
+        """Brush | Eraser at the top, Find Dust below, the rest folded away
+        (spec/dust-brush-eraser.md)."""
+        from PySide6.QtCore import QSettings
+        from core import ir_dust, film_marks
         layout = QVBoxLayout(self)
         theme.apply_panel_spacing(layout)
 
@@ -216,92 +238,45 @@ class DustRemovalPanel(QWidget):
         header.setStyleSheet("font-size: 14px; font-weight: bold; margin: 4px;")
         layout.addWidget(header)
 
-        # --- IR dust (spec/ir-dust-and-flat-sets.md) ---
-        self.ir_heading = self._section_label("Dust and Marks")
-        # right-click: forget what IR dust learned (spec/ir-dust-v2.md §4)
-        self.ir_heading.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.ir_heading.customContextMenuRequested.connect(self._ir_heading_menu)
-        layout.addWidget(self.ir_heading)
-        self.ir_status = QLabel("")
-        self.ir_status.setWordWrap(True)
-        self.ir_status.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 11px;")
-        layout.addWidget(self.ir_status)
-        ir_row1 = QHBoxLayout()
-        theme.apply_button_row(ir_row1)
-        self.ir_attach_btn = QPushButton("Attach IR Shot…")
-        self.ir_attach_btn.setToolTip(
-            "Pair this frame with an infrared shot of it (taken with only the "
-            "IR light on, nothing moved). Capture's IR for dust option does "
-            "this for every shot.")
-        self.ir_attach_btn.clicked.connect(self._on_ir_attach)
-        self.ir_find_btn = QPushButton("Find")
-        self.ir_find_btn.setToolTip("Look for dust in the IR shot (when there is one) and for "
-                                    "marks in the frame's own shots.")
-        self.ir_find_btn.clicked.connect(lambda: self.find_ir(self._current_image()))
-        ir_row1.addWidget(self.ir_attach_btn)
-        ir_row1.addWidget(self.ir_find_btn)
-        layout.addLayout(ir_row1)
-        ir_sens = QHBoxLayout()
-        ir_sens.setSpacing(theme.GAP_TIGHT)
-        lbl = QLabel("Sensitivity")
-        lbl.setFixedWidth(theme.LABEL_COL_W)
-        lbl.setToolTip("Higher finds fainter specks, and more false ones.")
-        from core import ir_dust
-        self.ir_sens_slider = QSlider(Qt.Horizontal)
-        self.ir_sens_slider.setRange(0, 100)
-        self.ir_sens_slider.setValue(ir_dust.SENS_DEFAULT)
-        self.ir_sens_slider.setFixedHeight(theme.CONTROL_H)
-        self.ir_sens_value = QLabel(str(ir_dust.SENS_DEFAULT))
-        self.ir_sens_value.setFixedWidth(theme.VALUE_COL_W)
-        self.ir_sens_slider.valueChanged.connect(self._on_ir_sens)
-        ir_sens.addWidget(lbl)
-        ir_sens.addWidget(self.ir_sens_slider)
-        ir_sens.addWidget(self.ir_sens_value)
-        layout.addLayout(ir_sens)
-        # the colour shots' marks (spec/colour-shot-marks.md): their own sensitivity
-        from core import film_marks
-        mk_row = QHBoxLayout()
-        mk_row.setSpacing(theme.GAP_TIGHT)
-        mk_lbl = QLabel("Marks")
-        mk_lbl.setFixedWidth(theme.LABEL_COL_W)
-        mk_lbl.setToolTip("Marks the IR can't see, found in the frame's own shots and "
-                          "outlined in blue: damage that prints dark, and dust and fibres "
-                          "the IR misses. Higher finds fainter ones, and more of the picture.")
-        self.mark_sens_slider = QSlider(Qt.Horizontal)
-        self.mark_sens_slider.setRange(0, 100)
-        self.mark_sens_slider.setValue(film_marks.SENS_DEFAULT)
-        self.mark_sens_slider.setFixedHeight(theme.CONTROL_H)
-        self.mark_sens_value = QLabel(str(film_marks.SENS_DEFAULT))
-        self.mark_sens_value.setFixedWidth(theme.VALUE_COL_W)
-        self.mark_sens_slider.valueChanged.connect(self._on_mark_sens)
-        mk_row.addWidget(mk_lbl)
-        mk_row.addWidget(self.mark_sens_slider)
-        mk_row.addWidget(self.mark_sens_value)
-        layout.addLayout(mk_row)
-        ir_row2 = QHBoxLayout()
-        theme.apply_button_row(ir_row2)
-        self.ir_heal_btn = QPushButton("Heal Them")
-        theme.style_button(self.ir_heal_btn, "primary")
-        self.ir_heal_btn.setToolTip("Heal the dust outlined in amber (one undo step).")
-        self.ir_heal_btn.clicked.connect(self._on_ir_heal)
-        self.ir_before_btn = QPushButton("Before")
-        self.ir_before_btn.setCheckable(True)
-        self.ir_before_btn.setToolTip("Show the picture as it was before Heal.")
-        self.ir_before_btn.toggled.connect(self._on_ir_before)
-        ir_row2.addWidget(self.ir_heal_btn)
-        ir_row2.addWidget(self.ir_before_btn)
-        layout.addLayout(ir_row2)
-        self.erase_btn = QPushButton("Erase Spots")
-        self.erase_btn.setCheckable(True)
+        # --- Tool: Brush | Eraser, and undo ---
+        layout.addWidget(self._section_label("Tool"))
+        tool_row = QHBoxLayout()
+        tool_row.setContentsMargins(0, 0, 0, 0)
+        tool_row.setSpacing(theme.GAP_BTN)
+        seg = QHBoxLayout()
+        seg.setContentsMargins(0, 0, 0, 0)
+        seg.setSpacing(0)
+        self.brush_btn = QPushButton("Brush")
+        self.brush_btn.setToolTip("Paint over dust to heal it (B).")
+        self.erase_btn = QPushButton("Eraser")
         self.erase_btn.setToolTip(
-            "Paint over a wrong spot to remove it: healed spots of any kind and "
-            "flagged IR ones. Click again to paint dust as before.")
-        self.erase_btn.toggled.connect(self._on_erase)
-        layout.addWidget(self.erase_btn)
-        layout.addWidget(self._separator())
+            "Paint over a heal to take it away, or over a found spot before it is "
+            "painted over (E).")
+        for i, b in enumerate((self.brush_btn, self.erase_btn)):
+            b.setCheckable(True)
+            b.setFixedHeight(theme.CONTROL_H)
+            b.setStyleSheet(self._segment_qss(left=(i == 0)))
+            seg.addWidget(b, 1)
+        self.brush_btn.setChecked(True)
+        self.brush_btn.toggled.connect(
+            lambda on: self.set_tool("brush" if on else "erase"))
+        self.erase_btn.toggled.connect(
+            lambda on: self.set_tool("erase" if on else "brush"))
+        tool_row.addLayout(seg, 1)
+        self.undo_btn = QPushButton("↶")
+        self.undo_btn.setToolTip("Undo the last dust step: a stroke, an erase or a "
+                                 "paint over (Ctrl+Z).")
+        self.undo_btn.setFixedSize(theme.CONTROL_H + 8, theme.CONTROL_H)
+        self.undo_btn.clicked.connect(self._on_undo_last)
+        tool_row.addWidget(self.undo_btn)
+        layout.addLayout(tool_row)
+        tool_hint = QLabel("Brush: paint over dust to heal it. Eraser: paint over a heal "
+                           "to take it away. B / E switch, Ctrl+wheel sizes the brush, "
+                           "↶ undoes.")
+        tool_hint.setWordWrap(True)
+        tool_hint.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 11px;")
+        layout.addWidget(tool_hint)
 
-        # --- Manual section ---
-        layout.addWidget(self._section_label("Manual"))
         brush_row = QHBoxLayout()
         brush_row.setSpacing(theme.GAP_TIGHT)
         brush_lbl = QLabel("Brush size")
@@ -340,20 +315,7 @@ class DustRemovalPanel(QWidget):
         feather_row.addWidget(self.feather_value)
         layout.addLayout(feather_row)
 
-        # Diagnostic overlay: outline every stroke and mark where each heal
-        # segment sampled its patch from (arrow source -> segment; ring only
-        # = diffusion fallback, nothing was sampled).
-        self.show_sources_cb = QCheckBox("Show heal sources")
-        self.show_sources_cb.setToolTip(
-            "Outline each stroke and mark where every heal sampled its "
-            "patch from (green arrow: sampled patch → healed segment; "
-            "orange ring: diffusion fill, nothing sampled).")
-        self.show_sources_cb.toggled.connect(
-            lambda on: self.image_preview.set_dust_source_overlay(on))
-        layout.addWidget(self.show_sources_cb)
-
         # A click grows to cover the speck's soft halo (spec/dust-fit-spot.md)
-        from PySide6.QtCore import QSettings
         self.fit_spot_cb = QCheckBox("Fit each click to the speck")
         self.fit_spot_cb.setToolTip(
             "A click grows to cover the speck's soft edge, so the heal copies "
@@ -369,55 +331,150 @@ class DustRemovalPanel(QWidget):
             self.image_preview.dust_fit_spot = bool(on)
         self.fit_spot_cb.toggled.connect(_fit)
         layout.addWidget(self.fit_spot_cb)
-
-        hint = QLabel(
-            "Click or drag over dust to remove it. Ctrl+wheel resizes the "
-            "brush. The spot you just painted shows where it copies from: "
-            "drag that green ring to copy from somewhere else (Ctrl+Z undoes "
-            "it).\n"
-            "With heal sources shown: right-drag a stroke to move it (it "
-            "keeps sampling the same patch); right-drag a source ring to "
-            "re-pick where it samples; double right-click deletes the "
-            "stroke.")
-        hint.setWordWrap(True)
-        hint.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 11px;")
-        layout.addWidget(hint)
-
-        manual_btns = QHBoxLayout()
-        theme.apply_button_row(manual_btns)
-        self.undo_btn = QPushButton("Undo last spot")
-        self.undo_btn.clicked.connect(self._on_undo_last)
-        self.clear_btn = QPushButton("Clear all")
-        self.clear_btn.clicked.connect(self._on_clear_all)
-        theme.style_button(self.clear_btn, "danger")  # removes all spots
-        manual_btns.addWidget(self.undo_btn)
-        manual_btns.addWidget(self.clear_btn)
-        layout.addLayout(manual_btns)
-
         layout.addWidget(self._separator())
 
-        # --- AI section ---
-        layout.addWidget(self._section_label("AI Dust Detection"))
+        # --- Find Dust: the IR shot's dust and the colour shots' marks
+        # (spec/ir-dust-and-flat-sets.md, spec/colour-shot-marks.md) ---
+        self.ir_heading = self._section_label("Find Dust")
+        # right-click: forget what IR dust learned (spec/ir-dust-v2.md §4)
+        self.ir_heading.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.ir_heading.customContextMenuRequested.connect(self._ir_heading_menu)
+        layout.addWidget(self.ir_heading)
+        self.ir_status = QLabel("")
+        self.ir_status.setWordWrap(True)
+        self.ir_status.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 11px;")
+        layout.addWidget(self.ir_status)
+        find_row = QHBoxLayout()
+        theme.apply_button_row(find_row)
+        self.ir_find_btn = QPushButton("Find")
+        self.ir_find_btn.setToolTip("Look for dust in the IR shot (when there is one) and for "
+                                    "marks in the frame's own shots.")
+        self.ir_find_btn.clicked.connect(lambda: self.find_ir(self._current_image()))
+        self.ir_before_btn = QPushButton("Before")
+        self.ir_before_btn.setCheckable(True)
+        self.ir_before_btn.setToolTip("Show the picture as it was before Paint Over.")
+        self.ir_before_btn.toggled.connect(self._on_ir_before)
+        find_row.addWidget(self.ir_find_btn)
+        find_row.addWidget(self.ir_before_btn)
+        layout.addLayout(find_row)
+        ir_sens = QHBoxLayout()
+        ir_sens.setSpacing(theme.GAP_TIGHT)
+        lbl = QLabel("Dust")
+        lbl.setFixedWidth(theme.LABEL_COL_W)
+        lbl.setToolTip("How readily the IR shot's specks are taken for dust (amber): "
+                       "higher finds fainter specks, and more false ones.")
+        self.ir_sens_slider = QSlider(Qt.Horizontal)
+        self.ir_sens_slider.setRange(0, 100)
+        self.ir_sens_slider.setValue(ir_dust.SENS_DEFAULT)
+        self.ir_sens_slider.setFixedHeight(theme.CONTROL_H)
+        self.ir_sens_value = QLabel(str(ir_dust.SENS_DEFAULT))
+        self.ir_sens_value.setFixedWidth(theme.VALUE_COL_W)
+        self.ir_sens_slider.valueChanged.connect(self._on_ir_sens)
+        ir_sens.addWidget(lbl)
+        ir_sens.addWidget(self.ir_sens_slider)
+        ir_sens.addWidget(self.ir_sens_value)
+        layout.addLayout(ir_sens)
+        mk_row = QHBoxLayout()
+        mk_row.setSpacing(theme.GAP_TIGHT)
+        mk_lbl = QLabel("Marks")
+        mk_lbl.setFixedWidth(theme.LABEL_COL_W)
+        mk_lbl.setToolTip("Marks the IR can't see, found in the frame's own shots and "
+                          "outlined in blue: damage that prints dark, and dust and fibres "
+                          "the IR misses. Higher finds fainter ones, and more of the picture.")
+        self.mark_sens_slider = QSlider(Qt.Horizontal)
+        self.mark_sens_slider.setRange(0, 100)
+        self.mark_sens_slider.setValue(film_marks.SENS_DEFAULT)
+        self.mark_sens_slider.setFixedHeight(theme.CONTROL_H)
+        self.mark_sens_value = QLabel(str(film_marks.SENS_DEFAULT))
+        self.mark_sens_value.setFixedWidth(theme.VALUE_COL_W)
+        self.mark_sens_slider.valueChanged.connect(self._on_mark_sens)
+        mk_row.addWidget(mk_lbl)
+        mk_row.addWidget(self.mark_sens_slider)
+        mk_row.addWidget(self.mark_sens_value)
+        layout.addLayout(mk_row)
+        self.ir_heal_btn = QPushButton("Paint Over Found")
+        theme.style_button(self.ir_heal_btn, "primary")
+        self.ir_heal_btn.setToolTip("Paint over everything outlined (amber dust, blue "
+                                    "marks) in one step; ↶ takes it back.")
+        self.ir_heal_btn.clicked.connect(self._on_ir_heal)
+        layout.addWidget(self.ir_heal_btn)
+        self.ir_wrong_hint = QLabel("Wrong ones: take the Eraser to them first.")
+        self.ir_wrong_hint.setWordWrap(True)
+        self.ir_wrong_hint.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 11px;")
+        self.ir_wrong_hint.setVisible(False)
+        layout.addWidget(self.ir_wrong_hint)
+        layout.addWidget(self._separator())
 
+        # --- More (folded): heal sources, AI detection, attach IR shot, clear all ---
+        self.more_btn = QPushButton()
+        self.more_btn.setCheckable(True)
+        self.more_btn.setFlat(True)
+        self.more_btn.setStyleSheet(
+            "QPushButton { text-align: left; border: none; padding: 2px 0px; "
+            f"color: {theme.TEXT_MUTED}; font-size: 11px; background: transparent; }}"
+            f"QPushButton:hover {{ color: {theme.TEXT}; }}")
+        layout.addWidget(self.more_btn)
+        self.more_box = QWidget()
+        more = QVBoxLayout(self.more_box)
+        more.setContentsMargins(0, 0, 0, 0)
+        more.setSpacing(theme.GAP_ROW)
+        layout.addWidget(self.more_box)
+
+        self.ir_attach_btn = QPushButton("Attach IR Shot…")
+        self.ir_attach_btn.setToolTip(
+            "Pair this frame with an infrared shot of it (taken with only the "
+            "IR light on, nothing moved). Capture's IR for dust option does "
+            "this for every shot.")
+        self.ir_attach_btn.clicked.connect(self._on_ir_attach)
+        more.addWidget(self.ir_attach_btn)
+
+        # Diagnostic overlay: outline every stroke and mark where each heal
+        # segment sampled its patch from (arrow source -> segment; ring only
+        # = diffusion fallback, nothing was sampled).
+        self.show_sources_cb = QCheckBox("Show heal sources")
+        self.show_sources_cb.setToolTip(
+            "Outline each stroke and mark where every heal sampled its "
+            "patch from (green arrow: sampled patch → healed segment; "
+            "orange ring: diffusion fill, nothing sampled).")
+        self.show_sources_cb.toggled.connect(
+            lambda on: self.image_preview.set_dust_source_overlay(on))
+        more.addWidget(self.show_sources_cb)
+        hint = QLabel(
+            "The spot you just painted shows where it copies from: drag that "
+            "green ring to copy from somewhere else (↶ undoes it). With heal "
+            "sources shown: right-drag a stroke to move it (it keeps sampling "
+            "the same patch); right-drag a source ring to re-pick where it "
+            "samples; double right-click deletes the stroke.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 11px;")
+        more.addWidget(hint)
+        self.clear_btn = QPushButton("Clear All")
+        self.clear_btn.setToolTip("Take every heal off this frame.")
+        self.clear_btn.clicked.connect(self._on_clear_all)
+        theme.style_button(self.clear_btn, "danger")  # removes all spots
+        more.addWidget(self.clear_btn)
+        more.addWidget(self._separator())
+
+        more.addWidget(self._section_label("AI Dust Detection"))
         self.ai_unavailable_label = QLabel(
             "AI detection unavailable in this build.")
         self.ai_unavailable_label.setWordWrap(True)
         self.ai_unavailable_label.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 11px;")
-        layout.addWidget(self.ai_unavailable_label)
+        more.addWidget(self.ai_unavailable_label)
 
         self.download_label = QLabel(
             "Download the local AI model (~150 MB) to detect dust "
             "automatically. One-time download.")
         self.download_label.setWordWrap(True)
         self.download_label.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 11px;")
-        layout.addWidget(self.download_label)
+        more.addWidget(self.download_label)
         self.download_btn = QPushButton("Download AI model (~150 MB)")
         self.download_btn.setFixedHeight(theme.CONTROL_H)
         self.download_btn.clicked.connect(self._on_download)
-        layout.addWidget(self.download_btn)
+        more.addWidget(self.download_btn)
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
-        layout.addWidget(self.progress_bar)
+        more.addWidget(self.progress_bar)
 
         sens_row = QHBoxLayout()
         sens_row.setSpacing(theme.GAP_TIGHT)
@@ -435,12 +492,12 @@ class DustRemovalPanel(QWidget):
         sens_row.addWidget(self.sensitivity_slider)
         sens_row.addWidget(self.sensitivity_value)
         self._sens_row = sens_row
-        layout.addLayout(sens_row)
+        more.addLayout(sens_row)
 
         self.detect_btn = QPushButton("Detect && Remove")
         self.detect_btn.setFixedHeight(theme.CONTROL_H)
         self.detect_btn.clicked.connect(self._on_detect)
-        layout.addWidget(self.detect_btn)
+        more.addWidget(self.detect_btn)
 
         self.detect_all_btn = QPushButton("Detect && Remove — All Images")
         self.detect_all_btn.setFixedHeight(theme.CONTROL_H)
@@ -449,7 +506,12 @@ class DustRemovalPanel(QWidget):
             "detected on its own (not by copying spots), at the current "
             "sensitivity.")
         self.detect_all_btn.clicked.connect(self._on_detect_all)
-        layout.addWidget(self.detect_all_btn)
+        more.addWidget(self.detect_all_btn)
+
+        more_open = QSettings("FreeCCR", "FreeCCR").value("dust/more_open", False, type=bool)
+        self.more_btn.toggled.connect(self._on_more_toggled)
+        self.more_btn.setChecked(more_open)
+        self._on_more_toggled(more_open, remember=False)
 
         self.status_label = QLabel("")
         self.status_label.setWordWrap(True)
@@ -465,6 +527,45 @@ class DustRemovalPanel(QWidget):
         theme.style_button(self.done_btn, "primary")
         self.done_btn.clicked.connect(self._on_done)
         layout.addWidget(self.done_btn)
+
+    MORE_TEXT = "More: heal sources, AI detection, attach IR shot, clear all"
+
+    def _on_more_toggled(self, on, remember=True):
+        self.more_box.setVisible(bool(on))
+        self.more_btn.setText(("▾ " if on else "▸ ") + self.MORE_TEXT)
+        if remember:
+            from PySide6.QtCore import QSettings
+            QSettings("FreeCCR", "FreeCCR").setValue("dust/more_open", bool(on))
+
+    @staticmethod
+    def _segment_qss(left: bool) -> str:
+        """One half of the Brush | Eraser control: the half in use is light
+        with dark bold text, the other the plain surface."""
+        r = theme.RADIUS_SM
+        corners = (f"border-top-left-radius: {r}px; border-bottom-left-radius: {r}px;"
+                   if left else
+                   f"border-top-right-radius: {r}px; border-bottom-right-radius: {r}px;")
+        return (
+            f"QPushButton {{ background-color: {theme.SURFACE}; color: {theme.TEXT};"
+            f" border: 1px solid {theme.BORDER_STRONG}; border-radius: 0px; {corners}"
+            " padding: 4px 10px; }"
+            f" QPushButton:hover {{ background-color: {theme.SURFACE_ACTIVE}; }}"
+            " QPushButton:checked { background-color: #e6e6e6; color: #111111;"
+            " border-color: #f4f4f4; font-weight: bold; }"
+            f" QPushButton:disabled {{ color: {theme.TEXT_DISABLED}; }}")
+
+    def set_tool(self, tool: str):
+        """Brush or Eraser: both buttons and the canvas in step
+        (spec/dust-brush-eraser.md)."""
+        tool = "erase" if tool == "erase" else "brush"
+        for b, on in ((self.brush_btn, tool == "brush"), (self.erase_btn, tool == "erase")):
+            b.blockSignals(True)
+            b.setChecked(on)
+            b.blockSignals(False)
+        self.image_preview.set_dust_tool(tool)
+
+    def tool(self) -> str:
+        return "erase" if self.erase_btn.isChecked() else "brush"
 
     @staticmethod
     def _section_label(text):
@@ -497,11 +598,10 @@ class DustRemovalPanel(QWidget):
         self.feather_value.setText(f"{f * 100.0:.0f}%")
         self._refresh_ai_section()
         self.status_label.setText("")
-        for b in (self.ir_before_btn, self.erase_btn):
-            b.blockSignals(True)
-            b.setChecked(False)
-            b.blockSignals(False)
-        self.image_preview.set_dust_tool("brush")
+        self.ir_before_btn.blockSignals(True)
+        self.ir_before_btn.setChecked(False)
+        self.ir_before_btn.blockSignals(False)
+        self.set_tool("brush")
         self.image_preview._dust_before_on = False
         sens = getattr(img, "ir_dust_sens", None) if img is not None else None
         if sens is not None:
@@ -551,8 +651,13 @@ class DustRemovalPanel(QWidget):
             self.image_preview._commit_dust_change(img)
 
     def _on_undo_last(self):
-        if not self.image_preview.dust_undo_last():
-            self.status_label.setText("Nothing to undo.")
+        """↶ and Ctrl+Z in dust mode: take back the last dust step, whole
+        (spec/dust-brush-eraser.md)."""
+        if self.image_preview.dust_undo():
+            self.status_label.setText("")
+            self.refresh_ir_section()
+        else:
+            self.status_label.setText("Nothing to undo here.")
 
     def _on_clear_all(self):
         from core.ccr_backend import ccr_backend
@@ -584,9 +689,7 @@ class DustRemovalPanel(QWidget):
         img = self._current_image()
         has_ir = img is not None and bool(getattr(img, "ir_source", None))
         pend = ir_dust.pending(img) if img is not None else []
-        n_ir = sum(1 for sp in pend if sp.get("kind") == ir_dust.KIND)
-        n_mk = len({(sp.get("mk_c"), tuple(sp.get("mk_f") or ())) for sp in pend
-                    if sp.get("kind") == ir_dust.MARK_KIND})
+        n_ir, n_mk = found_counts(pend)
         flagged = len(pend)
         healed = (sum(1 for sp in (getattr(img, "dust_spots", None) or [])
                       if sp.get("kind") in (ir_dust.KIND, ir_dust.MARK_KIND))
@@ -603,6 +706,10 @@ class DustRemovalPanel(QWidget):
         self.ir_sens_slider.setEnabled(has_ir and not busy)
         self.mark_sens_slider.setEnabled(img is not None and not busy and why_mk is None)
         self.ir_heal_btn.setEnabled(flagged > 0 and not busy)
+        n_found = n_ir + n_mk if flagged else 0
+        self.ir_heal_btn.setText(f"Paint Over {n_found} Found" if n_found
+                                 else "Paint Over Found")
+        self.ir_wrong_hint.setVisible(flagged > 0 and not busy)
         self.ir_before_btn.setEnabled(self.image_preview.has_dust_before())
         if img is None:
             text = ""
@@ -612,25 +719,25 @@ class DustRemovalPanel(QWidget):
         elif flagged:
             bits = []
             if n_ir:
-                bits.append(f"the IR shot shows {n_ir} speck{'s' if n_ir != 1 else ''} (amber)")
+                bits.append(f"{n_ir} dust (amber)")
             if n_mk:
-                bits.append(f"the colour shots {n_mk} mark{'s' if n_mk != 1 else ''} (blue)")
-            text = (" and ".join(bits) + ", not healed yet.")
-            text = text[0].upper() + text[1:]
+                bits.append(f"{n_mk} mark{'s' if n_mk != 1 else ''} (blue)")
+            text = (("IR shot attached. " if has_ir else "No IR shot. ")
+                    + f"Found {n_ir + n_mk}: " + ", ".join(bits) + ".")
         elif healed:
-            text = (f"{healed} spot{'s' if healed != 1 else ''} healed. Before "
-                    "shows the picture without them; Erase Spots removes a wrong one.")
+            text = (f"{healed} found spot{'s' if healed != 1 else ''} painted over. Before "
+                    "shows the picture without them; the Eraser takes a wrong one away.")
         elif searched:
             text = ("No dust or marks found at these sensitivities." if has_ir
                     else "No marks found at this sensitivity.")
         elif why is not None and why_mk is not None:
             text = (why if has_ir else
                     "No IR shot for this frame. Capture's IR for dust option takes one with "
-                    "every shot; Attach IR Shot… pairs one by hand. " + why_mk)
+                    "every shot; More → Attach IR Shot… pairs one by hand. " + why_mk)
         elif not has_ir:
             text = ("No IR shot for this frame: Find looks for marks in its own shots. "
                     "Capture's IR for dust option takes an IR shot with every shot; "
-                    "Attach IR Shot… pairs one by hand.")
+                    "More → Attach IR Shot… pairs one by hand.")
         else:
             text = "IR shot attached: Find looks for dust and marks."
         if has_ir and why is not None and why_mk is None and not busy:
@@ -857,9 +964,6 @@ class DustRemovalPanel(QWidget):
 
     def _on_ir_before(self, on):
         self.image_preview.set_dust_before(on)
-
-    def _on_erase(self, on):
-        self.image_preview.set_dust_tool("erase" if on else "brush")
 
     # --- AI handlers ------------------------------------------------------
     def _on_sensitivity_changed(self, value):

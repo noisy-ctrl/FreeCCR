@@ -212,7 +212,8 @@ def test_the_panel_finds_marks_and_outlines_them_blue(tmp_path, monkeypatch):
         time.sleep(0.02)
     app.processEvents()
     assert img.ir_dust_pending and all(s["kind"] == "mark" for s in img.ir_dust_pending)
-    assert "(blue)" in panel.ir_status.text() and "not healed" in panel.ir_status.text()
+    assert "(blue)" in panel.ir_status.text() and "Found" in panel.ir_status.text()
+    assert panel.ir_heal_btn.text().startswith("Paint Over ")     # spec/dust-brush-eraser.md
     assert [it.data(0) for it in prev._ir_pending_items] == ["mark"]
     assert prev._dust_badge is True
     n = len(img.ir_dust_pending)

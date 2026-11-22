@@ -271,7 +271,7 @@ def test_flag_badge_heal_before_and_erase_in_the_window(tmp_path, monkeypatch):
     assert not img.dust_spots                          # flagged, not healed
     assert prev._dust_badge is True                    # the red dot
     assert prev._ir_pending_items                      # outlined in amber
-    assert panel.ir_heal_btn.isEnabled() and "not healed" in panel.ir_status.text()
+    assert panel.ir_heal_btn.isEnabled() and "Found" in panel.ir_status.text()
     assert not panel.ir_before_btn.isEnabled()
     # Heal
     panel.ir_heal_btn.click()
@@ -279,7 +279,7 @@ def test_flag_badge_heal_before_and_erase_in_the_window(tmp_path, monkeypatch):
     assert img.ir_dust_pending is None
     assert sum(s["kind"] == "ir" for s in img.dust_spots) == flagged
     assert prev._dust_badge is False and not prev._ir_pending_items
-    assert panel.ir_before_btn.isEnabled() and "healed" in panel.ir_status.text()
+    assert panel.ir_before_btn.isEnabled() and "painted over" in panel.ir_status.text()
     # Before shows the picture as it was, After the healed one
     healed_key = prev.pixmap_item.pixmap().cacheKey()
     panel.ir_before_btn.setChecked(True)
