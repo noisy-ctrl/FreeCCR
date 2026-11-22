@@ -18,7 +18,7 @@ from core import ir_dust, ir_dust_learn  # noqa: E402
 
 
 def _scene(h=400, w=600, seed=3, kfun=lambda xx: 0.2, specks=(), loop=None,
-           vis_dust=0.55, ir_dust_att=0.81):
+           vis_dust=0.55, ir_dust_att=0.81, ir_noise=0.04):
     """Block maps (visible, IR) of a frame with sharp-edged bands. Dust is
     in both shots as measured on the user's frames: the IR's log dip about a
     third of the visible one (ln 0.81 / ln 0.55 = 0.35)."""
@@ -42,7 +42,7 @@ def _scene(h=400, w=600, seed=3, kfun=lambda xx: 0.2, specks=(), loop=None,
     di = cv2.GaussianBlur(di, (0, 0), 0.9)
     vis = 9000 * pic * dv * (1 + rng.normal(0, 0.01, (h, w)))
     hot = 1.0 + 0.8 * np.exp(-((xx - w / 2) ** 2 + (yy - h / 2) ** 2) / (2 * (w / 4) ** 2))
-    ir = 600 * hot * np.exp(kfun(xx) * np.log(pic)) * di * (1 + rng.normal(0, 0.04, (h, w)))
+    ir = 600 * hot * np.exp(kfun(xx) * np.log(pic)) * di * (1 + rng.normal(0, ir_noise, (h, w)))
     return vis.astype(np.float32), ir.astype(np.float32)
 
 
@@ -80,7 +80,10 @@ def test_local_crosstalk_takes_out_a_crosstalk_that_changes_across_the_frame():
     assert excess_one > 0 and excess_local < 0.5 * excess_one     # measured 0.0020 -> 0.0007
 
 
-def test_dust_in_both_shots_is_flagged_and_an_ir_only_dip_isnt():
+def test_dust_in_both_shots_is_flagged_and_an_ir_only_dip_isnt(monkeypatch):
+    # the model's judgement at this scene's own noise (cleaner than the 8 s
+    # shots it was fitted on; the reference is tested on its own below)
+    monkeypatch.setattr(ir_dust, "NOISE_REF", 0.0)
     both = [(150, 200, 2), (330, 120, 2)]
     vis, ir = _scene(specks=both)
     _, ir_only = _scene(specks=[(300, 260, 2), (520, 300, 2)], ir_dust_att=0.9)
@@ -367,3 +370,30 @@ def test_a_bridge_follows_a_thin_dark_line_not_an_edge():
     edge[:, :30] = -6.0                                   # dark on one side only
     path = [(28, y) for y in range(10, 50)]
     assert ir_dust._ridge_share(edge, path, 3.0) < 0.2
+
+
+
+# --- revision 2026-11-22: a cleaner IR shot is read at the model's noise -----
+def test_a_cleaner_ir_shot_doesnt_flood_the_finder():
+    specks = [(150, 200, 2), (330, 120, 2), (450, 300, 3)]
+    vis_n, ir_n = _scene(specks=specks, ir_noise=0.06)      # as noisy as an 8 s shot
+    vis_c, ir_c = _scene(specks=specks, ir_noise=0.03)      # twice as clean (a 30 s shot)
+    noisy, clean = ir_dust.dust_map(ir_n, [vis_n]), ir_dust.dust_map(ir_c, [vis_c])
+    assert noisy.noise >= ir_dust.NOISE_REF > clean.noise
+    assert len(clean.cands) <= len(noisy.cands)              # 27 without the reference
+    fl_n, fl_c = ir_dust.flagged(noisy, 50), ir_dust.flagged(clean, 50)
+    assert len(fl_c) <= len(fl_n) + 1
+    for x, y, _r in specks:                                 # the dust the noisy shot finds, it finds
+        i, c = _cand_near(noisy, x, y)
+        if c is None or i not in fl_n:
+            continue
+        j, c = _cand_near(clean, x, y)
+        assert c is not None and j in fl_c, (x, y)
+
+
+def test_a_shot_at_the_reference_noise_is_read_as_before(monkeypatch):
+    vis, ir = _scene(specks=[(150, 200, 2), (450, 300, 3)], ir_noise=0.06)
+    with_ref = ir_dust.dust_map(ir, [vis])
+    monkeypatch.setattr(ir_dust, "NOISE_REF", 0.0)
+    without = ir_dust.dust_map(ir, [vis])
+    assert np.array_equal(with_ref.z, without.z)

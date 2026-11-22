@@ -300,3 +300,41 @@ dust."
   edge not (< 0.2).
 - `tests/test_ir_dust.py` still passes (its synthetic scenes and the user's
   XP2 pair when present).
+
+## Revision 2026-11-22: Sensitivity means the same whatever the IR exposure
+
+**The fault.** The user's IR shots went from 8 s ISO 3200 to 30 s ISO 1000
+(the panel's "dark IR" hint). The same light level (8.7–12.9 % of the range
+against 9.1 %), but 1.85× less noise against the signal (photosite noise 48.9
+against 78.6 levels at the same mean). The features are in noise units, so
+the picture's leftovers after the crosstalk division (not noise-limited)
+scored twice as deep, and the model fitted on 8 s shots flagged them: on one
+frame of plain sky, Find + Heal Them healed 755 spots. The upside-down count
+(§1) showed it: at the default Sensitivity the 8 s frames run 0.16–0.32
+upside-down finds per real find, the 30 s frames 0.62–1.28. Adding noise back
+to an 8 s level on the same 30 s frame (frame 004) halved both counts (258 /
+161 → 130 / 72), so it is the cleaner shot, not the frames.
+
+**The fix: a cleaner shot is read at the noise the model was fitted at.**
+Real dust and the picture's leftovers are both fixed log dips; a cleaner
+shot only divides them by a smaller noise, so every z grows by the same
+factor and the model, fitted at 8 s noise (median local noise 0.0150–0.0162
+log), takes far more of them. `dust_map` now scales z by
+`noise / NOISE_REF` when the shot's median noise is below `NOISE_REF` =
+0.015 (`ir_dust.NOISE_REF`), before the line map and the candidates; a shot
+at or above it is read exactly as before (8 s shots: factor 1, unchanged).
+
+Measured on the 30 s sky frame (R0023 001, noise 0.0071): candidates 1307 →
+378, flagged at the default 233 → 100, and all 15 of the deepest IR
+candidates still flagged; its upside-down count at the default (65) is now
+within the 8 s frames' (39–90). A per-frame threshold set from the
+upside-down run was tried first and dropped: the false-find share on this
+frame stays near 0.55 over a wide range of thresholds, so the threshold
+jumped between 0.21 and 0.996 as the Sensitivity moved (45 → 367 finds).
+
+Tests (`tests/test_ir_dust_v2.py`): a scene and its twice-as-clean twin: the
+clean twin has no more candidates than the noisy one (27 without the
+reference against 20), flags at most one more, and flags every planted speck
+the noisy twin flags; a shot at the reference noise gives exactly the same z
+with and without it. The older "dust in both shots" test pins `NOISE_REF` to
+0, as it checks the model at its scene's own (cleaner) noise.
