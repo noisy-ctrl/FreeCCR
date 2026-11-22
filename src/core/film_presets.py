@@ -121,11 +121,11 @@ def new_id():
 
 
 def make(film, push=0, version=1, notes="", clip=None, chosen=(), when=None, pid=None,
-         flats=None):
+         flats=None, auto_radius=False):
     return clean({"id": pid or new_id(), "film": film, "push": push, "version": version,
                   "notes": notes, "clip": clip, "chosen": list(chosen or ()),
                   "when": when or datetime.date.today().isoformat(),
-                  "flats": flats or {}})
+                  "flats": flats or {}, "auto_radius": bool(auto_radius)})
 
 
 def _clean_flats(f):
@@ -166,7 +166,9 @@ def clean(p):
             "notes": str(p.get("notes") or "").strip(),
             "when": str(p.get("when") or ""),
             "clip": _clean_clip(p.get("clip")), "chosen": chosen,
-            "flats": _clean_flats(p.get("flats"))}
+            "flats": _clean_flats(p.get("flats")),
+            # measure each frame's sharpening radius (spec/preset-auto-radius.md)
+            "auto_radius": bool(p.get("auto_radius"))}
 
 
 def normalise(data):
@@ -289,7 +291,8 @@ def new_version(presets, pid):
         return lst, None
     v = next_version(lst, p["film"], p["push"])
     return add(lst, make(p["film"], p["push"], v, "", copy.deepcopy(p["clip"]), p["chosen"],
-                         flats=dict(p.get("flats") or {})))
+                         flats=dict(p.get("flats") or {}),
+                         auto_radius=bool(p.get("auto_radius"))))
 
 
 def write_clip(presets, pid, clip, chosen):
@@ -332,6 +335,16 @@ def set_flat(presets, pid, scan, ref):
     return update(lst, pid, flats=flats)
 
 
+def set_auto_radius(presets, pid, on):
+    """Whether the preset's frames get Auto Radius measured on each of them
+    (spec/preset-auto-radius.md). (presets, the preset or None)."""
+    return update(normalise(presets), pid, auto_radius=bool(on))
+
+
+def auto_radius_of(p):
+    return bool((p or {}).get("auto_radius"))
+
+
 def flat_of(p, scan):
     """The preset's flat for a scan type: a file name, "none", or "" (Automatic)."""
     return ((p or {}).get("flats") or {}).get(scan, "")
@@ -366,6 +379,8 @@ def summary(p):
     k = len((p or {}).get("flats") or {})
     if k:
         bits.append(f"{k} flat field{'' if k == 1 else 's'}")
+    if auto_radius_of(p):
+        bits.append("Auto radius")
     return " · ".join(bits) if bits else "no settings yet"
 
 

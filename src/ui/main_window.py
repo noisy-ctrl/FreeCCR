@@ -2497,6 +2497,7 @@ class MainWindow(QMainWindow):
             # (rotation/flips/crop are applied by update_preview on selection).
             img.update_thumbnail_and_preview()
         self.thumbnail_list.append_image_item(idx, select=True)
+        self._queue_preset_radius(img)            # spec/preset-auto-radius.md
         name = getattr(img, "display_name", None) or os.path.basename(img.file_path)
         if self._tether_active:
             self._tether_count += 1
@@ -2529,6 +2530,16 @@ class MainWindow(QMainWindow):
             # Late arrival after Stop: persist immediately (the debounced timer
             # is gone) so the photo isn't lost on close.
             ccr_backend.save_catalog()
+
+    def _queue_preset_radius(self, img):
+        """A capture of a film preset with Auto radius gets its own radius
+        measured (spec/preset-auto-radius.md)."""
+        pid = getattr(img, "film_preset", None)
+        if not pid:
+            return
+        from core import film_presets as fp
+        if fp.auto_radius_of(fp.find(fp.load(self._settings), pid)):
+            self.sliders_panel.queue_auto_radius([img])
 
     def _tether_template(self):
         """The look of the frame on screen, for the next capture to inherit
