@@ -2929,8 +2929,43 @@ class LiveCaptureMonitor(QWidget):
         self._refresh_edit_enabled()
         tri = self.scan_type() == "trichrome"
         base = self._film_base()
-        self.film_base_note.setText(be.summary(base, tri))
+        self._refresh_base_note()
         self.film_base_use.setEnabled(be.exposures_for(base, tri) is not None)
+
+    def _next_shot_exposures(self):
+        """The frame's own exposures the next Shoot uses instead of the film
+        base's, or None: Use for This Frame armed, else "Per shot, scale
+        exposure…" with an estimate that changes something (as
+        `_shoot_exposures` decides)."""
+        armed = getattr(self, "_frame_exposures", None)
+        if armed is not None:
+            return armed
+        sug = getattr(self, "_frame_suggestion", None)
+        auto = getattr(self, "frame_auto", None)
+        if auto is not None and auto.isChecked() and sug is not None and sug.changes:
+            return sug.exposures
+        return None
+
+    def _refresh_base_note(self):
+        """The film base's line, showing the exposures the next Shoot uses:
+        a frame's own ones bold italic (spec/frame-exposure.md, revision
+        2026-11-22)."""
+        tri = self.scan_type() == "trichrome"
+        base = self._film_base()
+        measured = be.summary(base, tri)
+        using = (self._next_shot_exposures()
+                 if be.exposures_for(base, tri) is not None else None)
+        line = be.summary(base, tri, using=using, rich=theme.TEXT) if using else ""
+        if line and "<b>" in line:
+            self.film_base_note.setTextFormat(Qt.RichText)
+            self.film_base_note.setText(line)
+            self.film_base_note.setToolTip(
+                "Bold italic: this frame's own exposures, which the next Shoot uses. "
+                "Measured on the film base: " + measured)
+        else:
+            self.film_base_note.setTextFormat(Qt.PlainText)
+            self.film_base_note.setText(measured)
+            self.film_base_note.setToolTip("")
 
     def _refresh_edit_enabled(self):
         seq = getattr(self, "sequence", None)
@@ -3365,6 +3400,7 @@ class LiveCaptureMonitor(QWidget):
         # It stays clickable (it says what's missing when pressed); it is off
         # only while a shot, measuring or another metering is running
         metering = self._measure is not None and self._measure.get("kind") == "frame"
+        self._refresh_base_note()               # the next Shoot's exposures above
         self.meter_btn.setVisible(metering or self._meter_shots_on())
         self.meter_btn.setEnabled(metering or not busy)
         why = self._meter_blocker(ctx)

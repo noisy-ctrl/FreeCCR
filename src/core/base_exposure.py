@@ -14,6 +14,7 @@ Everything here is pure: the camera, the light and the RAW reading are the
 caller's, so the state machine is tested against a fake linear camera.
 """
 import datetime
+import html
 import json
 import math
 from dataclasses import dataclass, field
@@ -948,8 +949,13 @@ def exposures_for(base, trichrome):
             for k in keys}
 
 
-def summary(base, trichrome):
-    """One line: each colour's speed, the ISO, the base reading."""
+def summary(base, trichrome, using=None, rich=False):
+    """One line: each colour's speed, the ISO, the base reading. `using`
+    ({colour: {"shutter", "iso"}}) shows those speeds and ISOs instead of
+    the measured ones: the next Shoot's, when a frame's own exposures are
+    used (spec/frame-exposure.md, revision 2026-11-22). With `rich` the line
+    is HTML and each value that differs from the measured one is bold
+    italic (`rich` may be a CSS colour for those values)."""
     if not base:
         return "No film base yet: Measure… reads the base and picks each colour's exposure."
     cols = base.get("colours") or {}
@@ -957,25 +963,48 @@ def summary(base, trichrome):
     if not all(k in cols for k in keys):
         other = "one exposure" if trichrome else "trichrome"
         return f"Measured for {other}: Measure Again for this scan type."
-    isos = {cols[k]["iso"] for k in keys}
-    iso = f", ISO {isos.pop()}" if len(isos) == 1 else ""
+    shown = {k: {"shutter": cols[k]["shutter"], "iso": cols[k]["iso"]} for k in keys}
+    for k in keys:
+        if using and k in using:
+            shown[k] = {"shutter": using[k]["shutter"], "iso": using[k]["iso"]}
+    esc = html.escape if rich else str
+
+    def mark(text, changed):
+        text = esc(text)
+        if rich and changed:
+            colour = f' style="color: {rich}"' if isinstance(rich, str) else ""
+            return f"<b><i><span{colour}>{text}</span></i></b>"
+        return text
+
+    def speed(k):
+        return mark(short_text(shown[k]["shutter"]),
+                    str(shown[k]["shutter"]) != str(cols[k]["shutter"]))
+
+    def iso_of(k):
+        return mark(str(shown[k]["iso"]), str(shown[k]["iso"]) != str(cols[k]["iso"]))
+
+    isos = {str(shown[k]["iso"]) for k in keys}
+    iso = ""
+    if len(isos) == 1:
+        iso = ", ISO " + mark(isos.pop(), any(str(shown[k]["iso"]) != str(cols[k]["iso"])
+                                              for k in keys))
     if trichrome:
-        speeds = " · ".join(f"{k.upper()} {short_text(cols[k]['shutter'])}"
-                            + ("" if iso else f" ISO {cols[k]['iso']}") for k in keys)
+        speeds = " · ".join(f"{k.upper()} " + speed(k) + ("" if iso else " ISO " + iso_of(k))
+                            for k in keys)
     else:
-        speeds = short_text(cols["w"]["shutter"]) + ("" if iso else f" ISO {cols['w']['iso']}")
+        speeds = speed("w") + ("" if iso else " ISO " + iso_of("w"))
     bases = " / ".join(("≈" if cols[k].get("edited") else "") + f"{100 * cols[k]['base']:.0f}"
                        for k in keys)
-    line = f"{speeds}{iso} (base {bases} %)"
+    tail = f" (base {bases} %)"
     dimmed = [(f"{NAMES[k]} LED" if k in COLOURS else "light") + f" {led_level(cols[k])}"
               for k in keys if cols[k].get("dimmed") and led_level(cols[k])]
     if dimmed:
-        line += "; " + ", ".join(dimmed)
+        tail += "; " + ", ".join(dimmed)
     if not trichrome and base.get("light") in ("r", "g", "b"):
-        line += f"; {LIGHT_NAMES[base['light']]} light"
+        tail += f"; {LIGHT_NAMES[base['light']]} light"
     if base.get("black_point"):
-        line += " · black point"
-    return line
+        tail += " · black point"
+    return speeds + iso + esc(tail)
 
 
 # --------------------------------------------------------------------------- #

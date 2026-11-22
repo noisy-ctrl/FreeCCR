@@ -260,3 +260,34 @@ the frame guide".
 
 "Expose each frame for itself" now reads **"Per shot, scale exposure to the
 frame's density"** (the user's wording). Behaviour unchanged.
+
+## Revision 2026-11-22: the film base's line shows the exposures the next Shoot uses
+
+The user: "Can the per shot exposure compensation change the values above,
+and maybe make the text italic or bold or something if it changes from base
+measurements."
+
+- The line under the Film base list (`film_base_note`, `be.summary`) shows
+  the shutter speed and ISO the NEXT Shoot will use: the frame's own when
+  "Per shot, scale exposure to the frame's density" is ticked and the
+  estimate changes something (`sug.changes`, exactly as `_shoot_exposures`
+  decides), or when Use for This Frame is armed; otherwise the film base's,
+  as before.
+- Each value that differs from the measured one is **bold italic** in the
+  window's normal text colour (the rest of the line stays muted); the line
+  is rich text only then (`be.summary(base, tri, using=, rich=True)`,
+  values HTML-escaped). An ISO shown once for all colours is marked when
+  any colour's changed.
+- The rest of the line (the base readings, a dimmed LED, light, black
+  point) still describes the film base as measured. Its tooltip says so and
+  gives the measured line: "Bold italic: this frame's own exposures, which
+  the next Shoot uses. Measured on the film base: …".
+- It follows the estimate every second (`_refresh_frame_line` →
+  `_refresh_base_note`); the Exposure row's pickers are the camera's own
+  settings and are not touched.
+
+Tests (`tests/test_frame_exposure.py`): `summary` with no `using` is the old
+line byte for byte; `using` + `rich` marks only the changed values; ticking
+the box with a dense frame marks the speeds (not the unchanged ISO) and
+unticking puts the measured line back; an armed Use for This Frame marks
+them too.

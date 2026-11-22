@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 sys.path.insert(0, os.path.dirname(__file__))
 
+from PySide6.QtCore import Qt  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 _app = QApplication.instance() or QApplication([])
@@ -497,9 +498,18 @@ def test_expose_each_frame_for_itself_uses_the_suggestion_every_shoot(film_mon):
     mon.feed.full = _noisy(_negative(frame_lin_ratio=0.25))
     mon._update_frame_estimate()
     assert mon.use_frame_btn.isVisibleTo(mon)
+    measured = mon.film_base_note.text()
+    assert measured == be.summary(mon._film_base(), True) and "<b>" not in measured
     mon.frame_auto.setChecked(True)
     assert lm._settings().value("live/frame_auto") in (True, "true")
     assert not mon.use_frame_btn.isVisibleTo(mon)            # the box does its job
+    # the film base's line shows the next Shoot's exposures, changed ones
+    # bold italic (revision 2026-11-22); the unchanged ISO isn't marked
+    note = mon.film_base_note
+    assert note.textFormat() == Qt.RichText
+    assert note.text().count("<b><i>") == 3 and "1/1.3</span></i></b>" in note.text()
+    assert ", ISO 100 (base" in note.text()
+    assert "Measured on the film base: " + measured in note.toolTip()
     mon._shutter_is_usb = lambda: True
     mon._ensure_hot_folder = lambda: True
     usb.dest = usb.dest or mon._usb_dest
@@ -522,8 +532,43 @@ def test_expose_each_frame_for_itself_uses_the_suggestion_every_shoot(film_mon):
     assert "film base's exposures" in mon.capture_caption.text()
     assert _wait(lambda: not mon.sequence.running, 20)
     assert usb.fires == [{"shutter": "1/4", "iso": "100"}] * 3
+    assert mon.film_base_note.text() == measured             # no estimate: the base's
     mon.frame_auto.setChecked(False)
     assert mon.use_frame_btn.isVisibleTo(mon)
+    assert mon.film_base_note.text() == measured and mon.film_base_note.toolTip() == ""
+
+
+def test_the_film_base_line_marks_only_what_changes():
+    """spec/frame-exposure.md, revision 2026-11-22."""
+    base = be.entry("P400", {k: {"shutter": "1/4", "iso": "100", "base": 0.8,
+                                 "levels": {k: 255}} for k in be.COLOURS})
+    plain = be.summary(base, True)
+    assert plain == "R 1/4 · G 1/4 · B 1/4, ISO 100 (base 80 / 80 / 80 %)"
+    assert be.summary(base, True, using=None, rich=True) == plain
+    same = {k: {"shutter": "1/4", "iso": "100"} for k in be.COLOURS}
+    assert be.summary(base, True, using=same, rich=True) == plain
+    using = {"r": {"shutter": "1/2", "iso": "100"}, "g": {"shutter": "1/4", "iso": "100"},
+             "b": {"shutter": "1", "iso": "200"}}
+    line = be.summary(base, True, using=using, rich="#111111")
+    m = '<b><i><span style="color: #111111">{}</span></i></b>'
+    assert line == ("R " + m.format("1/2") + " ISO 100 · G 1/4 ISO 100 · B " + m.format("1 s")
+                    + " ISO " + m.format("200") + " (base 80 / 80 / 80 %)")
+    # without rich: the values, unmarked
+    assert be.summary(base, True, using=using) == (
+        "R 1/2 ISO 100 · G 1/4 ISO 100 · B 1 s ISO 200 (base 80 / 80 / 80 %)")
+
+
+def test_an_armed_use_for_this_frame_shows_in_the_film_base_line(film_mon):
+    mon, usb, light, lm, path = film_mon
+    _with_base(mon)
+    mon.frame_auto.setChecked(False)
+    mon._frame_exposures = {k: {"shutter": "1/2", "iso": "100", "levels": None}
+                            for k in be.COLOURS}
+    mon._refresh_frame_line()
+    assert mon.film_base_note.text().count("<b><i>") == 3
+    mon._frame_exposures = None
+    mon._refresh_frame_line()
+    assert "<b>" not in mon.film_base_note.text()
 
 
 def test_meter_shoots_each_colour_reads_inside_the_guide_and_suggests(film_mon):
