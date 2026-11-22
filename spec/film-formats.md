@@ -69,3 +69,26 @@ its messages use the labels ("Auto crop: 120: 6x4.5, +0.30°…").
 - Contact sheet: format priority, labels, footer summary, strips of 3 for
   6x6, a format change redraws that frame and the footer.
 - Catalog round trip; learning records the picked format.
+
+## Revision 2026-11-22: the Crop panel follows the frame's format
+
+The user: "Crop tool doesn't seem to catch that I've changed from 120 645 to
+35mm again." The panel's Format was only ever the last one used
+(`crop/aspect_key`), so a 6x4.5 left from the last roll stayed on a 35mm roll.
+
+- On opening (`CropPanel.bind_image` → `follow_frame_format`), a remembered
+  FILM format gives way to the format the frame on screen is known to be
+  (`frame_format`): its own `film_format` (Done with a film format, or the
+  film menu's marking), else the frame guide's it was shot with
+  (`capture_guide["format"]`), else the roll's (the film menu's Format,
+  `MainWindow.roll_film_and_format`). Nothing known: unchanged.
+- A print ratio, Free, Original or Custom is a choice of its own and stays
+  (a 5:4 for posting isn't the film's format).
+- It is set quietly: a crop the frame already has is never reshaped; a box
+  seeded on entry takes the new shape as before. The new choice is
+  remembered like a picked one.
+
+Tests (`tests/test_crop_panel.py`): a remembered 6x4.5 becomes the roll's
+35mm, the guide's format beats the roll's and the frame's own beats both;
+a remembered print ratio, Free, Original or Custom stays; nothing known leaves it; an existing crop
+keeps its box.

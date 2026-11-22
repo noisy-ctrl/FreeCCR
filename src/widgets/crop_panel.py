@@ -264,6 +264,7 @@ class CropPanel(QWidget):
         """Refresh panel state when crop mode opens: reflect the (possibly
         folded) straighten angle, and seed/keep a box matching the remembered
         ratio. Called by MainWindow.toggle_crop_panel after enter_crop_mode."""
+        self.follow_frame_format()
         self._update_custom_visibility()
         self.auto_status.setVisible(False)
         self.image_preview.seed_crop_ratio_on_entry()
@@ -378,6 +379,59 @@ class CropPanel(QWidget):
         (spec/film-formats.md)."""
         key = self._active_key()
         return key if key in crop_aspect.FILM_KEYS else None
+
+    def frame_format(self):
+        """The film format the frame on screen is known to be, or None
+        (spec/film-formats.md, revision 2026-11-22): its own
+        (`img.film_format`: Done with a film format, or the film menu's
+        marking), else that of the frame guide it was shot with
+        (`img.capture_guide["format"]`), else the roll's (the film menu's
+        Format)."""
+        img = None
+        idx = getattr(self.image_preview, "current_idx", None)
+        try:
+            from core.ccr_backend import ccr_backend
+            if idx is not None and 0 <= idx < len(ccr_backend.images):
+                img = ccr_backend.images[idx]
+        except Exception:
+            img = None
+        guide = getattr(img, "capture_guide", None)
+        for key in (getattr(img, "film_format", None),
+                    guide.get("format") if isinstance(guide, dict) else None,
+                    self._roll_format()):
+            if key in crop_aspect.FILM_KEYS:
+                return key
+        return None
+
+    def _roll_format(self):
+        get = getattr(self.main_window, "roll_film_and_format", None)
+        try:
+            return get()[2] if callable(get) else None
+        except Exception:
+            return None
+
+    def follow_frame_format(self):
+        """On opening: a remembered FILM format gives way to the format this
+        frame is known to be (a 6x4.5 left from the last roll became the
+        35mm roll's). A print ratio, Free, Original or Custom is a choice of
+        its own and stays. Set quietly: an existing crop is never reshaped
+        (a seeded box is, by `seed_crop_ratio_on_entry`). True if it moved."""
+        if self._active_key() not in crop_aspect.FILM_KEYS:
+            return False
+        key = self.frame_format()
+        if key is None or key == self._active_key():
+            return False
+        idx = self.aspect_combo.findData(key)
+        if idx < 0:
+            return False
+        self._suppress = True
+        try:
+            self.aspect_combo.setCurrentIndex(idx)
+        finally:
+            self._suppress = False
+        self._update_custom_visibility()
+        self._save_prefs()
+        return True
 
     def _landscape(self):
         return self.landscape_radio.isChecked()
