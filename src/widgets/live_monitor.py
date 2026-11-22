@@ -2402,7 +2402,7 @@ class LiveCaptureMonitor(QWidget):
         tri = self.scan_type() == "trichrome"
         self._used()
         usb = self._shutter_is_usb()
-        exposures = rearm = None
+        exposures = rearm = estimate = None
         if usb:
             if tri and not self.light.is_open():
                 self._warn_caption("Trichrome needs the Scanlight connected: it sets "
@@ -2413,7 +2413,9 @@ class LiveCaptureMonitor(QWidget):
                                    "Folder Tether: turn it on to shoot.")
                 return None
             rearm = self._frame_exposures       # put back if the shot never happens
+            metered = self._frame_exposures is not None or self._frame_metered is not None
             exposures = self._shoot_exposures(tri)
+            estimate = self._estimate_record(metered)
         elif not self.light.is_open():
             return None
         ir = self._ir_shot() if usb else None
@@ -2422,7 +2424,45 @@ class LiveCaptureMonitor(QWidget):
             return None
         return {"tri": tri, "usb": usb, "exposures": exposures, "rearm": rearm, "ir": ir,
                 "guide": self._shot_guide_record(),
-                "note": getattr(self, "_frame_shot_note", "")}
+                "note": getattr(self, "_frame_shot_note", ""),
+                "estimate": estimate}
+
+    def _estimate_record(self, metered=False):
+        """What the frame's exposure estimate said as Shoot decided the
+        exposures, for the capture log (spec/capture-log-and-names.md
+        revision 2026-11-22): measured later against the RAWs. None without
+        a film base context."""
+        if isinstance(self._frame_context(), str):
+            return None
+        rec = {"auto": bool(self.frame_auto.isChecked())}
+        base = self._film_base()
+        if base:
+            rec["film_base"] = base.get("name")
+        est = list(getattr(self, "_frame_est", None) or [])
+        if est:
+            import numpy as np
+            rec["ratio"] = round(float(np.median(est)), 4)
+            rec["readings"] = len(est)
+            ratios = getattr(self, "_frame_live_ratios", None) or {}
+            if ratios:
+                rec["ratios"] = {k: round(float(v), 4) for k, v in ratios.items()}
+            src = getattr(self, "_frame_live_source", "")
+            if src:
+                rec["source"] = src
+        if metered:
+            rec["metered"] = True
+        sug = getattr(self, "_frame_suggestion", None)
+        if sug is not None and sug.stops:
+            rec["stops"] = {k: round(float(v), 3) for k, v in sug.stops.items()}
+            rec["live"] = bool(sug.live)
+        else:
+            reason = getattr(self, "_frame_reason", "")
+            if reason:
+                rec["reason"] = reason
+        note = getattr(self, "_frame_shot_note", "")
+        if note:
+            rec["note"] = note
+        return rec
 
     def _start_shot(self, p):
         """Start the sequence with what `_prepare_shot` took. True when it
@@ -2497,6 +2537,9 @@ class LiveCaptureMonitor(QWidget):
                  "exposures": ({k: {f: v.get(f) for f in ("shutter", "iso") if v.get(f)}
                                 for k, v in exps.items() if isinstance(v, dict)}
                                if exps else None)}
+        if p.get("estimate"):
+            # what the frame's exposure estimate said (spec revision 2026-11-22)
+            entry["estimate"] = p["estimate"]
         if p.get("guide") is not None:
             # the guide goes with the shot for good (spec/guide-in-log.md)
             g = capture_guide.save_for_log(folder, roll, shot, p["guide"])
@@ -3191,6 +3234,7 @@ class LiveCaptureMonitor(QWidget):
                 self._frame_live_source = est.source
                 if est.ok:
                     self._frame_est = (self._frame_est + [est.ratio])[-FRAME_ESTIMATES:]
+                    self._frame_live_ratios = dict(est.ratios or {})
                 else:
                     self._frame_est = []
         self._refresh_frame_line()
