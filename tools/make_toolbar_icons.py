@@ -409,6 +409,19 @@ def flat_field():
     return img
 
 
+def collage():
+    """The collage maker (spec/collage-maker.md, draft A): a grid of four
+    unequal cells."""
+    img, p = canvas()
+    p.setPen(pen(1.6, join=Qt.RoundJoin))
+    p.setBrush(Qt.NoBrush)
+    for x, y, w, h in ((2.6, 3.6, 10.2, 9.6), (14.4, 3.6, 7.0, 5.6),
+                       (2.6, 14.8, 10.2, 5.6), (14.4, 10.8, 7.0, 9.6)):
+        p.drawRoundedRect(QRectF(x, y, w, h), 1.0, 1.0)
+    p.end()
+    return img
+
+
 # (file in src/icons, drawing): the names the app loads
 ICONS = [
     ("rotate-left-icon-size_512.png", lambda: rotate(True)),
@@ -425,6 +438,7 @@ ICONS = [
     ("film-canister-icon.png", canister),
     ("scope-sample-icon.png", scope_sample),
     ("flat-field-icon.png", flat_field),
+    ("collage-icon.png", collage),
 ]
 # Capture keeps its camera (camera-icon.png, the user's choice, 2026-11-19).
 

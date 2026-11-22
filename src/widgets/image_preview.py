@@ -885,14 +885,14 @@ def orientation_prompt(kind, frames):
 EXPORT_GAP_PX = 12     # the least break between Convert and Export: a stretch with this
                        # minimum since spec/toolbar-centred.md (2026-11-20; a fixed gap
                        # of 18, 32, then 24 before), the boxed Export marks itself
-CONVERT_GAP_PX = 8     # ... and between Capture and Auto Crop
+CONVERT_GAP_PX = 4     # ... and between Capture and Auto Crop
 EXPORT_BOX_PAD = 24    # the boxed Export's width past its bold words (2 x 10 padding,
                        # the border, 2 px of air)
-ZOOM_GAP_PX = 8        # ... and the one between Export and the zoom box
+ZOOM_GAP_PX = 4        # ... and the one between Export and the zoom box
 TEXT_BUTTON_PAD = 6    # a text button's width past its words (Qt's hint: ~17; 8 until
                        # the Capture button, 2026-11-19)
-ICON_BUTTON_PAD = 6    # a picture button's width past its icon (Qt's hint: 8)
-AUTO_CROP_GAP_PX = 12  # the plain gap between Auto Crop and Un-convert (2026-11-08)
+ICON_BUTTON_PAD = 5    # a picture button's width past its icon (Qt's hint: 8)
+AUTO_CROP_GAP_PX = 8   # the plain gap between Auto Crop and Un-convert (2026-11-08)
 
 
 class ImagePreview(QWidget):
@@ -1156,6 +1156,18 @@ class ImagePreview(QWidget):
             "Measuring only: the picture is not changed.")
         self.sample_action.triggered.connect(self.set_sample_mode)
         self.toolbar.addAction(self.sample_action)
+        # The collage maker (spec/collage-maker.md): the last picture on the left
+        self.collage_action = QAction(
+            theme.load_tinted_icon(resource_path("icons/collage-icon.png"),
+                                   on_color=theme.ICON_ON),
+            "Collage", self)
+        self.collage_action.setCheckable(True)
+        self.collage_action.setToolTip(
+            "Collage: lay the selected frames (or the whole roll) out as an Instagram "
+            "post, carousel or story, and export it. Right-click frames in the list "
+            "to add or remove them.")
+        self.collage_action.triggered.connect(self._toggle_collage)
+        self.toolbar.addAction(self.collage_action)
         add_spacer()
 
         # Film Presets + Capture dead centre, Auto Crop / Un-convert / Convert
@@ -4169,6 +4181,13 @@ class ImagePreview(QWidget):
     SAMPLE_RIM_PX = 7          # a press this close to the rim resizes it (view px)
     SAMPLE_CLICK_PX = 4        # a drag shorter than this is a click
     SAMPLE_MIN_R = 0.004       # the smallest radius, a share of the width
+
+    def _toggle_collage(self, on):
+        mw = self.window()
+        if hasattr(mw, "show_collage"):
+            mw.show_collage(bool(on))
+        else:
+            self.collage_action.setChecked(False)
 
     def set_sample_mode(self, on):
         on = bool(on)

@@ -2005,9 +2005,12 @@ class CCRBackend:
                               output_colorspace: str = "srgb",
                               linear_merge: bool = False,
                               hdr_headroom: float = None,
-                              canvas=None) -> bool:
+                              canvas=None, image_obj=None) -> bool:
         """
         Exports the processed image at the given index to the specified output path.
+        `image_obj` (a shallow copy of that image with a changed crop, say)
+        is exported in its place (the collage's film borders from the scan,
+        spec/collage-maker.md).
         Routes to bwpoint or reference-frame pipeline depending on how the image was converted.
         linear_merge=True (trichrome only) bypasses ALL of that and writes the
         raw channel combination as a linear TIFF.
@@ -2017,8 +2020,9 @@ class CCRBackend:
         (spec/export-canvas-border.md).
         Returns True on success.
         """
-        if idx is not None and 0 <= idx < len(self.images):
-            image_obj = self.images[idx]
+        if image_obj is not None or (idx is not None and 0 <= idx < len(self.images)):
+            if image_obj is None:
+                image_obj = self.images[idx]
             try:
                 if linear_merge:
                     if not getattr(image_obj, "is_merged", False):
