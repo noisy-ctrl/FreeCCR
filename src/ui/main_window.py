@@ -521,6 +521,16 @@ class MainWindow(QMainWindow):
             self._balance_shortcuts.append(sc)
         self._apply_balance_hotkey_state()
 
+        # Dust removal's tools: B = Brush, E = Eraser (spec/dust-brush-eraser.md).
+        # Enabled only while dust mode is on (_sync_dust_action), so the
+        # letters aren't taken at other times.
+        self._dust_tool_shortcuts = []
+        for key, tool in (("B", "brush"), ("E", "erase")):
+            sc = QShortcut(QKeySequence(key), self)
+            sc.activated.connect(lambda t=tool: self._shortcut_dust_tool(t))
+            sc.setEnabled(False)
+            self._dust_tool_shortcuts.append(sc)
+
 
         # Non-blocking startup update check (2s network timeout, off-thread)
         self._update_worker = UpdateCheckWorker(self)
@@ -798,12 +808,18 @@ class MainWindow(QMainWindow):
             action.blockSignals(True)
             action.setChecked(checked)
             action.blockSignals(False)
+        for sc in getattr(self, "_dust_tool_shortcuts", ()):
+            sc.setEnabled(bool(checked))
+
+    def _shortcut_dust_tool(self, tool):
+        if getattr(self.image_preview, "dust_mode", False):
+            self.dust_panel.set_tool(tool)
 
     def undo_last_action(self):
         """Restore the current image's previous state (adjustments, crop,
         rotation, flips). Each Ctrl+Z press pops one more snapshot."""
-        # In dust mode, Ctrl+Z means "undo the last dust spot" (same as the
-        # panel's button) and must PRESERVE the viewport — the general undo
+        # In dust mode, Ctrl+Z means "undo the last dust step" (same as the
+        # panel's ↶, spec/dust-brush-eraser.md) and must PRESERVE the viewport — the general undo
         # below resets zoom (crop/rotation can move the displayed content),
         # which read as "Ctrl+Z unzoomed" while spotting dust zoomed-in.
         if getattr(self.image_preview, "dust_mode", False):

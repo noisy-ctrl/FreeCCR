@@ -1,9 +1,9 @@
 """IR dust learns from the user's corrections (spec/ir-dust-v2.md §4).
 
 Each correction is an example (the candidate's eight features, dust or not,
-a weight): Erase Spots over an IR spot says "not dust" (weight 1), a hand
+a weight): the Eraser over an IR spot says "not dust" (weight 1), a hand
 stroke over a candidate that wasn't flagged says "dust I had to find myself"
-(weight 1), and Heal Them says "dust" for every flagged spot healed (weight
+(weight 1), and Paint Over N Found says "dust" for every flagged spot healed (weight
 0.3: he could have erased it, but may not have looked).
 
 Examples are kept per kind of scan ("merged": a trichrome's three shots;

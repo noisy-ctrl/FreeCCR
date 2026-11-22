@@ -1,7 +1,7 @@
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QToolBar, QMessageBox, QSlider, QGraphicsView, QGraphicsScene,
     QGraphicsPixmapItem, QGraphicsRectItem, QGraphicsPathItem, QGraphicsEllipseItem,
-    QGraphicsLineItem, QGraphicsPolygonItem, QStyleOptionSlider, QDialog,
+    QGraphicsLineItem, QGraphicsPolygonItem, QStyleOptionSlider, QDialog, QGraphicsItem,
     QLabel, QPushButton, QStyle, QSizePolicy, QApplication, QComboBox, QToolButton
 )
 from PySide6.QtGui import (QPixmap, QIcon, QTransform, QPen, QColor, QAction, QPainter,
@@ -181,6 +181,39 @@ def resource_path(relative_path):
         return fallback_path
     # Not found, return as-is (QIcon will fail gracefully)
     return relative_path
+
+
+class _ToolTag(QGraphicsItem):
+    """The dust cursor's name tag ("Brush" / "Eraser"), drawn at a fixed
+    screen size just up and to the right of its point
+    (spec/dust-brush-eraser.md). Display only."""
+    PAD_X, PAD_Y, GAP = 6, 2, 4
+
+    def __init__(self, text, parent=None):
+        super().__init__(parent)
+        self.text = text
+        self.setFlag(QGraphicsItem.ItemIgnoresTransformations, True)
+        self.setAcceptedMouseButtons(Qt.NoButton)
+        from PySide6.QtGui import QFont, QFontMetrics
+        self._font = QFont()
+        self._font.setPixelSize(11)
+        self._font.setBold(True)
+        fm = QFontMetrics(self._font)
+        w = fm.horizontalAdvance(text) + 2 * self.PAD_X
+        h = fm.height() + 2 * self.PAD_Y
+        self._rect = QRectF(self.GAP, -self.GAP - h, w, h)
+
+    def boundingRect(self):
+        return self._rect.adjusted(-1, -1, 1, 1)
+
+    def paint(self, painter, option, widget=None):
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(20, 28, 48, 225))
+        painter.drawRoundedRect(self._rect, 3, 3)
+        painter.setPen(QColor(255, 255, 255))
+        painter.setFont(self._font)
+        painter.drawText(self._rect, Qt.AlignCenter, self.text)
 
 
 class GraphicsImageView(QGraphicsView):
@@ -5307,6 +5340,30 @@ class ImagePreview(QWidget):
         self._commit_dust_change(img)
         return True
 
+    DUST_UNDO_KEYS = ("dust_spots", "dust_plan", "ir_dust_pending")
+
+    def dust_undo(self) -> bool:
+        """↶ / Ctrl+Z in dust mode (spec/dust-brush-eraser.md): take back the
+        newest undo step when it was dust work only (a Brush stroke, an Eraser
+        stroke, a Paint Over, a re-picked source), keeping the view. False
+        when the newest step was something else (the general undo has it)."""
+        img = (ccr_backend.get_image_by_index(self.current_idx)
+               if self.current_idx is not None else None)
+        if img is None or not getattr(img, "undo_stack", None):
+            return False
+        top, now = img.undo_stack[-1], img.capture_undo_state()
+        keys = (set(top) | set(now)) - set(self.DUST_UNDO_KEYS)
+        if any(top.get(k) != now.get(k) for k in keys):
+            return False
+        if all(top.get(k) == now.get(k) for k in self.DUST_UNDO_KEYS):
+            return False
+        img.pop_undo_state()
+        self._commit_dust_change(img)
+        if hasattr(self, "_draw_ir_pending"):
+            self._draw_ir_pending()
+        self.refresh_dust_badge()
+        return True
+
     def dust_clear_all(self) -> bool:
         img = ccr_backend.get_image_by_index(self.current_idx)
         if img is None or not img.dust_spots:
@@ -5322,6 +5379,7 @@ class ImagePreview(QWidget):
     def set_dust_tool(self, tool: str):
         """"brush" paints spots; "erase" removes every spot it touches."""
         self._dust_tool = "erase" if tool == "erase" else "brush"
+        self._update_dust_cursor(getattr(self, "_dust_cursor_pos", None))
 
     def _dust_erase(self, img, pts):
         """Remove the spots an eraser stroke touched (healed ones of any kind,
@@ -5841,7 +5899,10 @@ class ImagePreview(QWidget):
         self._dust_stroke_item = item
 
     def _update_dust_cursor(self, scene_pos):
-        """Move the brush-circle cursor ring to the pointer (sized by brush)."""
+        """Move the brush-circle cursor ring to the pointer (sized by brush),
+        with the tool's name beside it; the Eraser's ring is struck through
+        (spec/dust-brush-eraser.md)."""
+        self._dust_cursor_pos = scene_pos
         if self._dust_cursor_item is not None:
             try:
                 self.scene.removeItem(self._dust_cursor_item)
@@ -5863,6 +5924,14 @@ class ImagePreview(QWidget):
         pen.setCosmetic(True)
         item.setPen(pen)
         item.setBrush(QBrush(Qt.NoBrush))
+        erase = self._dust_tool == "erase"
+        if erase:
+            k = r * 0.7071
+            slash = QGraphicsLineItem(scene_pos.x() - k, scene_pos.y() - k,
+                                      scene_pos.x() + k, scene_pos.y() + k, item)
+            slash.setPen(pen)
+        tag = _ToolTag("Eraser" if erase else "Brush", item)
+        tag.setPos(scene_pos.x() + r * 0.7071, scene_pos.y() - r * 0.7071)
         self.scene.addItem(item)
         self._dust_cursor_item = item
 
