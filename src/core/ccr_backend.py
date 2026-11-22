@@ -3784,6 +3784,50 @@ class CCRBackend:
         if frame is not None:
             self.crop_after_conversion(img, frame)
 
+    def convert_frames(self, images, progress_callback=None):
+        """Convert Selected (spec/convert-button-choice.md, revision
+        2026-11-23): each frame exactly as Convert Current converts it
+        (plan_frame_conversion + apply_frame_conversion), the roll's recorded
+        black and white points as its context, and the frames left out are
+        never touched (Convert All's batch reloads every frame). A frame with
+        nothing to anchor to is converted with the fixed density invert and
+        named, as Convert All does. Leaves its summary in
+        last_auto_bp_summary, in Convert All's form."""
+        images = list(images)
+        total = len(images)
+        summary = {"high": 0, "medium": 0, "fallback": 0, "unanchored": 0,
+                   "skipped": 0, "auto_wp": 0, "cropped": 0, "notes": []}
+        if progress_callback:
+            progress_callback(0, total)
+        for i, img in enumerate(images):
+            try:
+                plan = self.plan_frame_conversion(img)
+                res, source = plan.get("auto_res"), plan.get("auto_source")
+                if plan["black"] is None:
+                    summary["unanchored"] += 1
+                    summary["notes"].append(
+                        f"{os.path.basename(getattr(img, 'file_path', '') or str(i))}: "
+                        f"{res.reason if res is not None and res.reason else 'no film base'}")
+                elif source == "auto" and res is not None:
+                    summary[res.confidence] += 1
+                elif source is not None:
+                    summary["fallback"] += 1
+                rec = plan.get("awp_rec")
+                if rec and rec.get("choice") in ("frame", "roll"):
+                    summary["auto_wp"] += 1
+                before = (getattr(img, "crop_rect", None), getattr(img, "crop_angle", 0))
+                self.apply_frame_conversion(img, plan)
+                if (getattr(img, "crop_rect", None), getattr(img, "crop_angle", 0)) != before:
+                    summary["cropped"] += 1
+                img.update_thumbnail_and_preview()
+            except Exception as e:
+                print(f"Convert Selected failed for image {i}: {e}")
+                summary["skipped"] += 1
+            if progress_callback:
+                progress_callback(i + 1, total)
+        self.last_auto_bp_summary = summary
+        return summary
+
     def apply_bwpoint_to_all_images(self, progress_callback=None):
         """
         Apply B/W point film negative conversion to all loaded images using the same

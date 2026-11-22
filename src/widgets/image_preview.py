@@ -3192,23 +3192,35 @@ class ImagePreview(QWidget):
             action.blockSignals(was)
             action.setToolTip(f"{name} (this frame is mirrored)" if on else name)
 
-    def _ask_convert_scope(self):
-        """The toolbar Convert's question: "current", "all" or None (Cancel)."""
+    def _ask_convert_scope(self, n_selected=0):
+        """The toolbar Convert's question: "current", "selected", "all" or
+        None (Cancel). Selected only with more than one frame selected, and
+        then the default, as Auto Crop's (spec/convert-button-choice.md,
+        revision 2026-11-23). The test seam."""
         box = QMessageBox(self)
         box.setWindowTitle("Convert")
         box.setIcon(QMessageBox.Question)
-        box.setText("Convert the current frame, or every frame?")
+        many = n_selected > 1
+        box.setText("Convert the current frame, the selected frames, or every frame?"
+                    if many else "Convert the current frame, or every frame?")
         box.setInformativeText(
             "The same as Convert Current / Convert All in the panel, with the "
-            "Film B/W Point settings. A frame with a reference frame drawn "
-            "(right-drag) converts from it when converted on its own.")
+            "Film B/W Point settings; Selected converts each of them as Convert "
+            "Current does. A frame with a reference frame drawn (right-drag) "
+            "converts from it when converted on its own.")
         current = box.addButton("Convert Current", QMessageBox.AcceptRole)
+        selected = (box.addButton(f"Convert Selected ({n_selected})",
+                                  QMessageBox.AcceptRole) if many else None)
         every = box.addButton("Convert All", QMessageBox.AcceptRole)
         box.addButton(QMessageBox.Cancel)
-        box.setDefaultButton(current)
+        box.setDefaultButton(selected or current)
         box.exec()
         clicked = box.clickedButton()
-        return "current" if clicked is current else "all" if clicked is every else None
+        if clicked is current:
+            return "current"
+        if selected is not None and clicked is selected:
+            return "selected"
+        return "all" if clicked is every else None
 
     def convert_ccr(self):
         """Toolbar Convert: asks Convert Current / Convert All / Cancel
@@ -3216,13 +3228,20 @@ class ImagePreview(QWidget):
         if self.current_idx is None:
             QMessageBox.warning(self, "No Image Selected", "Please select an image to convert.")
             return
-        scope = self._ask_convert_scope()
+        mw = self.parent().parent()
+        tl = getattr(mw, "thumbnail_list", None)
+        sel = tl.selected_indices() if tl is not None else []
+        scope = self._ask_convert_scope(len(sel))
         if scope is None:
             return
-        panel = getattr(self.parent().parent(), "sliders_panel", None)
+        panel = getattr(mw, "sliders_panel", None)
         if scope == "all":
             if panel is not None:
                 panel._on_convert_all_bwpoint(confirmed=True)
+            return
+        if scope == "selected":
+            if panel is not None:
+                panel._on_convert_selected(sel)
             return
         if ccr_backend.get_reference_frame_by_index(self.current_idx) is not None:
             self._convert_current_by_reference()

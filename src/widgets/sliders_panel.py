@@ -5323,6 +5323,28 @@ class SlidersPanel(QWidget):
         worker.start()
         dialog.exec_()
 
+    def _on_convert_selected(self, indices):
+        """The toolbar Convert's "Convert Selected (N)": those frames, each as
+        Convert Current converts it, behind Convert All's progress window
+        (spec/convert-button-choice.md, revision 2026-11-23)."""
+        if (not getattr(ccr_backend, "auto_black_point", False)
+                and not self._confirm_no_anchor_convert()):
+            return
+        imgs = [ccr_backend.images[i] for i in sorted(set(indices))
+                if 0 <= i < len(ccr_backend.images)]
+        if not imgs:
+            return
+        dialog = BWPointConvertDialog(self)
+        worker = BWPointConvertWorker(images=imgs)
+        dialog.set_worker(worker)
+        worker.progress.connect(dialog.set_progress)
+        worker.finished.connect(lambda: self._on_bwp_convert_finished(dialog))
+        if getattr(self, "_convert_threaded", True):
+            worker.start()
+            dialog.exec_()
+        else:
+            worker.run()
+
     def _on_bwp_convert_finished(self, dialog):
         dialog.accept()
         try:
@@ -5737,16 +5759,20 @@ class BWPointConvertWorker(WorkerThread):
     finished = Signal()
     progress = Signal(int, int)
 
-    def __init__(self):
+    def __init__(self, images=None):
         super().__init__()
         self._stop_requested = False
+        self._images = images          # None = every frame (Convert All)
 
     def run(self):
         def progress_callback(current, total):
             if not self._stop_requested:
                 self.progress.emit(current, total)
         try:
-            ccr_backend.apply_bwpoint_to_all_images(progress_callback=progress_callback)
+            if self._images is None:
+                ccr_backend.apply_bwpoint_to_all_images(progress_callback=progress_callback)
+            else:
+                ccr_backend.convert_frames(self._images, progress_callback=progress_callback)
         except Exception as e:
             print(f"B/W point batch conversion failed: {e}")
         self.finished.emit()
