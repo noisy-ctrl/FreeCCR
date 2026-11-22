@@ -22,6 +22,13 @@ STUCK_TEXT = ("The light isn't taking data: unplug its USB and plug it back in, 
               "straight into the computer if you can")
 SILENT_TEXT = ("No answer: another program may have the port, or the light's USB is "
                "stuck (unplug it and plug it back in)")
+# spec/light-really-answers.md: bytes that aren't a light's answer, and a
+# light that stops reporting, are said plainly (2026-11-22: FreeCCR said
+# "Responding" while the light's firmware had stopped)
+NOT_LIGHT_TEXT = ("Something on this port answers, but not as a light: is it the right "
+                  "port? (another board shows up as a usbmodem port too)")
+STOPPED_TEXT = ("The light stopped answering: switch it off at its power, then plug "
+                "its power in first and its USB second")
 
 
 def _is_write_timeout(err):
@@ -53,6 +60,7 @@ class LightLink(QObject):
     TICK_MS = 15
     SCAN_MS = 3000
     LINK_CHECK_S = 2.5
+    STALE_S = 3.0            # a Scanlight reports 5 times a second: this long quiet = stopped
     COLOUR_GAP_S = 0.016
     TELEMETRY_GAP_S = 0.25
     SETTLE_S = 0.08          # a board that reset on open needs a moment
@@ -84,6 +92,8 @@ class LightLink(QObject):
         self._light_info = {}
         self._levels_now = None
         self._rx = 0
+        self._heard_at = None        # when the light last answered as a light
+        self._reports = False        # it has sent its own reports (a Scanlight's telemetry)
         self._dtr = True
         self._retried = False
         self._opened_at = 0.0
@@ -226,21 +236,31 @@ class LightLink(QObject):
             except Exception as e:  # unplugged, mostly
                 self._lose(e)
                 return
+            now = self._clock()
             if chunk:
                 self._rx += len(chunk)
                 for header, data in self._parser.feed(chunk):
+                    if header in cl.D2H_KNOWN:
+                        self._heard_at = now
                     t = cl.telemetry(header, data)
                     if t is not None:
                         self._telemetry[t[0]] = t[1]
                         self._telemetry_dirty = True
+                        self._reports = True
                 for line in self._olp_parser.feed(chunk):
                     self._on_olp_line(line)
                 if self._ser is None:            # a write in there failed
                     return
-            now = self._clock()
-            if self._state[0] in ("waiting", "silent") and self._rx > 0:
+            heard = self._heard_at is not None
+            if self._state[0] in ("waiting", "silent") and heard \
+                    and now - self._heard_at < self.STALE_S:
                 self._set_state("ok", self._port, "Responding")
                 self._learn_identity()
+            elif (self._state[0] == "ok" and self._reports and self._dialect == "scanlight"
+                  and now - self._heard_at >= self.STALE_S):
+                # its reports stopped: the firmware isn't running (the user's
+                # light, 2026-11-22, after its power went), whatever the port says
+                self._set_state("silent", self._port, STOPPED_TEXT)
             elif self._state[0] == "waiting" and now - self._opened_at >= self.LINK_CHECK_S:
                 if not self._retried:
                     # Silent: DTR may have reset the board, or the firmware
@@ -248,7 +268,8 @@ class LightLink(QObject):
                     self._retried = True
                     self._open(self._port, assert_dtr=not self._dtr)
                     return
-                self._set_state("silent", self._port, SILENT_TEXT)
+                self._set_state("silent", self._port,
+                                NOT_LIGHT_TEXT if self._rx > 0 else SILENT_TEXT)
             self._flush_colour()
             if (self._telemetry_dirty
                     and now - self._last_telemetry >= self.TELEMETRY_GAP_S):
@@ -339,6 +360,8 @@ class LightLink(QObject):
         self._ser = ser
         self._dtr = bool(assert_dtr)
         self._rx = 0
+        self._heard_at = None
+        self._reports = False
         self._parser = cl.PacketParser()
         self._olp_parser = olp.LineParser()
         self._dialect = "scanlight"
@@ -377,6 +400,8 @@ class LightLink(QObject):
         if reply is None:
             return
         kind, data = reply
+        if kind in ("hello", "status"):
+            self._heard_at = self._clock()        # a light, speaking text
         if kind == "hello":
             first = self._dialect != "olp"
             self._dialect = "olp"

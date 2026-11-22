@@ -148,7 +148,9 @@ class FakeSerial:
     def in_waiting(self):
         if self.dev.unplugged:
             raise OSError("device gone")
-        if self.dev.answers and self.dtr == self.dev.wants_dtr:
+        if getattr(self.dev, "noise", None) is not None:
+            self._out.extend(self.dev.noise)          # another board on the port
+        elif self.dev.answers and self.dtr == self.dev.wants_dtr:
             self._out.extend(_tele(cl.D2H_VBUS, 5.1) + _tele(cl.D2H_TEMP, 38.0))
         return len(self._out)
 
@@ -695,3 +697,49 @@ def test_same_device_and_identities():
     assert cl.same_device("2e8a:000a:", "2e8a:000a:E67")   # no serial: the kind
     assert not cl.same_device("", "2e8a:000a:E66")
     assert cl.identity_vid(SCANLIGHT) in cl.SCANLIGHT_VIDS and cl.identity_vid("") is None
+
+
+
+# --- spec/light-really-answers.md: only a light's own answer is "Responding" --
+def test_another_board_is_not_taken_for_the_light():
+    dev = FakeDevice()
+    dev.noise = b"ORP 1 STEPS_PER_MM=1200 NAME=Rail\n"      # the focus rail's board
+    link, clock, made, states, _ = _link(dev)
+    details = []
+    link.state_changed.connect(lambda s, p, d: details.append(d))
+    link.open_port("/dev/cu.usbmodem1")
+    link.tick()
+    assert states[-1] == "waiting"                    # bytes, but not a light's
+    for _ in range(2):
+        clock.t += 2.6
+        link.tick()
+    assert states[-1] == "silent" and details[-1] == ll.NOT_LIGHT_TEXT
+
+
+def test_a_light_whose_reports_stop_is_said_to_have_stopped_and_comes_back():
+    dev = FakeDevice()
+    link, clock, made, states, _ = _link(dev)
+    details = []
+    link.state_changed.connect(lambda s, p, d: details.append(d))
+    link.open_port("/dev/cu.usbmodem1")
+    link.tick()
+    assert states[-1] == "ok"
+    dev.answers = False                               # the firmware stopped
+    clock.t += 1.0
+    link.tick()
+    assert states[-1] == "ok"                         # a moment's quiet is fine
+    clock.t += LightLink.STALE_S
+    link.tick()
+    assert states[-1] == "silent" and details[-1] == ll.STOPPED_TEXT
+    dev.answers = True
+    link.tick()
+    assert states[-1] == "ok"
+
+
+def test_the_firmware_answer_alone_counts():
+    dev = FakeDevice(answers=False)
+    dev.noise = cl.packet(cl.D2H_FW_VERSION, b"\x00\x00\x00\x00")
+    link, clock, made, states, _ = _link(dev)
+    link.open_port("/dev/cu.usbmodem1")
+    link.tick()
+    assert states[-1] == "ok"
