@@ -18,6 +18,7 @@ from core.golden import normalize_golden_shape
 from core.shadow_neutral import normalize_shadow_shape
 from core.glow import normalize_glow_shape
 from core.shadow_lift import normalize_lift_shape
+from core.edge_effect import normalize_edge_shape
 from core.film_stocks import (decode_film_stocks, encode_film_stocks,
                               find_film_stock, upsert_film_stock,
                               remove_film_stock)
@@ -86,8 +87,9 @@ SYNC_GROUPS = [
     # judgement (focus, grain, how far the frame was downscaled), so a user
     # syncs it independently of colour. See spec/sharpening.md. Its "Bypass
     # until export" flag rides with it (spec/bypass-until-export.md).
-    ("details", "Details (sharpening)",
-     ("sharpen_amount", "sharpen_radius", "sharpen_masking", "sharpen_export_only")),
+    ("details", "Details (sharpening, edge effect)",
+     ("sharpen_amount", "sharpen_radius", "sharpen_masking", "sharpen_export_only",
+      "edge_effect")),
     # "curves" lives outside ADJUSTMENT_KEYS (it's a nested structure, not a
     # slider), so it's synced specially in _perform_sync_to_all, like crop.
     ("curves", "Curves", ()),
@@ -196,12 +198,14 @@ _BASIC_LABELS = {
     "chroma_nr": "Chroma NR Amount", "chroma_nr_radius": "Chroma NR Radius",
     "sharpen_amount": "Sharpen Amount", "sharpen_radius": "Sharpen Radius",
     "sharpen_masking": "Sharpen Masking",
+    "edge_effect": "Edge Effect",
 }
 _CHANNEL_NAMES = {"r": "Red", "g": "Green", "b": "Blue"}
 _BAND_KEYS = frozenset(BAND_ADJUSTMENT_KEYS) | {"band_feather"}
 _NOISE_KEYS = ("chroma_nr", "chroma_nr_radius")
 _XT_KEYS = ("xt_rg", "xt_rb", "xt_gr", "xt_gb", "xt_br", "xt_bg")
 _SHARPEN_KEYS = ("sharpen_amount", "sharpen_radius", "sharpen_masking")
+_EDGE_KEYS = ("edge_effect",)     # its own Detail paste row, with its options
 # Whole-image, non-slider flags stored in the GLOBAL adjustment dict. A slider
 # edit rebuilds that dict from the sliders, so every one of these must be
 # re-attached (_attach_cineon) and preserved by Sync / Paste when its own group
@@ -272,7 +276,7 @@ def paste_options(clip, default_for):
     adj = clip.get("adjustments") or {}
     for key, val in adj.items():
         if (key in _BAND_KEYS or key in _NOISE_KEYS or key in _SHARPEN_KEYS
-                or key in _XT_KEYS or val == default_for(key)):
+                or key in _EDGE_KEYS or key in _XT_KEYS or val == default_for(key)):
             continue
         section = ("Channel Levels" if key.startswith("ch_")
                    else "Channel Balance" if key.startswith("balance_")
@@ -348,6 +352,14 @@ def paste_options(clip, default_for):
         rows.append(("Detail", "sharpen",
                      f"Sharpening  (amount {_n(sh)}, radius {_n(rad)}, "
                      f"masking {_n(msk)}{bypass})"))
+    # The developer edge effect and its options travel together
+    # (spec/developer-edge-effect.md).
+    edge = adj.get("edge_effect", default_for("edge_effect"))
+    edge_opts = normalize_edge_shape(clip.get("edge_shape"))
+    if edge != default_for("edge_effect") or edge_opts:
+        from widgets.edge_popup import describe_edge
+        rows.append(("Detail", "edge",
+                     f"Edge Effect  ({_n(edge)}, {describe_edge(edge_opts, full=True)})"))
     crop_rect, crop_angle = clip.get("crop") or (None, 0.0)
     if crop_rect is not None:
         w = (crop_rect[2] - crop_rect[0]) * 100.0
@@ -877,6 +889,9 @@ class SlidersPanel(QWidget):
         # Details (sharpening) — created LAST of all, so these stay at the tail
         # of the positional zip. See spec/sharpening.md.
         "sharpen_amount", "sharpen_radius", "sharpen_masking",
+        # The developer edge effect, created right after Masking
+        # (spec/developer-edge-effect.md).
+        "edge_effect",
     ]
 
     # Non-zero default values for specific adjustment keys. Keys not listed
@@ -1888,12 +1903,28 @@ class SlidersPanel(QWidget):
             default_value=self._default_for("sharpen_masking"))
         masking_row.addSpacing(auto_w)
         self.details_section.add_layout(masking_row)
+        # Developer edge effect (spec/developer-edge-effect.md): the border a
+        # developer leaves where dense meets thin, on the negative's density.
+        # Created right after Masking (ADJUSTMENT_KEYS zip); right-click the
+        # label for its reach and whether each dye layer acts on its own.
+        edge_row = self.create_slider("Edge Effect", min_value=0, max_value=100)
+        edge_row.addSpacing(auto_w)
+        self._edge_shape = None          # options (None = default)
+        self._edge_popup = None
+        self._edge_label = edge_row.itemAt(0).widget()
+        self._edge_label.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._edge_label.customContextMenuRequested.connect(
+            lambda pos: self._open_edge_popup(self._edge_label.mapToGlobal(pos)))
+        self._update_edge_label()
         # "Bypass until export" (spec/bypass-until-export.md): the same
         # checkbox Chroma NR has, so slower machines can skip sharpening in the
-        # preview while exports always include it.
+        # preview while exports always include it. Right under the sharpening
+        # it belongs to; the edge effect sits below it.
         self.sharpen_bypass_checkbox = self._make_bypass_checkbox(
             "sharpen_export_only", "Sharpening")
         self.details_section.add_widget(self.sharpen_bypass_checkbox)
+        self.edge_effect_row = edge_row
+        self.details_section.add_layout(edge_row)
 
         # --- Populate Curves ---
         self.curve_editor = CurveEditor()
@@ -2403,6 +2434,9 @@ class SlidersPanel(QWidget):
         self._lift_shape = normalize_lift_shape(
             adjustment.get("shadow_lift_shape") if adjustment else None)
         self._update_lift_label()
+        self._edge_shape = normalize_edge_shape(
+            adjustment.get("edge_shape") if adjustment else None)
+        self._update_edge_label()
         self._glow_shape = normalize_glow_shape(
             adjustment.get("glow_shape") if adjustment else None)
         self._update_glow_label()
@@ -2794,6 +2828,8 @@ class SlidersPanel(QWidget):
             adjustment["shadow_lift_shape"] = dict(self._lift_shape)
         if getattr(self, "_glow_shape", None):
             adjustment["glow_shape"] = dict(self._glow_shape)
+        if getattr(self, "_edge_shape", None):
+            adjustment["edge_shape"] = dict(self._edge_shape)
         return adjustment
 
     def _attach_cineon(self, adjustment: dict) -> dict:
@@ -3538,6 +3574,62 @@ class SlidersPanel(QWidget):
             self._on_lift_show_mask(False)     # the map is only for adjusting
             self.end_undo_burst()
 
+    # --- Developer edge effect (spec/developer-edge-effect.md) --------------
+    EDGE_HINT = ("Edge Effect: the border a developer leaves where a dense part "
+                 "of the negative meets a thin one. Fresh developer reaches the "
+                 "dense side and spent developer the thin side, so each develops "
+                 "a little further at the border, over about a tenth of a "
+                 "millimetre: what makes film look crisp and solid without "
+                 "sharpening it. Added on the negative's density, between the "
+                 "grain's size and the developer's reach, and only where it "
+                 "stands out from the grain: grain and plain sky are left "
+                 "alone. It works in mm on the film, so every size and format "
+                 "looks alike.")
+    EDGE_LABEL_TIP = "Right-click: reach, each dye layer"
+
+    def _update_edge_label(self):
+        lbl = getattr(self, "_edge_label", None)
+        if lbl is None:
+            return
+        from widgets.edge_popup import describe_edge
+        custom = self._edge_shape is not None
+        f = lbl.font()
+        f.setUnderline(custom)
+        lbl.setFont(f)
+        lines = [self.EDGE_HINT]
+        if custom:
+            lines.append("Options: " + describe_edge(self._edge_shape))
+        lines.append(self.EDGE_LABEL_TIP)
+        lbl.setToolTip("\n".join(lines))
+
+    def _open_edge_popup(self, global_pos):
+        if self.current_idx is None:
+            return
+        from widgets.edge_popup import EdgePopup
+        self.end_undo_burst()
+        i = self.adjustment_keys.index("edge_effect")
+        pop = EdgePopup(self._edge_shape, self.sliders[i].value(), self)
+        pop.changed.connect(self._on_edge_shape_changed)
+        pop.closed.connect(self._on_edge_popup_closed)
+        self._edge_popup = pop
+        pop.adjustSize()
+        from utils.popup_placement import place_on_screen
+        place_on_screen(pop, global_pos)
+        pop.show()
+
+    def _on_edge_shape_changed(self, shape):
+        self._edge_shape = normalize_edge_shape(shape)
+        self._update_edge_label()
+        # Same store / preview / debounced-reprocess path as a slider move;
+        # its undo burst is held open until the popup closes (one undo step).
+        self.on_slider_changed()
+        self._undo_burst_timer.stop()
+
+    def _on_edge_popup_closed(self):
+        if self._edge_popup is not None:
+            self._edge_popup = None
+            self.end_undo_burst()
+
     # --- Glow options (spec/highlight-glow.md) -------------------------------
     GLOW_HINT = ("Glow: light spilling round the highlights, as on film. The "
                  "near-white highlights (above 95 % by default) leave a thin warm "
@@ -4030,6 +4122,8 @@ class SlidersPanel(QWidget):
         self._update_lift_label()
         self._glow_shape = None
         self._update_glow_label()
+        self._edge_shape = None
+        self._update_edge_label()
         # Save adjustment to the ACTIVE layer (global or selected area) and
         # update the preview. Resetting an area zeroes that area's settings;
         # resetting the Whole Image layer zeroes the global sliders (areas keep
@@ -4136,6 +4230,7 @@ class SlidersPanel(QWidget):
         # sliders); the Colour Organics regions ride the Saturation group.
         sync_tone_shape = bool(selection.get("tone"))
         sync_org_shape = bool(selection.get("sat"))
+        sync_edge_shape = bool(selection.get("details"))
         # Sync always copies the SOURCE image's GLOBAL (whole-image) layer, not
         # the live sliders — those may currently reflect an active area, and
         # areas are per-image (never synced). Read from the global dict.
@@ -4148,6 +4243,7 @@ class SlidersPanel(QWidget):
         src_shadow = normalize_shadow_shape(src_global.get("shadow_shape"))
         src_glow = normalize_glow_shape(src_global.get("glow_shape"))
         src_lift = normalize_lift_shape(src_global.get("shadow_lift_shape"))
+        src_edge = normalize_edge_shape(src_global.get("edge_shape"))
         current_adjustment = src_global
         crop_rect = src.crop_rect if src is not None else None
         crop_angle = getattr(src, "crop_angle", 0.0) if src is not None else 0.0
@@ -4176,10 +4272,12 @@ class SlidersPanel(QWidget):
             glow_changes = sync_org_shape and own_glow != src_glow
             own_lift = normalize_lift_shape(img.adjustment_settings.get("shadow_lift_shape"))
             lift_changes = sync_org_shape and own_lift != src_lift
+            own_edge = normalize_edge_shape(img.adjustment_settings.get("edge_shape"))
+            edge_changes = sync_edge_shape and own_edge != src_edge
             if (not adj_changes and not crop_changes and not profile_changes
                     and not curves_changes and not orient_changes and not shape_changes
                     and not org_changes and not gold_changes and not shadow_changes
-                    and not glow_changes and not lift_changes):
+                    and not glow_changes and not lift_changes and not edge_changes):
                 continue  # nothing to change — and no dead undo snapshot
             img.push_undo_state()
             if adj_changes:
@@ -4209,6 +4307,8 @@ class SlidersPanel(QWidget):
                     merged["glow_shape"] = dict(own_glow)
                 if own_lift and not lift_changes:
                     merged["shadow_lift_shape"] = dict(own_lift)
+                if own_edge and not edge_changes:
+                    merged["edge_shape"] = dict(own_edge)
                 # Same for the Cineon flag when the channels group (which
                 # carries it) is NOT being synced — the rebuild from
                 # adjustment_keys would silently drop it otherwise.
@@ -4246,6 +4346,11 @@ class SlidersPanel(QWidget):
                     img.adjustment_settings["shadow_lift_shape"] = dict(src_lift)
                 else:
                     img.adjustment_settings.pop("shadow_lift_shape", None)
+            if edge_changes:
+                if src_edge:
+                    img.adjustment_settings["edge_shape"] = dict(src_edge)
+                else:
+                    img.adjustment_settings.pop("edge_shape", None)
             if curves_changes:
                 if src_curves:
                     img.adjustment_settings["curves"] = copy.deepcopy(src_curves)
@@ -5522,6 +5627,8 @@ class SlidersPanel(QWidget):
                 live["glow_shape"] = g["glow_shape"]
             if g.get("shadow_lift_shape"):
                 live["shadow_lift_shape"] = g["shadow_lift_shape"]
+            if g.get("edge_shape"):
+                live["edge_shape"] = g["edge_shape"]
             for flag in GLOBAL_FLAG_KEYS:
                 if g.get(flag):
                     live[flag] = g[flag]
@@ -5538,6 +5645,7 @@ class SlidersPanel(QWidget):
             "glow_shape": copy.deepcopy(normalize_glow_shape(live.get("glow_shape"))),
             "shadow_lift_shape": copy.deepcopy(
                 normalize_lift_shape(live.get("shadow_lift_shape"))),
+            "edge_shape": copy.deepcopy(normalize_edge_shape(live.get("edge_shape"))),
             # Bypass-until-export flags ride with their section's paste row.
             "flags": {f: bool(live.get(f)) for f in GLOBAL_FLAG_KEYS
                       if f not in ("cineon_log", "look_lut")},
@@ -5647,13 +5755,15 @@ class SlidersPanel(QWidget):
             adj_keys += [k for k in self.adjustment_keys if k in _XT_KEYS]
         if "sharpen" in chosen:
             adj_keys += [k for k in self.adjustment_keys if k in _SHARPEN_KEYS]
+        if "edge" in chosen:
+            adj_keys += [k for k in self.adjustment_keys if k in _EDGE_KEYS]
         # Section -> its bypass flag (pasted with the section's row).
         flag_for = {"noise": "chroma_nr_export_only", "sharpen": "sharpen_export_only"}
         touch_adj = (bool(adj_keys) or "curves" in chosen or "cineon_log" in chosen
                      or "look_lut" in chosen or "xtone_shape" in chosen
                      or "organics_shape" in chosen or "golden_shape" in chosen
                      or "shadow_shape" in chosen or "glow_shape" in chosen
-                     or "shadow_lift_shape" in chosen)
+                     or "shadow_lift_shape" in chosen or "edge" in chosen)
         if not touch_adj:
             return None
         # Build a COMPLETE dict from the target (missing keys filled with
@@ -5692,6 +5802,11 @@ class SlidersPanel(QWidget):
             merged["shadow_lift_shape"] = copy.deepcopy(clip["shadow_lift_shape"])
         elif normalize_lift_shape(target.get("shadow_lift_shape")):
             merged["shadow_lift_shape"] = target["shadow_lift_shape"]
+        if "edge" in chosen:
+            if normalize_edge_shape(clip.get("edge_shape")):
+                merged["edge_shape"] = copy.deepcopy(clip["edge_shape"])
+        elif normalize_edge_shape(target.get("edge_shape")):
+            merged["edge_shape"] = target["edge_shape"]
         if "cineon_log" in chosen or target.get("cineon_log"):
             merged["cineon_log"] = True
         if "look_lut" in chosen and clip.get("look_lut"):
@@ -5744,6 +5859,8 @@ class SlidersPanel(QWidget):
                 self._update_glow_label()
                 self._lift_shape = normalize_lift_shape(merged.get("shadow_lift_shape"))
                 self._update_lift_label()
+                self._edge_shape = normalize_edge_shape(merged.get("edge_shape"))
+                self._update_edge_label()
 
         pixels = touch_adj
         if "profile" in chosen:
