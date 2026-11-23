@@ -188,11 +188,11 @@ class TestApplyDustRemoval:
         hard = _feather_alpha(mask, np.full((60, 60), 0.5, np.float32))
         assert hard[30, 49] > 0.9                  # hard fill at the rim
 
-    def test_feather_param_softens_rim(self):
-        # The user Feather setting widens the fill's cross-fade: with a wide
-        # feather the hole's clean rim stays close to the ORIGINAL pixels
-        # (low alpha), with feather 0 the rim is the clone (hard edge).
-        # feather is a fraction of the hole's own radius (1.0 = full depth).
+    def test_feather_param_softens_the_seam_outside(self):
+        # Revision 2026-11-23 (spec/dust-feather-outward.md): the Feather
+        # setting widens a cross-fade OUTSIDE the brushed area; inside it the
+        # heal is complete at every setting. feather is a fraction of the
+        # hole's own radius (1.0 = its full depth).
         rng = np.random.default_rng(5)
         img = np.clip(rng.normal(30000, 2000, (200, 200, 3)), 0,
                       65535).astype(np.uint16)
@@ -201,92 +201,91 @@ class TestApplyDustRemoval:
         hard = apply_dust_removal(img, [spot], feather=0.0)
         soft = apply_dust_removal(img, [spot], feather=1.0)
         yy, xx = np.mgrid[0:200, 0:200]
-        rim = (np.hypot(yy - 100, xx - 100) > 13.5) & \
-              (np.hypot(yy - 100, xx - 100) < 15.5)
-        d_hard = np.abs(hard[rim].astype(np.float32) - img[rim]).mean()
-        d_soft = np.abs(soft[rim].astype(np.float32) - img[rim]).mean()
-        assert d_soft < 0.5 * d_hard
-        # The speck itself is gone in both.
+        d = np.hypot(yy - 100, xx - 100)
+        outside = (d > 17.5) & (d < 22)
+        assert np.array_equal(hard[d > 17.5], img[d > 17.5])   # hard: nothing outside
+        d_soft = np.abs(soft[outside].astype(np.float32) - img[outside]).mean()
+        assert d_soft > 200                                     # soft: a seam blend
+        inside = d < 15.5
+        assert np.array_equal(soft[inside], hard[inside])       # the heal itself: the same
         assert int(hard[100, 100, 0]) < 40000
         assert int(soft[100, 100, 0]) < 40000
 
-    def test_full_feather_is_smooth_dome_no_speckle(self):
-        # 100% feather on a mostly-clean brushed area must blend as a smooth
-        # opacity dome rolling off from the stroke center — not a random
-        # per-pixel subset healed at full strength (the defect classifier
-        # collapsing onto the background used to force-fill a salt-and-pepper
-        # subset of grain pixels, dithering the rim).
+    def test_full_feather_fades_out_smoothly_outside(self):
+        # 100% feather: full heal inside the brush, then a smooth fade outward
+        # — falling monotonically with distance, with no isolated
+        # full-strength pixels at its outer edge.
         rng = np.random.default_rng(3)
         img = np.clip(rng.normal(30000, 3000, (200, 200, 3)), 0,
                       65535).astype(np.uint16)
-        spot = {"kind": "brush", "pts": [[0.5, 0.5]], "r": 0.15}  # r_px = 30
+        spot = {"kind": "brush", "pts": [[0.5, 0.5]], "r": 0.1}  # r_px = 20
         out = apply_dust_removal(img, [spot], feather=1.0)
         diff = np.abs(out.astype(np.float32) - img.astype(np.float32)).mean(axis=2)
         yy, xx = np.mgrid[0:200, 0:200]
         d = np.hypot(yy - 100, xx - 100)
-        # Mean deviation decreases monotonically outward (a dome)...
-        rings = [float(diff[(d >= a) & (d < b)].mean())
-                 for a, b in ((0, 6), (6, 12), (12, 18), (18, 24), (24, 30))]
-        assert all(rings[i] > rings[i + 1] for i in range(len(rings) - 1))
-        # ...and the outer rim has no isolated full-strength pixels: even its
-        # 99th-percentile deviation stays well below the core's mean.
-        outer = diff[(d >= 24) & (d < 29)]
-        assert float(np.percentile(outer, 99)) < 0.8 * (rings[0] + 1e-6)
+        core = float(diff[d < 18].mean())
+        bands = [float(diff[(d >= a) & (d < b)].mean())
+                 for a, b in ((21, 26), (26, 31), (31, 36), (36, 41))]
+        assert all(bands[i] > bands[i + 1] for i in range(len(bands) - 1))
+        assert bands[0] < core
+        outer = diff[(d >= 36) & (d < 41)]
+        assert float(np.percentile(outer, 99)) < 0.8 * (core + 1e-6)
+        assert np.array_equal(out[d > 43], img[d > 43])         # beyond the fade: untouched
 
-    def test_feather_ramp_scales_with_brush_size(self):
-        # The feather is a fraction of the hole's own radius: at the SAME
-        # setting, ~6 px inside the boundary is still soft rim for a big
-        # brush but near-full fill for a small one. A fixed-width ramp (the
-        # old fraction-of-image-width feather) would give the same alpha at
-        # the same absolute inset for both sizes.
+    def test_feather_reach_scales_with_brush_size(self):
+        # The fade's reach is a fraction of the hole's own radius: at the SAME
+        # setting, 8 px outside the rim is still blending for a big brush but
+        # past the fade for a small one.
         rng = np.random.default_rng(11)
         base = np.clip(rng.normal(30000, 3000, (300, 300, 3)), 0,
                        65535).astype(np.uint16)
 
-        def rim_ratio(r_norm):
+        def reach(r_norm):
             r_px = r_norm * 300
             img = base.copy()
             cv2.circle(img, (150, 150), max(3, int(r_px / 4)),
                        (60000, 60000, 60000), -1)
             spot = {"kind": "brush", "pts": [[0.5, 0.5]], "r": r_norm}
-            hard = apply_dust_removal(img, [spot], feather=0.0)
-            soft = apply_dust_removal(img, [spot], feather=0.75)
+            soft = apply_dust_removal(img, [spot], feather=0.5)
             yy, xx = np.mgrid[0:300, 0:300]
             d = np.hypot(yy - 150, xx - 150)
-            probe = (d > r_px - 7) & (d < r_px - 5)  # ~6 px inside the rim
-            d_hard = np.abs(hard[probe].astype(np.float32)
-                            - img[probe]).mean()
-            d_soft = np.abs(soft[probe].astype(np.float32)
-                            - img[probe]).mean()
-            return float(d_soft) / max(float(d_hard), 1e-6)
+            probe = (d > r_px + 7) & (d < r_px + 9)
+            return float(np.abs(soft[probe].astype(np.float32) - img[probe]).mean())
 
-        assert rim_ratio(0.12) < 0.5   # big brush: 6 px in is still soft rim
-        assert rim_ratio(0.04) > 0.5   # small brush: 6 px in is nearly core
+        assert reach(0.12) > 300      # big brush (r 36, fade 18 px): still blending
+        assert reach(0.04) == 0.0     # small brush (r 12, fade 6 px): untouched
 
-    def test_feather_rolls_off_even_over_defects(self):
-        # The feather governs EVERYTHING (maintainer rule: every pixel gets
-        # the effect, opacity rolled off from the stroke center — no
-        # exceptions). The old defect force-fill pinned alpha to 1 on
-        # defect-colored pixels, so on real dust the slider did nothing. At
-        # 100% the heal's effect must fade from the center outward even
-        # across the defect itself.
+    def test_feather_never_leaves_the_defect(self):
+        # The circles the user saw (2026-11-23): an inward fade kept the
+        # brush's outer quarter partly unhealed, and a speck reaching the rim
+        # showed as a ring. At every feather the defect is now gone all the
+        # way to the brush's edge.
         sky = np.array([20000, 25000, 40000], np.float32)
         img = np.broadcast_to(sky.astype(np.uint16), (200, 200, 3)).copy()
         cv2.circle(img, (100, 100), 10, (62000, 60000, 30000), -1)
         spot = {"kind": "brush", "pts": [[0.5, 0.5]], "r": 0.06}  # r = 12 px
-        out = apply_dust_removal(img, [spot], feather=1.0)
-        diff = np.abs(out.astype(np.float32)
-                      - img.astype(np.float32)).mean(axis=2)
         yy, xx = np.mgrid[0:200, 0:200]
         d = np.hypot(yy - 100, xx - 100)
-        inner = float(diff[d < 4].mean())
-        outer = float(diff[(d > 8) & (d < 10)].mean())  # defect rim, in-hole
-        assert inner > 10000            # the heal bites at the center
-        assert outer < 0.7 * inner      # ...and rolls off over the defect
-        # At feather 0 the same trace removes the defect completely.
-        hard = apply_dust_removal(img, [spot], feather=0.0)
-        core = hard[92:109, 92:109].astype(np.float32).reshape(-1, 3)
-        assert float(np.abs(core.mean(axis=0) - sky).max()) < 5000
+        for feather in (0.0, 0.25, 1.0):
+            out = apply_dust_removal(img, [spot], feather=feather).astype(np.float32)
+            rim = out[(d > 8) & (d < 10.5)]          # the defect's edge, inside the brush
+            assert float(np.abs(rim.mean(axis=0) - sky).max()) < 1500, feather
+            core = out[92:109, 92:109].reshape(-1, 3)
+            assert float(np.abs(core.mean(axis=0) - sky).max()) < 1500, feather
+
+    def test_the_outward_alpha(self):
+        from core.ccr_processor import _feather_alpha_out
+        comp = np.zeros((60, 60), bool)
+        cv2.circle(comp.view(np.uint8), (30, 30), 10, 1, -1)
+        comp = comp.astype(bool)
+        a = _feather_alpha_out(comp, np.full((60, 60), 6.0, np.float32))
+        assert a[30, 30] == 1.0 and a[30, 40] == 1.0           # the whole hole: 1
+        out = [float(a[30, 41 + k]) for k in range(8)]
+        assert all(out[i] >= out[i + 1] for i in range(7))      # falls outward
+        assert 0.0 < out[0] < 1.0 and out[-1] < 0.05 and a[30, 52] == 0.0
+        hard = _feather_alpha_out(comp, np.full((60, 60), 0.5, np.float32))
+        assert hard[30, 41] == 0.0                               # feather 0: a hard edge
+
 
     def test_big_merged_dabs_clone_texture_not_smear(self):
         # Big overlapping dabs used to become ONE segment whose source

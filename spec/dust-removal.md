@@ -115,7 +115,10 @@ in the catalog, and undoable.
      gets the effect, opacity rolled off from the stroke center — no
      exceptions, §5.2 step 6): at wide settings the heal fades out even
      across the defect itself, by explicit user choice; feather 0 is a
-     hard, complete removal.
+     hard, complete removal. **Superseded 2026-11-23**
+     (spec/dust-feather-outward.md): the heal is complete inside the brush at
+     every setting and the Feather is how far it blends out PAST the brushed
+     edge; the inward fade left the speck's edge as a ring.
    - **Show heal sources** checkbox: diagnostic overlay on the canvas —
      stroke borders outlined (yellow) as the contours of the UNION of the
      rasterized strokes (connected/overlapping strokes read as ONE region;
@@ -485,7 +488,10 @@ def apply_dust_removal(img16, spots, inpaint_radius=3) -> np.ndarray: # uint16 R
   5. **Fallback**: a patch with no clean in-bounds source window (image
      border, dense dust) or a starved ring (< `_HEAL_MIN_RING_PX`) falls back
      to the old 8-bit `cv2.inpaint(..., inpaint_radius, INPAINT_TELEA)` fill.
-  6. **Feathered composite**: alpha rises ~0 → 1 from each hole's boundary
+  6. **Feathered composite** (revision 2026-11-23: now OUTWARD, alpha 1 on
+     the hole and falling over the feather width outside it,
+     `_feather_alpha_out`; see spec/dust-feather-outward.md. As first
+     built:) alpha rises ~0 → 1 from each hole's boundary
      inward over a smoothstep ramp (`_feather_alpha`, evaluated at
      pixel-center depths `inside − 0.5` with FLOAT ramp widths, so the
      relative profile is identical at every resolution — an integer ramp
