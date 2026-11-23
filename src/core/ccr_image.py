@@ -1850,6 +1850,52 @@ class CCRImage:
 
     DUST_FILL_CACHE = 4     # healed renders remembered per image (preview, zoom, export ...)
 
+    EDGE_FIELD_CACHE = 3        # edge effect fields kept per image (preview, draft, detail)
+    EDGE_CACHE_MAX_LONG = 6500  # ... for renders up to this size (not exports)
+
+    def _apply_edge_effect(self, image, s, ws):
+        """The developer edge effect on the base (spec/developer-edge-effect.md).
+        The slow part (the cored band) is kept per buffer content + options,
+        so another slider's move re-renders with only the amount applied."""
+        from core import edge_effect as ee
+        from core import ccr_processor as _cp
+        amount = float(s.get('edge_effect', 0) or 0)
+        if amount <= 0 or image is None or image.ndim != 3:
+            return image
+        opts = ee.normalize_edge_shape(s.get('edge_shape'))
+        rect = getattr(self, "crop_rect", None)
+        crop = tuple(float(v) for v in rect) if rect else None
+        pxmm = ee.px_per_mm(image.shape, ee.frame_long_mm(self, image.shape), crop)
+        wsr = (_cp.WS_B, _cp.WS_W) if ws else None
+        field = None
+        if max(image.shape[:2]) <= self.EDGE_CACHE_MAX_LONG:
+            import hashlib
+            from collections import OrderedDict
+            h, w = image.shape[:2]
+            step = max(1, int(max(h, w) // 1500))
+            fp = hashlib.blake2b(np.ascontiguousarray(image[::step, ::step]).tobytes(),
+                                 digest_size=16).hexdigest()
+            ck = (image.shape, str(image.dtype), fp, repr(opts), repr(crop),
+                  round(pxmm, 4), bool(ws))
+            cache = self.__dict__.get("_edge_field_cache")
+            if cache is None:
+                cache = OrderedDict()
+                self._edge_field_cache = cache
+            field = cache.get(ck)
+            if field is None:
+                lo, hi = wsr if wsr is not None else (0.0, 65535.0)
+                v = (image[..., :3].astype(np.float32) - np.float32(lo)) / np.float32(hi - lo)
+                field = ee.edge_field(v, pxmm, opts, crop).astype(np.float16)
+                cache[ck] = field
+            # a shallow copy rendering on another thread shares the dict
+            try:
+                cache.move_to_end(ck)
+                while len(cache) > self.EDGE_FIELD_CACHE:
+                    cache.popitem(last=False)
+            except KeyError:
+                pass
+        return ee.apply_edge_effect(image, amount, pxmm, opts, wsr, crop, field=field)
+
     def _patch_heal_cached(self, image, spots, crop, ws_windowed, key):
         """The patch-fill heal (spec/dust-patch-fill.md), remembered by the
         buffer's content, the spots and the crop: a slider move re-renders the
@@ -2367,6 +2413,12 @@ class CCRImage:
             ag = _cached_auto_gain(self, base_in, ws, s if xt_on else None,
                                    processed=image)
         eb_eff = 0.0 if (auto_on or full_look) else eb   # no double-apply
+        # Developer edge effect (spec/developer-edge-effect.md): on the base's
+        # density, as a developer leaves it, AFTER Auto Gain was measured (so
+        # the slider never moves the exposure) and before every colour and
+        # tone stage. Spatial: skipped with dust for detached sample patches.
+        if s.get('edge_effect', 0) and not skip_dust:
+            image = self._apply_edge_effect(image, s, ws)
         # Auto tone (spec/auto-tone.md): the toe/shoulder measured for this
         # frame at conversion, applied in the windowed pre-stage. A look owns
         # its own tone, like Auto Gain.
