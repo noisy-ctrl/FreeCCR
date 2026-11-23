@@ -105,7 +105,10 @@ def test_no_ir_without_a_camera_shutter():
 
 def test_names_slots_and_pairing(tmp_path):
     stem = capture_log.shot_stem("R0011", "645", "XP2", 1, "ir")
-    assert stem == "R0011_645_XP2_001_4IR"
+    assert stem == "R0011_645_XP2_01_4IR"
+    assert sorted(["R1_01_4IR", "R1_01_3B", "R1_01_1R", "R1_01_2G"]) == \
+        ["R1_01_1R", "R1_01_2G", "R1_01_3B", "R1_01_4IR"]
+    # the older names still sort the same way
     assert sorted(["R1_001_4IR", "R1_001_3BLUE", "R1_001_1RED", "R1_001_2GREEN"]) == \
         ["R1_001_1RED", "R1_001_2GREEN", "R1_001_3BLUE", "R1_001_4IR"]
     assert capture_log.slots_of({"scan_type": "trichrome", "ir": True}) == \
@@ -219,8 +222,8 @@ def test_captures_ir_row_defaults_and_names(monkeypatch):
         assert mon.ir_shutter_combo.currentData() == "10s"  # remembered
         mon._log_shot = {"roll": "R0007", "format": "645", "film": "XP2", "shot": 3,
                          "scan_type": "trichrome"}
-        assert mon._shot_file_stem("ir") == "R0007_645_XP2_003_4IR"
-        assert mon._shot_file_stem("g") == "R0007_645_XP2_003_2GREEN"
+        assert mon._shot_file_stem("ir") == "R0007_645_XP2_03_4IR"
+        assert mon._shot_file_stem("g") == "R0007_645_XP2_03_2G"
     finally:
         mon.ir_shot_cb.setChecked(False)
         for k in ("live/ir_shot", "live/ir_shutter", "live/ir_iso"):

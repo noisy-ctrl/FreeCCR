@@ -972,6 +972,11 @@ class LiveCaptureMonitor(QWidget):
         # the roll and the next shot's number (spec/capture-log-and-names.md)
         self.roll_note = _muted("")
         lay.addWidget(self.roll_note)
+        # room left on the hot folder's disk (spec/capture-disk-space.md)
+        self.disk_note = _muted("")
+        self.disk_note.setVisible(False)
+        self._disk_checked = None
+        lay.addWidget(self.disk_note)
         # The roll's black point is sampled in the main window on a capture
         # (spec/tether-black-point.md): this brings it there, light ready.
         self.black_point_btn = QPushButton("Set Black Point…")
@@ -2584,8 +2589,41 @@ class LiveCaptureMonitor(QWidget):
             or capture_log.single_slot(e["scan_type"])
         return capture_log.shot_stem(e["roll"], e["format"], e["film"], e["shot"], slot)
 
+    DISK_EVERY_S = 5.0            # the disk's free space is looked at this often
+
+    def _refresh_disk_note(self, folder, force=False):
+        """'Disk: 212 GB free, about 480 shots' under the roll note, amber
+        under 30 shots, red under 5 (spec/capture-disk-space.md)."""
+        from core import disk_space
+        if not folder:
+            self.disk_note.setText("")
+            self.disk_note.setVisible(False)
+            self._disk_checked = None
+            return
+        now = time.monotonic()
+        last = self._disk_checked
+        if not force and last is not None and last[0] == folder and now - last[1] < self.DISK_EVERY_S:
+            return
+        self._disk_checked = (folder, now)
+        per_shot = 3 if self.scan_type() == "trichrome" else 1
+        try:
+            if self._ir_shot() is not None:
+                per_shot += 1
+        except Exception:
+            pass
+        text, level = disk_space.note(folder, per_shot)
+        colour = {"warn": theme.WARN_TEXT, "stop": theme.DANGER}.get(level, theme.TEXT_MUTED)
+        self.disk_note.setStyleSheet(f"color: {colour}; font-size: {theme.FS_CAPTION}px;"
+                                     + (" font-weight: bold;" if level == "stop" else ""))
+        self.disk_note.setText(text)
+        self.disk_note.setToolTip(
+            f"Free space on the disk the hot folder is on ({folder}). Shots are counted "
+            "from the size of the last shot taken there, else from its newest RAW files.")
+        self.disk_note.setVisible(bool(text))
+
     def _refresh_roll_note(self, next_shot=None):
         folder, sess = self.capture_session()
+        self._refresh_disk_note(folder, force=next_shot is not None)
         if folder is None:
             self.roll_note.setText("")
             return
@@ -2598,7 +2636,7 @@ class LiveCaptureMonitor(QWidget):
             bits.append(film_formats.label(sess["format"]) or sess["format"])
         if sess.get("film_label") or sess.get("film"):
             bits.append(str(sess.get("film_label") or sess["film"]))
-        bits.append(f"next shot {int(next_shot):03d}")
+        bits.append(f"next shot {int(next_shot):0{capture_log.SHOT_DIGITS}d}")
         self.roll_note.setText(" · ".join(bits))
 
     # --- autofocus before each shot (spec/focus-rail.md revision 2 C) -------
