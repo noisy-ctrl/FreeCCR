@@ -1035,6 +1035,10 @@ class SlidersPanel(QWidget):
         # Hovering a clip corner shows what is clipping on the picture
         # (spec/histogram-clip-overlay.md).
         self.histogram.clip_hover.connect(self._on_clip_hover)
+        # Right-click: scale White / Black Point to clip 0 % or 2 %
+        # (spec/histogram-clip-levels.md).
+        self.histogram.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.histogram.customContextMenuRequested.connect(self._show_histogram_menu)
         # Inset to match the content below so it isn't flush against the panel's
         # right border (the scroll area below keeps its scrollbar at the edge).
         hist_row = QHBoxLayout()
@@ -4602,6 +4606,70 @@ class SlidersPanel(QWidget):
     def on_skin_sampled(self, values, text=""):
         """Apply a Skin pull (spec/skin-picker.md): the Printer Lights' R/G/B
         Shift or Temperature/Tint, as one undo step, rendered now."""
+        self.set_solved_values(values, text)
+
+    # --- the histogram's right-click (spec/histogram-clip-levels.md) ------
+    CLIP_CHOICES = ((0.0, "Scale Sliders to Clip 0 %"), (0.02, "Scale Sliders to Clip 2 %"))
+
+    def histogram_menu(self):
+        """The histogram's right-click menu (a QMenu): Scale Sliders to Clip
+        0 % / 2 %. The test seam."""
+        menu = QMenu(self)
+        for share, text in self.CLIP_CHOICES:
+            act = menu.addAction(text)
+            act.triggered.connect(lambda _c=False, s=share: self.scale_to_clip(s))
+        return menu
+
+    def _show_histogram_menu(self, pos):
+        self.histogram_menu().exec(self.histogram.mapToGlobal(pos))
+
+    def _clip_blocker(self):
+        """Why Scale Sliders to Clip can't run now, or ""."""
+        if self.current_idx is None or not (0 <= self.current_idx < len(ccr_backend.images)):
+            return "Open a frame first."
+        img = ccr_backend.images[self.current_idx]
+        if getattr(img, "active_area_id", None) is not None:
+            return ("The sliders are editing an area layer: pick Whole Image in Layers "
+                    "first.")
+        try:
+            sl = self.sliders[self.adjustment_keys.index("white_point")]
+        except ValueError:
+            return "There is no White Point slider."
+        if not sl.isEnabled():
+            return "Convert the frame first: its sliders are off until then."
+        return ""
+
+    def scale_to_clip(self, share):
+        """Set White Point and Black Point so `share` (0 or 0.02) of the
+        picture clips at each end: a closed loop on the real render
+        (CCRImage.solve_clip_levels), one undo step. Returns the values set,
+        or None."""
+        from core import clip_levels as cl
+        why = self._clip_blocker()
+        if why:
+            self.set_temporary_hint(why, duration=6000)
+            return None
+        img = ccr_backend.images[self.current_idx]
+        wsl = self.sliders[self.adjustment_keys.index("white_point")]
+        bsl = self.sliders[self.adjustment_keys.index("black_point")]
+        rng = (lambda sl: sl.value_range() if hasattr(sl, "value_range")
+               else (sl.minimum(), sl.maximum()))
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            got = img.solve_clip_levels(share, rng(wsl), rng(bsl))
+        finally:
+            QApplication.restoreOverrideCursor()
+        if got is None:
+            self.set_temporary_hint("Nothing to measure on this frame yet.", duration=6000)
+            return None
+        white, black, info = got
+        values = {"white_point": white, "black_point": black}
+        self.set_solved_values(values, cl.describe(white, -black, share, info))
+        return values
+
+    def set_solved_values(self, values, text=""):
+        """Set sliders a solve worked out ({key: stored value}) as one undo
+        step and render (the Skin pull, Scale Sliders to Clip)."""
         self.end_undo_burst()
         for key, val in values.items():
             try:
