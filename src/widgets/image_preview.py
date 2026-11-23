@@ -4151,9 +4151,13 @@ class ImagePreview(QWidget):
         # geometry maps directly), so the hi-res layer must not swap cropped
         # pixels in under it — same mode exclusions as update_preview's
         # crop-display branch. Dust mode is NOT excluded: it shows the cropped
-        # preview and maps strokes back through the crop transform.
+        # preview and maps strokes back through the crop transform. A black /
+        # white point pick shows the whole frame (spec/bw-point-uncrop.md):
+        # without this, the sharp hi-res view on a Retina screen swapped the
+        # cropped picture back in over the uncropped preview.
         crop_active = (crop is not None and not self.crop_mode
                        and not self.slice_mode and not self.area_mode
+                       and not self.view.bwpoint_mode
                        and (img.converted or ccr_backend.positive_mode))
         crop_sig = (crop, angle) if crop_active else None
         if cache.get("display_pm") is not None and cache.get("crop_sig") == crop_sig:
