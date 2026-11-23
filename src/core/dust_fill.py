@@ -36,7 +36,9 @@ _HP = PATCH // 2
 ITERS_COARSE = 6            # PatchMatch iterations on the coarsest level
 ITERS_FINE = 4              # ... on every finer level
 HOLE_WEIGHT = 0.25          # a hole pixel's guess in the patch distance, against 1 for the picture
-CENTRE_ITERS = 1            # last iterations of the finest level that copy, not average
+CENTRE_ITERS = ITERS_FINE   # the finest level copies on every pass, never averages: an averaged
+                            # guess is smoother than any real patch and drew smooth sources (a
+                            # hole 9 px across kept 0.67 of the grain; copying 0.88-0.98)
 SEED_Z = 7.0                # a speck stands this far clear of the grain somewhere (clean grain: p99 5.7) ...
 GROW_Z = 2.0                # ... and is everything joined to it this far clear (inside the area)
 GROW_Z_OUT = 3.0            # ... or this far clear just outside it (a fibre running out of the area)
@@ -52,6 +54,12 @@ SMALL_R = 4.5               # a spot this narrow (px) at the size rendered is re
 FOUND_KINDS = ("ir", "auto", "mark")   # spots a finder placed (the rest were painted)
 THIN_R = 2.5                # a hole no wider than twice this (px) is diffused (+ grain), not rebuilt
 GRAIN_SIGMA = 1.0           # px: the grain is what a blur this wide takes out
+CH_PENALTY = 0.6            # a colour channel's score counts this much less than the grey's (three
+                            # more looks at the same grain: measured +0.5 at p50/p90 on frame 12)
+PIECE_LEN = 48              # px: a long stroke is traced in pieces this long (its own peak each)
+IR_CORE = 0.5 / 1.35        # an IR dab: half its own extent is always replaced (the spot is its
+                            # area's radius x 1.35 + a block); the trace finds the rest
+IR_CORE_STROKE = 0.5 / 1.35  # ... an IR stroke's, for spots found before the core was stored
 
 
 # --------------------------------------------------------------------------- #
@@ -107,20 +115,46 @@ def _disc(d: int) -> np.ndarray:
     return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * d + 1, 2 * d + 1))
 
 
+def _top_hat(P: np.ndarray, s: int, pol: int) -> np.ndarray:
+    se = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (s, s))
+    if pol > 0:
+        th = P - cv2.morphologyEx(P, cv2.MORPH_OPEN, se)
+    else:
+        th = cv2.morphologyEx(P, cv2.MORPH_CLOSE, se) - P
+    return cv2.GaussianBlur(th, (0, 0), 0.8)
+
+
+def sizes_for(region: np.ndarray) -> List[int]:
+    """The top-hat sizes a speck in `region` may have: up to twice the
+    region's own half-width (its inscribed radius: a long stroke is as wide
+    as its brush, not as its area) + 9 px."""
+    r_w = float(cv2.distanceTransform(np.pad(region, 1).astype(np.uint8),
+                                      cv2.DIST_L2, 5).max())
+    return [s for s in SIZES if s <= 2.0 * r_w + 9] or [SIZES[0]]
+
+
 def speck_mask(Y: np.ndarray, region: np.ndarray, polarity: int = 0,
-               avoid: Optional[np.ndarray] = None):
-    """The defect's pixels in `region` (bool, same shape as Y), as a bool
-    mask over Y's box, or None when nothing in the region stands out of the
-    grain (the caller then replaces the whole region). `Y` is a float
-    luminance on a perceptual scale. `avoid` (bool) are pixels that are no
-    part of the picture's noise estimate (other dust, outside the crop).
+               avoid: Optional[np.ndarray] = None,
+               anchor: Optional[np.ndarray] = None):
+    """The defect's pixels in `region` (bool, Y's box), as a bool mask over
+    Y's box, or None when nothing in the region stands out of the grain (the
+    caller then replaces the whole region). `Y` is a float image on a
+    perceptual scale: (H, W) grey, or (H, W, P) planes (the grey first, then
+    the colours: a defect in one colour shot of a trichrome stands out there
+    three times as far as in the grey; a colour counts CH_PENALTY less).
+    `avoid` (bool) are pixels that are no part of the picture's noise
+    estimate (other dust, outside the crop). `anchor` (bool) are pixels
+    known to be the defect (where the IR saw it): they seed the speck
+    wherever they stand GROW_Z clear, and it is followed at GROW_Z, not
+    relative to its peak (a fibre's faint stretches are as much the fibre).
     Returns (mask or None, info)."""
     region = region.astype(bool)
     n_reg = int(region.sum())
     if n_reg == 0:
         return None, {}
-    r_eq = float(np.sqrt(n_reg / np.pi))
-    sizes = [s for s in SIZES if s <= 2.0 * r_eq + 9] or [SIZES[0]]
+    planes = [Y] if Y.ndim == 2 else [Y[..., i] for i in range(Y.shape[2])]
+    pens = [0.0] + [CH_PENALTY] * (len(planes) - 1)
+    sizes = sizes_for(region)
     ring = (cv2.dilate(region.astype(np.uint8), _disc(4)) > 0) & ~region
     if avoid is not None:
         ring &= ~avoid
@@ -131,22 +165,27 @@ def speck_mask(Y: np.ndarray, region: np.ndarray, polarity: int = 0,
     if ring.sum() < 12:
         return None, {}
     best = None
-    for pol in ((1, -1) if polarity == 0 else (polarity, -polarity)):
+    pols = (1, -1) if polarity == 0 else ((polarity,) if anchor is not None else (polarity, -polarity))
+    for pol in pols:
         zs, ths = [], []
         for s in sizes + [s2 for s2 in SIZES if s2 > sizes[-1]][:2]:
-            se = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (s, s))
-            if pol > 0:
-                th = Y - cv2.morphologyEx(Y, cv2.MORPH_OPEN, se)
-            else:
-                th = cv2.morphologyEx(Y, cv2.MORPH_CLOSE, se) - Y
-            th = cv2.GaussianBlur(th, (0, 0), 0.8)
-            # how far it stands out of what this size finds in the grain
-            # round the area (a larger top-hat gathers more of the grain)
-            v = th[ring]
-            med = float(np.median(v))
-            spread = 1.4826 * float(np.median(np.abs(v - med))) + 1e-6
-            ths.append(th)
-            zs.append((th - med) / spread)
+            zb = thb = None
+            for P, pen in zip(planes, pens):
+                th = _top_hat(P, s, pol)
+                # how far it stands out of what this size finds in the grain
+                # round the area (a larger top-hat gathers more of the grain)
+                v = th[ring]
+                med = float(np.median(v))
+                spread = 1.4826 * float(np.median(np.abs(v - med))) + 1e-6
+                z = (th - med) / spread - pen
+                if zb is None:
+                    zb, thb = z, th
+                else:
+                    better = z > zb
+                    zb = np.where(better, z, zb)
+                    thb = np.where(better, th, thb)
+            ths.append(thb)
+            zs.append(zb)
         # the speck's size: the smallest top-hat that already holds
         # SIZE_HOLD of what one two sizes larger finds at its own brightest
         # point (larger sizes go on gathering the picture round the speck);
@@ -170,15 +209,19 @@ def speck_mask(Y: np.ndarray, region: np.ndarray, polarity: int = 0,
             best = (zmax * weight, pol, sizes[k], z, zmax)
     _, pol, s, z, zmax = best
     info = {"z": round(zmax, 2), "polarity": pol, "size": s}
-    if zmax < SEED_Z:
+    anchored = anchor is not None and bool((anchor & region & (z > GROW_Z)).any())
+    if zmax < SEED_Z and not anchored:
         return None, info
     seeds = (z > SEED_Z) & region
+    if anchored:
+        seeds |= anchor & region & (z > GROW_Z)
     near = cv2.dilate(region.astype(np.uint8), _disc(max(3, GROW_REACH * s))) > 0
     # relative to how far the speck stands out: a bright speck is followed
     # only as far as it is clearly brighter, so a soft glow round it in the
-    # picture is not taken with it
-    g_in = max(GROW_Z, GROW_SHARE * zmax)
-    g_out = max(GROW_Z_OUT, GROW_SHARE_OUT * zmax)
+    # picture is not taken with it (where the IR says where it is, its faint
+    # stretches are followed too)
+    g_in = GROW_Z if anchored else max(GROW_Z, GROW_SHARE * zmax)
+    g_out = GROW_Z_OUT if anchored else max(GROW_Z_OUT, GROW_SHARE_OUT * zmax)
     grow = ((z > g_in) & region) | ((z > g_out) & near)
     if avoid is not None:
         grow &= ~avoid | region
@@ -205,9 +248,10 @@ _OFFS = np.arange(-_HP, _HP + 1)
 
 
 def _patches(img: np.ndarray, ys: np.ndarray, xs: np.ndarray) -> np.ndarray:
-    yy = ys[:, None, None] + _OFFS[None, :, None]
-    xx = xs[:, None, None] + _OFFS[None, None, :]
-    return img[yy, xx].reshape(len(ys), -1)
+    """The PATCH x PATCH patches centred on (ys, xs), flattened (channel, y, x):
+    gathered from a sliding-window view (no index arrays built)."""
+    win = np.lib.stride_tricks.sliding_window_view(img, (PATCH, PATCH), axis=(0, 1))
+    return win[ys - _HP, xs - _HP].reshape(len(ys), -1)
 
 
 def _dist(img, ty, tx, sy, sx) -> np.ndarray:
@@ -254,24 +298,26 @@ def _vote(img, hole, ty, tx, sy, sx, d, centre_only):
         return out
     sig = max(float(np.percentile(d, 75)), 1e-10)
     wgt = np.exp(-d / (2.0 * sig))
-    acc = np.zeros((H * W, C), np.float64)
-    wsum = np.zeros(H * W, np.float64)
-    flat = img.reshape(-1, C)
+    hy, hx = np.nonzero(hole)
+    n = len(hy)
+    hidx = -np.ones((H, W), np.int64)
+    hidx[hy, hx] = np.arange(n)
+    acc = np.zeros((n, C), np.float64)
+    wsum = np.zeros(n, np.float64)
     for oy in _OFFS:
         for ox in _OFFS:
-            yy, xx = ty + oy, tx + ox
-            inh = hole[yy, xx]
+            dst = hidx[ty + oy, tx + ox]
+            inh = dst >= 0
             if not inh.any():
                 continue
-            dst = yy[inh] * W + xx[inh]
-            src = (sy[inh] + oy) * W + (sx[inh] + ox)
+            dst = dst[inh]
             ww = wgt[inh]
-            wsum += np.bincount(dst, ww, H * W)
+            vals = img[sy[inh] + oy, sx[inh] + ox]
+            wsum += np.bincount(dst, ww, n)
             for c in range(C):
-                acc[:, c] += np.bincount(dst, flat[src, c] * ww, H * W)
-    m = hole.reshape(-1) & (wsum > 0)
-    o = out.reshape(-1, C)
-    o[m] = (acc[m] / wsum[m, None]).astype(np.float32)
+                acc[:, c] += np.bincount(dst, vals[:, c] * ww, n)
+    m = wsum > 0
+    out[hy[m], hx[m]] = (acc[m] / wsum[m, None]).astype(np.float32)
     return out
 
 
@@ -287,7 +333,7 @@ def _patchmatch(img, hole, valid_c, sy, sx, iters, rng, last):
     # own current guess at HOLE_WEIGHT (a guess pulls matches towards
     # itself: a hole half as wide as a patch drifted to the wrong colour)
     wimg = np.where(hole, np.float32(HOLE_WEIGHT), np.float32(1.0))
-    Wt = np.repeat(_patches(wimg[..., None], ty, tx), C, axis=1)
+    Wt = _patches(np.repeat(wimg[..., None], C, axis=2), ty, tx)
     Wt /= Wt.sum(1, keepdims=True)
 
     def dist(A, sy_, sx_):
@@ -508,6 +554,80 @@ def _diffuse_with_grain(box16: np.ndarray, hole: np.ndarray,
     return np.clip(np.rint(out), 0, 65535).astype(np.uint16)
 
 
+def _pieces(spot: dict, w: int, h: int) -> List[dict]:
+    """A long stroke as consecutive pieces at most PIECE_LEN px long at this
+    size (sharing their joints), each traced on its own: a fibre fades and
+    brightens along its length, and one peak for all of it left its faint
+    stretches (the user's frame 12). A dab or short stroke is itself."""
+    pts = spot.get("pts") or []
+    if len(pts) <= 2:
+        return [spot]
+    try:
+        px = np.array([[float(p[0]) * w, float(p[1]) * h] for p in pts])
+    except (TypeError, ValueError, IndexError):
+        return [spot]
+    cum = np.r_[0.0, np.cumsum(np.hypot(*np.diff(px, axis=0).T))]
+    if cum[-1] <= PIECE_LEN:
+        return [spot]
+    out, i = [], 0
+    while i < len(pts) - 1:
+        j = i + 1
+        while j < len(pts) - 1 and cum[j + 1] - cum[i] <= PIECE_LEN:
+            j += 1
+        out.append(dict(spot, pts=pts[i:j + 1]))
+        i = j
+    return out
+
+
+def ir_core(spot: dict, h: int, w: int) -> Optional[Tuple[np.ndarray, int, int]]:
+    """Where the IR itself saw the dust, for an IR spot (None for any other
+    kind): its stored core radius ("ir_rc"), else the spot's radius less its
+    skirt (a stroke's spot was widened by the line stage's spread, so half
+    of that). At least a pixel."""
+    if spot.get("kind") != "ir":
+        return None
+    rc = spot.get("ir_rc")
+    if rc is None:
+        share = IR_CORE_STROKE if len(spot.get("pts") or []) > 1 else IR_CORE
+        rc = float(spot.get("r", 0.0)) * share
+    rc = max(float(rc), 1.0 / max(w, 1))
+    return spot_region(dict(spot, r=rc), h, w)
+
+
+def _boxed(m: np.ndarray, y0: int, x0: int, h: int, w: int):
+    """The region in a box with room round it for the noise ring, the
+    top-hats and the speck's run-on: the region's own half-width (not its
+    length) sets the room. Returns (region in the box, (y0, x0, y1, x1))."""
+    sizes = sizes_for(m)
+    ext = sizes + [s2 for s2 in SIZES if s2 > sizes[-1]][:2]
+    g = 8 + max(ext)
+    by0, bx0 = max(0, y0 - g), max(0, x0 - g)
+    by1, bx1 = min(h, y0 + m.shape[0] + g), min(w, x0 + m.shape[1] + g)
+    reg = np.zeros((by1 - by0, bx1 - bx0), bool)
+    reg[y0 - by0:y0 - by0 + m.shape[0], x0 - bx0:x0 - bx0 + m.shape[1]] = m
+    return reg, (by0, bx0, by1, bx1)
+
+
+def _place(m: np.ndarray, y0: int, x0: int, shape, by0: int, bx0: int) -> np.ndarray:
+    """A mask from its own box onto a box of `shape` at (by0, bx0), clipped."""
+    out = np.zeros(shape, bool)
+    ty0, tx0 = y0 - by0, x0 - bx0
+    sy0, sx0 = max(0, -ty0), max(0, -tx0)
+    ty0, tx0 = max(0, ty0), max(0, tx0)
+    hh = min(m.shape[0] - sy0, shape[0] - ty0)
+    ww = min(m.shape[1] - sx0, shape[1] - tx0)
+    if hh > 0 and ww > 0:
+        out[ty0:ty0 + hh, tx0:tx0 + ww] = m[sy0:sy0 + hh, sx0:sx0 + ww]
+    return out
+
+
+def _planes(E: np.ndarray) -> np.ndarray:
+    """The tracer's planes from the encoded box: the grey, then each colour."""
+    if E.shape[2] == 1:
+        return E[..., 0]
+    return np.concatenate([E.mean(axis=2, keepdims=True), E], axis=2)
+
+
 # --------------------------------------------------------------------------- #
 # the heal of a buffer
 # --------------------------------------------------------------------------- #
@@ -551,40 +671,52 @@ def heal(img16: np.ndarray, spots, keep: Optional[np.ndarray] = None,
             if info is not None:
                 info.append({"hole": 0})
             continue
-        m, y0, x0 = rg
-        g = 4 + 2 * max(m.shape)                 # room for the noise ring and growth
-        by0, bx0 = max(0, y0 - g), max(0, x0 - g)
-        by1, bx1 = min(h, y0 + m.shape[0] + g), min(w, x0 + m.shape[1] + g)
-        reg = np.zeros((by1 - by0, bx1 - bx0), bool)
-        reg[y0 - by0:y0 - by0 + m.shape[0], x0 - bx0:x0 - bx0 + m.shape[1]] = m
         if float(s.get("r", 0.0)) * w <= SMALL_R:
             # a few pixels across at this size (the preview): too small to
             # trace a speck in (tracing it there took the picture round it
             # too), so the area goes as painted or found
-            hole, sinfo = reg, {"small": True}
-        else:
-            Y = enc(src16[by0:by1, bx0:bx1]).mean(axis=2)
+            m, y0, x0 = rg
+            holes[y0:y0 + m.shape[0], x0:x0 + m.shape[1]] |= m
+            if info is not None:
+                info.append({"small": True, "hole": int(m.sum())})
+            continue
+        sinfo = {"hole": 0, "pieces": 0}
+        for piece in _pieces(s, w, h):
+            prg = spot_region(piece, h, w)
+            if prg is None:
+                continue
+            m, y0, x0 = prg
+            reg_full, (by0, bx0, by1, bx1) = _boxed(m, y0, x0, h, w)
+            reg = reg_full
+            core = None
+            crg = ir_core(piece, h, w)
+            if crg is not None:
+                core = _place(*crg, reg.shape, by0, bx0) & reg
+            Y = _planes(enc(src16[by0:by1, bx0:bx1]))
             avoid = area_all[by0:by1, bx0:bx1] & ~reg
             if outside is not None:
                 avoid = avoid | outside[by0:by1, bx0:bx1]
-            speck, sinfo = speck_mask(Y, reg, polarity_of(s), avoid)
+            speck, pinfo = speck_mask(Y, reg, polarity_of(s), avoid, anchor=core)
             if speck is None:
-                # nothing in it stands out of the grain: the area is
-                # replaced as painted or found
-                hole = reg
-                sinfo["whole_area"] = True
+                # nothing in it stands out of the grain: the IR's own extent
+                # (it saw dust there), else the area as painted or found
+                hole = core if (core is not None and core.any()) else reg
+                pinfo["whole_area"] = hole is reg
             elif s.get("kind") in FOUND_KINDS:
-                # a finder's area is a generous guess round the speck:
-                # only the speck goes
-                hole = speck
+                # a finder's area is a generous guess round the speck: only
+                # the speck goes, and always where the IR saw it
+                hole = speck if core is None else (speck | core)
             else:
                 # painted by hand: what was painted goes (as with any
                 # inpainting brush; "Fit each click to the speck" sizes a
                 # click to its soft edge), and the speck where it runs on
                 hole = reg | speck
-        holes[by0:by1, bx0:bx1] |= hole
+            holes[by0:by1, bx0:bx1] |= hole
+            sinfo["hole"] += int(hole.sum())
+            sinfo["pieces"] += 1
+            for k_, v_ in pinfo.items():
+                sinfo.setdefault(k_, v_)
         if info is not None:
-            sinfo["hole"] = int(hole.sum())
             info.append(sinfo)
     if not holes.any():
         return img16

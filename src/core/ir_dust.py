@@ -57,6 +57,7 @@ MAX_AREA_MIN = 1500         # ... but never under this many blocks (a long hair)
 ELONGATED = 3.5             # length / width above this: a hair, a polyline
 SPOT_SCALE = 1.35           # area-equivalent radius x this, + SPOT_PAD blocks:
 SPOT_PAD = 1.0              # the threshold keeps the core, the heal needs the skirt
+STROKE_CORE_PAD = 0.75     # blocks: a stroke's core (where the IR saw the fibre) + registration
 VIS_REACH_Z = 3.0           # a found speck grows over what touches it this dark (z) in the colour shots ...
 VIS_REACH_MAX = 3.0         # ... up to this many times its size across (spec/ir-dust-v2.md rev. 2026-11-22 b)
 HP_SIGMA = 25.0             # high-pass for the crosstalk fit and registration
@@ -97,6 +98,13 @@ BRIDGE_DARK_SHARE = 0.8    # (mean z below -BRIDGE_DARK, this share of the way b
 BRIDGE_STRAIGHT = 1.6      # ... along a path at most this much longer than the gap
 BRIDGE_RIDGE = 0.7         # ... and a thin line there: this share of the way darker than
 BRIDGE_SIDE = 1.5          # both sides (z) a little out (a picture's edge is dark on one)
+GHOST_LW = 5.0             # an IR line at least this long for its width ...
+GHOST_DEPTH = 5.0          # ... that the IR shows only as a shallow line (z) ...
+GHOST_STEP = 0.25          # ... lying along a step in the colour shots (ln, across it,
+GHOST_OFF = 3.0            #     GHOST_OFF blocks either side) ...
+GHOST_DIP = 0.3            # ... and dipping there less than this share of the step, is the
+                           # IR and the colour shots disagreeing about an edge, not a fibre
+                           # (the user's frame 12, 2026-11-23: strokes along the bright walls)
 IR_DEPTH_CAP = 8.0         # the model's IR depth and line features stop here: a
 LINE_CAP = 12.0            # deeper IR dip with nothing in the frame's own shots is
                            # a hot pixel or an IR-only blob, not dust that shows
@@ -513,6 +521,7 @@ class Candidate:
     length: float = 1.0
     width: float = 1.0
     depth: float = 0.0       # the IR's own depth, uncapped (the IR-only rule reads it)
+    ghost: bool = False      # an edge the IR and the colour shots disagree on (never flagged)
 
     def centre(self) -> Tuple[float, float]:
         ys, xs = np.nonzero(self.mask)
@@ -543,7 +552,7 @@ def _shape_agreement(z: np.ndarray, vz: np.ndarray, cx: int, cy: int, half: int)
 def find_candidates(z: np.ndarray, line: np.ndarray, vz: Optional[np.ndarray],
                     vzmin: Optional[np.ndarray], vd: Optional[np.ndarray],
                     ird: np.ndarray, grad: Optional[np.ndarray],
-                    gmed: float) -> List[Candidate]:
+                    gmed: float, vlog: Optional[np.ndarray] = None) -> List[Candidate]:
     """Every possible speck (spec §3.2) with its features (§3.3). With no
     visible shot the colour shots' features are 0."""
     seeds = (z < -SEED_Z) | (line < -SEED_LINE)
@@ -606,10 +615,60 @@ def find_candidates(z: np.ndarray, line: np.ndarray, vz: Optional[np.ndarray],
             zvmin = float(-vzmin[box][m].min())
         feats = np.array([min(zmin, IR_DEPTH_CAP), min(lz, LINE_CAP), vbump, shape, ratio,
                           vedge, math.log(nb), zvmin], np.float32)
+        line_like = bool(lz >= LINE_LIKE or length / width >= 3.0)
+        ghost = bool(vlog is not None and line_like and length / width >= GHOST_LW
+                     and zmin < GHOST_DEPTH and edge_ghost(m, x0, y0, vlog))
         out.append(Candidate(x0=x0, y0=y0, mask=m, feats=feats, seed=seed,
-                             line_like=bool(lz >= LINE_LIKE or length / width >= 3.0),
-                             length=length, width=width, depth=max(zmin, lz * 7.0 / 9.0)))
+                             line_like=line_like, length=length, width=width,
+                             depth=max(zmin, lz * 7.0 / 9.0), ghost=ghost))
     return out
+
+
+def _tangents(pts: np.ndarray, radius: float = 4.0) -> np.ndarray:
+    """A unit tangent at each of a line's points (x, y): the main axis of its
+    points within `radius`."""
+    n = len(pts)
+    t = np.zeros((n, 2), np.float64)
+    t[:, 0] = 1.0
+    d2 = ((pts[:, None, :] - pts[None, :, :]) ** 2).sum(-1)
+    near = d2 <= radius * radius
+    for i in range(n):
+        nb = pts[near[i]]
+        if len(nb) >= 3:
+            c = nb - nb.mean(0)
+            ev, evec = np.linalg.eigh(c.T @ c)
+            t[i] = evec[:, -1]
+    return t
+
+
+def step_and_dip(mask: np.ndarray, x0: int, y0: int, vlog: np.ndarray,
+                 off: float = GHOST_OFF) -> Tuple[float, float]:
+    """Along a candidate's skeleton, the colour shots' (ln, smoothed) step
+    across it, |a - b| at `off` blocks either side, and its dip there,
+    mean(a, b) - centre (> 0 where it is darker, as dust is): medians."""
+    sk = thin(mask)
+    ys, xs = np.nonzero(sk)
+    if len(xs) < 3:
+        ys, xs = np.nonzero(mask)
+    pts = np.stack([xs + x0, ys + y0], 1).astype(np.float64)
+    if len(pts) > 400:
+        pts = pts[np.linspace(0, len(pts) - 1, 400).astype(int)]
+    t = _tangents(pts)
+    nrm = np.stack([-t[:, 1], t[:, 0]], 1)
+    q = np.concatenate([pts, pts + off * nrm, pts - off * nrm]).astype(np.float32)
+    v = cv2.remap(vlog, q[:, 0].reshape(1, -1), q[:, 1].reshape(1, -1), cv2.INTER_LINEAR,
+                  borderMode=cv2.BORDER_REPLICATE)[0]
+    n = len(pts)
+    c, a, b = v[:n], v[n:2 * n], v[2 * n:]
+    return float(np.median(np.abs(a - b))), float(np.median((a + b) / 2.0 - c))
+
+
+def edge_ghost(mask: np.ndarray, x0: int, y0: int, vlog: np.ndarray) -> bool:
+    """Whether a long, shallow IR line lies along an edge of the picture
+    rather than being a fibre: the colour shots step across it by at least
+    GHOST_STEP and barely dip on it (spec/dust-detect-v3.md §1)."""
+    step, dip = step_and_dip(mask, x0, y0, vlog)
+    return step >= GHOST_STEP and dip < GHOST_DIP * step
 
 
 @dataclass
@@ -624,8 +683,10 @@ class DustMap:
     kind: str = "single"             # "merged" | "single" | "ir-only": which model judges it
     ir_level: Optional[float] = None  # the IR shot's 99.5th percentile, share of its range
     vz: Optional[np.ndarray] = None   # the frame's own shots' darkening (z), float16
+    vlog: Optional[np.ndarray] = None  # their ln (summed, smoothed) at HALF the grid, float16
     _nbrs: Optional[List[List[int]]] = None
     _skel: Optional[Dict[int, np.ndarray]] = None
+    _tail: Optional[Tuple[float, float, float, float]] = None
 
 
 def kind_for(n_visible: int) -> str:
@@ -687,11 +748,15 @@ def dust_map(ir: np.ndarray, visible: Optional[List[np.ndarray]] = None,
         gy = cv2.Sobel(g, cv2.CV_32F, 0, 1) / 8
         grad = np.sqrt(gx * gx + gy * gy)
         gmed = float(np.median(grad[_middle(grad.shape)][::4, ::4])) + 1e-6
-    cands = find_candidates(z, line, vz, vzmin, vd, dc, grad, gmed)
+    cands = find_candidates(z, line, vz, vzmin, vd, dc, grad, gmed,
+                            vlog=g if vis_logs else None)
     return DustMap(z=z.astype(np.float16), k=[float(x) for x in k], shift=shift,
                    noise=float(np.median(sig[::8, ::8])), size=(ir.shape[1], ir.shape[0]),
                    align=al, cands=cands, kind=kind_for(len(vis_logs)), ir_level=ir_level,
-                   vz=vz.astype(np.float16) if vz is not None else None)
+                   vz=vz.astype(np.float16) if vz is not None else None,
+                   vlog=(cv2.resize(g, (g.shape[1] // 2, g.shape[0] // 2),
+                                    interpolation=cv2.INTER_AREA).astype(np.float16)
+                         if vis_logs else None))
 
 
 # --------------------------------------------------------------------------- #
@@ -765,7 +830,7 @@ def flagged(dm: DustMap, sensitivity: float = SENS_DEFAULT,
     need = p_needed(sensitivity)
     acc = set()
     for i, c in enumerate(dm.cands):
-        if p[i] < need:
+        if p[i] < need or getattr(c, "ghost", False):
             continue
         if keep is not None and not keep[c.seed[1], c.seed[0]]:
             continue
@@ -776,7 +841,7 @@ def flagged(dm: DustMap, sensitivity: float = SENS_DEFAULT,
         while queue:
             i = queue.pop()
             for j in nbrs[i]:
-                if j not in acc and p[j] >= JOIN_P:
+                if j not in acc and p[j] >= JOIN_P and not getattr(dm.cands[j], "ghost", False):
                     acc.add(j)
                     queue.append(j)
     return sorted(acc)
@@ -827,6 +892,43 @@ def thin(mask: np.ndarray) -> np.ndarray:
         if not changed:
             break
     return img[1:-1, 1:-1].astype(bool)
+
+
+def _ends(sk: np.ndarray) -> np.ndarray:
+    """A skeleton's end pixels: one neighbour, counting a diagonal only where
+    no straight step joins the two (skeleton_paths' rule: a staircase's
+    corner isn't a second neighbour)."""
+    a = np.pad(sk.astype(bool), 1)
+    up, dn, lf, rt = a[:-2, 1:-1], a[2:, 1:-1], a[1:-1, :-2], a[1:-1, 2:]
+    ul, ur, dl, dr = a[:-2, :-2], a[:-2, 2:], a[2:, :-2], a[2:, 2:]
+    n = (up.astype(np.int16) + dn + lf + rt
+         + (ul & ~up & ~lf) + (ur & ~up & ~rt) + (dl & ~dn & ~lf) + (dr & ~dn & ~rt))
+    return sk & (n == 1)
+
+
+def prune(sk: np.ndarray, n: int) -> np.ndarray:
+    """A skeleton without its spurs up to `n` pixels long (the twigs thinning
+    leaves on a wide mask: the user's strand came out as 14 strokes): ends
+    are taken off `n` times, then the ends left are grown back along the
+    skeleton `n` times, so real ends keep their length."""
+    if n <= 0 or not sk.any():
+        return sk
+    pr = sk.copy()
+    for _ in range(n):
+        e = _ends(pr)
+        if not e.any():
+            break
+        pr &= ~e
+    if not pr.any():
+        return sk                          # all spur: keep it as it was
+    tips = _ends(pr)
+    k3 = np.ones((3, 3), np.uint8)
+    for _ in range(n):
+        tips = (cv2.dilate(tips.astype(np.uint8), k3) > 0) & sk & ~pr
+        if not tips.any():
+            break
+        pr |= tips
+    return pr
 
 
 def skeleton_paths(sk: np.ndarray) -> List[List[Tuple[int, int]]]:
@@ -921,8 +1023,24 @@ def with_visible(c: Candidate, vz: Optional[np.ndarray]) -> Candidate:
                                width=max(1.0, nb / max(length, 1.0)))
 
 
+def core_width(c: Candidate, z: np.ndarray, skeleton_len: int) -> float:
+    """A fibre's width in the IR itself (blocks): its pixels at least half as
+    deep as the deepest within LINE_LEN // 2 blocks along it, over its
+    skeleton's length. The candidate's own mask is grown by the line stage
+    (its segments' spread: 7.5 blocks on the user's strand, 2 of it fibre)."""
+    zb = z[c.y0:c.y0 + c.mask.shape[0], c.x0:c.x0 + c.mask.shape[1]].astype(np.float32)
+    deep = np.where(c.mask, zb, 0.0).astype(np.float32)
+    k = 2 * (LINE_LEN // 2) + 1
+    local = cv2.erode(deep, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)),
+                      borderType=cv2.BORDER_REPLICATE)
+    core = c.mask & (zb <= 0.5 * local) & (zb < -1.0)
+    return float(min(max(core.sum() / max(skeleton_len, 1), 1.0),
+                     c.mask.sum() / max(skeleton_len, 1)))
+
+
 def _spots_of(c: Candidate, idx: int, w_b: int, h_b: int,
-              vz: Optional[np.ndarray] = None) -> List[dict]:
+              vz: Optional[np.ndarray] = None,
+              z: Optional[np.ndarray] = None) -> List[dict]:
     """A candidate as dust spots: a dab at the centre, or for a long one
     strokes along its skeleton (a curled fibre is followed, not averaged).
     With the colour shots' darkening `vz`, the spots cover the speck as it
@@ -932,10 +1050,13 @@ def _spots_of(c: Candidate, idx: int, w_b: int, h_b: int,
     area = len(xs)
     tag = {"ir_f": [round(float(v), 3) for v in c.feats], "ir_c": int(idx)}
 
-    def spot(pts, r):
-        return dict({"kind": KIND,
-                     "pts": [[float(x) / w_b, float(y) / h_b] for x, y in pts],
-                     "r": float(r) / w_b}, **tag)
+    def spot(pts, r, rc=None):
+        d = dict({"kind": KIND,
+                  "pts": [[float(x) / w_b, float(y) / h_b] for x, y in pts],
+                  "r": float(r) / w_b}, **tag)
+        if rc is not None:
+            d["ir_rc"] = float(rc) / w_b
+        return d
 
     sk = thin(c.mask) if area >= 6 and (c.length / c.width > 2.0 or area >= 40) else None
     # long = its skeleton is long for its width (a curl or a loop too, which
@@ -943,10 +1064,15 @@ def _spots_of(c: Candidate, idx: int, w_b: int, h_b: int,
     ls = int(sk.sum()) if sk is not None else 0
     width = area / max(ls, 1)
     if sk is not None and ls / width > ELONGATED:
+        # the area stays as generous as the line stage spread it: the IR and
+        # the colour shots can be a few blocks apart along a fibre (3 on the
+        # user's strand), and the heal traces the fibre inside it; the core
+        # (where the IR itself saw it) is what the heal always replaces
         r = width / 2.0 * SPOT_SCALE + SPOT_PAD
+        rc = None if z is None else core_width(c, z, ls) / 2.0 + STROKE_CORE_PAD
         step = max(1, int(round(r)))
         out = []
-        paths = skeleton_paths(sk)
+        paths = skeleton_paths(prune(sk, max(2, int(round(width / 2.0)) + 1)))
         longest = max((len(p) for p in paths), default=0)
         for path in paths:
             if len(path) < 3 and longest >= 3:
@@ -955,15 +1081,15 @@ def _spots_of(c: Candidate, idx: int, w_b: int, h_b: int,
             if keep_i[-1] != len(path) - 1:
                 keep_i.append(len(path) - 1)
             pts = [(c.x0 + path[i][1] + 0.5, c.y0 + path[i][0] + 0.5) for i in keep_i]
-            out.append(spot(pts, r))
+            out.append(spot(pts, r, rc))
         if out:
             return out
         pts = _polyline(ys + c.y0 + 0.5, xs + c.x0 + 0.5, step=r)
-        return [spot(pts, r)]
+        return [spot(pts, r, rc)]
     if vz is not None:
         grown = with_visible(c, vz)
         if grown is not c:
-            return _spots_of(grown, idx, w_b, h_b)     # a dab, or strokes if it's a hook
+            return _spots_of(grown, idx, w_b, h_b, z=z)     # a dab, or strokes if it's a hook
     r = math.sqrt(area / math.pi) * SPOT_SCALE + SPOT_PAD
     cx, cy = c.centre()
     return [spot([(cx, cy)], r)]
@@ -978,8 +1104,9 @@ def spots_from(dm: DustMap, sensitivity: float = SENS_DEFAULT,
     spots: List[dict] = []
     acc = flagged(dm, sensitivity, keep, model)
     for i in acc:
-        spots.extend(_spots_of(dm.cands[i], i, w_b, h_b, vz=dm.vz))
+        spots.extend(_spots_of(dm.cands[i], i, w_b, h_b, vz=dm.vz, z=dm.z))
     spots.extend(bridges(dm, acc, spots))
+    spots.extend(tails(dm, acc, spots))
     return spots
 
 
@@ -1146,6 +1273,281 @@ def bridges(dm: DustMap, acc: List[int], spots: List[dict]) -> List[dict]:
                         "r": r / w_b, "ir_bridge": [int(i), int(j)]})
             done.add((i, j))
     return out
+
+
+# --------------------------------------------------------------------------- #
+# tails: a fibre followed on past where the IR loses it (spec/dust-detect-v3.md §2)
+# --------------------------------------------------------------------------- #
+TAIL_CHUNK = 8.0           # blocks: a tail is followed a straight chunk at a time ...
+TAIL_TURNS = (-20.0, -10.0, 0.0, 10.0, 20.0)   # ... each turning at most this (degrees) ...
+TAIL_LATS = (-1.5, -0.75, 0.0, 0.75, 1.5)      # ... and stepping aside at most this (blocks)
+TAIL_FIRST_TURNS = TAIL_TURNS
+TAIL_FIRST_LATS = (-4.0, -3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0, 4.0)   # the skeleton's end is a guess
+TAIL_AXIS = 20.0           # blocks: a fibre's way out = the main axis of its pixels this near the end
+TAIL_NULL = 300            # random chunks that set what "darker than chance" is ...
+TAIL_NULL_Q = 1.0          # ... (this percentile of their best, per map: the user's clean
+                           #     30 s shots read z at a third of the 8 s shots')
+TAIL_SIDE = 0.3            # x |that|: the chunk darker than both sides 3 blocks out by this
+TAIL_W_IR = 0.7            # the joint field: the IR's share ...
+TAIL_W_VIS = 0.3           # ... and the colour shots' (each in units of its own chance)
+TAIL_VIS_CAP = 3.0         # x chance: a colour-shot sample counts no darker (a strong line in
+                           # the colour shots mustn't carry a chunk the IR doesn't show)
+TAIL_OWN = 0.4             # a chunk at most this much over its own fibre (no going back over it)
+TAIL_IR_SHARE = 0.6        # a chunk's IR at least this share of chance by itself
+TAIL_MISS = 1              # chunks in a row that may fall short (a fibre's faint stretch)
+TAIL_MAX = 80              # blocks at most
+TAIL_MIN_CHUNKS = 2        # a tail of fewer chunks that land is left off
+
+_TAIL_T = np.linspace(0.0, TAIL_CHUNK, 17)
+
+
+def _sample(a: np.ndarray, pts: np.ndarray) -> np.ndarray:
+    p = np.asarray(pts, np.float32).reshape(-1, 2)
+    return cv2.remap(a.astype(np.float32, copy=False), p[:, 0].reshape(1, -1),
+                     p[:, 1].reshape(1, -1), cv2.INTER_LINEAR,
+                     borderMode=cv2.BORDER_REPLICATE)[0]
+
+
+def _turned(d: np.ndarray, deg: float) -> np.ndarray:
+    t = math.radians(deg)
+    return np.array([d[0] * math.cos(t) - d[1] * math.sin(t),
+                     d[0] * math.sin(t) + d[1] * math.cos(t)])
+
+
+def _best_chunk(fields, weights, p: np.ndarray, d: np.ndarray, turns, lats, floors=None):
+    """The straight chunk from near p, heading about d, along which the
+    weighted sum of the fields' means is lowest: (that sum, direction, its
+    start, its end, each field's mean). `floors` (one per field, or None)
+    caps how dark a sample counts."""
+    best = None
+    floors = floors or [None] * len(fields)
+    for ang in turns:
+        v = _turned(d, ang)
+        n = np.array([-v[1], v[0]])
+        for lat in lats:
+            st = p + lat * n
+            P = st[None, :] + _TAIL_T[:, None] * v[None, :]
+            ms = [float(np.maximum(_sample(f, P), fl).mean() if fl is not None
+                        else _sample(f, P).mean()) for f, fl in zip(fields, floors)]
+            m = sum(w * x for w, x in zip(weights, ms))
+            if best is None or m < best[0]:
+                best = (m, v, st, st + TAIL_CHUNK * v, ms)
+    return best
+
+
+def _side_gap(fields, weights, st: np.ndarray, v: np.ndarray, mean: float,
+              off: float = 3.0) -> float:
+    n = np.array([-v[1], v[0]])
+    P = st[None, :] + _TAIL_T[:, None] * v[None, :]
+    side = [sum(w * float(_sample(f, P + sg * off * n).mean()) for f, w in zip(fields, weights))
+            for sg in (1.0, -1.0)]
+    return min(side) - mean
+
+
+def tail_thresholds(dm: DustMap) -> Tuple[float, float, float, float]:
+    """(tz, tv, tj, tf): what a chunk's mean must beat to be more than
+    chance in the IR alone, the colour shots alone, the joint field
+    TAIL_W_IR·z/|tz| + TAIL_W_VIS·vz/|tv| for a following chunk, and the joint
+    field for the first chunk (searched wider): the TAIL_NULL_Q percentile
+    of the best chunks at random places in the frame's middle (seeded,
+    cached on the map). The IR and the colour shots are read jointly because
+    a fibre fades in each in different places (the user's strand: dots in
+    the IR, a green line in the colour shots)."""
+    if getattr(dm, "_tail", None) is not None:
+        return dm._tail
+    z = dm.z.astype(np.float32)
+    vz = dm.vz.astype(np.float32)
+    H, W = z.shape
+    # chance is measured away from every candidate (a dusty frame's own dust
+    # would otherwise set the bar)
+    near = np.zeros((H, W), np.uint8)
+    for c in dm.cands:
+        near[c.y0:c.y0 + c.mask.shape[0], c.x0:c.x0 + c.mask.shape[1]] |= c.mask.astype(np.uint8)
+    reach = int(TAIL_CHUNK) + 6
+    near = cv2.dilate(near, np.ones((2 * reach + 1, 2 * reach + 1), np.uint8)) > 0
+    rng = np.random.default_rng(12345)
+    pts = []
+    for _ in range(TAIL_NULL * 20):
+        p = np.array([rng.uniform(W * 0.15, W * 0.85), rng.uniform(H * 0.15, H * 0.85)])
+        a = rng.uniform(0.0, 2.0 * math.pi)
+        if not near[int(p[1]), int(p[0])]:
+            pts.append((p, a))
+            if len(pts) == TAIL_NULL:
+                break
+    if len(pts) < TAIL_NULL // 3:
+        dm._tail = (-1e9, -1e9, -1e9, -1e9)         # no clean ground to measure chance on
+        return dm._tail
+    q = lambda v: min(float(np.percentile(v, TAIL_NULL_Q)), -0.1)
+    dirs = [np.array([math.cos(a), math.sin(a)]) for _, a in pts]
+    tz = q([_best_chunk([z], [1.0], p, d, TAIL_TURNS, TAIL_LATS)[0] for (p, _), d in zip(pts, dirs)])
+    tv = q([_best_chunk([vz], [1.0], p, d, TAIL_TURNS, TAIL_LATS)[0] for (p, _), d in zip(pts, dirs)])
+    w = (TAIL_W_IR / abs(tz), TAIL_W_VIS / abs(tv))
+    fl = [None, TAIL_VIS_CAP * tv]
+    tj = q([_best_chunk([z, vz], w, p, d, TAIL_TURNS, TAIL_LATS, fl)[0]
+            for (p, _), d in zip(pts, dirs)])
+    tf = q([_best_chunk([z, vz], w, p, d, TAIL_FIRST_TURNS, TAIL_FIRST_LATS, fl)[0]
+            for (p, _), d in zip(pts, dirs)])
+    dm._tail = (tz, tv, tj, tf)
+    return dm._tail
+
+
+def _follow(dm: DustMap, start: np.ndarray, way: np.ndarray,
+            stop=None, own=None) -> List[np.ndarray]:
+    """From a fibre's free end, the chunks along which it goes on as a thin
+    dark line, read jointly in the IR and the colour shots (each chunk read
+    over its length, so a dotted fibre is followed): darker than chance
+    (`tail_thresholds`) and than both its sides, at least partly dark in the
+    IR itself (TAIL_IR_SHARE of chance: followed on the colour shots alone,
+    tails ran along lines and edges of the picture on the Gold 200 frames),
+    and not lying along an edge of the picture (the ghosts' rule). Returns the points (the
+    end first) or [] when fewer than TAIL_MIN_CHUNKS land. `stop` ends it on
+    reaching another flagged piece; a chunk running back over the fibre's
+    own piece (`own`, more than TAIL_OWN of it) doesn't count."""
+    z = dm.z.astype(np.float32)
+    vz = dm.vz.astype(np.float32)
+    H, W = z.shape
+    tz, tv, tj, tf = tail_thresholds(dm)
+    fields, w = [z, vz], (TAIL_W_IR / abs(tz), TAIL_W_VIS / abs(tv))
+    fl = [None, TAIL_VIS_CAP * tv]
+    d = np.asarray(way, np.float64)
+    d /= max(float(np.hypot(*d)), 1e-9)
+    pos = np.asarray(start, np.float64)
+    path = [pos]
+    good, landed, misses = 1, 0, 0
+    first = True
+    while (len(path) - 1) * TAIL_CHUNK < TAIL_MAX:
+        turns, lats = (TAIL_FIRST_TURNS, TAIL_FIRST_LATS) if first else (TAIL_TURNS, TAIL_LATS)
+        m, v, st, end, ms = _best_chunk(fields, w, pos, d, turns, lats, fl)
+        lim = tf if first else tj
+        if not (1 <= end[0] < W - 2 and 1 <= end[1] < H - 2):
+            break
+        hit = stop is not None and stop[int(end[1]), int(end[0])]
+        ok = (m <= lim and ms[0] <= TAIL_IR_SHARE * tz
+              and _side_gap(fields, w, st, v, m) >= TAIL_SIDE * abs(lim))
+        if ok and own is not None:
+            P = st[None, :] + _TAIL_T[:, None] * v[None, :]
+            ok = np.mean([own[int(q[1]), int(q[0])] for q in P]) <= TAIL_OWN
+        if ok and dm.vlog is not None:
+            # no edge of the picture along it (the ghosts' rule, on the
+            # colour shots' own levels at half the grid)
+            n = np.array([-v[1], v[0]])
+            P = (st[None, :] + _TAIL_T[:, None] * v[None, :]) / 2.0
+            vl = dm.vlog
+            c_ = _sample(vl, P)
+            a_ = _sample(vl, P + (GHOST_OFF / 2.0) * n)
+            b_ = _sample(vl, P - (GHOST_OFF / 2.0) * n)
+            step = float(np.median(np.abs(a_ - b_)))
+            dip = float(np.median((a_ + b_) / 2.0 - c_))
+            ok = not (step >= GHOST_STEP and dip < GHOST_DIP * step)
+        if first and not ok:
+            return []
+        path.append(end)
+        if ok:
+            landed += 1
+            good, misses = len(path), 0
+        else:
+            misses += 1
+            if misses > TAIL_MISS:
+                break
+        if hit:
+            break
+        pos, d, first = end, v, False
+    if landed < TAIL_MIN_CHUNKS:
+        return []
+    return path[:good]
+
+
+def tails(dm: DustMap, acc: List[int], spots: List[dict]) -> List[dict]:
+    """Strokes carrying a flagged fibre on from each free end of its
+    skeleton where it goes on as a thin dark line that the finder broke into
+    pieces too faint to flag (the user's strand, 2026-11-23: its last third
+    was a row of faint dots in the IR, and green in the colour shots).
+    Tagged "ir_tail"; no features (nothing to learn from)."""
+    if dm.vz is None or not acc:
+        return []
+    w_b, h_b = dm.size
+    r_of: Dict[int, Tuple[float, Optional[float]]] = {}
+    for sp in spots:
+        c = sp.get("ir_c")
+        if c is not None and len(sp.get("pts") or []) > 1:
+            r_of.setdefault(c, (float(sp["r"]) * w_b,
+                                None if sp.get("ir_rc") is None else float(sp["ir_rc"]) * w_b))
+    owner = np.full((h_b, w_b), -1, np.int32)
+    for i in acc:
+        c = dm.cands[i]
+        sub = owner[c.y0:c.y0 + c.mask.shape[0], c.x0:c.x0 + c.mask.shape[1]]
+        sub[c.mask] = i
+    out: List[dict] = []
+    for i in acc:
+        c = dm.cands[i]
+        if not c.line_like or i not in r_of or getattr(c, "ghost", False):
+            continue
+        r, rc = r_of[i]
+        sk = prune(thin(c.mask), max(2, int(round(c.width / 2.0)) + 1))
+        ys, xs = np.nonzero(sk)
+        if len(xs) < 4:
+            continue
+        my, mx = np.nonzero(c.mask)
+        mp = np.stack([mx + c.x0 + 0.5, my + c.y0 + 0.5], 1).astype(np.float64)
+        ey, ex = np.nonzero(_ends(sk))
+        for y, x in zip(ey, ex):
+            e = np.array([x + c.x0 + 0.5, y + c.y0 + 0.5])
+            # the way out: the main axis of the fibre's pixels near the end
+            # (a thinned end hooks: 50 degrees off on the user's strand)
+            near = mp[np.hypot(*(mp - e).T) <= TAIL_AXIS]
+            if len(near) < 8:
+                continue
+            cen = near.mean(0)
+            ev, evec = np.linalg.eigh(np.cov((near - cen).T))
+            way = evec[:, -1]
+            if float(way @ (e - cen)) < 0:
+                way = -way
+            if float(np.hypot(*(e - cen))) < 2.0:
+                continue
+            y0, x0 = max(0, int(e[1]) - TAIL_MAX - 8), max(0, int(e[0]) - TAIL_MAX - 8)
+            box = owner[y0:int(e[1]) + TAIL_MAX + 8, x0:int(e[0]) + TAIL_MAX + 8]
+            stop = None
+            others = (box >= 0) & (box != i)
+            if others.any():
+                stop = _BoxMask(others, y0, x0)
+            mine = _BoxMask(cv2.dilate((box == i).astype(np.uint8),
+                                       np.ones((5, 5), np.uint8)) > 0, y0, x0)
+            # start where the piece itself ends along the way out (its mask
+            # runs on past its thinned end)
+            e0 = e.copy()
+            for _ in range(12):
+                if not mine[int(e0[1]), int(e0[0])]:
+                    break
+                e0 = e0 + way
+            line = _follow(dm, e0, way, stop, own=mine)
+            if line:
+                line = [e] + line
+            if not line:
+                continue
+            step = max(1, int(math.ceil(TAIL_CHUNK / max(r, 1.0))))
+            dense = []
+            for p0, p1 in zip(line[:-1], line[1:]):
+                for t in np.linspace(0.0, 1.0, step, endpoint=False):
+                    dense.append(p0 + t * (p1 - p0))
+            dense.append(line[-1])
+            sp = {"kind": KIND, "pts": [[float(q[0]) / w_b, float(q[1]) / h_b] for q in dense],
+                  "r": r / w_b, "ir_tail": int(i)}
+            if rc is not None:
+                sp["ir_rc"] = rc / w_b
+            out.append(sp)
+    return out
+
+
+class _BoxMask:
+    """A bool mask over part of the block grid, indexed in grid coordinates."""
+    def __init__(self, m: np.ndarray, y0: int, x0: int):
+        self.m, self.y0, self.x0 = m, y0, x0
+
+    def __getitem__(self, yx):
+        y, x = yx[0] - self.y0, yx[1] - self.x0
+        if 0 <= y < self.m.shape[0] and 0 <= x < self.m.shape[1]:
+            return bool(self.m[y, x])
+        return False
 
 
 def mask_from(dm: DustMap, sensitivity: float = SENS_DEFAULT,

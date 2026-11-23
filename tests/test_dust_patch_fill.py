@@ -106,12 +106,20 @@ def test_a_found_spot_replaces_only_the_speck_a_painted_one_what_was_painted():
     assert n_painted > 0.9 * area                     # the whole painted dab
 
 
-def test_nothing_standing_out_replaces_the_whole_area():
+def test_nothing_standing_out_replaces_the_whole_area_or_where_the_ir_saw_it():
+    """A painted spot with nothing in it: what was painted goes. An IR spot:
+    the IR saw dust there (just not standing out in the picture), so its own
+    extent goes (spec/dust-detect-v3.md §3), not the generous area round it."""
     img = _rgb16(_grain(100, 100, seed=9))
     info = []
-    out = dfl.heal(img, [_spot("ir", [(50, 50)], 8, 100, 100)], info=info)
+    out = dfl.heal(img, [_spot("brush", [(50, 50)], 8, 100, 100)], info=info)
     assert info[0].get("whole_area")
     assert int((out != img).any(2).sum()) > 0.8 * np.pi * 64
+    info = []
+    out = dfl.heal(img, [_spot("ir", [(50, 50)], 8, 100, 100)], info=info)
+    n = int((out != img).any(2).sum())
+    core = np.pi * (8 * dfl.IR_CORE) ** 2
+    assert 0.5 * core < n < 0.5 * np.pi * 64, (n, core)
 
 
 def test_nothing_is_sampled_from_outside_the_crop():
