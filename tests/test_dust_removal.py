@@ -31,6 +31,16 @@ from core.ccr_processor import (apply_dust_removal,  # noqa: E402
                                 rasterize_dust_mask, DUST_FEATHER_DEFAULT)
 
 
+@pytest.fixture(autouse=True)
+def _clone_engine(monkeypatch):
+    """These tests pin the earlier one-source clone heal, which stays
+    selectable (FREECCR_DUST_ENGINE=clone); the default patch fill has its
+    own tests (tests/test_dust_patch_fill.py, spec/dust-patch-fill.md)."""
+    from core import ccr_processor as _cp
+    monkeypatch.setattr(_cp, "DUST_ENGINE", "clone")
+
+
+
 def _flat_with_speck(h=100, w=100, base=30000, speck=60000, cx=50, cy=50, r=4):
     """Flat gray image with one bright circular speck near the center."""
     img = np.full((h, w, 3), base, dtype=np.uint16)

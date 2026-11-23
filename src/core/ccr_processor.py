@@ -5835,6 +5835,34 @@ def _nearest_plan_record(plan, cyn, cxn, tol=0.06):
     return best
 
 
+# Which heal runs (spec/dust-patch-fill.md): "patch" = the speck's own pixels
+# rebuilt from many small patches (core/dust_fill.py), decided at each
+# render's resolution; "clone" = the earlier engine below, one source patch
+# per segment, planned at the preview's size. FREECCR_DUST_ENGINE=clone
+# brings the old one back for comparison.
+DUST_ENGINE = os.environ.get("FREECCR_DUST_ENGINE", "patch").strip().lower()
+
+
+def _patch_heal(img16: np.ndarray, spots, crop=None, ws_windowed: bool = False):
+    """apply_dust_removal through core/dust_fill: nothing sampled outside the
+    crop, patches compared on de-windowed display values."""
+    from core import dust_fill
+    h, w = img16.shape[:2]
+    keep = None
+    if crop is not None and crop[0]:
+        keep = _crop_keep_mask(crop[0], crop[1], h, w)
+    dewindow = None
+    if ws_windowed:
+        k = np.float32(65535.0 / (WS_W - WS_B))
+
+        def dewindow(v):
+            return (v - np.float32(WS_B)) * k
+    t0 = time.time()
+    out = dust_fill.heal(img16, spots, keep=keep, dewindow=dewindow)
+    print(f"Dust heal {w}x{h} (patch fill, {len(spots)} spots): {time.time() - t0:.3f}s")
+    return out
+
+
 def apply_dust_removal(img16: np.ndarray, spots, inpaint_radius: int = 3,
                        feather: float = DUST_FEATHER_DEFAULT,
                        plan=None, collect_plan=None,
@@ -5901,6 +5929,8 @@ def apply_dust_removal(img16: np.ndarray, spots, inpaint_radius: int = 3,
     """
     if not spots:
         return img16
+    if DUST_ENGINE == "patch":
+        return _patch_heal(img16, spots, crop=crop, ws_windowed=ws_windowed)
     h, w = img16.shape[:2]
     long_side = max(h, w)
     if long_side <= _DUST_PLAN_LONG:

@@ -314,13 +314,19 @@ class DustRemovalPanel(QWidget):
         feather_row.addWidget(self.feather_slider)
         feather_row.addWidget(self.feather_value)
         layout.addLayout(feather_row)
+        # The patch fill rebuilds only the speck, seamlessly: there is no
+        # copied disc to fade (spec/dust-patch-fill.md), so no Feather.
+        from core import ccr_processor as _cp
+        self._patch_fill = _cp.DUST_ENGINE == "patch"
+        if self._patch_fill:
+            for wdg in (feather_lbl, self.feather_slider, self.feather_value):
+                wdg.hide()
 
         # A click grows to cover the speck's soft halo (spec/dust-fit-spot.md)
         self.fit_spot_cb = QCheckBox("Fit each click to the speck")
         self.fit_spot_cb.setToolTip(
-            "A click grows to cover the speck's soft edge, so the heal copies "
-            "from clean film beside it (a brush that covers only the bright "
-            "core leaves a trace). Never smaller than your brush, at most three "
+            "A click grows to cover the speck's soft edge, so none of it is "
+            "left round the heal. Never smaller than your brush, at most three "
             "times it; strokes are left as painted.")
         on = QSettings("FreeCCR", "FreeCCR").value("dust/fit_spot", True, type=bool)
         self.fit_spot_cb.setChecked(on)
@@ -439,7 +445,7 @@ class DustRemovalPanel(QWidget):
         self.show_sources_cb.toggled.connect(
             lambda on: self.image_preview.set_dust_source_overlay(on))
         more.addWidget(self.show_sources_cb)
-        hint = QLabel(
+        self.sources_hint = hint = QLabel(
             "The spot you just painted shows where it copies from: drag that "
             "green ring to copy from somewhere else (↶ undoes it). With heal "
             "sources shown: right-drag a stroke to move it (it keeps sampling "
@@ -448,6 +454,10 @@ class DustRemovalPanel(QWidget):
         hint.setWordWrap(True)
         hint.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 11px;")
         more.addWidget(hint)
+        if self._patch_fill:
+            # many small patches, no one place a heal copies from
+            self.show_sources_cb.hide()
+            hint.hide()
         self.clear_btn = QPushButton("Clear All")
         self.clear_btn.setToolTip("Take every heal off this frame.")
         self.clear_btn.clicked.connect(self._on_clear_all)
@@ -528,7 +538,7 @@ class DustRemovalPanel(QWidget):
         self.done_btn.clicked.connect(self._on_done)
         layout.addWidget(self.done_btn)
 
-    MORE_TEXT = "More: heal sources, AI detection, attach IR shot, clear all"
+    MORE_TEXT = "More: AI detection, attach IR shot, clear all"
 
     def _on_more_toggled(self, on, remember=True):
         self.more_box.setVisible(bool(on))
@@ -972,6 +982,13 @@ class DustRemovalPanel(QWidget):
         self.refresh_ir_section()
 
     def _on_ir_heal(self):
+        # a Dust or Marks slider move still waiting to apply would flag the
+        # finds again just after they are painted over: apply it first
+        for timer, apply in ((self._ir_sens_timer, self._apply_ir_sensitivity),
+                             (self._mark_sens_timer, self._apply_mark_sensitivity)):
+            if timer.isActive():
+                timer.stop()
+                apply()
         n = self.image_preview.heal_ir_dust()
         self.refresh_ir_section()
         if n:

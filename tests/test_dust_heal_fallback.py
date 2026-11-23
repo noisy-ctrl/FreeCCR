@@ -15,6 +15,16 @@ import cv2  # noqa: E402
 from core import ccr_processor as cp  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _clone_engine(monkeypatch):
+    """These tests pin the earlier one-source clone heal, which stays
+    selectable (FREECCR_DUST_ENGINE=clone); the default patch fill has its
+    own tests (tests/test_dust_patch_fill.py, spec/dust-patch-fill.md)."""
+    from core import ccr_processor as _cp
+    monkeypatch.setattr(_cp, "DUST_ENGINE", "clone")
+
+
+
 def _narrow_gradient(h=300, w=400):
     """A sky as a converted base holds it: a smooth gradient over only ~60
     16-bit codes (well under one 8-bit step of 257)."""
