@@ -179,12 +179,14 @@ def test_slider_defaults_are_the_details_defaults():
 def test_keys_are_last_so_the_positional_zip_is_unchanged():
     keys = SlidersPanel.ADJUSTMENT_KEYS
     # The developer edge effect is created right after Masking
-    # (spec/developer-edge-effect.md), so it is the very last.
-    assert keys[-1] == "edge_effect"
-    assert keys[-4:-1] == ["sharpen_amount", "sharpen_radius", "sharpen_masking"]
+    # (spec/developer-edge-effect.md), then the Local Contrast list's sliders
+    # (spec/local-contrast.md), so they are the very last.
+    assert keys[-6:] == ["edge_effect", "lc_lighting", "lc_detail", "lc_texture",
+                         "lc_structure", "lc_shape"]
+    assert keys[-9:-6] == ["sharpen_amount", "sharpen_radius", "sharpen_masking"]
     # Chroma Noise Reduction's keys sit just before them (spec/chroma-noise-reduction.md).
-    assert keys[-6:-4] == ["chroma_nr", "chroma_nr_radius"]
-    assert keys[-7] == "xt_bg"          # Crosstalk Correction (spec/density-crosstalk.md)
+    assert keys[-11:-9] == ["chroma_nr", "chroma_nr_radius"]
+    assert keys[-12] == "xt_bg"          # Crosstalk Correction (spec/density-crosstalk.md)
 
 
 def test_panel_has_one_slider_per_key_in_order():
@@ -206,7 +208,8 @@ def test_details_has_its_own_sync_group_and_keys_stay_partitioned():
     # (and the developer edge effect - spec/developer-edge-effect.md)
     assert tuple(groups["details"]) == ("sharpen_amount", "sharpen_radius",
                                         "sharpen_masking", "sharpen_export_only",
-                                        "edge_effect")
+                                        "edge_effect", "lc_lighting", "lc_detail",
+                                        "lc_texture", "lc_structure", "lc_shape")
     from widgets.sliders_panel import GLOBAL_FLAG_KEYS
     grouped = [k for _gid, _label, keys in SYNC_GROUPS for k in keys]
     grouped = [k for k in grouped if k not in GLOBAL_FLAG_KEYS]   # flags, not sliders

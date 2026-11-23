@@ -30,6 +30,7 @@ from core.ccr_processor import (adjust_image, adjust_image_opencl,
 from core import color_management
 from core import load_progress
 from core import detail_defaults
+from core import local_contrast as _lc
 
 # Import optional libraries with fallbacks
 try:
@@ -2417,7 +2418,8 @@ class CCRImage:
         # density, as a developer leaves it, AFTER Auto Gain was measured (so
         # the slider never moves the exposure) and before every colour and
         # tone stage. Spatial: skipped with dust for detached sample patches.
-        if s.get('edge_effect', 0) and not skip_dust:
+        # Only when it is the Local Contrast list's choice (spec/local-contrast.md).
+        if s.get('edge_effect', 0) and not skip_dust and _lc.method_of(s) == "edge":
             image = self._apply_edge_effect(image, s, ws)
         # Auto tone (spec/auto-tone.md): the toe/shoulder measured for this
         # frame at conversion, applied in the windowed pre-stage. A look owns
@@ -2585,6 +2587,11 @@ class CCRImage:
         # loop, where a sharpening halo would perturb the mean being solved.
         # "Bypass until export" (sharpen_export_only) skips it outside
         # exports; see spec/bypass-until-export.md.
+        # Local Contrast (spec/local-contrast.md): Lighting & Detail, Local
+        # Laplacian or Detail Bands on the finished picture, right before
+        # sharpening. Spatial: skipped with dust for detached sample patches.
+        if not skip_dust and _lc.active(s) and _lc.method_of(s) in _lc.LOGS:
+            adjusted = self._apply_local_contrast(adjusted, s)
         if sharpen_live and not skip_dust:
             # an image that never set its own sharpening takes the Details
             # defaults, the values its panel shows (spec/details-defaults.md)
@@ -2596,6 +2603,15 @@ class CCRImage:
                                         (CCRImage._sharpen_scale_for(self, adjusted)
                                          if sharpen_scale is None else sharpen_scale))
         return adjusted
+
+    def _apply_local_contrast(self, image, s):
+        """The Local Contrast list's method on the finished picture, scaled
+        to the film like the edge effect (spec/local-contrast.md)."""
+        from core import edge_effect as ee
+        rect = getattr(self, "crop_rect", None)
+        crop = tuple(float(v) for v in rect) if rect else None
+        pxmm = ee.px_per_mm(image.shape, ee.frame_long_mm(self, image.shape), crop)
+        return _lc.apply_local_contrast(image, s, pxmm, crop)
 
     def _sharpen_scale_for(self, buf) -> float:
         """This buffer's pixels per full-resolution pixel, at most 1 (an
