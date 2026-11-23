@@ -101,6 +101,9 @@ class ThumbnailList(QWidget):
     # A greyed-out "needs attention" tile was acted on: (entry id, action),
     # action in "choose" | "merge" | "singles" | "remove" (spec/scan-type.md).
     attention_action = Signal(str, str)
+    # a file's exposure / clipping was read for the hover card (a reader
+    # thread emits it; spec/thumbnail-hover-card.md)
+    _card_read = Signal(str)
 
     def __init__(self, image_selected_callback):
         super().__init__()
@@ -210,6 +213,14 @@ class ThumbnailList(QWidget):
         self.thumbnail_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.thumbnail_list.setWordWrap(False)
         self._apply_list_grid()
+        # hovering a frame shows its card: shutter speeds and whether its RAWs
+        # clip inside the picture (spec/thumbnail-hover-card.md)
+        from core import frame_card
+        self._card_idx = None
+        self._card_pos = None
+        self._card_reader = frame_card.ClipReader(done=self._card_read.emit)
+        self._card_read.connect(self._on_card_read)
+        self.thumbnail_list.viewport().installEventFilter(self)
         self.thumbnail_list.setFocusPolicy(Qt.StrongFocus)  # <-- Ensure strong focus
         self.thumbnail_list.setFocus()  # <-- Optionally set focus immediately
         # Ctrl+click toggles, Shift+click selects a range
@@ -464,6 +475,15 @@ class ThumbnailList(QWidget):
             self.attention_popup.setVisible(False)
 
     def eventFilter(self, obj, ev):
+        tl = getattr(self, "thumbnail_list", None)
+        if tl is not None and obj is tl.viewport():
+            t = ev.type()
+            if t == QEvent.ToolTip:
+                self._show_card(ev.pos(), ev.globalPos())
+                return True
+            if t == QEvent.Leave:
+                self._card_idx = None
+            return super().eventFilter(obj, ev)
         if obj in (getattr(self, "attention_bar", None), getattr(self, "attention_popup", None)):
             t = ev.type()
             if t == QEvent.Enter:
@@ -471,6 +491,53 @@ class ThumbnailList(QWidget):
             elif t == QEvent.Leave:
                 self._attention_hide_timer.start()
         return super().eventFilter(obj, ev)
+
+    # --- the hover card (spec/thumbnail-hover-card.md) -----------------------
+    def card_html(self, item):
+        """The card of a list item, as rich text: the frame's full name, each
+        file's shutter speed and ISO and its clipping inside the picture."""
+        from core import frame_card
+        idx = item.data(Qt.UserRole)
+        img = ccr_backend.get_image_by_index(idx) if idx is not None else None
+        if img is None:
+            return ""
+        _label, full = self._item_label(img)
+        html = frame_card.card_html(img, full, warn=theme.DANGER)
+        if item.text().startswith("⚠ "):
+            html += ("<br>⚠ Graded under a different camera profile or field correction."
+                     "<br>Right-click ▸ Replace with current camera profile.")
+        return html
+
+    def _show_card(self, pos, global_pos):
+        from PySide6.QtWidgets import QToolTip
+        from core import frame_card
+        item = self.thumbnail_list.itemAt(pos)
+        if item is None:
+            self._card_idx = None
+            QToolTip.hideText()
+            return
+        idx = item.data(Qt.UserRole)
+        self._card_idx, self._card_pos = idx, global_pos
+        img = ccr_backend.get_image_by_index(idx)
+        if img is not None:
+            need = frame_card.to_read(img)
+            if need:
+                self._card_reader.ask(need)
+        QToolTip.showText(global_pos, self.card_html(item), self.thumbnail_list.viewport(),
+                          self.thumbnail_list.visualItemRect(item))
+
+    def _on_card_read(self, _path):
+        """A file was read: redraw the card if it is still showing."""
+        from PySide6.QtWidgets import QToolTip
+        if self._card_idx is None or not QToolTip.isVisible():
+            return
+        for row in range(self.thumbnail_list.count()):
+            item = self.thumbnail_list.item(row)
+            if item.data(Qt.UserRole) == self._card_idx:
+                QToolTip.showText(self._card_pos, self.card_html(item),
+                                  self.thumbnail_list.viewport(),
+                                  self.thumbnail_list.visualItemRect(item))
+                return
 
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
