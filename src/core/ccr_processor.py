@@ -5276,6 +5276,24 @@ def _feather_alpha(mask: np.ndarray, fmap: np.ndarray) -> np.ndarray:
     return _smoothstep((inside - 0.5) / f) * (mask > 0)
 
 
+def _feather_alpha_out(comp: np.ndarray, fmap: np.ndarray) -> np.ndarray:
+    """Per-pixel blend alpha with the fade OUTSIDE the hole (revision
+    2026-11-23): exactly 1 on every hole pixel, then a smoothstep from 1 down
+    to 0 over `fmap` px outward (each band pixel's own feather width, written
+    by its patch; <= 0.5 = a hard edge). Distances at pixel centres, as in
+    `_feather_alpha`, so the profile is resolution-stable."""
+    comp = comp.astype(bool)
+    # exact Euclidean distance: the 3x3 chamfer puts the next pixel at 0.955,
+    # which let a hard edge (feather 0) leak 2 % onto it
+    out_d = cv2.distanceTransform((~comp).astype(np.uint8), cv2.DIST_L2,
+                                  cv2.DIST_MASK_PRECISE)
+    f = np.maximum(fmap.astype(np.float32), 0.5)
+    a = _smoothstep(1.0 - (out_d - 0.5) / f)
+    a[out_d - 0.5 >= f] = 0.0
+    a[comp] = 1.0
+    return a.astype(np.float32)
+
+
 def _hsv1(rgb):
     """(h, s, v) of one RGB triple (float 0..65535) — all three in 0..1."""
     px = np.asarray(rgb, np.float32).reshape(1, 1, 3) / 65535.0
@@ -5765,8 +5783,21 @@ def _heal_patch(img16: np.ndarray, img16_c: np.ndarray, labels: np.ndarray,
     # dust — precisely where the user reaches for it.
     inside = cv2.distanceTransform(hole.astype(np.uint8), cv2.DIST_L2, 3)
     depth = max(1.0, float(inside.max()))
-    fmap[wy0:wy1, wx0:wx1][hole] = \
-        max(0.5, min(float(feather) * depth, depth))
+    fw = max(0.5, min(float(feather) * depth, depth))
+    fmap[wy0:wy1, wx0:wx1][hole] = fw
+    # The fade runs OUTWARD from the brushed edge (revision 2026-11-23,
+    # spec/dust-feather-outward.md): the fill is also written over a band
+    # the feather's width outside the hole, in clean picture only, and the
+    # composite blends it in there. An inward fade kept the outer quarter of
+    # the brush partly unhealed, and a speck's soft edge reaching the
+    # brush's rim showed as a ring (+1.7 levels at 0.7-0.9 r, feather 25 %).
+    band = ((~hole) & (away <= fw + 0.5)
+            & (mask_pad[wy0:wy1, wx0:wx1] == 0))
+    if band.any():
+        filled[wy0:wy1, wx0:wx1][band] = np.clip(
+            np.rint(heal[band]), 0, 65535).astype(np.uint16)
+        fm_win = fmap[wy0:wy1, wx0:wx1]
+        fm_win[band] = np.maximum(fm_win[band], fw)
     # dlike_on lives on as plan metadata only (records keep their shape and
     # the verdict stays resolution-stable via the replayed flags).
     sep = float(np.abs(defect - ring_bg).mean())
@@ -6172,26 +6203,38 @@ def _heal_impl(img16: np.ndarray, spots, inpaint_radius: int,
     # cutting a seam through the middle of the union's interior.
     nu, ulab, ustats, _ = cv2.connectedComponentsWithStats(mask,
                                                            connectivity=8)
+    alpha = {}
     for i in range(1, nu):
         bx0 = int(ustats[i, cv2.CC_STAT_LEFT])
         by0 = int(ustats[i, cv2.CC_STAT_TOP])
         bw_ = int(ustats[i, cv2.CC_STAT_WIDTH])
         bh_ = int(ustats[i, cv2.CC_STAT_HEIGHT])
-        ys = slice(max(0, by0 - 2), min(h, by0 + bh_ + 2))
-        xs = slice(max(0, bx0 - 2), min(w, bx0 + bw_ + 2))
+        inner = ulab[by0:by0 + bh_, bx0:bx0 + bw_] == i
+        reach = int(math.ceil(float(fmap[by0:by0 + bh_, bx0:bx0 + bw_][inner].max()))) + 2
+        ys = slice(max(0, by0 - reach), min(h, by0 + bh_ + reach))
+        xs = slice(max(0, bx0 - reach), min(w, bx0 + bw_ + reach))
         comp = ulab[ys, xs] == i
-        # The dome IS the whole story: no defect force-fill floor (see
-        # _heal_patch's feather comment) — the slider's rolloff shows on
-        # every heal, dust included.
-        a = _feather_alpha(comp.astype(np.uint8) * 255, fmap[ys, xs])
-        write = a > 0.0
-        if not write.any():
-            continue
-        a3 = a[..., None]
-        blend = (img16[ys, xs].astype(np.float32) * (1.0 - a3)
-                 + filled[ys, xs].astype(np.float32) * a3)
-        out[ys, xs][write] = np.clip(
-            np.rint(blend[write]), 0, 65535).astype(np.uint16)
+        # Fully healed across the whole brushed region, fading out over the
+        # feather's width OUTSIDE it (revision 2026-11-23): the slider softens
+        # the seam, never the heal itself.
+        a = _feather_alpha_out(comp, fmap[ys, xs])
+        key = (ys.start, ys.stop, xs.start, xs.stop)
+        alpha[key] = a
+    if alpha:
+        A = np.zeros((h, w), np.float32)
+        for (y0, y1, x0, x1), a in alpha.items():
+            np.maximum(A[y0:y1, x0:x1], a, out=A[y0:y1, x0:x1])
+        for (y0, y1, x0, x1) in alpha:
+            ys, xs = slice(y0, y1), slice(x0, x1)
+            a = A[ys, xs]
+            write = a > 0.0
+            if not write.any():
+                continue
+            a3 = a[..., None]
+            blend = (img16[ys, xs].astype(np.float32) * (1.0 - a3)
+                     + filled[ys, xs].astype(np.float32) * a3)
+            out[ys, xs][write] = np.clip(
+                np.rint(blend[write]), 0, 65535).astype(np.uint16)
     print(f"Dust heal {w}x{h}: setup {t_setup:.3f}s, "
           f"{n_segs} segments {t_segs:.3f}s, telea {t_telea:.3f}s, "
           f"composite {time.time() - t0:.3f}s{mode}")
