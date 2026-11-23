@@ -279,7 +279,8 @@ def test_slider_sits_under_masking_in_details(panel):
     from widgets.sliders_panel import SYNC_GROUPS
     keys = panel.adjustment_keys
     i = keys.index("edge_effect")
-    assert keys[i - 1] == "sharpen_masking" and i == len(keys) - 1
+    assert keys[i - 1] == "sharpen_masking"
+    assert keys[i + 1:] == ["lc_lighting", "lc_detail", "lc_texture", "lc_structure", "lc_shape"]
     assert panel.sliders[i].value_range() == (0, 100) and panel.sliders[i].value() == 0
     lbl = panel._edge_label
     assert lbl.text() == "Edge Effect"
@@ -315,8 +316,11 @@ def test_paste_copy_and_sync(panel, monkeypatch):
     from widgets.sliders_panel import paste_options, SYNC_GROUPS
     clip = {"adjustments": {"edge_effect": 40}, "edge_shape": {"reach": 25}}
     rows = paste_options(clip, lambda k: 0)
-    row = [r for r in rows if r[1] == "edge"]
-    assert row and row[0][0] == "Detail" and "40" in row[0][2] and "0.25 mm" in row[0][2]
+    # one Local Contrast row now (spec/local-contrast.md); a frame with Edge
+    # Effect and no method set reads as Edge Effect
+    row = [r for r in rows if r[1] == "local"]
+    assert row and row[0][0] == "Detail" and "Edge Effect 40" in row[0][2]
+    assert "0.25 mm" in row[0][2]
     assert not [r for r in rows if r[1] == "adj:edge_effect"]
     img = _Img({"contrast": 5})
     _wire(panel, monkeypatch, img)
@@ -324,7 +328,7 @@ def test_paste_copy_and_sync(panel, monkeypatch):
     panel.clipboard = dict(clip, curves=None, cineon_log=False, look_lut=None,
                            flags={}, profile="color", crop=(None, 0.0), rotation=0,
                            flip_h=False, flip_v=False, fine_rotation=0)
-    panel._apply_paste(0, {"edge"})
+    panel._apply_paste(0, {"edge"})       # the row's old id still pastes it
     assert img.adjustment_settings["edge_effect"] == 40
     assert img.adjustment_settings["edge_shape"]["reach"] == 25
     assert img.adjustment_settings["contrast"] == 5

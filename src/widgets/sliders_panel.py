@@ -19,6 +19,9 @@ from core.shadow_neutral import normalize_shadow_shape
 from core.glow import normalize_glow_shape
 from core.shadow_lift import normalize_lift_shape
 from core.edge_effect import normalize_edge_shape
+from core.local_contrast import (LC_KEYS, METHODS as LC_METHODS, METHOD_NAMES as LC_NAMES,
+                                 METHOD_KEYS as LC_METHOD_KEYS, method_of as lc_method_of,
+                                 normalize_method as normalize_lc_method)
 from core.film_stocks import (decode_film_stocks, encode_film_stocks,
                               find_film_stock, upsert_film_stock,
                               remove_film_stock)
@@ -87,9 +90,9 @@ SYNC_GROUPS = [
     # judgement (focus, grain, how far the frame was downscaled), so a user
     # syncs it independently of colour. See spec/sharpening.md. Its "Bypass
     # until export" flag rides with it (spec/bypass-until-export.md).
-    ("details", "Details (sharpening, edge effect)",
+    ("details", "Details (sharpening, local contrast)",
      ("sharpen_amount", "sharpen_radius", "sharpen_masking", "sharpen_export_only",
-      "edge_effect")),
+      "edge_effect") + LC_KEYS),
     # "curves" lives outside ADJUSTMENT_KEYS (it's a nested structure, not a
     # slider), so it's synced specially in _perform_sync_to_all, like crop.
     ("curves", "Curves", ()),
@@ -199,13 +202,35 @@ _BASIC_LABELS = {
     "sharpen_amount": "Sharpen Amount", "sharpen_radius": "Sharpen Radius",
     "sharpen_masking": "Sharpen Masking",
     "edge_effect": "Edge Effect",
+    "lc_lighting": "Local Lighting", "lc_detail": "Local Detail",
+    "lc_texture": "Texture", "lc_structure": "Structure", "lc_shape": "Shape",
 }
 _CHANNEL_NAMES = {"r": "Red", "g": "Green", "b": "Blue"}
 _BAND_KEYS = frozenset(BAND_ADJUSTMENT_KEYS) | {"band_feather"}
 _NOISE_KEYS = ("chroma_nr", "chroma_nr_radius")
 _XT_KEYS = ("xt_rg", "xt_rb", "xt_gr", "xt_gb", "xt_br", "xt_bg")
 _SHARPEN_KEYS = ("sharpen_amount", "sharpen_radius", "sharpen_masking")
-_EDGE_KEYS = ("edge_effect",)     # its own Detail paste row, with its options
+# The Local Contrast list's sliders: one Detail paste row ("local"), with the
+# chosen method and Edge Effect's options (spec/local-contrast.md).
+_LOCAL_KEYS = ("edge_effect",) + LC_KEYS
+_LC_ROW_NAMES = {"lc_lighting": "Lighting", "lc_detail": "Detail", "lc_texture": "Texture",
+                 "lc_structure": "Structure", "lc_shape": "Shape"}
+_LC_ROW_TIPS = {
+    "lc_lighting": ("Lighting: the picture's broad light and shade, the big smooth "
+                    "differences between lit and unlit areas. Left flattens it "
+                    "(shadows open, the brightest light kept), right deepens it."),
+    "lc_detail": ("Detail: everything finer than the lighting, the texture and "
+                  "modelling of surfaces. Right brings it out, left softens it. "
+                  "Where the detail is no more than the film's grain (plain sky) "
+                  "it is left as it is."),
+    "lc_texture": ("Texture: the finest detail above the grain (grass, stone, "
+                   "fabric). The grain itself is left alone."),
+    "lc_structure": ("Structure: middle-sized detail, the folds and forms within "
+                     "things (bark, cloud billows, features)."),
+    "lc_shape": ("Shape: large forms, the modelling of whole objects (a face, a "
+                 "hill, a cloud). Strong edges are kept out of it, so it throws "
+                 "no halo."),
+}
 # Whole-image, non-slider flags stored in the GLOBAL adjustment dict. A slider
 # edit rebuilds that dict from the sliders, so every one of these must be
 # re-attached (_attach_cineon) and preserved by Sync / Paste when its own group
@@ -266,6 +291,23 @@ def _fmt_value(v):
     return f"{int(f):+d}" if f.is_integer() else f"{f:+.1f}"
 
 
+def describe_local_contrast(adj, method=None, edge_shape=None):
+    """'Lighting & Detail: lighting -20, detail +30' for the paste row."""
+    adj = dict(adj or {})
+    if method:
+        adj["local_contrast"] = method
+    m = lc_method_of(adj)
+    if m == "off":
+        return "Off"
+    if m == "edge":
+        from widgets.edge_popup import describe_edge
+        return (f"Edge Effect {_fmt_value(adj.get('edge_effect', 0)).lstrip('+')}, "
+                + describe_edge(edge_shape, full=True))
+    parts = [f"{_LC_ROW_NAMES[k].lower()} "
+             + (_fmt_value(adj.get(k, 0)) if adj.get(k, 0) else "0") for k in LC_METHOD_KEYS[m]]
+    return f"{LC_NAMES[m]}: " + ", ".join(parts)
+
+
 def paste_options(clip, default_for):
     """The paste dialog's rows for a clipboard: [(section, item_id, label)],
     in PASTE_SECTIONS order. Only settings that differ from default on the
@@ -276,7 +318,7 @@ def paste_options(clip, default_for):
     adj = clip.get("adjustments") or {}
     for key, val in adj.items():
         if (key in _BAND_KEYS or key in _NOISE_KEYS or key in _SHARPEN_KEYS
-                or key in _EDGE_KEYS or key in _XT_KEYS or val == default_for(key)):
+                or key in _LOCAL_KEYS or key in _XT_KEYS or val == default_for(key)):
             continue
         section = ("Channel Levels" if key.startswith("ch_")
                    else "Channel Balance" if key.startswith("balance_")
@@ -352,14 +394,13 @@ def paste_options(clip, default_for):
         rows.append(("Detail", "sharpen",
                      f"Sharpening  (amount {_n(sh)}, radius {_n(rad)}, "
                      f"masking {_n(msk)}{bypass})"))
-    # The developer edge effect and its options travel together
-    # (spec/developer-edge-effect.md).
-    edge = adj.get("edge_effect", default_for("edge_effect"))
-    edge_opts = normalize_edge_shape(clip.get("edge_shape"))
-    if edge != default_for("edge_effect") or edge_opts:
-        from widgets.edge_popup import describe_edge
-        rows.append(("Detail", "edge",
-                     f"Edge Effect  ({_n(edge)}, {describe_edge(edge_opts, full=True)})"))
+    # The Local Contrast list: its method, sliders and Edge Effect's options
+    # travel together (spec/local-contrast.md).
+    lc_set = normalize_lc_method(clip.get("local_contrast"))
+    if (lc_set or normalize_edge_shape(clip.get("edge_shape"))
+            or any(adj.get(k, default_for(k)) != default_for(k) for k in _LOCAL_KEYS)):
+        rows.append(("Detail", "local", "Local Contrast  ("
+                     + describe_local_contrast(adj, lc_set, clip.get("edge_shape")) + ")"))
     crop_rect, crop_angle = clip.get("crop") or (None, 0.0)
     if crop_rect is not None:
         w = (crop_rect[2] - crop_rect[0]) * 100.0
@@ -890,8 +931,10 @@ class SlidersPanel(QWidget):
         # of the positional zip. See spec/sharpening.md.
         "sharpen_amount", "sharpen_radius", "sharpen_masking",
         # The developer edge effect, created right after Masking
-        # (spec/developer-edge-effect.md).
+        # (spec/developer-edge-effect.md), then the Local Contrast list's
+        # sliders (spec/local-contrast.md).
         "edge_effect",
+        "lc_lighting", "lc_detail", "lc_texture", "lc_structure", "lc_shape",
     ]
 
     # Non-zero default values for specific adjustment keys. Keys not listed
@@ -1923,8 +1966,43 @@ class SlidersPanel(QWidget):
         self.sharpen_bypass_checkbox = self._make_bypass_checkbox(
             "sharpen_export_only", "Sharpening")
         self.details_section.add_widget(self.sharpen_bypass_checkbox)
+        # Local Contrast (spec/local-contrast.md): one list, one method at a
+        # time, each with its own sliders below it (the others hidden, their
+        # values kept). Edge Effect is one of them.
+        lc_label = QLabel("Local Contrast")
+        lc_label.setFixedWidth(theme.LABEL_COL_W)
+        lc_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        lc_label.setFixedHeight(theme.CONTROL_H)
+        lc_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        lc_label.setToolTip(self.LC_HINT)
+        self.lc_combo = theme.ElidingComboBox()
+        self.lc_combo.setFixedHeight(theme.CONTROL_H)
+        theme.shrinkable_combo(self.lc_combo)
+        for key in LC_METHODS:
+            self.lc_combo.addItem(LC_NAMES[key], key)
+            self.lc_combo.setItemData(self.lc_combo.count() - 1, self.LC_ITEM_TIPS[key],
+                                      Qt.ToolTipRole)
+        self.lc_combo.setToolTip(self.LC_HINT)
+        self.lc_combo.currentIndexChanged.connect(self._on_lc_method_changed)
+        lc_row = QHBoxLayout()
+        lc_row.setSpacing(theme.GAP_TIGHT)
+        lc_row.addWidget(lc_label, alignment=Qt.AlignVCenter)
+        lc_row.addWidget(self.lc_combo, 1)
+        lc_row.addSpacing(auto_w)
+        self.lc_method_row = lc_row
+        self.details_section.add_layout(lc_row)
         self.edge_effect_row = edge_row
         self.details_section.add_layout(edge_row)
+        # Created after Edge Effect, in LC_KEYS' order (ADJUSTMENT_KEYS zip).
+        self._lc_rows = {}
+        for key in LC_KEYS:
+            row = self.create_slider(_LC_ROW_NAMES[key])
+            row.addSpacing(auto_w)
+            row.itemAt(0).widget().setToolTip(_LC_ROW_TIPS[key])
+            self.details_section.add_layout(row)
+            self._lc_rows[key] = row
+        self._lc_method = None           # the frame's stored choice (None = not set)
+        self._sync_lc_rows("off")
 
         # --- Populate Curves ---
         self.curve_editor = CurveEditor()
@@ -2437,6 +2515,9 @@ class SlidersPanel(QWidget):
         self._edge_shape = normalize_edge_shape(
             adjustment.get("edge_shape") if adjustment else None)
         self._update_edge_label()
+        self._lc_method = normalize_lc_method(
+            adjustment.get("local_contrast") if adjustment else None)
+        self._set_lc_combo(lc_method_of(adjustment or {}))
         self._glow_shape = normalize_glow_shape(
             adjustment.get("glow_shape") if adjustment else None)
         self._update_glow_label()
@@ -2830,6 +2911,8 @@ class SlidersPanel(QWidget):
             adjustment["glow_shape"] = dict(self._glow_shape)
         if getattr(self, "_edge_shape", None):
             adjustment["edge_shape"] = dict(self._edge_shape)
+        if getattr(self, "_lc_method", None):
+            adjustment["local_contrast"] = self._lc_method
         return adjustment
 
     def _attach_cineon(self, adjustment: dict) -> dict:
@@ -3630,6 +3713,55 @@ class SlidersPanel(QWidget):
             self._edge_popup = None
             self.end_undo_burst()
 
+    # --- Local Contrast list (spec/local-contrast.md) ------------------------
+    LC_HINT = ("Local Contrast: ways of giving the picture more depth and "
+               "shape than one overall contrast can. Pick one; its sliders "
+               "appear below. Each leaves the film's grain as it is and "
+               "nothing clips.")
+    LC_ITEM_TIPS = {
+        "off": "No local contrast.",
+        "edge": ("Edge Effect: the border a developer leaves where dense meets "
+                 "thin on the negative, about a tenth of a millimetre wide. "
+                 "Crisp edges, as film shows them."),
+        "light": ("Lighting & Detail: the picture split into its broad lighting "
+                  "and its detail, each turned up or down. Strong edges stay "
+                  "clean, with no halo."),
+        "llf": ("Local Laplacian: the same two controls by a different method, "
+                "which treats every size of detail alike; a little stronger on "
+                "large forms, softer on edges."),
+        "bands": ("Detail Bands: texture, structure and shape, each with its "
+                  "own slider."),
+    }
+
+    def _sync_lc_rows(self, method=None):
+        """Show the chosen method's sliders, hide the rest."""
+        if method is None:
+            method = self.lc_combo.currentData() or "off"
+        self._layout_visible(self.edge_effect_row, method == "edge")
+        for key, row in self._lc_rows.items():
+            self._layout_visible(row, key in LC_METHOD_KEYS.get(method, ()))
+
+    def _set_lc_combo(self, method):
+        combo = getattr(self, "lc_combo", None)
+        if combo is None:
+            return
+        i = combo.findData(method if method in LC_METHODS else "off")
+        combo.blockSignals(True)
+        combo.setCurrentIndex(max(i, 0))
+        combo.blockSignals(False)
+        self._sync_lc_rows(combo.currentData())
+
+    def _on_lc_method_changed(self, index):
+        method = self.lc_combo.itemData(index) or "off"
+        self._sync_lc_rows(method)
+        if self.current_idx is None:
+            return
+        # A discrete choice: one undo step of its own.
+        self.end_undo_burst()
+        self._lc_method = method
+        self.on_slider_changed()
+        self.end_undo_burst()
+
     # --- Glow options (spec/highlight-glow.md) -------------------------------
     GLOW_HINT = ("Glow: light spilling round the highlights, as on film. The "
                  "near-white highlights (above 95 % by default) leave a thin warm "
@@ -4124,6 +4256,8 @@ class SlidersPanel(QWidget):
         self._update_glow_label()
         self._edge_shape = None
         self._update_edge_label()
+        self._lc_method = None
+        self._set_lc_combo("off")
         # Save adjustment to the ACTIVE layer (global or selected area) and
         # update the preview. Resetting an area zeroes that area's settings;
         # resetting the Whole Image layer zeroes the global sliders (areas keep
@@ -4244,6 +4378,7 @@ class SlidersPanel(QWidget):
         src_glow = normalize_glow_shape(src_global.get("glow_shape"))
         src_lift = normalize_lift_shape(src_global.get("shadow_lift_shape"))
         src_edge = normalize_edge_shape(src_global.get("edge_shape"))
+        src_lcm = normalize_lc_method(src_global.get("local_contrast"))
         current_adjustment = src_global
         crop_rect = src.crop_rect if src is not None else None
         crop_angle = getattr(src, "crop_angle", 0.0) if src is not None else 0.0
@@ -4274,10 +4409,13 @@ class SlidersPanel(QWidget):
             lift_changes = sync_org_shape and own_lift != src_lift
             own_edge = normalize_edge_shape(img.adjustment_settings.get("edge_shape"))
             edge_changes = sync_edge_shape and own_edge != src_edge
+            own_lcm = normalize_lc_method(img.adjustment_settings.get("local_contrast"))
+            lcm_changes = sync_edge_shape and own_lcm != src_lcm
             if (not adj_changes and not crop_changes and not profile_changes
                     and not curves_changes and not orient_changes and not shape_changes
                     and not org_changes and not gold_changes and not shadow_changes
-                    and not glow_changes and not lift_changes and not edge_changes):
+                    and not glow_changes and not lift_changes and not edge_changes
+                    and not lcm_changes):
                 continue  # nothing to change — and no dead undo snapshot
             img.push_undo_state()
             if adj_changes:
@@ -4309,6 +4447,8 @@ class SlidersPanel(QWidget):
                     merged["shadow_lift_shape"] = dict(own_lift)
                 if own_edge and not edge_changes:
                     merged["edge_shape"] = dict(own_edge)
+                if own_lcm and not lcm_changes:
+                    merged["local_contrast"] = own_lcm
                 # Same for the Cineon flag when the channels group (which
                 # carries it) is NOT being synced — the rebuild from
                 # adjustment_keys would silently drop it otherwise.
@@ -4351,6 +4491,11 @@ class SlidersPanel(QWidget):
                     img.adjustment_settings["edge_shape"] = dict(src_edge)
                 else:
                     img.adjustment_settings.pop("edge_shape", None)
+            if lcm_changes:
+                if src_lcm:
+                    img.adjustment_settings["local_contrast"] = src_lcm
+                else:
+                    img.adjustment_settings.pop("local_contrast", None)
             if curves_changes:
                 if src_curves:
                     img.adjustment_settings["curves"] = copy.deepcopy(src_curves)
@@ -5629,6 +5774,8 @@ class SlidersPanel(QWidget):
                 live["shadow_lift_shape"] = g["shadow_lift_shape"]
             if g.get("edge_shape"):
                 live["edge_shape"] = g["edge_shape"]
+            if g.get("local_contrast"):
+                live["local_contrast"] = g["local_contrast"]
             for flag in GLOBAL_FLAG_KEYS:
                 if g.get(flag):
                     live[flag] = g[flag]
@@ -5646,6 +5793,7 @@ class SlidersPanel(QWidget):
             "shadow_lift_shape": copy.deepcopy(
                 normalize_lift_shape(live.get("shadow_lift_shape"))),
             "edge_shape": copy.deepcopy(normalize_edge_shape(live.get("edge_shape"))),
+            "local_contrast": normalize_lc_method(live.get("local_contrast")),
             # Bypass-until-export flags ride with their section's paste row.
             "flags": {f: bool(live.get(f)) for f in GLOBAL_FLAG_KEYS
                       if f not in ("cineon_log", "look_lut")},
@@ -5755,15 +5903,17 @@ class SlidersPanel(QWidget):
             adj_keys += [k for k in self.adjustment_keys if k in _XT_KEYS]
         if "sharpen" in chosen:
             adj_keys += [k for k in self.adjustment_keys if k in _SHARPEN_KEYS]
-        if "edge" in chosen:
-            adj_keys += [k for k in self.adjustment_keys if k in _EDGE_KEYS]
+        # "local" (its old id "edge" too): the Local Contrast list
+        local = "local" in chosen or "edge" in chosen
+        if local:
+            adj_keys += [k for k in self.adjustment_keys if k in _LOCAL_KEYS]
         # Section -> its bypass flag (pasted with the section's row).
         flag_for = {"noise": "chroma_nr_export_only", "sharpen": "sharpen_export_only"}
         touch_adj = (bool(adj_keys) or "curves" in chosen or "cineon_log" in chosen
                      or "look_lut" in chosen or "xtone_shape" in chosen
                      or "organics_shape" in chosen or "golden_shape" in chosen
                      or "shadow_shape" in chosen or "glow_shape" in chosen
-                     or "shadow_lift_shape" in chosen or "edge" in chosen)
+                     or "shadow_lift_shape" in chosen or local)
         if not touch_adj:
             return None
         # Build a COMPLETE dict from the target (missing keys filled with
@@ -5802,11 +5952,16 @@ class SlidersPanel(QWidget):
             merged["shadow_lift_shape"] = copy.deepcopy(clip["shadow_lift_shape"])
         elif normalize_lift_shape(target.get("shadow_lift_shape")):
             merged["shadow_lift_shape"] = target["shadow_lift_shape"]
-        if "edge" in chosen:
+        if local:
             if normalize_edge_shape(clip.get("edge_shape")):
                 merged["edge_shape"] = copy.deepcopy(clip["edge_shape"])
-        elif normalize_edge_shape(target.get("edge_shape")):
-            merged["edge_shape"] = target["edge_shape"]
+            if normalize_lc_method(clip.get("local_contrast")):
+                merged["local_contrast"] = clip["local_contrast"]
+        else:
+            if normalize_edge_shape(target.get("edge_shape")):
+                merged["edge_shape"] = target["edge_shape"]
+            if normalize_lc_method(target.get("local_contrast")):
+                merged["local_contrast"] = target["local_contrast"]
         if "cineon_log" in chosen or target.get("cineon_log"):
             merged["cineon_log"] = True
         if "look_lut" in chosen and clip.get("look_lut"):
@@ -5861,6 +6016,8 @@ class SlidersPanel(QWidget):
                 self._update_lift_label()
                 self._edge_shape = normalize_edge_shape(merged.get("edge_shape"))
                 self._update_edge_label()
+                self._lc_method = normalize_lc_method(merged.get("local_contrast"))
+                self._set_lc_combo(lc_method_of(merged))
 
         pixels = touch_adj
         if "profile" in chosen:
