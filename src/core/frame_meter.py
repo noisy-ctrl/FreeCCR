@@ -484,6 +484,24 @@ def read_clipping(path, guide=None):
     return clipping_in_guide(vis, cols, desc, black, white, guide)
 
 
+def read_shot(path, guide=None):
+    """(`clipping_in_guide`, the thinnest level reading) of a RAW file, from
+    ONE read: Capture's per-shot check reads both for the estimate's learning
+    (spec/frame-exposure.md, revision 2026-11-23). The reading is None with
+    no guide."""
+    import rawpy
+    with rawpy.imread(path) as raw:
+        vis = np.array(raw.raw_image_visible, copy=True)
+        cols = np.array(raw.raw_colors_visible, copy=True)
+        desc = bytes(raw.color_desc).decode("ascii", "ignore")
+        black = list(raw.black_level_per_channel)
+        white = float(raw.white_level)
+    clips = clipping_in_guide(vis, cols, desc, black, white, guide)
+    reading = (reading_in_guide(vis, cols, desc, black, white, guide)
+               if guide is not None else None)
+    return clips, reading
+
+
 CLIP_NAMES = {"R": "red", "G": "green", "B": "blue"}
 
 
@@ -590,12 +608,15 @@ def suggest(base, trichrome, levels, shutters, isos, live=False):
     return out
 
 
-def live_levels(base, trichrome, ratio):
+def live_levels(base, trichrome, ratio, bias=0.0):
     """The frame's thinnest level per colour from a live estimate: the film
-    base's reading times one ratio for all colours."""
+    base's reading times one ratio for all colours, times 2^`bias` (the
+    correction learned from earlier shots, spec/frame-exposure.md revision
+    2026-11-23)."""
     keys = be.COLOURS if trichrome else ("w",)
     cols = (base or {}).get("colours") or {}
-    return {k: float(cols[k]["base"]) * float(ratio) for k in keys if k in cols}
+    f = float(ratio) * (2.0 ** float(bias or 0.0))
+    return {k: float(cols[k]["base"]) * f for k in keys if k in cols}
 
 
 class FrameMetering:
