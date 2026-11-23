@@ -2020,6 +2020,72 @@ class CCRImage:
             best = list(tt)
         return (int(best[0]), int(best[1]))
 
+    def clip_area(self):
+        """The picture area (x1, y1, x2, y2) as shares of the preview base for
+        the histogram's Scale Sliders to Clip (spec/histogram-clip-levels.md
+        §3): the crop, inset by its turn so no sliver outside it is read,
+        else the picture rect the conversion measured, else None (the whole
+        frame)."""
+        import math as _m
+        rect = getattr(self, "crop_rect", None)
+        base = getattr(self, "resized_raw", None)
+        if rect is not None and base is not None:
+            H, W = base.shape[:2]
+            x1, y1, x2, y2 = (float(v) for v in rect)
+            w, h = (x2 - x1) * W, (y2 - y1) * H
+            t = abs(_m.radians(float(getattr(self, "crop_angle", 0.0) or 0.0)))
+            iw = w * _m.cos(t) - h * _m.sin(t)
+            ih = h * _m.cos(t) - w * _m.sin(t)
+            if iw <= 2 or ih <= 2:
+                iw, ih = w * 0.5, h * 0.5
+            cx, cy = (x1 + x2) * 0.5, (y1 + y2) * 0.5
+            return (cx - iw / W * 0.5, cy - ih / H * 0.5,
+                    cx + iw / W * 0.5, cy + ih / H * 0.5)
+        ci = getattr(self, "conversion_inputs", None) or {}
+        if ci.get("picture"):
+            return tuple(float(v) for v in ci["picture"])
+        return None
+
+    def solve_clip_levels(self, share, white_range, black_range, settings=None):
+        """White Point and (stored) Black Point that make `share` of the
+        picture clip at each end (spec/histogram-clip-levels.md): a closed
+        loop on the real render of the preview base. Returns (white, black,
+        info) or None when there is nothing to render."""
+        from core import clip_guard as cg
+        from core import clip_levels as cl
+        base = getattr(self, "resized_raw", None)
+        if base is None:
+            return None
+        st0 = dict(self.adjustment_settings if settings is None else settings)
+        rect = self.clip_area()
+        ag = self._auto_gain_for_base(base)
+
+        def measure_on(img):
+            def measure(white, black):
+                st = dict(st0)
+                st["white_point"] = white
+                st["black_point"] = black
+                out = self.apply_adjustments(img, settings=st, auto_gain_override=ag,
+                                             skip_dust=True)
+                b, w, total = cg.clip_counts(out, rect)
+                total = max(int(total), 1)
+                return b / total, w / total
+            return measure
+
+        # searched on a half-size render (a quarter of the time), then
+        # settled on the preview base itself (clip_levels.refine)
+        import cv2
+        h, w = base.shape[:2]
+        small = (cv2.resize(base, (max(1, w // 2), max(1, h // 2)),
+                            interpolation=cv2.INTER_AREA)
+                 if min(h, w) >= 200 else None)
+        white, black, info = cl.solve(measure_on(base), float(share), white_range,
+                                      black_range,
+                                      black0=float(st0.get("black_point", 0.0) or 0.0),
+                                      coarse=measure_on(small) if small is not None else None)
+        info["area"] = rect
+        return white, black, info
+
     def solve_skin(self, patch, mask, keys, rng, amount, settings=None):
         """The Skin tool's pull (spec/skin-picker.md): slider values for
         `keys` (the Printer Lights' R/G/B Shift, or Temperature/Tint) that turn
