@@ -410,6 +410,32 @@ class TestBwPointUncrop:
         assert ip.view.bwpoint_mode is None
         assert ip.current_pixmap.width() == 300                   # cropped again
 
+    def test_the_sharp_hires_view_is_uncropped_too(self, tmp_path, monkeypatch):
+        """Revision 2026-11-23: on a high-DPI screen the sharp fitted view
+        swaps a hi-res render in over the preview; it was cut to the crop
+        even while picking, so the film border never showed."""
+        from PySide6.QtGui import QPixmap
+        ip, img = _converted_preview(tmp_path)
+        full = QPixmap(1200, 800)
+        full.fill()
+        monkeypatch.setattr(ip, "_zoomed_in_enough", lambda: True)
+
+        def arrives():                 # a detail render lands (any refresh drops it)
+            ip._hires = {"full_pm": full, "img": img, "sig": ip._hires_signature(img),
+                         "adj_sig": None, "display_pm": None, "crop_sig": None}
+            ip._refresh_item_pixmap()
+        arrives()
+        assert ip._hires_display_pixmap().width() == 600          # the crop
+        ip.set_bwpoint_mode("black")
+        arrives()
+        pm = ip._hires_display_pixmap()
+        assert (pm.width(), pm.height()) == (1200, 800)           # the whole frame
+        assert ip.current_pixmap.width() == 600
+        assert ip._item_prescale == pytest.approx(600 / 1200)
+        ip._on_escape_key()
+        arrives()
+        assert ip._hires_display_pixmap().width() == 600
+
     def test_no_crop_no_rerender(self, tmp_path, monkeypatch):
         ip, img = _converted_preview(tmp_path, crop_rect=None)
         calls = []
