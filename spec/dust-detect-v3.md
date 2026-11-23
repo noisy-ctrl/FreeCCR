@@ -73,6 +73,12 @@ on a dark line the IR also shows beside a bright stripe.
 and not in the IR (it moved between shots). Picture lines can also be one
 colour, so that needs its own evidence.
 
+**Still seen by the user** (2026-11-23, after this revision, merged): some
+false finds on foliage and on edges. Bear it in mind for the next change:
+foliage is fine, high-contrast texture where the IR and colour shots
+disagree a little, the same cause as the ghosts but not long straight lines,
+so §1's rule (line-like, ≥ 5 × as long as wide) doesn't reach it.
+
 ## 3. Selection: an IR find always loses what the IR saw (`dust_fill`)
 
 * `ir_core(spot)`: where the IR itself saw the dust: a stroke's stored
