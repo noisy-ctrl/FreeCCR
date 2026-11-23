@@ -31,12 +31,14 @@ def _fresh():
 # names
 # --------------------------------------------------------------------------- #
 def test_names():
-    assert cl.shot_stem("R0034", "645", "Portra 400", 13, "red") == "R0034_645_Portra400_013_1RED"
-    assert cl.shot_stem("R0034", "", "", 13, "green") == "R0034_013_2GREEN"
-    assert cl.shot_stem("R0034", "", "", 13, "blue") == "R0034_013_3BLUE"
-    assert cl.shot_stem("R0034", "6x7", "", 2, "white") == "R0034_6x7_002_WHITE"
+    # spec/capture-short-names.md: 1R 2G 3B W BW, two-digit shots, 35mm -> 135
+    assert cl.shot_stem("R0034", "645", "Portra 400", 13, "red") == "R0034_645_Portra400_13_1R"
+    assert cl.shot_stem("R0034", "", "", 13, "green") == "R0034_13_2G"
+    assert cl.shot_stem("R0034", "", "", 13, "blue") == "R0034_13_3B"
+    assert cl.shot_stem("R0034", "6x7", "", 2, "white") == "R0034_6x7_02_W"
     assert cl.shot_stem("R0034", "", "HP5+ @800", 1234, "bw") == "R0034_HP5800_1234_BW"
-    assert cl.shot_stem("", "", "", 1, "blue") == "R0001_001_3BLUE"
+    assert cl.shot_stem("", "", "", 1, "blue") == "R0001_01_3B"
+    assert cl.shot_stem("R0025", "35mm", "Colorplus", 4, "ir") == "R0025_135_Colorplus_04_4IR"
     assert cl.single_slot("bw") == "bw" and cl.single_slot("colour") == "white"
 
 
@@ -230,23 +232,23 @@ def test_capture_names_and_logs_a_usb_trichrome_shot(tmp_path, monkeypatch):
         mw._tether_folder = mw.folder
         mw.capture_session = {"roll": "R0034", "format": "645", "film": "Portra 400"}
         mon._refresh_status_strip()
-        assert mon.roll_note.text() == "Roll R0034 · 120: 6x4.5 · Portra 400 · next shot 001"
+        assert mon.roll_note.text() == "Roll R0034 · 120: 6x4.5 · Portra 400 · next shot 01"
         mon.shoot()
         assert mon.sequence.running
-        for word in ("1RED", "2GREEN", "3BLUE"):
+        for word in ("1R", "2G", "3B"):
             n = len(getattr(usb, "names", []))
             assert _wait(lambda: len(getattr(usb, "names", [])) > n)
             name = usb.names[-1]
-            assert name == f"R0034_645_Portra400_001_{word}"
+            assert name == f"R0034_645_Portra400_01_{word}"
             usb.file_saved.emit(os.path.join(mw.folder, name + ".RAF"))
             _app.processEvents()
         assert _wait(lambda: not mon.sequence.running)
         (e,) = cl.read_log(mw.folder)
-        assert e["files"] == {c: f"R0034_645_Portra400_001_{w}.RAF"
-                              for c, w in (("red", "1RED"), ("green", "2GREEN"),
-                                           ("blue", "3BLUE"))}
+        assert e["files"] == {c: f"R0034_645_Portra400_01_{w}.RAF"
+                              for c, w in (("red", "1R"), ("green", "2G"),
+                                           ("blue", "3B"))}
         assert e["done"] and e["route"] == "usb" and e["scan_type"] == "trichrome"
-        assert "next shot 002" in mon.roll_note.text()
+        assert "next shot 02" in mon.roll_note.text()
     finally:
         try:
             next(gen)

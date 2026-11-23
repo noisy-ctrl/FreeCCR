@@ -200,6 +200,16 @@ class ThumbnailList(QWidget):
         self.thumbnail_list.setWrapping(False)
         self.thumbnail_list.setFlow(QListWidget.TopToBottom)
         self.thumbnail_list.setFixedWidth(196)
+        # names at the caption size on a fixed grid as wide as the list, elided
+        # in the middle if still too long: no sideways scroll
+        # (spec/capture-short-names.md)
+        f = self.thumbnail_list.font()
+        f.setPixelSize(theme.FS_CAPTION)
+        self.thumbnail_list.setFont(f)
+        self.thumbnail_list.setTextElideMode(Qt.ElideMiddle)
+        self.thumbnail_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.thumbnail_list.setWordWrap(False)
+        self._apply_list_grid()
         self.thumbnail_list.setFocusPolicy(Qt.StrongFocus)  # <-- Ensure strong focus
         self.thumbnail_list.setFocus()  # <-- Optionally set focus immediately
         # Ctrl+click toggles, Shift+click selects a range
@@ -318,12 +328,9 @@ class ThumbnailList(QWidget):
             # Get filename from the CCRImage object itself (always in sync);
             # sliced images carry a distinguishing display name (e.g. _s2)
             img_obj = ccr_backend.get_image_by_index(idx)
-            if img_obj is None:
-                filename = ""
-            else:
-                filename = (getattr(img_obj, "display_name", None)
-                            or os.path.basename(img_obj.file_path))
-            item = QListWidgetItem(filename)  # Set filename as item text
+            filename, full = self._item_label(img_obj)
+            item = QListWidgetItem(filename)  # the short label (spec/capture-short-names.md)
+            item.setToolTip(full)
             # Apply rotations and flips using PySide6 transformations
             transformed_thumbnail = self.apply_frontend_transformations(thumbnail, idx)
             icon = QIcon(transformed_thumbnail)
@@ -502,9 +509,9 @@ class ThumbnailList(QWidget):
         if img_obj is None:
             logging.warning(f"append_image_item: no backend image at index {idx}")
             return False
-        filename = (getattr(img_obj, "display_name", None)
-                    or os.path.basename(img_obj.file_path))
+        filename, full = self._item_label(img_obj)
         item = QListWidgetItem(filename)
+        item.setToolTip(full)
         thumbnail = ccr_backend.get_thumbnail_by_index(idx)
         if thumbnail is not None:
             item.setIcon(QIcon(self.apply_frontend_transformations(thumbnail, idx)))
@@ -517,6 +524,25 @@ class ThumbnailList(QWidget):
             self.thumbnail_list.setCurrentRow(self.thumbnail_list.count() - 1)
         return True
         
+    LIST_GRID_W = 172      # px: the list's 196 less its frame and scroll bar
+    LIST_ICON = 156
+
+    def _apply_list_grid(self):
+        from PySide6.QtGui import QFontMetrics
+        fm = QFontMetrics(self.thumbnail_list.font())
+        self.thumbnail_list.setGridSize(
+            QSize(self.LIST_GRID_W, self.LIST_ICON + fm.height() + 14))
+
+    @staticmethod
+    def _item_label(img):
+        """(the list's short label, the full file name) of an image."""
+        if img is None:
+            return "", ""
+        from core import capture_log
+        full = (getattr(img, "display_name", None)
+                or os.path.basename(img.file_path))
+        return capture_log.list_label(full), full
+
     def _on_sheet_clicked(self, checked):
         mw = self._main_window()
         if not hasattr(mw, "show_contact_sheet") or not mw.show_contact_sheet(checked):
@@ -606,17 +632,16 @@ class ThumbnailList(QWidget):
             img = ccr_backend.get_image_by_index(idx)
             if img is None:
                 continue
-            filename = (getattr(img, "display_name", None)
-                        or os.path.basename(img.file_path))
+            filename, full = self._item_label(img)
             sig = getattr(img, "profile_signature", None)
             # per frame: its own flat (spec/preset-flat-fields.md §5)
             mism = sig is not None and sig != ccr_backend.active_profile_signature(img)
             item.setText(("⚠ " + filename) if mism else filename)
             item.setForeground(warn if mism else normal)
             item.setToolTip(
-                "Graded under a different camera profile or field "
+                full + "\n\nGraded under a different camera profile or field "
                 "correction.\nRight-click ▸ Replace with current camera "
-                "profile." if mism else "")
+                "profile." if mism else full)
 
     def replace_with_current_profile(self, indices):
         """Re-grade the given image(s) under the current camera profile by

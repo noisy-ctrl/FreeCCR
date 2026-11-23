@@ -2598,7 +2598,7 @@ class LiveCaptureMonitor(QWidget):
             bits.append(film_formats.label(sess["format"]) or sess["format"])
         if sess.get("film_label") or sess.get("film"):
             bits.append(str(sess.get("film_label") or sess["film"]))
-        bits.append(f"next shot {int(next_shot):03d}")
+        bits.append(f"next shot {int(next_shot):0{capture_log.SHOT_DIGITS}d}")
         self.roll_note.setText(" · ".join(bits))
 
     # --- autofocus before each shot (spec/focus-rail.md revision 2 C) -------
