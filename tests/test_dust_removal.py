@@ -63,6 +63,16 @@ class TestRasterize:
 
 
 # --- apply_dust_removal -----------------------------------------------------
+
+def _reach(r_px):
+    """How far the heal's source search looks for a round dab of radius
+    r_px (spec/dust-heal-ring-match.md): 4 x its size, +50 % slack."""
+    from core import ccr_processor as cp
+    size = 2 * r_px + 1
+    reach = min(cp._HEAL_SEARCH_MAX * max(1.0, r_px / 4.0),
+                max(cp._HEAL_SEARCH_MIN, cp._HEAL_SEARCH * size))
+    return 1.5 * reach + 2
+
 class TestApplyDustRemoval:
     def test_identity_returns_same_object(self):
         img = _flat_with_speck()
@@ -140,15 +150,11 @@ class TestApplyDustRemoval:
         out = apply_dust_removal(img, [spot])
         assert int(out[50, 50, 0]) < 45000  # moved toward the surround
 
-    def test_manual_stroke_samples_touching_area(self):
-        # AUTOMATIC SAMPLING RULE (maintainer): every automatically picked
-        # initial sample — painted strokes included — must TOUCH the patch.
-        # Consequence, accepted with the rule: a brush narrower than the
-        # defect it traces samples the defect's own continuation (the only
-        # thing touching it) — the brush must COVER a defect to remove it.
-        # This test pins the touch contract; the old version asserted the
-        # ring-rejection machinery healed a tight hair trace to sky, which
-        # sampled from far away and is superseded by the rule.
+    def test_a_stroke_samples_within_reach(self):
+        # The source search (spec/dust-heal-ring-match.md, 2026-11-23) looks
+        # only within 4 x a piece's size: every automatic sample is near its
+        # patch (the old rule demanded touching; it broke lines and pasted
+        # discs of whatever touched the spot).
         sky = np.array([20000, 25000, 40000], np.float32)
         img = np.broadcast_to(sky.astype(np.uint16), (200, 200, 3)).copy()
         cv2.line(img, (30, 100), (170, 100), (62000, 60000, 30000), 13)
@@ -160,9 +166,8 @@ class TestApplyDustRemoval:
         for cy, cx, off, *_ in plan:
             if off is None:
                 continue
-            # Touching: segment thickness is the 2 px brush → offsets sit at
-            # ~2·half_th (+raster slack), never out on the old search rings.
-            assert float(np.hypot(off[0] * 200, off[1] * 200)) <= 12.0
+            # within reach of the piece (2 px brush, pieces up to 32 px)
+            assert float(np.hypot(off[0] * 200, off[1] * 200)) <= _reach(16)
         # And a stroke that COVERS the hair heals it to sky from the
         # touching sky on either side.
         wide = {"kind": "brush",
@@ -317,9 +322,9 @@ class TestApplyDustRemoval:
         # plan seeds every re-heal and matching segments reuse its offset
         # VERBATIM (no re-scoring). Proof by tampering: a shifted-but-clean
         # prior offset must drive the heal and be carried into the new plan.
-        # (The tamper stays within the rule's ±4 px touching tolerance — an
-        # AUTOMATIC pin shifted beyond touching is a fossil and re-picks,
-        # see test_fossil_automatic_pins_repick_under_the_rule.)
+        # (The record carries the current rule's tag: an automatic pin from
+        # the old touching rule is searched again,
+        # spec/dust-heal-ring-match.md.)
         rng = np.random.default_rng(17)
         img = np.clip(rng.normal(30000, 3000, (400, 400, 3)), 0,
                       65535).astype(np.uint16)
@@ -328,7 +333,8 @@ class TestApplyDustRemoval:
         apply_dust_removal(img, [spot], collect_plan=plan1)
         (cy, cx, off, g, d, *_), = plan1
         assert off is not None
-        tampered = [(cy, cx, (off[0], off[1] + 3.0 / 400.0), g, d)]
+        from core import ccr_processor as cp
+        tampered = [(cy, cx, (off[0], off[1] + 3.0 / 400.0), g, d, False, cp._HEAL_RULE)]
         plan2 = []
         apply_dust_removal(img, [spot], collect_plan=plan2,
                            prior_plan=tampered)
@@ -377,14 +383,10 @@ class TestApplyDustRemoval:
         dist = float(np.hypot(off[0] * 400, off[1] * 400))
         assert dist <= 1.6 * 41
 
-    def test_stripes_defect_removed_from_touching_sample(self):
-        # AUTOMATIC SAMPLING RULE: the sample must touch the patch and is
-        # chosen by hue/sat/value + texture — the rule has NO pattern-phase
-        # term, so on striped content the fill may land phase-shifted (the
-        # user's re-pick drag is the tool for pattern alignment). What must
-        # hold: the defect is gone, the fill is stripe-toned content from a
-        # TOUCHING offset, never a remote patch. (Supersedes the old
-        # phase-alignment promise of the ring-SSD search.)
+    def test_stripes_defect_removed_from_a_near_sample(self):
+        # The source search matches the surroundings (the ring), so on
+        # stripes the fill comes from a nearby patch in phase; what must
+        # hold: the defect is gone and the sample is within reach.
         yy, xx = np.mgrid[0:200, 0:200]
         base = 30000 + 12000 * np.sin(2 * np.pi * xx / 24.0)
         img = np.stack([base] * 3, axis=-1).astype(np.uint16)
@@ -394,7 +396,7 @@ class TestApplyDustRemoval:
         out = apply_dust_removal(img, [spot], feather=0.0, collect_plan=plan)
         (cy, cx, off, *_), = plan
         assert off is not None
-        assert float(np.hypot(off[0] * 200, off[1] * 200)) <= 2 * 10 + 4
+        assert float(np.hypot(off[0] * 200, off[1] * 200)) <= _reach(10)
         hole = np.hypot(yy - 100, xx - 100) <= 8
         healed = out[hole].astype(np.float32)
         assert float(healed.max()) < 50000       # the bright speck is gone
@@ -491,7 +493,7 @@ class TestApplyDustRemoval:
     def test_touching_strokes_sample_separately(self):
         # MAINTAINER RULE, verbatim: "do not auto connect 2 strokes — sample
         # separately." Two overlapping dabs must remain two patches, each
-        # with its own record and its own TOUCHING sample; the union used to
+        # with its own record and its own sample; the union used to
         # merge into one component healed as a single bigger patch.
         rng = np.random.default_rng(12)
         img = np.clip(rng.normal(30000, 2000, (300, 300, 3)), 0,
@@ -505,8 +507,8 @@ class TestApplyDustRemoval:
             assert off is not None
             # Each record's segment lies on its own stroke...
             assert abs(cx - s["pts"][0][0]) < 0.03
-            # ...and each sample touches ITS patch.
-            assert float(np.hypot(off[0] * 300, off[1] * 300)) <= 2 * 9 + 8
+            # ...and each sample is within reach of ITS patch.
+            assert float(np.hypot(off[0] * 300, off[1] * 300)) <= _reach(9)
 
     def test_new_stroke_keeps_far_samples_stable(self):
         # Adding a dab must only re-sample segments near the edit. In the
@@ -803,7 +805,7 @@ class TestStalePlanPruning:
                            prior_plan=[(0.5, 0.5, far, False, False, False)])
         (cy, cx, off, *_), = plan
         assert off is not None
-        assert float(np.hypot(off[0] * 400, off[1] * 400)) <= 2 * 12 + 8
+        assert float(np.hypot(off[0] * 400, off[1] * 400)) <= _reach(12)
         plan2 = []
         apply_dust_removal(img16, [spot], collect_plan=plan2,
                            prior_plan=[(0.5, 0.5, far, False, False, True)])
@@ -818,9 +820,10 @@ class TestStalePlanPruning:
                         65535).astype(np.uint16)
         holder = CCRImage.__new__(CCRImage)
         keep = {"kind": "brush", "pts": [[0.3, 0.3]], "r": 0.03}
-        pinned = (25.0 / 400, 0.0)   # a touching offset (hole r = 12 px)
+        pinned = (25.0 / 400, 0.0)   # within reach (hole r = 12 px)
+        from core import ccr_processor as cp
         holder._dust_plan_cache = ("k", [(0.3, 0.3, pinned,
-                                          False, False, False)])
+                                          False, False, False, cp._HEAL_RULE)])
         holder._dust_plan_spots = [keep]
         holder.dust_spots = [keep]
         holder.dust_feather = 0.25

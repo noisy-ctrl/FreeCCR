@@ -299,7 +299,8 @@ def serialize_image(img) -> dict:
 def _dust_plan_to_json(img):
     """The image's cached heal plan as JSON-safe lists, or None when it does
     not match the current spots (never persist a stale plan). Records mirror
-    _heal_impl's: [cy, cx, [oy, ox] | None, genuine, dlike_on, manual]."""
+    _heal_impl's: [cy, cx, [oy, ox] | None, genuine, dlike_on, manual, rule]
+    (rule: the source search that picked it, spec/dust-heal-ring-match.md)."""
     cached = getattr(img, "_dust_plan_cache", None)
     spots = getattr(img, "dust_spots", None) or []
     if not cached or not spots or cached[0] != repr(spots):
@@ -307,14 +308,14 @@ def _dust_plan_to_json(img):
     out = []
     for r in cached[1]:
         off = None if r[2] is None else [float(r[2][0]), float(r[2][1])]
-        out.append([float(r[0]), float(r[1]), off] + list(r[3:6]))
+        out.append([float(r[0]), float(r[1]), off] + list(r[3:7]))
     return out
 
 
 def _dust_plan_from_json(plan):
     """Inverse of _dust_plan_to_json (tuples, offset as a tuple)."""
     return [(r[0], r[1], (tuple(r[2]) if r[2] is not None else None),
-             *r[3:6]) for r in plan]
+             *r[3:7]) for r in plan]
 
 
 def _adjustments_to_json(adj):

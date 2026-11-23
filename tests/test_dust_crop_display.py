@@ -139,7 +139,7 @@ class TestHealSourceOverlay:
 
 
 class TestRightButtonStrokeEditing:
-    def test_right_drag_moves_stroke_and_repicks_touching(self, tmp_path):
+    def test_right_drag_moves_stroke_and_repicks_nearby(self, tmp_path):
         # THE SAMPLING RULE retroacts on automatic pins: a moved stroke's
         # AUTOMATIC source used to travel absolutely (offset compensated),
         # which leaves it far from the stroke's new position — a non-touching
@@ -160,13 +160,14 @@ class TestRightButtonStrokeEditing:
         ip.dust_right_move(QPointF(360, 200))
         ip.dust_right_release()
         assert img.dust_spots[0]["pts"][0] == pytest.approx([0.6, 0.5])
-        # The moved stroke's automatic sample TOUCHES it at the new place.
+        # The moved stroke's automatic sample is near it at the new place.
         (cy2, cx2, off2, *_), = img._dust_plan_cache[1]
         assert cx2 == pytest.approx(0.6, abs=0.01)
         assert off2 is not None
         h, w = img.resized_raw.shape[:2]
         r_px = 0.03 * w
-        assert float(np.hypot(off2[0] * h, off2[1] * w)) <= 2 * r_px + 8
+        from tests.test_dust_removal import _reach
+        assert float(np.hypot(off2[0] * h, off2[1] * w)) <= _reach(r_px)
         # The drag is one undo step back to the pre-drag stroke.
         assert img.pop_undo_state()
         assert img.dust_spots[0]["pts"][0] == pytest.approx([0.5, 0.5])

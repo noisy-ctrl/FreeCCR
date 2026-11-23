@@ -440,7 +440,9 @@ def apply_dust_removal(img16, spots, inpaint_radius=3) -> np.ndarray: # uint16 R
      become the entire anchor (clean sky strokes healed to solid black,
      cloned from the border). Either failure distrusts the estimate
      (`genuine=False`): full ring, no defect force-fill.
-  3. **Search — THE AUTOMATIC SAMPLING RULE (maintainer, verbatim)**,
+  3. **Search** — superseded 2026-11-23 by spec/dust-heal-ring-match.md (the nearby
+     patch whose surroundings match, within 4 × the piece's size). As first built:
+     **THE AUTOMATIC SAMPLING RULE (maintainer, verbatim)**,
      applied to EVERY automatically picked initial sample — AI-detected
      spots and painted strokes alike (only the user's explicit right-drag
      re-pick is exempt). **Strokes are never auto-connected**: each spot is

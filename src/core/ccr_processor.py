@@ -5234,6 +5234,21 @@ _HEAL_ANGLES = 16         # candidate source directions searched around a spot
 # lowest texture wins. Total selection — no distance rings, no gates, no
 # fallback ranking. The former ring-sweep constants died with the sweep.
 _HEAL_MIN_RING_PX = 8     # need at least this much clean ring to heal
+# The source search (spec/dust-heal-ring-match.md, the user 2026-11-23: "where
+# dust is on a straight horizontal object, the tool often samples from outside
+# that line ... creating objects where there aren't any ... too crisp"): the
+# source is the nearby patch whose SURROUNDINGS match the spot's (masked SSD
+# on the ring), within _HEAL_SEARCH x the patch's size, a little dearer with
+# distance, plus how far its interior strays from a smooth fill of the ring
+# (copying an object into plain picture costs). _HEAL_RULE tags plan records
+# made by it: an automatic record without it (the old touching rule) is
+# searched again.
+_HEAL_RULE = 2
+_HEAL_SEARCH = 4.0
+_HEAL_SEARCH_MIN = 12
+_HEAL_SEARCH_MAX = 160
+_HEAL_DIST_PEN = 0.15
+_HEAL_PRIOR = 0.5
 _HEAL_SEG_MIN = 32        # min heal-segment size (px) for long strokes
 _HEAL_SEG_THICKNESS = 6.0  # segment size as a multiple of hole thickness
 _HEAL_SEG_MAX = 96        # segment-size cap (px at plan scale): a big compact
@@ -5307,7 +5322,7 @@ def _heal_patch(img16: np.ndarray, img16_c: np.ndarray, labels: np.ndarray,
                 filled: np.ndarray, fmap: np.ndarray, feather: float,
                 src_off=None, forced_flags=None,
                 sample=None, manual=False, auto=False, ws_windowed=False,
-                pref_off=None):
+                pref_off=None, smooth=None):
     """Fill one hole patch (a compact component, or one segment of a long
     stroke) by cloning the best-matching nearby clean patch.
 
@@ -5463,26 +5478,16 @@ def _heal_patch(img16: np.ndarray, img16_c: np.ndarray, labels: np.ndarray,
     ring_bg = np.median(dst_ring, axis=0)
     ring_mad = float(np.median(np.abs(dst_ring - ring_bg).mean(axis=1)))
 
+    reach = int(min(_HEAL_SEARCH_MAX * max(1.0, half_th / 4.0),
+                    max(_HEAL_SEARCH_MIN,
+                        _HEAL_SEARCH * max(by1 - by0, bx1 - bx0, 2.0 * half_th))))
+
     def _touches_patch(ty, tx):
-        """Does the sample area (hole shifted by (ty, tx)) come within the
-        rule's ±4 px of THE PATCH (labels == comp — the whole spot, not just
-        this segment's tile)? Used by both the pinned-offset validation and
-        the per-patch shared-offset (pref) path so plan time and replay
-        agree: a shared offset that stops touching where the patch boundary
-        curves away must re-pick at BOTH, or the plans drift."""
-        gy0 = max(0, min(wy0, wy0 + ty) - 5)
-        gx0 = max(0, min(wx0, wx0 + tx) - 5)
-        gy1 = min(h, max(wy1, wy1 + ty) + 5)
-        gx1 = min(w, max(wx1, wx1 + tx) + 5)
-        comp_near = cv2.dilate(
-            (labels[gy0:gy1, gx0:gx1] == comp).astype(np.uint8),
-            np.ones((9, 9), np.uint8)).astype(bool)
-        hy_, hx_ = np.nonzero(hole)
-        py_ = hy_ + (wy0 + ty - gy0)
-        px_ = hx_ + (wx0 + tx - gx0)
-        okp = ((py_ >= 0) & (py_ < gy1 - gy0)
-               & (px_ >= 0) & (px_ < gx1 - gx0))
-        return bool(comp_near[py_[okp], px_[okp]].any())
+        """Is a source at offset (ty, tx) within the search's reach of the
+        patch (spec/dust-heal-ring-match.md)? Pins and the shared per-patch
+        offset are honoured only within it (+50 % for raster rounding across
+        scales), as the search itself only looks that far."""
+        return float(np.hypot(ty, tx)) <= 1.5 * reach + 2.0
 
     best_src, best_off, best_rv = None, None, None
     if src_off is not None:
@@ -5650,64 +5655,68 @@ def _heal_patch(img16: np.ndarray, img16_c: np.ndarray, labels: np.ndarray,
                 best_off = (pdy, pdx)
                 best_rv = None if bool(rvp.all()) else rvp
     if best_src is None:
-        hl = hole_px.mean(axis=1)
-        ref = _dw(np.median(hole_px[hl <= np.median(hl)], axis=0))
-        ref_h, ref_s, ref_v = _hsv1(ref)
-        best_comb = None
-        # THE FINITE TOUCHING SET: every translation that places a congruent
-        # copy of the patch so its border shares contact with the patch
-        # border — no angular sampling, no gaps. Translations that OVERLAP
-        # the patch form the support of the shape's autocorrelation (the
-        # Minkowski sum of the hole with its own reflection); the touching
-        # set is that support's outer 8-connected boundary. Finite and
-        # complete: every member touches by construction, and every possible
-        # touching placement is a member. The sample-area dust check uses
-        # the RAW mask (labels) — the 1 px mask_pad dilation would push the
-        # sample off the border it must touch — and the membrane's ring
-        # subset derives from the raw mask too (scale-stable, where
-        # mask_pad's fixed dilation drifted preview vs export).
-        hys, hxs = np.nonzero(hole)
-        K = hole[int(hys.min()):int(hys.max()) + 1,
-                 int(hxs.min()):int(hxs.max()) + 1].astype(np.float32)
-        kh, kw = K.shape
-        pyk, pxk = kh + 2, kw + 2
-        canvas = np.zeros((kh + 2 * pyk, kw + 2 * pxk), np.float32)
-        canvas[pyk:pyk + kh, pxk:pxk + kw] = K
-        overlap = cv2.matchTemplate(canvas, K, cv2.TM_CCORR) > 0.5
-        touching = (cv2.dilate(overlap.astype(np.uint8),
-                               np.ones((3, 3), np.uint8)).astype(bool)
-                    & ~overlap)
-        t_ys, t_xs = np.nonzero(touching)
-        for dy, dx in zip((t_ys - pyk).tolist(), (t_xs - pxk).tolist()):
-            sy0, sx0, sy1, sx1 = wy0 + dy, wx0 + dx, wy1 + dy, wx1 + dx
-            if sy0 < 0 or sx0 < 0 or sy1 > h or sx1 > w:
-                continue
-            # Pre-existing invariant: dust is never cloned — a touching
-            # placement whose SAMPLE AREA overlaps any spot is not scene.
-            lbl_win = labels[sy0:sy1, sx0:sx1]
-            if (lbl_win[hole] > 0).any():
-                continue
-            rv2 = lbl_win[ring] == 0
-            if not rv2.any():
-                continue  # membrane needs ≥1 clean ring px (NaN guard)
-            src = img16[sy0:sy1, sx0:sx1].astype(np.float32)
-            area = src[hole]
-            ah, as_, av = _hsv1(_dw(np.median(area, axis=0)))
-            dh_ = abs(ah - ref_h)
-            dh_ = min(dh_, 1.0 - dh_) * 2.0 * max(as_, ref_s)
-            tex = float(area.mean(axis=1).std()) * dwk / 65535.0
-            comb = dh_ + abs(as_ - ref_s) + abs(av - ref_v) + tex
-            if best_comb is None or comb < best_comb:
-                best_comb = comb
-                best_src, best_off = src, (dy, dx)
-                best_rv = None if bool(rv2.all()) else rv2
+        # THE SOURCE SEARCH (spec/dust-heal-ring-match.md): every placement
+        # within `reach` whose sample area is clean, scored by how well its
+        # surroundings match the patch's ring (masked SSD on a gentle
+        # sqrt encoding of display values), x (1 + a little for distance),
+        # + how far its interior strays from a smooth fill of the ring. A
+        # wire through the spot is matched by the wire either side of it;
+        # a plain sky can't take a chimney. Measured on dust put on the
+        # user's lab scans: mean error 36 -> 20 levels, wrong-structure
+        # pixels 51 -> 33 %, fine detail 1.10 -> 1.00 of the real picture.
+        sy0, sy1 = max(0, wy0 - reach), min(h, wy1 + reach)
+        sx0, sx1 = max(0, wx0 - reach), min(w, wx1 + reach)
+        th_, tw_ = wy1 - wy0, wx1 - wx0
+        if sy1 - sy0 >= th_ + 1 and sx1 - sx0 >= tw_ + 1:
+            def _enc(v):
+                return np.sqrt(np.maximum(_dw(v), 0.0) / 65535.0).astype(np.float32)
+            area = _enc(img16[sy0:sy1, sx0:sx1].astype(np.float32))
+            tmpl = _enc(dst)
+            ring_f = ring.astype(np.float32)
+            n_ring = float(ring_f.sum())
+            ssd = np.zeros((sy1 - sy0 - th_ + 1, sx1 - sx0 - tw_ + 1), np.float32)
+            for c in range(3):
+                ssd += cv2.matchTemplate(np.ascontiguousarray(area[..., c]),
+                                         np.ascontiguousarray(tmpl[..., c]),
+                                         cv2.TM_SQDIFF, mask=ring_f)
+            ssd /= max(n_ring, 1.0)
+            # the sample area must be clean (no dust, nothing outside the crop)
+            dirty = (mask_pad[sy0:sy1, sx0:sx1] > 0).astype(np.float32)
+            hole_f = hole.astype(np.float32)
+            bad = cv2.matchTemplate(dirty, hole_f, cv2.TM_CCORR) > 0.5
+            # ... and most of its own ring too (the tone anchor)
+            ring_dirty = cv2.matchTemplate(dirty, ring_f, cv2.TM_CCORR)
+            bad |= ring_dirty > 0.25 * n_ring
+            ssd[bad] = np.inf
+            ssd[~np.isfinite(ssd)] = np.inf
+            oy, ox = np.mgrid[0:ssd.shape[0], 0:ssd.shape[1]]
+            dist = np.hypot(oy + (sy0 - wy0), ox + (sx0 - wx0))
+            ssd = ssd * (1.0 + _HEAL_DIST_PEN * dist / max(reach, 1))
+            if smooth is not None and _HEAL_PRIOR > 0 and np.isfinite(ssd).any():
+                sm_img = smooth["get"]()
+                sm = _enc(sm_img[wy0:wy1, wx0:wx1].astype(np.float32))
+                dev = np.zeros_like(ssd)
+                for c in range(3):
+                    dev += cv2.matchTemplate(
+                        np.ascontiguousarray(cv2.GaussianBlur(area[..., c], (0, 0), 1.5)),
+                        np.ascontiguousarray(cv2.GaussianBlur(sm[..., c], (0, 0), 1.5)),
+                        cv2.TM_SQDIFF, mask=hole_f)
+                dev /= max(float(hole_f.sum()), 1.0)
+                ssd = ssd + _HEAL_PRIOR * dev
+            k = int(np.argmin(ssd))
+            if np.isfinite(ssd.flat[k]):
+                by_, bx_ = np.unravel_index(k, ssd.shape)
+                dy, dx = int(by_ + sy0 - wy0), int(bx_ + sx0 - wx0)
+                best_src = img16[wy0 + dy:wy1 + dy, wx0 + dx:wx1 + dx].astype(np.float32)
+                best_off = (dy, dx)
+                rv2 = labels[wy0 + dy:wy1 + dy, wx0 + dx:wx1 + dx][ring] == 0
+                if not rv2.any():
+                    best_src = best_off = None
+                else:
+                    best_rv = None if bool(rv2.all()) else rv2
         if best_src is None:
-            # No touching candidate EXISTS: every touching direction is out
-            # of frame (a patch nearly as big as the buffer) or inside other
-            # dust. There is no sample to select — dust pixels are never
-            # cloned (pre-existing invariant) — so this degenerates to the
-            # boundary-diffusion fill (Telea), which grows the fill from the
-            # patch's own touching border.
+            # No clean placement within reach (dense dust, the frame's edge):
+            # the boundary-diffusion fill (Telea) takes it.
             return None
 
     if best_src is None:
@@ -5823,6 +5832,21 @@ _DUST_PLAN_LONG = 1080
 _DUST_EDIT_TOL = 0.004
 
 
+def _record_current(rec):
+    """Was this plan record's source chosen by the current search? A user's
+    own pick always counts; an automatic one only if tagged _HEAL_RULE (the
+    old touching rule's picks are searched again)."""
+    if rec is None or rec[2] is None:
+        return True
+    if len(rec) >= 6 and bool(rec[5]):
+        return True
+    return len(rec) >= 7 and rec[6] == _HEAL_RULE
+
+
+def _plan_current(plan):
+    return plan is not None and all(_record_current(r) for r in plan)
+
+
 def _nearest_plan_record(plan, cyn, cxn, tol=0.06):
     """The plan record whose segment centroid is nearest to (cyn, cxn) in
     normalized coords, or None when nothing lies within `tol` (a component
@@ -5909,6 +5933,12 @@ def apply_dust_removal(img16: np.ndarray, spots, inpaint_radius: int = 3,
                           plan_tol=_DUST_EDIT_TOL, crop=crop,
                           ws_windowed=ws_windowed, retry_fallbacks=True)
     scale = long_side / float(_DUST_PLAN_LONG)
+    if plan is not None and not _plan_current(plan):
+        # a plan with sources the old touching rule picked (a catalogue from
+        # before spec/dust-heal-ring-match.md, the preview not rendered
+        # since): plan afresh at the preview's scale rather than search at
+        # this size, so the result is the one the preview will show
+        plan = None
     if plan is None:
         # No preview plan supplied — derive one from this buffer's own
         # downscale (plan-only: the healed small buffer would be discarded).
@@ -6056,6 +6086,17 @@ def _heal_impl(img16: np.ndarray, spots, inpaint_radius: int,
     kb = int(round(max(1.0, scale_up)))
     kb += 1 - (kb % 2)  # nearest odd
     img16_c = img16 if kb <= 1 else cv2.blur(img16, (kb, kb))
+    # The source search's smooth fill of the dust (its "no new objects"
+    # check, spec/dust-heal-ring-match.md): made once, only if some patch
+    # searches afresh (a replay of a plan never needs it).
+    _smooth = {"img": None}
+
+    def _smooth_get():
+        if _smooth["img"] is None:
+            _smooth["img"] = _telea16(img16, cv2.dilate(mask, np.ones((3, 3), np.uint8)),
+                                      telea_r)
+        return _smooth["img"]
+    smooth_box = {"get": _smooth_get}
     # Segments whose PINNED source is under newer dust: re-run after the
     # fills below so they clone the healed content at the same location.
     deferred = []
@@ -6116,13 +6157,15 @@ def _heal_impl(img16: np.ndarray, spots, inpaint_radius: int,
                             # plan's own scale looks again (a fallback isn't a
                             # source, so nothing on screen is re-sampled)
                             forced_fb = not retry_fallbacks
-                        else:
+                        elif _record_current(rec):
                             src_off = (int(round(rec[2][0] * h)),
                                        int(round(rec[2][1] * w)))
                             if len(rec) >= 5:
                                 flags = (rec[3], rec[4])
                             if len(rec) >= 6:
                                 manual = bool(rec[5])  # user-picked source
+                        # else: an automatic source the old touching rule
+                        # picked: searched again (spec/dust-heal-ring-match.md)
                 res = None
                 if not forced_fb:
                     res = _heal_patch(img16, img16_c, labels, i, bbox,
@@ -6130,7 +6173,10 @@ def _heal_impl(img16: np.ndarray, spots, inpaint_radius: int,
                                       feather, src_off=src_off,
                                       forced_flags=flags, manual=manual,
                                       auto=comp_auto, ws_windowed=ws_windowed,
-                                      pref_off=comp_off.get(i))
+                                      # each piece of a stroke finds its own source
+                                      # (spec/dust-heal-ring-match.md: fibres 19.4 ->
+                                      # 18.8 levels on the bench vs one shared offset)
+                                      pref_off=None, smooth=smooth_box)
                 if (res is not None and len(res) == 3 and src_off is None
                         and res[0] is not None):
                     comp_off.setdefault(i, res[0])
@@ -6142,9 +6188,9 @@ def _heal_impl(img16: np.ndarray, spots, inpaint_radius: int,
                 off = None if res is None else res[0]
                 if collect is not None:
                     collect.append(
-                        (cyn, cxn, None, None, None, False) if res is None
+                        (cyn, cxn, None, None, None, False, _HEAL_RULE) if res is None
                         else (cyn, cxn, (off[0] / h, off[1] / w),
-                              res[1], res[2], manual))
+                              res[1], res[2], manual, _HEAL_RULE))
                 if off is None:
                     fallback[by:by + sub.shape[0],
                              bx:bx + sub.shape[1]][sub] = 255
