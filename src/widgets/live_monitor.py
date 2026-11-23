@@ -33,6 +33,7 @@ from core import capture_light as cl
 from core import capture_sequence as cs
 from core import capture_guide
 from core import capture_log
+from core import exposure_learn
 from core import frame_meter as fm
 from core import guide_tracker
 from core import light_presets as lp
@@ -327,6 +328,7 @@ class LiveCaptureMonitor(QWidget):
     _base_bp_read = Signal(int, object)  # (name, black point or error), from a thread
     _zoom_spot_found = Signal(int, object)   # where the magnifier looked (or None)
     _clip_read = Signal(int, str, object)    # (shot, file, clipped colours or error)
+    _level_read = Signal(int, str, object)   # (shot, file, (colour, reading, E used) or error)
 
     def __init__(self, main_window=None, feed=None, light=None, usb=None, rail=None,
                  parent=None):
@@ -1219,6 +1221,17 @@ class LiveCaptureMonitor(QWidget):
         self._clip_guide = None
         self._clip_threaded = True          # tests read it in line
         self._read_clipping = fm.read_clipping
+        # the estimate learns from each shot (spec/frame-exposure.md, 2026-11-23)
+        self._read_thinnest = fm.read_frame
+        self._level_read.connect(self._on_level_read)
+        self._learn_shot = None
+        self._learn_errs = {}
+        self._exposure_learn = exposure_learn.Store(
+            lambda: _settings().value("live/exposure_learn", "", type=str),
+            lambda text: _settings().setValue("live/exposure_learn", text))
+        self.frame_auto.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.frame_auto.customContextMenuRequested.connect(
+            lambda pos: self.frame_auto_menu().exec(self.frame_auto.mapToGlobal(pos)))
         self._base_bp_token = 0
         self._base_bp_threaded = True       # tests read it in line
         self._load_base_shots = None        # the decoder (None: base_black_point.load_shots)
@@ -2433,7 +2446,8 @@ class LiveCaptureMonitor(QWidget):
         return {"tri": tri, "usb": usb, "exposures": exposures, "rearm": rearm, "ir": ir,
                 "guide": self._shot_guide_record(),
                 "note": getattr(self, "_frame_shot_note", ""),
-                "estimate": estimate}
+                "estimate": estimate,
+                "learn": self._learn_context(exposures, tri) if usb else None}
 
     def _estimate_record(self, metered=False):
         """What the frame's exposure estimate said as Shoot decided the
@@ -2459,6 +2473,9 @@ class LiveCaptureMonitor(QWidget):
                 rec["source"] = src
         if metered:
             rec["metered"] = True
+        bias, n = self._learned_bias()
+        if n:
+            rec["learned"] = {"stops": round(bias, 3), "shots": n}
         sug = getattr(self, "_frame_suggestion", None)
         if sug is not None and sug.stops:
             rec["stops"] = {k: round(float(v), 3) for k, v in sug.stops.items()}
@@ -2806,6 +2823,9 @@ class LiveCaptureMonitor(QWidget):
             g = getattr(self.canvas, "guide", None)
             guide = dict(g) if g else None
         self._clip_guide = guide
+        learn = p.get("learn")
+        self._learn_shot = learn if (learn and guide is not None) else None
+        self._learn_errs = {}
 
     def _clip_check(self, path):
         if self._clip_token == 0:
@@ -2814,13 +2834,36 @@ class LiveCaptureMonitor(QWidget):
         if (ns is not None and ns[2] == "ir") or capture_log.is_ir_file(path):
             return                               # the IR shot aims elsewhere
         token, guide, read = self._clip_token, self._clip_guide, self._read_clipping
+        colour = self._learn_colour(path)
+        read_level = self._read_thinnest if colour is not None else None
+        learn = self._learn_shot
 
         def work():
-            try:
-                out = read(path, guide)
-            except Exception as e:
-                out = e
+            reading = None
+            if (read_level is not None and read is fm.read_clipping
+                    and read_level is fm.read_frame):
+                try:                             # one RAW read for both
+                    out, reading = fm.read_shot(path, guide)
+                except Exception as e:
+                    out = reading = e
+            else:
+                try:
+                    out = read(path, guide)
+                except Exception as e:
+                    out = e
+                if read_level is not None:
+                    try:
+                        reading = read_level(path, guide)
+                    except Exception as e:
+                        reading = e
             self._clip_read.emit(token, path, out)
+            if read_level is not None:
+                if isinstance(reading, Exception) or reading is None:
+                    self._level_read.emit(token, path, reading)
+                else:
+                    self._level_read.emit(token, path,
+                                          (colour, reading, self._exposure_used(path, colour,
+                                                                                learn)))
 
         if not self._clip_threaded:
             work()
@@ -2845,6 +2888,118 @@ class LiveCaptureMonitor(QWidget):
         text = self.clip_warning_text()
         if text:
             self._warn_caption(text)
+
+    # ------------------------------------------------------------------ #
+    # the estimate learns from each shot (spec/frame-exposure.md, 2026-11-23)
+    # ------------------------------------------------------------------ #
+    SLOT_COLOUR = {"red": "r", "green": "g", "blue": "b", "white": "w", "bw": "w"}
+
+    def _learn_key(self):
+        t = self.scan_type()
+        return exposure_learn.setup_key(self._usb_model, t,
+                                        self.bw_light() if t == "bw" else None)
+
+    def _learned_bias(self):
+        """(correction in stops, shots learned from) for this camera and scan
+        type."""
+        try:
+            return self._exposure_learn.bias(self._learn_key())
+        except Exception:
+            return 0.0, 0
+
+    def _learn_context(self, exposures, tri):
+        """What a shot's files are measured against: the film base's reading
+        and exposure per colour, the live ratio at Shoot (uncorrected) and
+        the exposures planned. None when the shot can't teach anything (no
+        estimate, or not at the film base's / frame's exposures)."""
+        est = list(getattr(self, "_frame_est", None) or [])
+        base = self._film_base()
+        if not exposures or not est or not base:
+            return None
+        import numpy as np
+        cols = base.get("colours") or {}
+        keys = list(be.COLOURS if tri else ("w",))
+        ctx = {"ratio": float(np.median(est)), "key": self._learn_key(),
+               "colours": keys, "base": {}, "base_e": {}, "planned_e": {}}
+        for k in keys:
+            if k not in cols or k not in exposures:
+                return None
+            ctx["base"][k] = float(cols[k]["base"])
+            ctx["base_e"][k] = be.exposure_of(cols[k]["shutter"], cols[k]["iso"])
+            ctx["planned_e"][k] = be.exposure_of(exposures[k]["shutter"], exposures[k]["iso"])
+        return ctx
+
+    def _learn_colour(self, path):
+        """The colour a Shoot's file is of, when the shot can teach."""
+        learn = self._learn_shot
+        if not learn:
+            return None
+        ns = capture_log.name_slot(path)
+        if ns is not None:
+            k = self.SLOT_COLOUR.get(ns[2])
+        else:                                     # a file the camera named
+            k = "w" if learn["colours"] == ["w"] else None
+        return k if k in learn["colours"] else None
+
+    @staticmethod
+    def _exposure_used(path, colour, learn):
+        """The file's exposure (ISO-100 seconds) from its EXIF, else the one
+        planned for it."""
+        try:
+            from core.ccr_merge import shot_exposure
+            e = shot_exposure(path)
+        except Exception:
+            e = None
+        if not e and learn:
+            e = learn["planned_e"].get(colour)
+        return e
+
+    def _on_level_read(self, token, path, payload):
+        learn = self._learn_shot
+        if token != self._clip_token or not learn or not isinstance(payload, tuple):
+            return
+        colour, reading, e_used = payload
+        measured = reading.level(colour) if getattr(reading, "levels", None) else None
+        pred = exposure_learn.predicted(learn["base"].get(colour), learn["ratio"],
+                                        e_used, learn["base_e"].get(colour))
+        err = exposure_learn.colour_error(measured, pred)
+        landed = {"level": None if measured is None else round(float(measured), 4),
+                  "predicted": None if pred is None else round(float(pred), 4),
+                  "stops": None if err is None else round(float(err), 3)}
+        try:
+            capture_log.note(path, "landed", landed)
+        except Exception:
+            pass
+        if err is None:
+            self._learn_shot = None               # this shot can't teach: none of it counts
+            return
+        self._learn_errs[colour] = err
+        shot = exposure_learn.shot_error(self._learn_errs, learn["colours"])
+        if shot is None:
+            return
+        self._exposure_learn.add(learn["key"], shot)
+        self._learn_shot = None                   # learned once
+        try:
+            capture_log.note(path, "landed_error", round(float(shot), 3))
+        except Exception:
+            pass
+        self._refresh_frame_line()
+
+    def frame_auto_menu(self):
+        """The right-click menu of "Per shot, scale exposure…": forget what
+        the estimate learned for this camera and scan type. The seam."""
+        menu = QMenu(self)
+        _bias, n = self._learned_bias()
+        act = menu.addAction(f"Forget What It Learned ({n} shot{'s' if n != 1 else ''})")
+        act.setEnabled(n > 0)
+        act.triggered.connect(self.forget_exposure_learning)
+        return menu
+
+    def forget_exposure_learning(self):
+        self._exposure_learn.forget(self._learn_key())
+        self._refresh_frame_line()
+        self._note_caption("The exposure estimate starts afresh for this camera and "
+                           "scan type.")
 
     # ------------------------------------------------------------------ #
     # film bases (spec/film-base-exposure.md)
@@ -3354,9 +3509,15 @@ class LiveCaptureMonitor(QWidget):
             import numpy as np
             base, tri, shutters, isos = ctx
             ratio = float(np.median(self._frame_est))
-            sug = fm.suggest(base, tri, fm.live_levels(base, tri, ratio), shutters, isos,
-                             live=True)
+            bias, learned = self._learned_bias()
+            sug = fm.suggest(base, tri, fm.live_levels(base, tri, ratio, bias=bias),
+                             shutters, isos, live=True)
             text = sug.text() if sug else "This frame: no estimate."
+            if sug is not None and learned and abs(bias) >= 0.05:
+                text = text.replace(
+                    "(live view)",
+                    f"(live view, corrected {fm.stops_text(bias)} from {learned} "
+                    f"shot{'s' if learned != 1 else ''})")
         else:
             text = "This frame: " + (getattr(self, "_frame_live_reason", "") or
                                      "waiting for the live view…")

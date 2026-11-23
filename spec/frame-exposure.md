@@ -291,3 +291,76 @@ line byte for byte; `using` + `rich` marks only the changed values; ticking
 the box with a dense frame marks the speeds (not the unchanged ISO) and
 unticking puts the measured line back; an armed Use for This Frame marks
 them too.
+
+## Revision 2026-11-23: the estimate learns from each shot
+
+The user: "is capture still learning from captures? The checkbox tool that
+scales exposures…" — it wasn't: every estimate came fresh from the live view
+with a fixed ⅓ stop margin, and the RAWs it produced were never looked at.
+Asked whether it should correct itself from them: "Yes please".
+
+### What is measured
+
+Capture already reads every USB Shoot file inside the frame guide for
+clipping (spec/capture-clip-warning.md). When that shot was taken with a
+live estimate in hand, the same read also takes the frame's thinnest level
+(`frame_meter.read_frame`'s reading: the 99.5th percentile of 16 × 16 block
+means inside the guide, 3 % in, the shot's own colour; "w" = its brightest
+channel, as the film base was read), one rawpy read for both
+(`frame_meter.read_shot`).
+
+What the estimate PREDICTED for that file is known exactly: the film base's
+reading for that colour × the live ratio at Shoot (uncorrected, the median
+`_frame_est`) × E_used / E_base (E = seconds × ISO / 100; E_used from the
+file's EXIF, else the exposure planned for it). The shot's error is
+
+    err = max over its colours of log2(level measured / level predicted)
+
+The MAX, not one error per colour: the estimate is one factor for all
+colours so that none passes the target, and per-colour errors mostly
+describe the scene (a blue sky frame then a warm one): learning them per
+colour would expose the next frame's red for the last frame's sky. A clipped
+colour reads near 1.0, which is a lower bound of its error: it still pushes
+the right way (darker).
+
+A shot is learned from only when: it used exposures from the film base or
+the frame's suggestion (they carry the base's LED levels; the Exposure row's
+don't), a live ratio existed at Shoot, it had a frame guide, every colour of
+the shot was read, each measured level ≥ 0.03 of the range, and |err| ≤ 3
+stops (anything bigger is another frame or a moved guide). Measure / Meter /
+flat-field shots and the IR shot are never read for it.
+
+### How it is used (`core/exposure_learn.py`, Qt-free)
+
+- Per setup — the camera's model and the scan type (and, in B&W, its light) —
+  the last 12 errors are kept (`KEEP`), in QSettings `live/exposure_learn`
+  (JSON), across sessions.
+- The correction is `median(errors) × n/(n + 1)`, clamped to ±1.5 stops:
+  one shot moves it half way, a run of shots nearly all the way, and an odd
+  shot can't swing it (the median).
+- The live estimate's level becomes base × ratio × 2^correction
+  (`frame_meter.live_levels(..., bias=)`), so the suggestion, the film base
+  line's bold values and "Per shot, scale exposure…" all follow. The ⅓ stop
+  margin stays. A Meter reading (real RAW shots) is never corrected.
+
+### What you see
+
+- The "This frame" line: "≈ +1⅔ stops (live view, corrected −0.3 from 6
+  shots)" once a correction applies.
+- Right-click "Per shot, scale exposure to the frame's density": **Forget
+  What It Learned (N shots)** for this camera and scan type
+  (`frame_auto_menu()`, the seam).
+- Each read shot's capture-log line gets `landed` {colour: {level,
+  predicted, stops}} and the shot's error, so the learning can be checked
+  against the RAWs.
+
+### Tests
+
+- `exposure_learn`: the error is the largest colour's; skip rules; the
+  correction's shrink, median, clamp; the store keeps 12 per setup, survives
+  a reload, forgets.
+- Capture: a shot with an estimate is read once for both clipping and level
+  (`read_shot`); three colours read → one error learned; a shot at the
+  Exposure row's settings or without an estimate learns nothing; the next
+  estimate is corrected by the learned amount and the line says so;
+  Forget clears it.
