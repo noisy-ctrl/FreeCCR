@@ -3,7 +3,9 @@
 Every shot Capture takes is written to `freeccr-capture-log.jsonl` in the
 capture folder: one JSON object a line, a shot's line written again as its
 files arrive (a reader keeps the last line per roll and shot). Files FreeCCR
-downloads are named `<roll>_<format>_<film>_<shot>_<COLOUR>`. Qt-free.
+downloads are named `<roll>_<format>_<film>_<shot>_<slot>`, e.g.
+`R0025_135_Colorplus_04_1R` (spec/capture-short-names.md; the older
+`R0025_35mm_Colorplus_004_1RED` names are still read). Qt-free.
 """
 import datetime
 import json
@@ -15,12 +17,21 @@ import time
 LOG_NAME = "freeccr-capture-log.jsonl"
 GRACE_S = 60.0                     # files this long after a shot's end still join it
 COLOUR_ORDER = ("red", "green", "blue")
-# 1RED / 2GREEN / 3BLUE: by name a shot's files then sort red, green, blue in
-# any app (the user, 2026-11-09; plain RED/GREEN/BLUE sorted blue first)
-WORDS = {"red": "1RED", "green": "2GREEN", "blue": "3BLUE", "white": "WHITE", "bw": "BW",
+# 1R / 2G / 3B: by name a shot's files then sort red, green, blue in any app
+# (the user, 2026-11-09; plain RED/GREEN/BLUE sorted blue first). Short since
+# 2026-11-23 (spec/capture-short-names.md: the names made the frame list
+# scroll sideways); 1RED / 2GREEN / 3BLUE / WHITE are still read.
+WORDS = {"red": "1R", "green": "2G", "blue": "3B", "white": "W", "bw": "BW",
          # the IR shot for dust (spec/ir-dust-and-flat-sets.md): after the
          # colour shot(s), sorting last; never merged, paired with its shot
          "ir": "4IR"}
+# a format's tag in a file name where it isn't its own key (135 film)
+FILE_TAG = {"35mm": "135"}
+SHOT_DIGITS = 2                    # 04; 100 and up as they are
+# a slot word in a name, new and old: 1R 2G 3B W BW 4IR, 1RED RED WHITE ...
+_SLOT_WORD = r"(?:[123]?(?:RED|GREEN|BLUE)|[123][RGB]|WHITE|W|BW|4IR)"
+_WORD_SLOTS = {"RED": "red", "GREEN": "green", "BLUE": "blue", "R": "red", "G": "green",
+               "B": "blue", "WHITE": "white", "W": "white", "BW": "bw", "IR": "ir"}
 DEFAULT_ROLL = "R0001"
 
 
@@ -37,33 +48,40 @@ def clean_roll(text):
     return re.sub(r"[^0-9A-Za-z-]+", "", str(text or "")).strip("-")
 
 
+def format_tag(fmt):
+    """A film format as it goes in a file name: '35mm' -> '135', '645' -> '645'."""
+    key = clean(fmt)
+    return FILE_TAG.get(key.lower(), key)
+
+
 def shot_stem(roll, fmt, film, shot, slot):
-    """'R0034_645_Portra400_013_1RED' (2GREEN, 3BLUE, WHITE, BW); format and
-    film left out when not set."""
+    """'R0034_645_Portra400_13_1R' (2G, 3B, W, BW, 4IR); format and film left
+    out when not set; the shot in two digits."""
     parts = [clean_roll(roll) or DEFAULT_ROLL]
-    for p in (clean(fmt), clean(film)):
+    for p in (format_tag(fmt), clean(film)):
         if p:
             parts.append(p)
-    parts.append(f"{int(shot):03d}")
-    parts.append(WORDS.get(slot, clean(slot).upper() or "WHITE"))
+    parts.append(f"{int(shot):0{SHOT_DIGITS}d}")
+    parts.append(WORDS.get(slot, clean(slot).upper() or "W"))
     return "_".join(parts)
 
 
-_SLOT_RE = re.compile(r"^(.*_\d{3,})_[123]?(RED|GREEN|BLUE)(?:_(\d+))?$")
-_SLOT_ORDER = {"RED": 0, "GREEN": 1, "BLUE": 2}
+_SLOT_ORDER = {"red": 0, "green": 1, "blue": 2}
 
 
 def slot_order(name):
-    """For a file FreeCCR named (`..._013_1RED`, `..._013_2GREEN_1`, or the
-    older `..._013_RED`): (stem up
-    to the shot number, 0/1/2 for red/green/blue, retake number), so a shot
-    sorts red, green, blue — by name it is BLUE, GREEN, RED. None for any
-    other name."""
+    """For a file FreeCCR named (`..._13_1R`, `..._13_2G_1`, or the older
+    `..._013_1RED` / `..._013_RED`): (stem up to the shot number, 0/1/2 for
+    red/green/blue, retake number), so a shot sorts red, green, blue — by
+    name it is BLUE, GREEN, RED. None for any other name."""
     stem = os.path.splitext(os.path.basename(str(name)))[0]
-    m = _SLOT_RE.match(stem)
+    m = _NAME_SLOT_RE.match(stem)
     if not m:
         return None
-    return m.group(1).lower(), _SLOT_ORDER[m.group(2)], int(m.group(3) or 0)
+    slot = _word_slot(m.group(3))
+    if slot not in _SLOT_ORDER:
+        return None
+    return f"{m.group(1)}_{m.group(2)}".lower(), _SLOT_ORDER[slot], int(m.group(4) or 0)
 
 
 def single_slot(scan_type):
@@ -89,40 +107,72 @@ def _shot_from_name(name, roll):
     stem = os.path.splitext(os.path.basename(name))[0]
     if not stem.startswith(roll + "_"):
         return None
-    m = re.search(r"_(\d{3,})_[1234]?[A-Z]+(?:_\d+)?$", stem)
+    m = re.search(r"_(\d{2,})_" + _SLOT_WORD + r"(?:_\d+)?$", stem, re.I)
     return int(m.group(1)) if m else None
 
 
-_NAME_SLOT_RE = re.compile(
-    r"^(.*)_(\d{3,})_((?:[123]?(?:RED|GREEN|BLUE))|WHITE|BW|4IR)(?:_\d+)?$", re.I)
-_WORD_SLOTS = {"RED": "red", "GREEN": "green", "BLUE": "blue", "WHITE": "white",
-               "BW": "bw", "IR": "ir"}
+_NAME_SLOT_RE = re.compile(r"^(.*)_(\d{2,})_(" + _SLOT_WORD + r")(?:_(\d+))?$", re.I)
+
+
+def _word_slot(word):
+    """'1R' / '1RED' / 'RED' -> 'red', 'W' / 'WHITE' -> 'white', '4IR' -> 'ir'."""
+    return _WORD_SLOTS.get(re.sub(r"^[1-4]", "", str(word).upper()))
 
 
 def name_slot(name):
     """(prefix '<roll>_<format>_<film>' lower case, shot number, slot) for a
-    file FreeCCR named (`..._013_1RED`, `..._013_RED_1`, `..._013_4IR`,
-    `..._013_WHITE`), else None (spec revision 2026-11-22)."""
+    file FreeCCR named (`..._13_1R`, `..._013_1RED`, `..._013_RED_1`,
+    `..._13_4IR`, `..._013_WHITE`), else None (spec revision 2026-11-22)."""
     stem = os.path.splitext(os.path.basename(str(name or "")))[0]
     m = _NAME_SLOT_RE.match(stem)
     if not m:
         return None
-    word = m.group(3).upper().lstrip("1234")
-    slot = _WORD_SLOTS.get(word)
+    slot = _word_slot(m.group(3))
     if slot is None:
         return None
     return m.group(1).lower(), int(m.group(2)), slot
 
 
-def _entry_key(entry):
-    """(prefix lower case, shot) of a log entry, as `name_slot` reads names."""
+def _entry_keys(entry):
+    """{(prefix lower case, shot)} a log entry's files can carry, as
+    `name_slot` reads names: today's and, for a log written before the short
+    names, the old format tag (35mm, not 135)."""
     try:
         shot = int(entry.get("shot"))
-        stem = shot_stem(entry.get("roll"), entry.get("format"), entry.get("film"),
-                         shot, "white")
     except (TypeError, ValueError):
-        return None
-    return stem.rsplit("_", 2)[0].lower(), shot
+        return set()
+    keys = set()
+    for fmt in (format_tag(entry.get("format")), clean(entry.get("format"))):
+        parts = [clean_roll(entry.get("roll")) or DEFAULT_ROLL]
+        for p in (fmt, clean(entry.get("film"))):
+            if p:
+                parts.append(p)
+        keys.add(("_".join(parts).lower(), shot))
+    return keys
+
+
+def list_label(name):
+    """A frame's name as the frame list shows it (spec/capture-short-names.md):
+    a name FreeCCR gave in the short form ('R0025_35mm_Colorplus_004_1RED_RGB.raf'
+    -> 'R0025_135_Colorplus_04'; a merge drops its slot word, a single frame
+    keeps it, short: '..._04_BW'); any other name as it is."""
+    base = os.path.basename(str(name or ""))
+    stem = os.path.splitext(base)[0]
+    m = re.match(r"^(.*?)_RGB(?:_(\d+))?$", stem)
+    merged, dup = (True, m.group(2)) if m else (False, None)
+    core = m.group(1) if m else stem
+    n = _NAME_SLOT_RE.match(core)
+    if not n:
+        return base
+    prefix, shot, word, retake = n.groups()
+    parts = [FILE_TAG.get(p.lower(), p) for p in prefix.split("_")]
+    out = "_".join(parts) + f"_{int(shot):0{SHOT_DIGITS}d}"
+    if not merged:
+        out += "_" + WORDS.get(_word_slot(word), word)
+    for extra in (retake, dup):
+        if extra:
+            out += f"_{extra}"
+    return out
 
 
 def entry_files(entry):
@@ -130,8 +180,8 @@ def entry_files(entry):
     another shot is dropped, one named for this shot sits in the slot its
     name says; other names stay where they were."""
     files = dict(entry.get("files") or {})
-    key = _entry_key(entry)
-    if key is None:
+    keys = _entry_keys(entry)
+    if not keys:
         return files
     named, other = {}, {}
     for slot, name in files.items():
@@ -140,7 +190,7 @@ def entry_files(entry):
         ns = name_slot(name)
         if ns is None:
             other[slot] = name
-        elif (ns[0], ns[1]) == key and ns[2] not in named:
+        elif (ns[0], ns[1]) in keys and ns[2] not in named:
             named[ns[2]] = name
     for slot, name in other.items():
         if slot not in named:
@@ -316,7 +366,7 @@ def add_file(path, now=None):
             # FreeCCR named it: it belongs to the shot and slot its name says
             # (a late report of the previous shot's file must not take this
             # shot's next slot: spec revision 2026-11-22)
-            if (ns[0], ns[1]) != _entry_key(e) or ns[2] not in slots_of(e) \
+            if (ns[0], ns[1]) not in _entry_keys(e) or ns[2] not in slots_of(e) \
                     or ns[2] in files:
                 return False
             files[ns[2]] = name
@@ -383,9 +433,8 @@ def clear():
 # --------------------------------------------------------------------------- #
 # IR shots and the frames they belong to (spec/ir-dust-and-flat-sets.md)
 # --------------------------------------------------------------------------- #
-_SHOT_KEY_RE = re.compile(
-    r"^(.*_\d{3,})_(?:[123]?(?:RED|GREEN|BLUE)|WHITE|BW|4IR)(?:_\d+)?$", re.I)
-_IR_RE = re.compile(r"_\d{3,}_4IR(?:_\d+)?$", re.I)
+_SHOT_KEY_RE = re.compile(r"^(.*_\d{2,})_" + _SLOT_WORD + r"(?:_\d+)?$", re.I)
+_IR_RE = re.compile(r"_\d{2,}_4IR(?:_\d+)?$", re.I)
 
 
 def shot_key(path):
