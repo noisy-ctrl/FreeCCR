@@ -1805,6 +1805,9 @@ class CCRImage:
                 if rect else None)
         key = repr(spots)
         h, w = image.shape[:2]
+        from core import ccr_processor as _cp
+        if _cp.DUST_ENGINE == "patch":
+            return self._patch_heal_cached(image, spots, crop, ws_windowed, key)
         if max(h, w) <= _DUST_PLAN_LONG:
             plan_out = []
             cached = getattr(self, "_dust_plan_cache", None)
@@ -1843,6 +1846,46 @@ class CCRImage:
         print(f"Dust heal total ({len(spots)} spots, "
               f"preview plan {'reused' if plan is not None else 'MISSING'}): "
               f"{time.time() - t0:.3f}s")
+        return out
+
+    DUST_FILL_CACHE = 4     # healed renders remembered per image (preview, zoom, export ...)
+
+    def _patch_heal_cached(self, image, spots, crop, ws_windowed, key):
+        """The patch-fill heal (spec/dust-patch-fill.md), remembered by the
+        buffer's content, the spots and the crop: a slider move re-renders the
+        same base with the same spots, and the heal (seconds at full size) is
+        then only the changed pixels put back. Keyed by content, so a shallow
+        copy sharing the dict is harmless."""
+        import hashlib
+        from collections import OrderedDict
+        from core.ccr_processor import apply_dust_removal
+        h, w = image.shape[:2]
+        step = max(1, int(max(h, w) // 1500))
+        fp = hashlib.blake2b(np.ascontiguousarray(image[::step, ::step]).tobytes(),
+                             digest_size=16).hexdigest()
+        ck = (image.shape, str(image.dtype), fp, key, repr(crop), bool(ws_windowed))
+        cache = self.__dict__.get("_dust_fill_cache")
+        if cache is None:
+            cache = OrderedDict()
+            self._dust_fill_cache = cache
+        hit = cache.get(ck)
+        if hit is not None:
+            ys, xs, vals = hit
+            out = image.copy()
+            out[ys, xs] = vals
+            return out
+        out = apply_dust_removal(image, spots, crop=crop, ws_windowed=ws_windowed)
+        changed = out != image
+        if changed.ndim == 3:
+            changed = changed.any(axis=2)
+        ys, xs = np.nonzero(changed)
+        cache[ck] = (ys, xs, out[ys, xs])
+        while len(cache) > self.DUST_FILL_CACHE:
+            cache.popitem(last=False)
+        if max(h, w) <= _DUST_PLAN_LONG:
+            # the old engine's plan has nothing to show for this heal
+            self._dust_plan_cache = (key, [])
+            self._dust_plan_spots = list(spots)
         return out
 
     # --- Closed-loop neutral solve (WB picker / AWB) -------------------------

@@ -282,12 +282,15 @@ def test_flag_badge_heal_before_and_erase_in_the_window(tmp_path, monkeypatch):
     assert panel.ir_before_btn.isEnabled() and "painted over" in panel.ir_status.text()
     # Before shows the picture as it was, After the healed one
     healed_key = prev.pixmap_item.pixmap().cacheKey()
+    # (the preview kept at Heal, or the detail render kept with it when one
+    # had landed by then: which depends on how fast the find was)
+    kept = {pm.cacheKey() for pm in prev._dust_before[1:] if pm is not None}
     panel.ir_before_btn.setChecked(True)
     app.processEvents()
-    assert prev.pixmap_item.pixmap().cacheKey() == prev._dust_before[1].cacheKey()
+    assert prev.pixmap_item.pixmap().cacheKey() in kept
     panel.ir_before_btn.setChecked(False)
     app.processEvents()
-    assert prev.pixmap_item.pixmap().cacheKey() != prev._dust_before[1].cacheKey()
+    assert prev.pixmap_item.pixmap().cacheKey() not in kept
     # Erase one healed spot; undo brings it back
     panel.erase_btn.setChecked(True)
     assert prev._dust_tool == "erase"

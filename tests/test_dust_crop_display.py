@@ -37,6 +37,16 @@ from core.ccr_image import CCRImage  # noqa: E402
 from widgets.image_preview import ImagePreview  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _clone_engine(monkeypatch):
+    """These tests pin the earlier one-source clone heal, which stays
+    selectable (FREECCR_DUST_ENGINE=clone); the default patch fill has its
+    own tests (tests/test_dust_patch_fill.py, spec/dust-patch-fill.md)."""
+    from core import ccr_processor as _cp
+    monkeypatch.setattr(_cp, "DUST_ENGINE", "clone")
+
+
+
 def _scan_png(tmp_path, name="negative.png", w=600, h=400, seed=21):
     rng = np.random.default_rng(seed)
     yy, xx = np.mgrid[0:h, 0:w]
