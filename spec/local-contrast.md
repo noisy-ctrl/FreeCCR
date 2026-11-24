@@ -69,9 +69,20 @@ Common (`core/local_contrast.py`):
 band's energy smoothed over 0.25 % of P / (9 × its 10th percentile in the
 picture), so detail no stronger than the grain (plain sky) is left as it is;
 decided on smoothed energy, so grain can't steer it. Measured on his Gold 200
-frames at 4500 px, Detail +60 alone (Bands +60 each): grain on plain sky
-×1.01–1.04; with Lighting −30 too, the sky is lifted and its grain rises
-with its tone (×1.09), as with any brightening.
+frames at 4500 px (revision 2026-11-24, re-measured: the first figures came
+from renders that applied the effect twice), Detail +60 alone (Bands +60
+each): grain on plain sky ×1.00–1.01; with Lighting −30 too ×0.98–1.05,
+rising with the sky's tone (+2–6 % brighter), as with any brightening.
+
+**Lighting against Shadows** (the user asked whether Lighting adds anything,
+2026-11-24): on the lighthouse, Lighting −25 (Detail 0) and Shadows +37 lift
+the rocks by the same 1.1 stops (at 1000, 2000 and 4500 px alike). The dark
+lattice against the sky: +0.86 stops with Lighting, +1.26 with Shadows. The
+sky: +0.05 / +0.01 stop. The rocks' texture (local contrast in stops,
+1–8 px at 2000): ×0.96 with Lighting, ×1.08 with Shadows. So Lighting moves
+dark AREAS more than thin dark things, but on strongly textured areas the
+edge-aware base keeps much of the texture, and Lighting compresses it a
+little, where Shadows' steep curve in the deep tones raises it.
 
 Measured on his frames: see the draft sheets (`local-contrast-*.jpg`).
 
