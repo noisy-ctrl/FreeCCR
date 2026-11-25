@@ -280,7 +280,8 @@ def test_slider_sits_under_masking_in_details(panel):
     keys = panel.adjustment_keys
     i = keys.index("edge_effect")
     assert keys[i - 1] == "sharpen_masking"
-    assert keys[i + 1:] == ["lc_lighting", "lc_detail", "lc_texture", "lc_structure", "lc_shape"]
+    assert keys[i + 1:i + 6] == ["lc_lighting", "lc_detail", "lc_texture", "lc_structure",
+                                 "lc_shape"]
     assert panel.sliders[i].value_range() == (0, 100) and panel.sliders[i].value() == 0
     lbl = panel._edge_label
     assert lbl.text() == "Edge Effect"

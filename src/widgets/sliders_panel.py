@@ -58,7 +58,7 @@ SYNC_GROUPS = [
     ("sat", "Saturation & Lab Finish", ("saturation", "sat_rolloff", "vibrance",
                             "clean_lights", "golden_highlights", "shadow_neutralise",
                             "shadow_lift", "glow", "colour_organics",
-                            "natural_tint")),
+                            "natural_tint", "organics_v2", "organic_sat")),
     ("crop", "Crop", ()),
     # Coarse 90-degree rotation + the mirror flags, synced like crop (whole-image
     # properties, not adjustment keys). fine_rotation_angle is deliberately NOT
@@ -189,6 +189,8 @@ _BASIC_LABELS = {
     "saturation": "Saturation", "sat_rolloff": "Saturation Roll-off",
     "vibrance": "Vibrance",
     "colour_organics": "Colour Organics",
+    "organics_v2": "Organics v2",
+    "organic_sat": "Organic Saturation",
     "natural_tint": "Natural tint",
     "clean_lights": "Clean Lights",
     "golden_highlights": "Golden Highlights",
@@ -935,6 +937,10 @@ class SlidersPanel(QWidget):
         # sliders (spec/local-contrast.md).
         "edge_effect",
         "lc_lighting", "lc_detail", "lc_texture", "lc_structure", "lc_shape",
+        # Colour Organics v2 (spec/colour-organics-v2.md): created after the
+        # Local Contrast sliders, so last of all here; shown under Colour
+        # Organics.
+        "organics_v2", "organic_sat",
     ]
 
     # Non-zero default values for specific adjustment keys. Keys not listed
@@ -2004,6 +2010,30 @@ class SlidersPanel(QWidget):
         self._lc_method = None           # the frame's stored choice (None = not set)
         self._sync_lc_rows("off")
 
+        # Colour Organics v2: the labs' hue moves and saturation BY TONE,
+        # measured on Noritsu pairs (spec/colour-organics-v2.md). Created
+        # last (ADJUSTMENT_KEYS zip), shown right under Colour Organics.
+        self.organics_v2_slider_layout = self.create_slider(
+            "Organics v2", min_value=0, max_value=100)
+        self.organics_v2_slider_layout.itemAt(0).widget().setToolTip(
+            "Organics v2: turns colours the way lab scans do, by tone as well "
+            "as by colour (dark browns towards ochre, blues towards cyan, reds "
+            "and pinks towards orange). Measured on Noritsu scans of the same "
+            "negatives: 50 is the labs' amount, 100 twice it. A newer version "
+            "of Colour Organics: use one or the other.")
+        self.organic_sat_slider_layout = self.create_slider(
+            "Organic Saturation", min_value=0, max_value=100)
+        self.organic_sat_slider_layout.itemAt(0).widget().setToolTip(
+            "Organic Saturation: the labs' saturation by tone and colour. Mid "
+            "tones keep their colour; shadows and light tones ease off, more "
+            "for blues, greens and reds. Measured on top of Clean Lights at "
+            "50: 50 is the labs' amount, 100 twice it. Only ever takes colour "
+            "out, at unchanged brightness.")
+        _at = next(k for k in range(scroll_layout.count())
+                   if scroll_layout.itemAt(k).layout() is self.colour_organics_slider_layout)
+        scroll_layout.insertLayout(_at + 1, self.organic_sat_slider_layout)
+        scroll_layout.insertLayout(_at + 1, self.organics_v2_slider_layout)
+
         # --- Populate Curves ---
         self.curve_editor = CurveEditor()
         self.curves_section.add_widget(self.curve_editor)
@@ -2396,6 +2426,9 @@ class SlidersPanel(QWidget):
             profile = getattr(img, "color_profile", "color") if img is not None else "color"
         bw = profile == "bw"
         self._layout_visible(self.colour_organics_slider_layout, not bw)
+        for lay in ("organics_v2_slider_layout", "organic_sat_slider_layout"):
+            if hasattr(self, lay):
+                self._layout_visible(getattr(self, lay), not bw)
         self._layout_visible(self.natural_tint_slider_layout, bw)
 
     def on_color_profile_changed(self, index):

@@ -16,6 +16,7 @@ from core.shadow_neutral import apply_shadow_neutralise
 from core.glow import apply_glow
 from core.shadow_lift import apply_shadow_lift
 from core.clean_lights import apply_clean_lights
+from core.organics_v2 import apply_organics_v2
 # ... and their GPU versions (spec/gpu-finishing-tools.md), run straight after
 # the main kernel when the OpenCL device is a GPU.
 from core import finish_gpu
@@ -3923,6 +3924,10 @@ def adjust_image(
     # Clean Lights (spec/clean-lights.md), 0..100 (50 = the labs' amount).
     # Appended last.
     clean_lights: float = 0.0,
+    # Colour Organics v2 (spec/colour-organics-v2.md): the labs' hue moves
+    # and saturation by tone, 0..100 each (50 = the labs' amount). Appended last.
+    organics_v2: float = 0.0,
+    organic_sat: float = 0.0,
 ) -> np.ndarray:
     """
     Apply temperature, tint, exposure, brightness, blackpoint, whitepoint, highlights, shadows,
@@ -4145,6 +4150,12 @@ def adjust_image(
             img_norm = np.clip(img / 65535.0, 0.0, 1.0).astype(np.float32)
             img = _apply_color_bands_float(img_norm, bin_deltas, feather) * 65535.0
 
+    # Colour Organics v2: the labs' hue moves and saturation by tone, right
+    # before Clean Lights (whose own amount its saturation table is measured
+    # on top of; spec/colour-organics-v2.md).
+    if (organics_v2 and organics_v2 > 0) or (organic_sat and organic_sat > 0):
+        img = apply_organics_v2(np.clip(img / 65535.0, 0.0, 1.0).astype(np.float32),
+                                organics_v2, organic_sat) * 65535.0
     # Clean Lights: less colour in the light tones, before the gold is added
     # (spec/clean-lights.md).
     if clean_lights and clean_lights > 0:
@@ -4469,6 +4480,9 @@ def adjust_image_opencl(
     shadow_lift_shape=None,
     # Clean Lights — appended last, see adjust_image.
     clean_lights: float = 0.0,
+    # Colour Organics v2 — appended last, see adjust_image.
+    organics_v2: float = 0.0,
+    organic_sat: float = 0.0,
 ) -> np.ndarray:
     """
     GPU-accelerated (OpenCL) version of adjust_image.
@@ -4657,7 +4671,8 @@ def adjust_image_opencl(
                           shadow_shape=shadow_shape,
                           glow=glow, glow_shape=glow_shape, glow_area=glow_area,
                           shadow_lift=shadow_lift, shadow_lift_shape=shadow_lift_shape,
-                          clean_lights=clean_lights)
+                          clean_lights=clean_lights,
+                          organics_v2=organics_v2, organic_sat=organic_sat)
 
     try:
       # Serialize GPU submissions: the hi-res zoom worker may run this
@@ -4723,7 +4738,10 @@ def adjust_image_opencl(
 
         # The finishing tools on the GPU, on the kernel's own buffer, so the
         # picture leaves the GPU once (spec/gpu-finishing-tools.md).
-        finished = _finish_on_gpu(ctx, queue, img_buf, img.shape[0], img.shape[1],
+        # Organics v2 runs in numpy BEFORE Clean Lights, so with it on the
+        # whole finishing chain runs in numpy, in order.
+        v2_on = (organics_v2 and organics_v2 > 0) or (organic_sat and organic_sat > 0)
+        finished = (not v2_on) and _finish_on_gpu(ctx, queue, img_buf, img.shape[0], img.shape[1],
                                   golden_highlights, golden_shape,
                                   shadow_neutralise, shadow_shape, glow, glow_shape,
                                   glow_area, shadow_lift, shadow_lift_shape,
@@ -4733,8 +4751,13 @@ def adjust_image_opencl(
         result = img_buf.get().reshape(img.shape)
       if finished:
           return np.clip(result, 0, 65535).astype(np.uint16)
-      # Otherwise Clean Lights then Golden Highlights run after everything
-      # else, in numpy (the same functions as adjust_image's last stages).
+      # Otherwise Organics v2, Clean Lights then Golden Highlights run after
+      # everything else, in numpy (the same functions as adjust_image's last
+      # stages).
+      if (organics_v2 and organics_v2 > 0) or (organic_sat and organic_sat > 0):
+          result = apply_organics_v2(
+              np.clip(result / 65535.0, 0.0, 1.0).astype(np.float32),
+              organics_v2, organic_sat) * 65535.0
       if clean_lights and clean_lights > 0:
           result = apply_clean_lights(
               np.clip(result / 65535.0, 0.0, 1.0).astype(np.float32),
@@ -4786,7 +4809,8 @@ def adjust_image_opencl(
                           shadow_shape=shadow_shape,
                           glow=glow, glow_shape=glow_shape, glow_area=glow_area,
                           shadow_lift=shadow_lift, shadow_lift_shape=shadow_lift_shape,
-                          clean_lights=clean_lights)
+                          clean_lights=clean_lights,
+                          organics_v2=organics_v2, organic_sat=organic_sat)
 
 
 
