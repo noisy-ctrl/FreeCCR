@@ -182,6 +182,8 @@ def test_keys_are_last_so_the_positional_zip_is_unchanged():
     # (spec/developer-edge-effect.md), then the Local Contrast list's sliders
     # (spec/local-contrast.md), so they are the very last.
     # Colour Organics v2's two sliders come after them (spec/colour-organics-v2.md).
+    assert keys[-2:] == ["luma_nr", "luma_nr_detail"]   # spec/luminance-noise-reduction.md
+    keys = keys[:-2]
     assert keys[-3:] == ["organics_v2", "organic_sat", "lab_tone"]
     assert keys[-9:-3] == ["edge_effect", "lc_lighting", "lc_detail", "lc_texture",
                            "lc_structure", "lc_shape"]

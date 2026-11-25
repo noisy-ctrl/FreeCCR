@@ -27,6 +27,7 @@ from core.ccr_processor import (adjust_image, adjust_image_opencl,
                                 compute_auto_gain_offset,
                                 renders_monochrome,
                                 positive_base_curve_points)
+from core.luma_nr import apply_luma_nr, DETAIL_DEFAULT as LUMA_NR_DETAIL_DEFAULT
 from core import color_management
 from core import load_progress
 from core import detail_defaults
@@ -2563,6 +2564,14 @@ class CCRImage:
         # White (it never changes luma). See spec/chroma-noise-reduction.md.
         nr_live = for_export or not s.get('chroma_nr_export_only')
         sharpen_live = for_export or not s.get('sharpen_export_only')
+        # Luminance noise reduction first (spec/luminance-noise-reduction.md):
+        # an equal change to R, G and B, so it runs in B&W too (the grey moves
+        # by exactly that change), with the same bypass and the same skip.
+        if nr_live and not skip_dust and s.get('luma_nr', 0):
+            adjusted = apply_luma_nr(
+                adjusted, s.get('luma_nr', 0),
+                s.get('luma_nr_detail', LUMA_NR_DETAIL_DEFAULT),
+                scale=CCRImage._sharpen_scale_for(self, adjusted))
         if (nr_live and not skip_dust and profile != "bw"
                 and s.get('chroma_nr', 0)):
             adjusted = apply_chroma_denoise(
@@ -2708,9 +2717,15 @@ class CCRImage:
         curves = s.get('curves')
         if curves:
             adjusted = apply_curves(adjusted, curves)
-        # An area's own Chroma NR: extra, inside its mask, on top of the global
+        # An area's own noise reduction (luminance, then colour): extra, inside
+        # its mask, on top of the global
         # amount (area renders are always whole images). The global "Bypass
         # until export" flag governs it too. (Sharpening is global only.)
+        if nr_live and s.get('luma_nr', 0):
+            adjusted = apply_luma_nr(
+                adjusted, s.get('luma_nr', 0),
+                s.get('luma_nr_detail', LUMA_NR_DETAIL_DEFAULT),
+                scale=CCRImage._sharpen_scale_for(self, adjusted))
         if nr_live and s.get('chroma_nr', 0):
             adjusted = apply_chroma_denoise(
                 adjusted, s.get('chroma_nr', 0),
