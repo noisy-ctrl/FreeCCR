@@ -783,6 +783,13 @@ class ThumbnailList(QWidget):
             ir_img = ccr_backend.get_image_by_index(indices[0])
             has_ir = bool(getattr(ir_img, "ir_source", None))
             ir_action = menu.addAction("Change IR Shot…" if has_ir else "Attach IR Shot…")
+        # spec/reference-compare.md: this frame as the one on screen's reference
+        compare_action = None
+        ip = getattr(self._main_window(), "image_preview", None)
+        if (ip is not None and getattr(ip, "compare", None) is not None
+                and len(indices) == 1 and indices[0] != getattr(ip, "current_idx", None)
+                and indices[0] < len(ccr_backend.images)):
+            compare_action = menu.addAction("Compare the Frame on Screen with This")
         # spec/collage-maker.md: the collage's members
         collage_add = collage_remove = None
         cv = getattr(self._main_window(), "collage_view", None)
@@ -831,6 +838,8 @@ class ThumbnailList(QWidget):
             dp = getattr(self._main_window(), "dust_panel", None)
             if dp is not None:
                 dp.attach_ir(ccr_backend.get_image_by_index(indices[0]))
+        elif compare_action is not None and action == compare_action:
+            ip.compare.use_frame(ccr_backend.images[indices[0]])
         elif collage_add is not None and action == collage_add:
             cv.add_members([ccr_backend.images[i] for i in indices
                             if i < len(ccr_backend.images)])

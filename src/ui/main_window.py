@@ -943,6 +943,10 @@ class MainWindow(QMainWindow):
         export_action = file_menu.addAction("Export…")
         export_action.setShortcut("Ctrl+E")
         export_action.triggered.connect(self.image_preview.open_export_dialog)
+        # The collage maker, here for now: its toolbar room went to Reference
+        # (the user, 2026-11-25; spec/reference-compare.md). The same
+        # checkable action, ticked while the collage shows.
+        file_menu.addAction(self.image_preview.collage_action)
 
         # Settings — the colour-management features (input ICC/DCP, the IT8
         # camera-profile wizard, Positive mode) live in its Color Management tab.

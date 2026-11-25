@@ -53,7 +53,7 @@ def _centre_scene(ip):
 def test_the_toggle_sits_after_false_colour_and_notes_the_scopes(ip):
     acts = ip.toolbar.actions()
     i = acts.index(ip.sample_action)
-    assert acts[i - 1] is ip.fc_action
+    assert acts[i - 1] is ip.compare_action and acts[i - 2] is ip.fc_action
     assert ip.sample_action.toolTip().startswith("Sample circle")
     assert not ip.sample_action.icon().isNull()
     ip.sample_action.trigger()

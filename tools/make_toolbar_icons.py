@@ -422,6 +422,27 @@ def collage():
     return img
 
 
+def reference():
+    """Compare with a reference picture (spec/reference-compare.md, the user's
+    pick of the drafts, 2026-11-25: "A"): a frame cut by an upright line with
+    a knob, the reference's half shaded."""
+    img, p = canvas()
+    r = QRectF(2.6, 4.6, 18.8, 14.8)
+    p.setPen(Qt.NoPen)
+    p.setBrush(QBrush(QColor(0, 0, 0, 120)))
+    p.drawRoundedRect(QRectF(12, 4.6, 9.4, 14.8), 1.2, 1.2)
+    p.drawRect(QRectF(12, 4.6, 3, 14.8))
+    p.setPen(pen(1.6))
+    p.setBrush(Qt.NoBrush)
+    p.drawRoundedRect(r, 1.2, 1.2)
+    p.drawLine(QPointF(12, 2.0), QPointF(12, 22.0))
+    p.setPen(Qt.NoPen)
+    p.setBrush(QBrush(BLACK))
+    p.drawEllipse(QPointF(12, 12), 2.3, 2.3)
+    p.end()
+    return img
+
+
 def skin(gap=2.0, width=1.7):
     """The skin tool (spec/skin-picker.md): a head and shoulders as a DOTTED
     outline (the user, 2026-11-23: "a dotted outline of someone"; the
@@ -461,6 +482,7 @@ ICONS = [
     ("scope-sample-icon.png", scope_sample),
     ("flat-field-icon.png", flat_field),
     ("collage-icon.png", collage),
+    ("reference-icon.png", reference),
     ("skin-icon.png", skin),
 ]
 # Capture keeps its camera (camera-icon.png, the user's choice, 2026-11-19).

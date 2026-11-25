@@ -143,6 +143,22 @@ def _ci_from_json(ci):
     return out
 
 
+def _compare_ref_to_json(ref):
+    """A frame's Reference (spec/reference-compare.md), or None."""
+    if not isinstance(ref, dict):
+        return None
+    if ref.get("file"):
+        return {"file": str(ref["file"])}
+    frame = ref.get("frame")
+    if frame and len(frame) == 2:
+        return {"frame": [str(frame[0]), str(frame[1])]}
+    return None
+
+
+def _compare_ref_from_json(ref):
+    return _compare_ref_to_json(ref)
+
+
 def _slice_parent_to_json(parent):
     """slice_parent is a plain {display_name, is_duplicate, slice_group} dict
     of JSON-safe scalars, but copy defensively so the stored catalog never
@@ -257,6 +273,8 @@ def serialize_image(img) -> dict:
         # The film format picked for the frame in the Crop panel
         # (spec/film-formats.md). Additive: absent = not set.
         "film_format": getattr(img, "film_format", None),
+        # spec/reference-compare.md: {"file": path} | {"frame": [key, name]}
+        "compare_ref": _compare_ref_to_json(getattr(img, "compare_ref", None)),
         # How it was scanned (spec/scan-type.md): colour / trichrome / bw / None
         "capture_type": getattr(img, "capture_type", None),
         # Its film preset (spec/film-presets.md). Additive: absent = none.
@@ -339,7 +357,8 @@ def _is_pristine(state: dict) -> bool:
             and state["reference_frame"] is None
             and not state.get("capture_guide")
             and not state.get("ir_source")
-            and not state.get("film_preset"))
+            and not state.get("film_preset")
+            and not state.get("compare_ref"))
 
 
 def _prune(catalog: dict) -> None:
@@ -762,6 +781,7 @@ def _restore_image(file_path: str, state: dict, live_merge_sources=None,
     img.auto_crop_rect = tuple(auto) if auto else None
     img.auto_crop_example = state.get("auto_crop_example")
     img.film_format = state.get("film_format")
+    img.compare_ref = _compare_ref_from_json(state.get("compare_ref"))
     img.capture_type = state.get("capture_type")
     img.film_preset = state.get("film_preset")
     img.capture_guide = state.get("capture_guide")
