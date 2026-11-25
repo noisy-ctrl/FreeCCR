@@ -181,12 +181,14 @@ def test_keys_are_last_so_the_positional_zip_is_unchanged():
     # The developer edge effect is created right after Masking
     # (spec/developer-edge-effect.md), then the Local Contrast list's sliders
     # (spec/local-contrast.md), so they are the very last.
-    assert keys[-6:] == ["edge_effect", "lc_lighting", "lc_detail", "lc_texture",
-                         "lc_structure", "lc_shape"]
-    assert keys[-9:-6] == ["sharpen_amount", "sharpen_radius", "sharpen_masking"]
+    # Colour Organics v2's two sliders come after them (spec/colour-organics-v2.md).
+    assert keys[-2:] == ["organics_v2", "organic_sat"]
+    assert keys[-8:-2] == ["edge_effect", "lc_lighting", "lc_detail", "lc_texture",
+                           "lc_structure", "lc_shape"]
+    assert keys[-11:-8] == ["sharpen_amount", "sharpen_radius", "sharpen_masking"]
     # Chroma Noise Reduction's keys sit just before them (spec/chroma-noise-reduction.md).
-    assert keys[-11:-9] == ["chroma_nr", "chroma_nr_radius"]
-    assert keys[-12] == "xt_bg"          # Crosstalk Correction (spec/density-crosstalk.md)
+    assert keys[-13:-11] == ["chroma_nr", "chroma_nr_radius"]
+    assert keys[-14] == "xt_bg"          # Crosstalk Correction (spec/density-crosstalk.md)
 
 
 def test_panel_has_one_slider_per_key_in_order():
