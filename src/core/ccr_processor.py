@@ -17,6 +17,7 @@ from core.glow import apply_glow
 from core.shadow_lift import apply_shadow_lift
 from core.clean_lights import apply_clean_lights
 from core.organics_v2 import apply_organics_v2
+from core.lab_tone import apply_lab_tone
 # ... and their GPU versions (spec/gpu-finishing-tools.md), run straight after
 # the main kernel when the OpenCL device is a GPU.
 from core import finish_gpu
@@ -3928,6 +3929,9 @@ def adjust_image(
     # and saturation by tone, 0..100 each (50 = the labs' amount). Appended last.
     organics_v2: float = 0.0,
     organic_sat: float = 0.0,
+    # Lab Tone (spec/lab-tone.md): the labs' tone curve on lightness, 0..100
+    # (50 = the labs'). Appended last.
+    lab_tone: float = 0.0,
 ) -> np.ndarray:
     """
     Apply temperature, tint, exposure, brightness, blackpoint, whitepoint, highlights, shadows,
@@ -4161,6 +4165,11 @@ def adjust_image(
     if clean_lights and clean_lights > 0:
         img = apply_clean_lights(np.clip(img / 65535.0, 0.0, 1.0).astype(np.float32),
                                  clean_lights) * 65535.0
+    # Lab Tone: the labs' tone curve, measured on top of Organics v2 and
+    # Clean Lights (spec/lab-tone.md).
+    if lab_tone and lab_tone > 0:
+        img = apply_lab_tone(np.clip(img / 65535.0, 0.0, 1.0).astype(np.float32),
+                             lab_tone) * 65535.0
     # Golden Highlights: the last colour stage, finishing the look (after the
     # saturation sliders and the bands, so they don't push it around).
     if golden_highlights and golden_highlights > 0:
@@ -4483,6 +4492,9 @@ def adjust_image_opencl(
     # Colour Organics v2 — appended last, see adjust_image.
     organics_v2: float = 0.0,
     organic_sat: float = 0.0,
+    # Lab Tone (spec/lab-tone.md): the labs' tone curve on lightness, 0..100
+    # (50 = the labs'). Appended last.
+    lab_tone: float = 0.0,
 ) -> np.ndarray:
     """
     GPU-accelerated (OpenCL) version of adjust_image.
@@ -4672,7 +4684,8 @@ def adjust_image_opencl(
                           glow=glow, glow_shape=glow_shape, glow_area=glow_area,
                           shadow_lift=shadow_lift, shadow_lift_shape=shadow_lift_shape,
                           clean_lights=clean_lights,
-                          organics_v2=organics_v2, organic_sat=organic_sat)
+                          organics_v2=organics_v2, organic_sat=organic_sat,
+                          lab_tone=lab_tone)
 
     try:
       # Serialize GPU submissions: the hi-res zoom worker may run this
@@ -4740,7 +4753,8 @@ def adjust_image_opencl(
         # picture leaves the GPU once (spec/gpu-finishing-tools.md).
         # Organics v2 runs in numpy BEFORE Clean Lights, so with it on the
         # whole finishing chain runs in numpy, in order.
-        v2_on = (organics_v2 and organics_v2 > 0) or (organic_sat and organic_sat > 0)
+        v2_on = ((organics_v2 and organics_v2 > 0) or (organic_sat and organic_sat > 0)
+                 or (lab_tone and lab_tone > 0))
         finished = (not v2_on) and _finish_on_gpu(ctx, queue, img_buf, img.shape[0], img.shape[1],
                                   golden_highlights, golden_shape,
                                   shadow_neutralise, shadow_shape, glow, glow_shape,
@@ -4762,6 +4776,10 @@ def adjust_image_opencl(
           result = apply_clean_lights(
               np.clip(result / 65535.0, 0.0, 1.0).astype(np.float32),
               clean_lights) * 65535.0
+      if lab_tone and lab_tone > 0:
+          result = apply_lab_tone(
+              np.clip(result / 65535.0, 0.0, 1.0).astype(np.float32),
+              lab_tone) * 65535.0
       if golden_highlights and golden_highlights > 0:
           result = apply_golden(np.clip(result / 65535.0, 0.0, 1.0).astype(np.float32),
                                 golden_highlights, golden_shape) * 65535.0
@@ -4810,7 +4828,8 @@ def adjust_image_opencl(
                           glow=glow, glow_shape=glow_shape, glow_area=glow_area,
                           shadow_lift=shadow_lift, shadow_lift_shape=shadow_lift_shape,
                           clean_lights=clean_lights,
-                          organics_v2=organics_v2, organic_sat=organic_sat)
+                          organics_v2=organics_v2, organic_sat=organic_sat,
+                          lab_tone=lab_tone)
 
 
 

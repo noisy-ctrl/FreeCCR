@@ -276,7 +276,7 @@ class TestUIWiring:
                                  "chroma_nr", "chroma_nr_radius", "sharpen_amount",
                                  "sharpen_radius", "sharpen_masking", "edge_effect",
                                  "lc_lighting", "lc_detail", "lc_texture", "lc_structure",
-                                 "lc_shape", "organics_v2", "organic_sat"]
+                                 "lc_shape", "organics_v2", "organic_sat", "lab_tone"]
         assert keys[fi - len(BAND_ADJUSTMENT_KEYS):fi] == list(BAND_ADJUSTMENT_KEYS)
         assert len(BAND_ADJUSTMENT_KEYS) == len(COLOR_BANDS) * len(BAND_PARAMS)
 

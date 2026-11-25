@@ -58,7 +58,8 @@ SYNC_GROUPS = [
     ("sat", "Saturation & Lab Finish", ("saturation", "sat_rolloff", "vibrance",
                             "clean_lights", "golden_highlights", "shadow_neutralise",
                             "shadow_lift", "glow", "colour_organics",
-                            "natural_tint", "organics_v2", "organic_sat")),
+                            "natural_tint", "organics_v2", "organic_sat",
+                            "lab_tone")),
     ("crop", "Crop", ()),
     # Coarse 90-degree rotation + the mirror flags, synced like crop (whole-image
     # properties, not adjustment keys). fine_rotation_angle is deliberately NOT
@@ -191,6 +192,7 @@ _BASIC_LABELS = {
     "colour_organics": "Colour Organics",
     "organics_v2": "Organics v2",
     "organic_sat": "Organic Saturation",
+    "lab_tone": "Lab Tone",
     "natural_tint": "Natural tint",
     "clean_lights": "Clean Lights",
     "golden_highlights": "Golden Highlights",
@@ -941,6 +943,8 @@ class SlidersPanel(QWidget):
         # Local Contrast sliders, so last of all here; shown under Colour
         # Organics.
         "organics_v2", "organic_sat",
+        # Lab Tone (spec/lab-tone.md): created last, shown under Clean Lights.
+        "lab_tone",
     ]
 
     # Non-zero default values for specific adjustment keys. Keys not listed
@@ -2033,6 +2037,22 @@ class SlidersPanel(QWidget):
                    if scroll_layout.itemAt(k).layout() is self.colour_organics_slider_layout)
         scroll_layout.insertLayout(_at + 1, self.organic_sat_slider_layout)
         scroll_layout.insertLayout(_at + 1, self.organics_v2_slider_layout)
+
+        # Lab Tone: the labs' tone curve (spec/lab-tone.md). Created last
+        # (ADJUSTMENT_KEYS zip), shown in Lab Finish right under Clean Lights.
+        self.lab_tone_slider_layout = self.create_slider(
+            "Lab Tone", min_value=0, max_value=100)
+        self.lab_tone_slider_layout.itemAt(0).widget().setToolTip(
+            "Lab Tone: the labs' tone curve, measured on Noritsu scans of the "
+            "same negatives. A soft, lifted black (about 6/255 at 50), slightly "
+            "deeper lower mids, livelier mids and a soft top (white held at "
+            "about 250/255). Lightness only: colours keep their hue and "
+            "saturation. 50 is the labs' curve, 100 a stronger version. Measured "
+            "on top of Organics v2 and Clean Lights at 50.")
+        _cl = self.lab_finish_section._content_layout
+        _at = next(k for k in range(_cl.count())
+                   if _cl.itemAt(k).layout() is self.clean_lights_slider_layout)
+        _cl.insertLayout(_at + 1, self.lab_tone_slider_layout)
 
         # --- Populate Curves ---
         self.curve_editor = CurveEditor()

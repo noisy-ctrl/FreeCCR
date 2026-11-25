@@ -149,7 +149,7 @@ def test_adjust_image_runs_it_and_is_a_no_op_at_zero():
 def test_panel_keys_are_last_and_synced_with_saturation():
     from widgets import sliders_panel as sp
     keys = sp.SlidersPanel.ADJUSTMENT_KEYS
-    assert keys[-2:] == ["organics_v2", "organic_sat"]
+    assert keys[-3:-1] == ["organics_v2", "organic_sat"]
     sat = next(g for g in sp.SYNC_GROUPS if g[0] == "sat") if hasattr(sp, "SYNC_GROUPS") else None
     if sat is not None:
         assert "organics_v2" in sat[2] and "organic_sat" in sat[2]

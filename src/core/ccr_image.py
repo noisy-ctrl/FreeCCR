@@ -2508,6 +2508,7 @@ class CCRImage:
                      clean_lights=s.get('clean_lights', 0),
                      organics_v2=s.get('organics_v2', 0),
                      organic_sat=s.get('organic_sat', 0),
+                     lab_tone=s.get('lab_tone', 0),
                      # Per-color-band sliders ride the same GPU pass (or the
                      # CPU fallback); None keeps the inactive case free.
                      band_settings=(s if any(s.get(k, 0)
@@ -2692,6 +2693,7 @@ class CCRImage:
                      clean_lights=s.get('clean_lights', 0),
                      organics_v2=s.get('organics_v2', 0),
                      organic_sat=s.get('organic_sat', 0),
+                     lab_tone=s.get('lab_tone', 0),
                      balance_r=s.get('balance_r', 0),
                      balance_g=s.get('balance_g', 0),
                      balance_b=s.get('balance_b', 0),
