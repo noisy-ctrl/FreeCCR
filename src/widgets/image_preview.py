@@ -327,6 +327,16 @@ class GraphicsImageView(QGraphicsView):
         if self._space_pan:
             # Space+drag pans the view (ScrollHandDrag handles the motion)
             return super().mousePressEvent(event)
+        if self._compare_free() and self.parent_widget.compare.hit(event.pos()):
+            compare = self.parent_widget.compare
+            if event.button() == Qt.RightButton:
+                compare.show_menu(self.viewport().mapToGlobal(event.pos()))
+                event.accept()
+                return
+            if event.button() == Qt.LeftButton and not compare.locked:
+                compare.press(event.pos())
+                event.accept()
+                return
         if self.parent_widget.dust_mode and self.parent_widget.pixmap_item is not None:
             if event.button() == Qt.LeftButton:
                 self.parent_widget.dust_press(self.mapToScene(event.pos()))
@@ -409,6 +419,21 @@ class GraphicsImageView(QGraphicsView):
             return
         if self._space_pan:
             return super().mouseMoveEvent(event)
+        compare = getattr(self.parent_widget, "compare", None)
+        if compare is not None and compare.dragging:
+            compare.drag_to(event.pos())
+            event.accept()
+            return
+        if compare is not None and compare.on:
+            over = (self._compare_free() and not compare.locked
+                    and event.buttons() == Qt.NoButton and compare.hit(event.pos()))
+            if over:
+                self.setCursor(compare.cursor())
+                self._compare_hover = True
+                return
+            if getattr(self, "_compare_hover", False):
+                self._compare_hover = False
+                self._restore_mode_cursor()
         if self.parent_widget.dust_mode:
             if (self.parent_widget._dust_drag is not None
                     or self.parent_widget._dust_src_drag is not None):
@@ -546,6 +571,11 @@ class GraphicsImageView(QGraphicsView):
             return
         if self._space_pan:
             return super().mouseReleaseEvent(event)
+        compare = getattr(self.parent_widget, "compare", None)
+        if compare is not None and compare.dragging:
+            compare.release()
+            event.accept()
+            return
         if self.parent_widget.dust_mode:
             if event.button() == Qt.LeftButton:
                 if self.parent_widget._dust_src_drag is not None:
@@ -740,6 +770,9 @@ class GraphicsImageView(QGraphicsView):
 
     def drawForeground(self, painter, rect):
         super().drawForeground(painter, rect)
+        compare = getattr(self.parent_widget, "compare", None)
+        if compare is not None:
+            compare.paint(painter)
         if self._grid_shown():
             painter.save()
             painter.setRenderHint(QPainter.Antialiasing, False)  # <-- Use QPainter.Antialiasing
@@ -804,6 +837,15 @@ class GraphicsImageView(QGraphicsView):
         tool has the mouse (spec/skin-picker.md)."""
         pw = self.parent_widget
         return (getattr(pw, "skin_mode", False) and pw.pixmap_item is not None
+                and not (pw.dust_mode or pw.crop_mode or pw.area_mode or pw.slice_mode
+                         or self.wb_pick_mode or self.bwpoint_mode))
+
+    def _compare_free(self):
+        """The Reference line may take the mouse: no editing tool has it
+        (spec/reference-compare.md)."""
+        pw = self.parent_widget
+        compare = getattr(pw, "compare", None)
+        return (compare is not None and compare.on and pw.pixmap_item is not None
                 and not (pw.dust_mode or pw.crop_mode or pw.area_mode or pw.slice_mode
                          or self.wb_pick_mode or self.bwpoint_mode))
 
@@ -1217,6 +1259,25 @@ class ImagePreview(QWidget):
             _fc_btn.setContextMenuPolicy(Qt.CustomContextMenu)
             _fc_btn.customContextMenuRequested.connect(
                 lambda pos, b=_fc_btn: self._show_fc_menu(b.mapToGlobal(pos)))
+        # Reference: the frame and a finished picture of it either side of a
+        # line, lined up (spec/reference-compare.md); a view, like False colour
+        self.compare_action = QAction(
+            theme.load_tinted_icon(resource_path("icons/reference-icon.png"),
+                                   on_color=theme.ICON_ON),
+            "Reference", self)
+        self.compare_action.setCheckable(True)
+        self.compare_action.setToolTip(
+            "Reference: compare this frame with a finished picture of it (a lab "
+            "scan, a JPEG made elsewhere, another open frame), lined up with it, "
+            "either side of a line you can drag. Right-click the line or this "
+            "button to turn the line level, swap sides or lock it. Display only.")
+        self.compare_action.triggered.connect(self.set_compare)
+        self.toolbar.addAction(self.compare_action)
+        _cmp_btn = self.toolbar.widgetForAction(self.compare_action)
+        if _cmp_btn is not None:
+            _cmp_btn.setContextMenuPolicy(Qt.CustomContextMenu)
+            _cmp_btn.customContextMenuRequested.connect(
+                lambda pos, b=_cmp_btn: self.compare.show_menu(b.mapToGlobal(pos)))
         # Sample circle: points the scopes and the histogram at one round
         # area; a measuring tool only (spec/scope-sample-circle.md)
         self.sample_action = QAction(
@@ -1250,7 +1311,9 @@ class ImagePreview(QWidget):
             _skin_btn.setContextMenuPolicy(Qt.CustomContextMenu)
             _skin_btn.customContextMenuRequested.connect(
                 lambda pos, b=_skin_btn: self._show_skin_menu(b.mapToGlobal(pos)))
-        # The collage maker (spec/collage-maker.md): the last picture on the left
+        # The collage maker (spec/collage-maker.md). In the File menu for now
+        # (the user, 2026-11-25: its room on the toolbar went to Reference),
+        # so the action is made here and the main window lists it.
         self.collage_action = QAction(
             theme.load_tinted_icon(resource_path("icons/collage-icon.png"),
                                    on_color=theme.ICON_ON),
@@ -1261,7 +1324,7 @@ class ImagePreview(QWidget):
             "post, carousel or story, and export it. Right-click frames in the list "
             "to add or remove them.")
         self.collage_action.triggered.connect(self._toggle_collage)
-        self.toolbar.addAction(self.collage_action)
+        self.collage_action.setIconVisibleInMenu(False)
         add_spacer()
 
         # Film Presets + Capture dead centre, Auto Crop / Un-convert / Convert
@@ -1355,6 +1418,10 @@ class ImagePreview(QWidget):
         self.view = GraphicsImageView(self)
         self.view.setScene(self.scene)
         self.layout.addWidget(self.view)
+        # a pan moves the picture under the Reference line
+        for _bar in (self.view.horizontalScrollBar(), self.view.verticalScrollBar()):
+            _bar.valueChanged.connect(lambda *_a: getattr(self, "compare", None)
+                                      and self.compare.update_clip())
 
         # Scopes (RGB parade + vectorscope) computed from the displayed image
         # (zoom/pan-independent) — collapsible, below the canvas. See
@@ -1558,6 +1625,9 @@ class ImagePreview(QWidget):
         # False colour (spec/false-colour.md): its own layer under the glow.
         self._false_colour = False
         self._fc_item = None
+        # Reference compare (spec/reference-compare.md)
+        from widgets.compare_layer import CompareLayer
+        self.compare = CompareLayer(self)
         self._fc_cache = None            # (cacheKey of the shown pixmap, layer)
         self._fc_legend = None
         # Which scale (bands / zones) and, for zones, what they read
@@ -1637,6 +1707,7 @@ class ImagePreview(QWidget):
         self._glow_item = None           # scene.clear() above deleted it
         self._glow_cache = None
         self._fc_item = None
+        self.compare.reset_items()
         self._fm_item = None
         self._sample_item = None
         self._fc_cache = None
@@ -1860,6 +1931,7 @@ class ImagePreview(QWidget):
         self._dust_cursor_item = None
         self._glow_item = None
         self._fc_item = None
+        self.compare.reset_items()
         self._fm_item = None
         self._gm_item = None
         self._clip_item = None
@@ -2018,6 +2090,9 @@ class ImagePreview(QWidget):
             self._draw_dust_debug()
             if self._slice_lines:
                 self._redraw_slice_lines()
+        compare = getattr(self, "compare", None)
+        if compare is not None:
+            compare.update_clip()
 
     def apply_transformations(self):
         if not self.pixmap_item:
@@ -2092,6 +2167,7 @@ class ImagePreview(QWidget):
             self._refresh_skin_items()
         self._draw_ir_pending()
         self.refresh_dust_badge()
+        self.compare.refresh()
 
         # The displayed image content/orientation may have changed (rotate,
         # flip, fine rotation, hi-res pixmap swap) — refresh the scopes.
@@ -2315,6 +2391,11 @@ class ImagePreview(QWidget):
 
     # --- False colour (spec/false-colour.md) -----------------------------
     FC_MAX_LONG = 4096      # cap for the layer's own resolution (GUI-thread cost)
+
+    def set_compare(self, on):
+        """The Reference compare view on or off (spec/reference-compare.md);
+        on for a frame with no reference asks for one."""
+        return self.compare.set_on(bool(on))
 
     def set_false_colour(self, on):
         """Show or hide the false-colour view: the displayed picture in
@@ -3710,6 +3791,7 @@ class ImagePreview(QWidget):
             self._draw_area_overlay()  # area handle sizes track the view scale too
         if self.dust_mode:
             self._draw_dust_debug()  # source markers track the view scale too
+        self.compare.update_clip()
 
     def zoom_to_percent(self, pct):
         """Zoom to an absolute percentage of the source's ACTUAL size (1.0 =

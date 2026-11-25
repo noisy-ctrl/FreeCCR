@@ -316,8 +316,8 @@ def test_the_toolbar_button_shows_the_collage_and_back(roll):
     from ui.main_window import MainWindow
     mw = MainWindow()
     ip = mw.image_preview
-    names = [a.text() for a in ip.toolbar.actions() if a.text()]
-    assert names.index("Collage") == names.index("Skin") + 1
+    # in the File menu since spec/reference-compare.md (2026-11-25)
+    assert ip.collage_action not in ip.toolbar.actions()
     ip.collage_action.trigger()
     assert mw.collage_shown() and ip.isHidden() and ip.collage_action.isChecked()
     assert mw.collage_view.members() == roll
