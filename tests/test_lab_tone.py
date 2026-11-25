@@ -100,4 +100,4 @@ def test_adjust_image_runs_it_and_is_a_no_op_at_zero():
 
 def test_panel_key_is_last_and_synced_with_lab_finish():
     from widgets import sliders_panel as sp
-    assert sp.SlidersPanel.ADJUSTMENT_KEYS[-1] == "lab_tone"
+    assert sp.SlidersPanel.ADJUSTMENT_KEYS[-3] == "lab_tone"   # then luma_nr*

@@ -144,8 +144,8 @@ class TestPanel:
         assert keys[i:i + 2] == ["chroma_nr", "chroma_nr_radius"]
         assert SlidersPanel.SLIDER_DEFAULTS["chroma_nr_radius"] == CHROMA_NR_RADIUS_DEFAULT
         groups = {gid: k for gid, _l, k in SYNC_GROUPS}
-        assert groups["noise"] == ("chroma_nr", "chroma_nr_radius",
-                                   "chroma_nr_export_only")
+        assert groups["noise"] == ("luma_nr", "luma_nr_detail", "chroma_nr",
+                                   "chroma_nr_radius", "chroma_nr_export_only")
 
     def test_sliders_built_with_defaults(self):
         from PySide6.QtWidgets import QApplication

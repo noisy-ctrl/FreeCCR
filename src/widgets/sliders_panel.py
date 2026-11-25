@@ -14,6 +14,7 @@ from core.ccr_processor import (COLOR_BANDS, BAND_PARAMS, BAND_ADJUSTMENT_KEYS,
                                 compute_density_slopes, CHROMA_NR_RADIUS_DEFAULT,
                                 normalize_organics_shape)
 from core.x_tones import normalize_xtone_shape, XTONE_SHAPE_DEFAULT
+from core.luma_nr import DETAIL_DEFAULT as LUMA_NR_DETAIL_DEFAULT
 from core.golden import normalize_golden_shape
 from core.shadow_neutral import normalize_shadow_shape
 from core.glow import normalize_glow_shape
@@ -85,8 +86,10 @@ SYNC_GROUPS = [
     ("balance", "Channel Balance (R/G/B)", ("balance_r", "balance_g", "balance_b")),
     ("bands", "Subtractive Saturations (per color)",
      tuple(BAND_ADJUSTMENT_KEYS) + ("band_feather",)),
-    ("noise", "Chroma Noise Reduction",
-     ("chroma_nr", "chroma_nr_radius", "chroma_nr_export_only")),
+    # Noise Reduction: luminance and colour (spec/luminance-noise-reduction.md)
+    ("noise", "Noise Reduction",
+     ("luma_nr", "luma_nr_detail", "chroma_nr", "chroma_nr_radius",
+      "chroma_nr_export_only")),
     # Details (sharpening) — its own group: output sharpening is a per-capture
     # judgement (focus, grain, how far the frame was downscaled), so a user
     # syncs it independently of colour. See spec/sharpening.md. Its "Bypass
@@ -203,6 +206,7 @@ _BASIC_LABELS = {
     "ch_input_gain": "Input Gain", "ch_master_shift": "Master Shift",
     "ch_master_gain": "Master Gain",
     "chroma_nr": "Chroma NR Amount", "chroma_nr_radius": "Chroma NR Radius",
+    "luma_nr": "Luminance NR Amount", "luma_nr_detail": "Luminance NR Detail",
     "sharpen_amount": "Sharpen Amount", "sharpen_radius": "Sharpen Radius",
     "sharpen_masking": "Sharpen Masking",
     "edge_effect": "Edge Effect",
@@ -211,7 +215,7 @@ _BASIC_LABELS = {
 }
 _CHANNEL_NAMES = {"r": "Red", "g": "Green", "b": "Blue"}
 _BAND_KEYS = frozenset(BAND_ADJUSTMENT_KEYS) | {"band_feather"}
-_NOISE_KEYS = ("chroma_nr", "chroma_nr_radius")
+_NOISE_KEYS = ("luma_nr", "luma_nr_detail", "chroma_nr", "chroma_nr_radius")
 _XT_KEYS = ("xt_rg", "xt_rb", "xt_gr", "xt_gb", "xt_br", "xt_bg")
 _SHARPEN_KEYS = ("sharpen_amount", "sharpen_radius", "sharpen_masking")
 # The Local Contrast list's sliders: one Detail paste row ("local"), with the
@@ -379,12 +383,20 @@ def paste_options(clip, default_for):
         return _fmt_value(v).lstrip("+")
 
     nr = adj.get("chroma_nr", default_for("chroma_nr"))
-    if nr != default_for("chroma_nr"):
-        # Amount, Radius and the bypass flag travel together.
+    lnr = adj.get("luma_nr", default_for("luma_nr"))
+    if nr != default_for("chroma_nr") or lnr != default_for("luma_nr"):
+        # Both halves' sliders and the bypass flag travel together
+        # (spec/luminance-noise-reduction.md).
         rad = adj.get("chroma_nr_radius", default_for("chroma_nr_radius"))
+        det = adj.get("luma_nr_detail", default_for("luma_nr_detail"))
+        bits = []
+        if lnr != default_for("luma_nr"):
+            bits.append(f"luminance {_n(lnr)}, detail {_n(det)}")
+        if nr != default_for("chroma_nr"):
+            bits.append(f"colour {_n(nr)}, radius {_n(rad)}")
         bypass = ", bypass until export" if flags.get("chroma_nr_export_only") else ""
         rows.append(("Detail", "noise",
-                     f"Chroma Noise Reduction  (amount {_n(nr)}, radius {_n(rad)}{bypass})"))
+                     f"Noise Reduction  ({'; '.join(bits)}{bypass})"))
     # Sharpening is on by default (amount 25), so unlike noise reduction its
     # row must not hang off the amount alone: a frame left at 25 with its
     # radius or masking changed, or with "bypass until export" ticked, has
@@ -945,6 +957,9 @@ class SlidersPanel(QWidget):
         "organics_v2", "organic_sat",
         # Lab Tone (spec/lab-tone.md): created last, shown under Clean Lights.
         "lab_tone",
+        # Luminance noise reduction (spec/luminance-noise-reduction.md):
+        # created last, shown at the top of Noise Reduction.
+        "luma_nr", "luma_nr_detail",
     ]
 
     # Non-zero default values for specific adjustment keys. Keys not listed
@@ -962,7 +977,8 @@ class SlidersPanel(QWidget):
     # Sharpening's defaults are the user's, from Settings → Details
     # (core.detail_defaults, spec/details-defaults.md): _default_for reads them.
     SLIDER_DEFAULTS = {"band_feather": 10,
-                       "chroma_nr_radius": CHROMA_NR_RADIUS_DEFAULT}
+                       "chroma_nr_radius": CHROMA_NR_RADIUS_DEFAULT,
+                       "luma_nr_detail": LUMA_NR_DETAIL_DEFAULT}
 
     CROSSTALK_HINT = ("Unmixes the film's dye layers in density, after the film "
                       "base is removed, so the base and greys stay neutral. "
@@ -1716,7 +1732,7 @@ class SlidersPanel(QWidget):
 
         for sid, attr, title in (("curves", "curves_section", "Curves"),
                                  ("bands", "band_section", "Subtractive Saturations"),
-                                 ("noise", "noise_section", "Chroma Noise Reduction"),
+                                 ("noise", "noise_section", "Noise Reduction"),
                                  ("details", "details_section", "Details")):
             sep = _section_separator()
             scroll_layout.addWidget(sep)
@@ -1914,10 +1930,10 @@ class SlidersPanel(QWidget):
             self.create_slider("Radius", min_value=0, max_value=100,
                                default_value=self._default_for("chroma_nr_radius")))
         self.nr_bypass_checkbox = self._make_bypass_checkbox(
-            "chroma_nr_export_only", "Chroma noise reduction")
+            "chroma_nr_export_only", "Noise reduction")
         self.noise_section.add_widget(self.nr_bypass_checkbox)
-        nr_hint = QLabel("Smooths colour blotches only; sharpness and grain "
-                         "are untouched. Zoom in to 100% to judge it.")
+        nr_hint = QLabel("Luminance calms speckle, Colour smooths colour blotches; "
+                         "edges and texture are kept. Zoom in to 100% to judge it.")
         nr_hint.setWordWrap(True)
         nr_hint.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 11px;")
         self.noise_section.add_widget(nr_hint)
@@ -2053,6 +2069,35 @@ class SlidersPanel(QWidget):
         _at = next(k for k in range(_cl.count())
                    if _cl.itemAt(k).layout() is self.clean_lights_slider_layout)
         _cl.insertLayout(_at + 1, self.lab_tone_slider_layout)
+
+        # Luminance noise reduction (spec/luminance-noise-reduction.md): created
+        # last (ADJUSTMENT_KEYS zip), shown at the top of Noise Reduction under
+        # a "Luminance" caption, the colour sliders under "Colour".
+        self.luma_nr_slider_layout = self.create_slider(
+            "Amount", min_value=0, max_value=100, default_value=self._default_for("luma_nr"))
+        self.luma_nr_slider_layout.itemAt(0).widget().setToolTip(
+            "Luminance noise reduction: how much of the fine speckle (the camera's "
+            "noise in dense shadows, the finest grain) is taken out. It measures "
+            "the noise in the frame itself, size by size and tone by tone, and "
+            "leaves edges and texture that stand above it. 0 is off.")
+        self.luma_nr_detail_slider_layout = self.create_slider(
+            "Detail", min_value=0, max_value=100,
+            default_value=self._default_for("luma_nr_detail"))
+        self.luma_nr_detail_slider_layout.itemAt(0).widget().setToolTip(
+            "Detail: how much of the finest texture is always kept, so the grain "
+            "stays. Lower smooths more, higher is a lighter touch.")
+        _nl = self.noise_section._content_layout
+
+        def _caption(text):
+            lab = QLabel(text)
+            lab.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 11px;")
+            return lab
+        self.luma_nr_caption = _caption("Luminance")
+        self.chroma_nr_caption = _caption("Colour")
+        _nl.insertWidget(0, self.chroma_nr_caption)
+        _nl.insertLayout(0, self.luma_nr_detail_slider_layout)
+        _nl.insertLayout(0, self.luma_nr_slider_layout)
+        _nl.insertWidget(0, self.luma_nr_caption)
 
         # --- Populate Curves ---
         self.curve_editor = CurveEditor()
@@ -3017,7 +3062,7 @@ class SlidersPanel(QWidget):
                          ("balance", "Channel Balance", "balance_section"),
                          ("curves", "Curves", "curves_section"),
                          ("bands", "Subtractive Saturations", "band_section"),
-                         ("noise", "Chroma Noise Reduction", "noise_section"),
+                         ("noise", "Noise Reduction", "noise_section"),
                          ("details", "Details", "details_section"))
     _HIDDEN_KEY = "panel/hidden_sections"
 
