@@ -160,6 +160,17 @@ class _IrFindWorker(QObject):
             self.failed.emit(self.img, str(e))
 
 
+def clear_question(n_heals: int, n_found: int) -> str:
+    """What Clear All asks (spec/dust-clear-found.md)."""
+    parts = []
+    if n_heals:
+        parts.append(f"the {n_heals} heal{'s' if n_heals != 1 else ''}")
+    if n_found:
+        parts.append(f"the {n_found} found spot{'s' if n_found != 1 else ''} "
+                     "not painted over yet")
+    return "Take " + " and ".join(parts) + " off this frame?"
+
+
 def found_counts(pending):
     """(IR dust, marks) the pending list holds as FINDS, not spots: a fibre's
     strokes are one find (`ir_c`; bridges join pieces and don't count), a
@@ -459,7 +470,8 @@ class DustRemovalPanel(QWidget):
             self.show_sources_cb.hide()
             hint.hide()
         self.clear_btn = QPushButton("Clear All")
-        self.clear_btn.setToolTip("Take every heal off this frame.")
+        self.clear_btn.setToolTip("Take every heal off this frame, and the dust and marks "
+                                  "Find found but nothing has painted over yet.")
         self.clear_btn.clicked.connect(self._on_clear_all)
         theme.style_button(self.clear_btn, "danger")  # removes all spots
         more.addWidget(self.clear_btn)
@@ -670,22 +682,29 @@ class DustRemovalPanel(QWidget):
             self.status_label.setText("Nothing to undo here.")
 
     def _on_clear_all(self):
-        from core.ccr_backend import ccr_backend
-        img = ccr_backend.get_image_by_index(self.image_preview.current_idx)
+        """Take off every heal AND the dust found but not painted over yet
+        (spec/dust-clear-found.md), after asking."""
+        from core import ir_dust
+        img = self._current_image()
         n = len(getattr(img, "dust_spots", []) or []) if img is not None else 0
-        if n == 0:
-            self.status_label.setText("No dust spots to clear.")
+        m = len(ir_dust.pending(img)) if img is not None else 0
+        if n == 0 and m == 0:
+            self.status_label.setText("Nothing to clear.")
             return
-        if QMessageBox.question(
-                self, "Clear All Dust Spots",
-                f"Remove all {n} dust spot{'s' if n != 1 else ''} from this image?",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+        if not self._confirm_clear(clear_question(n, m)):
             return
         if self.image_preview.dust_clear_all():
             self._prob = None  # spots gone; a re-detect should start fresh
-            self.status_label.setText("Cleared all dust spots.")
+            self.status_label.setText("Cleared.")
+            self.refresh_ir_section()
         else:
-            self.status_label.setText("No dust spots to clear.")
+            self.status_label.setText("Nothing to clear.")
+
+    def _confirm_clear(self, text) -> bool:
+        """The seam: Yes / No."""
+        return QMessageBox.question(
+            self, "Clear All", text, QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No) == QMessageBox.Yes
 
     def _on_done(self):
         self.main_window.toggle_dust_removal(False)
@@ -737,6 +756,8 @@ class DustRemovalPanel(QWidget):
         elif healed:
             text = (f"{healed} found spot{'s' if healed != 1 else ''} painted over. Before "
                     "shows the picture without them; the Eraser takes a wrong one away.")
+        elif getattr(img, "ir_cleared", False):
+            text = "Cleared. Find looks again."
         elif searched:
             text = ("No dust or marks found at these sensitivities." if has_ir
                     else "No marks found at this sensitivity.")
@@ -874,6 +895,8 @@ class DustRemovalPanel(QWidget):
         """Look for a frame's IR dust in the background (queued behind any
         other frame being searched); flagged, never healed by itself."""
         from core import ir_dust, film_marks
+        if img is not None:
+            img.ir_cleared = False
         if img is None or (ir_dust.can_find(img) is not None
                            and film_marks.can_find(img) is not None):
             self.refresh_ir_section()

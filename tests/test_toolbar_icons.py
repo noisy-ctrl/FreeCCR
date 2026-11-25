@@ -19,9 +19,9 @@ def test_every_left_hand_button_is_a_picture_in_order():
     names = [a.text() for a in ip.toolbar.actions() if a.text()]
     left = names[:names.index("Capture")]
     assert left == ["Rotate Left", "Rotate Right", "Mirror Vertical", "Mirror Horizontal",
-                    "Crop", "Sprocket Holes White", "Area", "Gradient", "Dust removal",
+                    "Crop", "Sprocket Holes White", "Area", "Gradient",
                     "Flat field map", "HDR", "False colour", "Reference", "Sample circle",
-                    "Skin", "Film Presets"]       # Collage: File menu (spec/reference-compare.md)
+                    "Skin", "Dust removal", "Film Presets"]   # Dust last: spec/dust-clear-found.md       # Collage: File menu (spec/reference-compare.md)
     by = {a.text(): a for a in ip.toolbar.actions()}
     for n in left + ["Capture"]:
         assert not by[n].icon().isNull(), n

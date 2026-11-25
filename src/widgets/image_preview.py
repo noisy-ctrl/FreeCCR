@@ -1168,7 +1168,7 @@ class ImagePreview(QWidget):
 
         # Dust removal: opens the Dust Removal panel (covers the sliders) and a
         # paint/AI-detect mode on the canvas. Checkable so it reflects mode
-        # state. With the area tools. "Dust removal" (the user, 2026-11-08):
+        # state. Made here, placed after Skin (below). "Dust removal" (the user, 2026-11-08):
         # the toolbar must still fit at a 14-inch Mac's full width without
         # pushing Export into the overflow menu (a test checks).
         self.dust_action = QAction(
@@ -1180,7 +1180,8 @@ class ImagePreview(QWidget):
             "panel: paint over dust with the brush, or use AI auto-detect.")
         self.dust_action.triggered.connect(
             lambda checked: self.window().toggle_dust_removal(checked))
-        self.toolbar.addAction(self.dust_action)
+        # placed at the right-hand end of the left-hand pictures, after Skin
+        # (the user, 2026-11-25; spec/dust-clear-found.md)
         add_spacer()
 
         self.toolbar.addSeparator()
@@ -1311,6 +1312,7 @@ class ImagePreview(QWidget):
             _skin_btn.setContextMenuPolicy(Qt.CustomContextMenu)
             _skin_btn.customContextMenuRequested.connect(
                 lambda pos, b=_skin_btn: self._show_skin_menu(b.mapToGlobal(pos)))
+        self.toolbar.addAction(self.dust_action)
         # The collage maker (spec/collage-maker.md). In the File menu for now
         # (the user, 2026-11-25: its room on the toolbar went to Reference),
         # so the action is made here and the main window lists it.
@@ -6089,12 +6091,19 @@ class ImagePreview(QWidget):
         return True
 
     def dust_clear_all(self) -> bool:
+        """Take every heal off the frame on screen AND the dust it found but
+        hasn't painted over yet (spec/dust-clear-found.md): one undo step."""
+        from core import ir_dust
         img = ccr_backend.get_image_by_index(self.current_idx)
-        if img is None or not img.dust_spots:
+        if img is None or not (img.dust_spots or ir_dust.pending(img)):
             return False
         img.push_undo_state()
         img.dust_spots = []
+        img.ir_dust_pending = None
+        img.ir_cleared = True          # the Dust panel says so until the next Find
         self._commit_dust_change(img)
+        self._draw_ir_pending()
+        self.refresh_dust_badge()
         return True
 
     # --- IR dust (spec/ir-dust-and-flat-sets.md) ---------------------------
