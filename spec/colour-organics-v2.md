@@ -77,6 +77,10 @@ dialog's labels come from ADJUSTMENT_KEYS / `_BASIC_LABELS` like every slider.
 
 ## Data
 
+Revision 2026-11-26: the three labs' average is replaced by two labs, Lab A
+and Lab B, chosen per frame (spec/organics-v2-labs.md).
+
+
 `core/organics_v2_data.py`, WRITTEN by `tools/fit_organics_v2.py`:
 `HUE_KNOTS` (24, every 15 deg of OKLab hue), `L_KNOTS` (0.15 .. 0.90 OKLab
 L), `HUE_MOVE` (deg) and `CHROMA_LOG` (log ratio, <= 0). Per lab, a Gaussian

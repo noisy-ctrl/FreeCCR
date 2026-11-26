@@ -5,7 +5,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QSlider, QLabel, QHBoxLayou
                                 QProgressDialog, QApplication)
 from PySide6.QtCore import Qt, QTimer, QThread, Signal, QRectF, QSettings
 from PySide6.QtGui import (QKeySequence, QShortcut, QPainter, QColor,
-                           QLinearGradient, QPen)
+                           QLinearGradient, QPen, QActionGroup)
 from core.ccr_backend import ccr_backend
 from core import detail_defaults
 from core import film_presets
@@ -15,6 +15,7 @@ from core.ccr_processor import (COLOR_BANDS, BAND_PARAMS, BAND_ADJUSTMENT_KEYS,
                                 normalize_organics_shape)
 from core.x_tones import normalize_xtone_shape, XTONE_SHAPE_DEFAULT
 from core.luma_nr import DETAIL_DEFAULT as LUMA_NR_DETAIL_DEFAULT
+from core.organics_v2 import normalize_lab as normalize_v2_lab
 from core.golden import normalize_golden_shape
 from core.shadow_neutral import normalize_shadow_shape
 from core.glow import normalize_glow_shape
@@ -221,6 +222,8 @@ _SHARPEN_KEYS = ("sharpen_amount", "sharpen_radius", "sharpen_masking")
 # The Local Contrast list's sliders: one Detail paste row ("local"), with the
 # chosen method and Edge Effect's options (spec/local-contrast.md).
 _LOCAL_KEYS = ("edge_effect",) + LC_KEYS
+# Organics v2's lab is pasted with either of these rows (spec/organics-v2-labs.md).
+_V2_KEYS = ("organics_v2", "organic_sat")
 _LC_ROW_NAMES = {"lc_lighting": "Lighting", "lc_detail": "Detail", "lc_texture": "Texture",
                  "lc_structure": "Structure", "lc_shape": "Shape"}
 _LC_ROW_TIPS = {
@@ -331,8 +334,10 @@ def paste_options(clip, default_for):
         section = ("Channel Levels" if key.startswith("ch_")
                    else "Channel Balance" if key.startswith("balance_")
                    else "Adjustments")
-        rows.append((section, f"adj:{key}",
-                     f"{adjustment_label(key)}  ({_fmt_value(shown_value(key, val))})"))
+        shown = _fmt_value(shown_value(key, val))
+        if key in _V2_KEYS and normalize_v2_lab(clip.get("organics_v2_lab")):
+            shown += ", lab B"       # the lab rides these rows (spec/organics-v2-labs.md)
+        rows.append((section, f"adj:{key}", f"{adjustment_label(key)}  ({shown})"))
     if clip.get("cineon_log"):
         rows.append(("Channel Levels", "cineon_log", "Cineon Log → Workspace"))
     if clip.get("look_lut"):
@@ -2035,24 +2040,23 @@ class SlidersPanel(QWidget):
         # last (ADJUSTMENT_KEYS zip), shown right under Colour Organics.
         self.organics_v2_slider_layout = self.create_slider(
             "Organics v2", min_value=0, max_value=100)
-        self.organics_v2_slider_layout.itemAt(0).widget().setToolTip(
-            "Organics v2: turns colours the way lab scans do, by tone as well "
-            "as by colour (dark browns towards ochre, blues towards cyan, reds "
-            "and pinks towards orange). Measured on Noritsu scans of the same "
-            "negatives: 50 is the labs' amount, 100 twice it. A newer version "
-            "of Colour Organics: use one or the other.")
+
         self.organic_sat_slider_layout = self.create_slider(
             "Organic Saturation", min_value=0, max_value=100)
-        self.organic_sat_slider_layout.itemAt(0).widget().setToolTip(
-            "Organic Saturation: the labs' saturation by tone and colour. Mid "
-            "tones keep their colour; shadows and light tones ease off, more "
-            "for blues, greens and reds. Measured on top of Clean Lights at "
-            "50: 50 is the labs' amount, 100 twice it. Only ever takes colour "
-            "out, at unchanged brightness.")
+
         _at = next(k for k in range(scroll_layout.count())
                    if scroll_layout.itemAt(k).layout() is self.colour_organics_slider_layout)
         scroll_layout.insertLayout(_at + 1, self.organic_sat_slider_layout)
         scroll_layout.insertLayout(_at + 1, self.organics_v2_slider_layout)
+        # Right-click either label: Lab A or Lab B (spec/organics-v2-labs.md).
+        self._v2_lab = None              # active layer's lab (None = Lab A)
+        self._v2_labels = [lay.itemAt(0).widget() for lay in
+                           (self.organics_v2_slider_layout, self.organic_sat_slider_layout)]
+        for lbl in self._v2_labels:
+            lbl.setContextMenuPolicy(Qt.CustomContextMenu)
+            lbl.customContextMenuRequested.connect(
+                lambda pos, lbl=lbl: self.organics_v2_menu().exec(lbl.mapToGlobal(pos)))
+        self._update_v2_labels()
 
         # Lab Tone: the labs' tone curve (spec/lab-tone.md). Created last
         # (ADJUSTMENT_KEYS zip), shown in Lab Finish right under Clean Lights.
@@ -2601,6 +2605,8 @@ class SlidersPanel(QWidget):
         self._organics_shape = normalize_organics_shape(
             adjustment.get("organics_shape") if adjustment else None)
         self._update_organics_label()
+        self._v2_lab = normalize_v2_lab(adjustment.get("organics_v2_lab") if adjustment else None)
+        self._update_v2_labels()
         self._golden_shape = normalize_golden_shape(
             adjustment.get("golden_shape") if adjustment else None)
         self._update_golden_label()
@@ -2997,6 +3003,9 @@ class SlidersPanel(QWidget):
         # Colour Organics regions: nested and non-slider in the same way.
         if getattr(self, "_organics_shape", None):
             adjustment["organics_shape"] = dict(self._organics_shape)
+        # ... and Organics v2's lab (only Lab B is stored).
+        if getattr(self, "_v2_lab", None):
+            adjustment["organics_v2_lab"] = self._v2_lab
         # ... and the Golden Highlights options.
         if getattr(self, "_golden_shape", None):
             adjustment["golden_shape"] = dict(self._golden_shape)
@@ -4022,6 +4031,73 @@ class SlidersPanel(QWidget):
             self._organics_popup = None
             self.end_undo_burst()
 
+    # --- Organics v2: Lab A or Lab B (spec/organics-v2-labs.md) ---------------
+    ORGANICS_V2_HINT = (
+        "Organics v2: turns colours the way lab scans do, by tone as well as by "
+        "colour. Measured on lab scans of the same negatives: 50 is the lab's "
+        "amount, 100 twice it. A newer version of Colour Organics: use one or "
+        "the other.")
+    ORGANIC_SAT_HINT = (
+        "Organic Saturation: the lab's saturation by tone and colour. Mid tones "
+        "keep their colour; shadows and light tones ease off, by colour. "
+        "Measured on top of Clean Lights at 50: 50 is the lab's amount, 100 "
+        "twice it. Only ever takes colour out, at unchanged brightness.")
+    V2_LAB_TEXT = {
+        "a": "Lab A",
+        "b": "Lab B",
+    }
+    # Written from the measurement (spec/organics-v2-labs.md, Measured).
+    V2_LAB_HINT = {
+        "a": "yellower skin and reds, softer light tones",
+        "b": "near the default, reds a little more orange",
+    }
+    V2_LAB_TIP = "Right-click: Lab A or Lab B"
+
+    def _update_v2_labels(self):
+        """Tooltips of both labels say the lab; underlined on Lab B (a
+        non-default option, as the other tools mark theirs)."""
+        from core.organics_v2 import lab_of
+        lab = lab_of(getattr(self, "_v2_lab", None))
+        for lbl, hint in zip(getattr(self, "_v2_labels", ()),
+                             (self.ORGANICS_V2_HINT, self.ORGANIC_SAT_HINT)):
+            f = lbl.font()
+            f.setUnderline(lab != "a")
+            lbl.setFont(f)
+            lbl.setToolTip("\n".join([
+                hint, f"{self.V2_LAB_TEXT[lab]}: {self.V2_LAB_HINT[lab]}",
+                self.V2_LAB_TIP]))
+
+    def organics_v2_menu(self):
+        """The labels' right-click menu: Lab A / Lab B, the frame's ticked.
+        (The test seam: tests trigger its actions.)"""
+        from core.organics_v2 import lab_of
+        menu = QMenu(self)
+        group = QActionGroup(menu)
+        group.setExclusive(True)
+        now = lab_of(self._v2_lab)
+        for lab in ("a", "b"):
+            act = menu.addAction(f"{self.V2_LAB_TEXT[lab]} \u00b7 {self.V2_LAB_HINT[lab]}")
+            act.setCheckable(True)
+            act.setChecked(lab == now)
+            act.setData(lab)
+            act.setEnabled(self.current_idx is not None)
+            group.addAction(act)
+            act.triggered.connect(lambda _=False, lab=lab: self.set_v2_lab(lab))
+        return menu
+
+    def set_v2_lab(self, lab):
+        """Use Lab A or Lab B on the active layer: one undo step, re-rendered
+        like a slider move."""
+        new = normalize_v2_lab(lab)
+        if self.current_idx is None or new == self._v2_lab:
+            return
+        self.end_undo_burst()
+        self._v2_lab = new
+        self._update_v2_labels()
+        self.on_slider_changed()
+        self._undo_burst_timer.stop()
+        self.end_undo_burst()
+
     # --- Film Look (spec/film-look-lut.md) -----------------------------------
     def _populate_look_combo(self, select=None):
         """Both Film Look lists (Channel Levels' and the one above the
@@ -4342,6 +4418,8 @@ class SlidersPanel(QWidget):
         # the Highlights ⅃ / Shadows L / Contrast L ⅃ options to their defaults.
         self._organics_shape = None
         self._update_organics_label()
+        self._v2_lab = None
+        self._update_v2_labels()
         self._xtone_shape = None
         self._update_xtone_labels()
         self._golden_shape = None
@@ -4471,6 +4549,7 @@ class SlidersPanel(QWidget):
         src_curves = src_global.get("curves")  # None when identity/absent
         src_shape = normalize_xtone_shape(src_global.get("xtone_shape"))
         src_org = normalize_organics_shape(src_global.get("organics_shape"))
+        src_v2lab = normalize_v2_lab(src_global.get("organics_v2_lab"))
         src_gold = normalize_golden_shape(src_global.get("golden_shape"))
         src_shadow = normalize_shadow_shape(src_global.get("shadow_shape"))
         src_glow = normalize_glow_shape(src_global.get("glow_shape"))
@@ -4497,6 +4576,8 @@ class SlidersPanel(QWidget):
             shape_changes = sync_tone_shape and own_shape != src_shape
             own_org = normalize_organics_shape(img.adjustment_settings.get("organics_shape"))
             org_changes = sync_org_shape and own_org != src_org
+            own_v2lab = normalize_v2_lab(img.adjustment_settings.get("organics_v2_lab"))
+            v2lab_changes = sync_org_shape and own_v2lab != src_v2lab
             own_gold = normalize_golden_shape(img.adjustment_settings.get("golden_shape"))
             gold_changes = sync_org_shape and own_gold != src_gold
             own_shadow = normalize_shadow_shape(img.adjustment_settings.get("shadow_shape"))
@@ -4513,7 +4594,7 @@ class SlidersPanel(QWidget):
                     and not curves_changes and not orient_changes and not shape_changes
                     and not org_changes and not gold_changes and not shadow_changes
                     and not glow_changes and not lift_changes and not edge_changes
-                    and not lcm_changes):
+                    and not lcm_changes and not v2lab_changes):
                 continue  # nothing to change — and no dead undo snapshot
             img.push_undo_state()
             if adj_changes:
@@ -4535,6 +4616,8 @@ class SlidersPanel(QWidget):
                     merged["xtone_shape"] = dict(own_shape)
                 if own_org and not org_changes:
                     merged["organics_shape"] = dict(own_org)
+                if own_v2lab and not v2lab_changes:
+                    merged["organics_v2_lab"] = own_v2lab
                 if own_gold and not gold_changes:
                     merged["golden_shape"] = dict(own_gold)
                 if own_shadow and not shadow_changes:
@@ -4564,6 +4647,11 @@ class SlidersPanel(QWidget):
                     img.adjustment_settings["organics_shape"] = dict(src_org)
                 else:
                     img.adjustment_settings.pop("organics_shape", None)
+            if v2lab_changes:
+                if src_v2lab:
+                    img.adjustment_settings["organics_v2_lab"] = src_v2lab
+                else:
+                    img.adjustment_settings.pop("organics_v2_lab", None)
             if gold_changes:
                 if src_gold:
                     img.adjustment_settings["golden_shape"] = dict(src_gold)
@@ -5862,6 +5950,8 @@ class SlidersPanel(QWidget):
                 live["xtone_shape"] = g["xtone_shape"]
             if g.get("organics_shape"):
                 live["organics_shape"] = g["organics_shape"]
+            if g.get("organics_v2_lab"):
+                live["organics_v2_lab"] = g["organics_v2_lab"]
             if g.get("golden_shape"):
                 live["golden_shape"] = g["golden_shape"]
             if g.get("shadow_shape"):
@@ -5885,6 +5975,7 @@ class SlidersPanel(QWidget):
             "xtone_shape": copy.deepcopy(normalize_xtone_shape(live.get("xtone_shape"))),
             "organics_shape": copy.deepcopy(
                 normalize_organics_shape(live.get("organics_shape"))),
+            "organics_v2_lab": normalize_v2_lab(live.get("organics_v2_lab")),
             "golden_shape": copy.deepcopy(normalize_golden_shape(live.get("golden_shape"))),
             "shadow_shape": copy.deepcopy(normalize_shadow_shape(live.get("shadow_shape"))),
             "glow_shape": copy.deepcopy(normalize_glow_shape(live.get("glow_shape"))),
@@ -6034,6 +6125,13 @@ class SlidersPanel(QWidget):
             merged["organics_shape"] = copy.deepcopy(clip["organics_shape"])
         elif normalize_organics_shape(target.get("organics_shape")):
             merged["organics_shape"] = target["organics_shape"]
+        # Organics v2's lab rides its sliders' rows: either brings the
+        # clipboard's (Lab A removes the target's B); neither keeps the target's.
+        v2_lab = (normalize_v2_lab(clip.get("organics_v2_lab"))
+                  if any(f"adj:{k}" in chosen for k in _V2_KEYS)
+                  else normalize_v2_lab(target.get("organics_v2_lab")))
+        if v2_lab:
+            merged["organics_v2_lab"] = v2_lab
         if "golden_shape" in chosen and clip.get("golden_shape"):
             merged["golden_shape"] = copy.deepcopy(clip["golden_shape"])
         elif normalize_golden_shape(target.get("golden_shape")):
@@ -6102,6 +6200,8 @@ class SlidersPanel(QWidget):
                 self.curve_editor.set_curves(merged.get("curves"))
                 self._organics_shape = normalize_organics_shape(merged.get("organics_shape"))
                 self._update_organics_label()
+                self._v2_lab = normalize_v2_lab(merged.get("organics_v2_lab"))
+                self._update_v2_labels()
                 self._xtone_shape = normalize_xtone_shape(merged.get("xtone_shape"))
                 self._update_xtone_labels()
                 self._golden_shape = normalize_golden_shape(merged.get("golden_shape"))

@@ -26,7 +26,11 @@ finishing tools' quality rules:
 
 The tables are evaluated as the fit was: a normalised Gaussian kernel over
 the knots (12 deg in hue, periodic; 0.08 in L), tabulated once on a fine
-(hue, L) grid and read bilinearly."""
+(hue, L) grid and read bilinearly.
+
+Two measured labs (spec/organics-v2-labs.md): Lab A (the default) and Lab B,
+each with its own tables; a frame picks one with
+adjustment_settings["organics_v2_lab"] ("b", or absent for A)."""
 import functools
 
 import numpy as np
@@ -51,39 +55,60 @@ CHUNK = 1 << 20
 
 _HK = np.asarray(data.HUE_KNOTS, np.float64)
 _LK = np.asarray(data.L_KNOTS, np.float64)
-_A = np.asarray(data.HUE_MOVE, np.float64)
-_B = np.minimum(np.asarray(data.CHROMA_LOG, np.float64), 0.0)
+
+LABS = tuple(sorted(data.LABS))          # ("a", "b")
+DEFAULT_LAB = "a"
 
 
-def table_fields(L, h):
-    """(move deg, chroma log) at the labs' amount for lightness L and hue h
+def normalize_lab(value):
+    """The stored form of a lab choice: "b" for Lab B, None for Lab A (the
+    default) and anything unknown."""
+    v = str(value).strip().lower() if value is not None else ""
+    return v if v in LABS and v != DEFAULT_LAB else None
+
+
+def lab_of(value):
+    """The lab a stored value means: "a" or "b"."""
+    return normalize_lab(value) or DEFAULT_LAB
+
+
+@functools.lru_cache(maxsize=None)
+def _tables(lab):
+    t = data.LABS[lab_of(lab)]
+    return (np.asarray(t["HUE_MOVE"], np.float64),
+            np.minimum(np.asarray(t["CHROMA_LOG"], np.float64), 0.0))
+
+
+def table_fields(L, h, lab=DEFAULT_LAB):
+    """(move deg, chroma log) at the lab's amount for lightness L and hue h
     (degrees), by the fit's own kernel evaluation. float64 arrays."""
+    A, B = _tables(lab_of(lab))
     L = np.asarray(L, np.float64).reshape(-1)
     h = np.asarray(h, np.float64).reshape(-1)
     dx = ((h[:, None] - _HK[None, :] + 180.0) % 360.0) - 180.0
     kh = np.exp(-0.5 * (dx / SIGMA_H) ** 2)
     kl = np.exp(-0.5 * ((L[:, None] - _LK[None, :]) / SIGMA_L) ** 2)
     den = kh.sum(1) * kl.sum(1)
-    move = ((kh @ _A) * kl).sum(1) / den
-    clog = ((kh @ _B) * kl).sum(1) / den
+    move = ((kh @ A) * kl).sum(1) / den
+    clog = ((kh @ B) * kl).sum(1) / den
     return move, clog
 
 
-@functools.lru_cache(maxsize=1)
-def _grids():
+@functools.lru_cache(maxsize=None)
+def _grids(lab=DEFAULT_LAB):
     hs = np.arange(0.0, 360.0 + GRID_H, GRID_H)
     ls = np.arange(0.0, 1.0 + GRID_L, GRID_L)
     H, L = np.meshgrid(hs, ls, indexing="ij")
-    move, clog = table_fields(L.ravel(), H.ravel())
+    move, clog = table_fields(L.ravel(), H.ravel(), lab)
     return (move.reshape(H.shape).astype(np.float32),
             np.minimum(clog, 0.0).reshape(H.shape).astype(np.float32))
 
 
-@functools.lru_cache(maxsize=1)
-def fold_limit():
+@functools.lru_cache(maxsize=None)
+def fold_limit(lab=DEFAULT_LAB):
     """The largest hue amount (slider units) whose map never folds: at every
     lightness 1 + (amount/50) . d move/d hue >= MIN_SLOPE."""
-    move, _ = _grids()
+    move, _ = _grids(lab_of(lab))
     d = np.diff(move.astype(np.float64), axis=0) / GRID_H     # per degree
     worst = float(d.min())
     if worst >= 0:
@@ -105,24 +130,26 @@ def _lookup(grid, h, L):
             + (g01 * (1 - th) + g11 * th) * tl).astype(np.float32)
 
 
-def amounts(hue_amount, sat_amount):
-    """Slider values -> (hue factor, saturation factor), 1 = the labs'.
-    The hue amount is held under the fold limit."""
-    hue = min(max(float(hue_amount or 0.0), 0.0), AMOUNT_MAX, fold_limit())
+def amounts(hue_amount, sat_amount, lab=DEFAULT_LAB):
+    """Slider values -> (hue factor, saturation factor), 1 = the lab's.
+    The hue amount is held under the lab's fold limit."""
+    hue = min(max(float(hue_amount or 0.0), 0.0), AMOUNT_MAX, fold_limit(lab_of(lab)))
     sat = min(max(float(sat_amount or 0.0), 0.0), AMOUNT_MAX)
     return hue / LAB_AMOUNT, sat / LAB_AMOUNT
 
 
-def field_maps(img01, hue_amount, sat_amount, with_full=False):
+def field_maps(img01, hue_amount, sat_amount, with_full=False, lab=DEFAULT_LAB):
     """The turn (deg) and chroma log maps decided on the decision view, at
-    the given amounts, smoothed along the picture's edges."""
-    kh, ks = amounts(hue_amount, sat_amount)
+    the given amounts of the lab's tables, smoothed along the picture's
+    edges."""
+    which = lab_of(lab)                  # the lab's tables ("lab" below is OKLab)
+    kh, ks = amounts(hue_amount, sat_amount, which)
     smooth_lab, lab = decision_lab(img01)
     Ls = smooth_lab[..., 0]
     Cs = np.hypot(smooth_lab[..., 1], smooth_lab[..., 2])
     hs = np.degrees(np.arctan2(smooth_lab[..., 2], smooth_lab[..., 1]))
     gate = smooth((Cs - GATE_LO) / GATE_SPAN).astype(np.float32)
-    move_g, clog_g = _grids()
+    move_g, clog_g = _grids(which)
     flat_h, flat_l = hs.reshape(-1), Ls.reshape(-1)
     move = np.zeros(flat_h.shape, np.float32)
     clog = np.zeros(flat_h.shape, np.float32)
@@ -162,14 +189,16 @@ def _chunk(x, move, clog, lab):
     return out
 
 
-def apply_organics_v2(img01, hue_amount=0.0, sat_amount=0.0):
+def apply_organics_v2(img01, hue_amount=0.0, sat_amount=0.0, lab=DEFAULT_LAB):
     """Organics v2 (hue) and Organic Saturation on an HxWx3 float image in
-    0..1. A new float32 array; the input itself when both are 0."""
-    kh, ks = amounts(hue_amount, sat_amount)
+    0..1, with the lab's tables ("a" or "b"; a stored value is fine). A new
+    float32 array; the input itself when both are 0."""
+    lab = lab_of(lab)
+    kh, ks = amounts(hue_amount, sat_amount, lab)
     if kh <= 0 and ks <= 0:
         return img01
     a = np.asarray(img01, dtype=np.float32)
-    move, clog, full = field_maps(a, hue_amount, sat_amount, with_full=True)
+    move, clog, full = field_maps(a, hue_amount, sat_amount, with_full=True, lab=lab)
     flat = a.reshape(-1, 3)
     move = move.reshape(-1)
     clog = clog.reshape(-1)

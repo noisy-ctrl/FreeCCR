@@ -64,10 +64,12 @@ def test_directions_match_the_labs(L, C, h, sign):
 
 
 def test_dark_browns_turn_further_than_mid_oranges():
+    # Lab A (the default, spec/organics-v2-labs.md): 7.8 deg dark vs 6.9 mid;
+    # the three labs' average had a wider gap.
     dark = lab_patch(0.30, 0.06, 35)
     mid = lab_patch(0.60, 0.06, 35)
     assert mean_turn(dark, v2.apply_organics_v2(dark, 50, 0)) > \
-        mean_turn(mid, v2.apply_organics_v2(mid, 50, 0)) + 1.0
+        mean_turn(mid, v2.apply_organics_v2(mid, 50, 0)) + 0.5
 
 
 def test_saturation_only_ever_takes_colour_out():

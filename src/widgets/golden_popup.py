@@ -17,7 +17,7 @@ LABEL_W = 96            # fits "Neutral whites" with room
 
 ROWS = (
     ("hue", "Hue", ("Amber", "Yellow"),
-     "The gold's hue. The middle is the gold measured off a Noritsu scan; "
+     "The gold's hue. The middle is the gold measured off a lab scan; "
      "towards Amber is warmer and richer, towards Yellow paler (too far reads "
      "as yellow rather than gold)."),
     ("start", "Start", ("Lower", "Higher"),
@@ -130,7 +130,7 @@ class GoldenPopup(QFrame):
             lay.addWidget(w, alignment=Qt.AlignHCenter)
 
         self.reset_btn = QPushButton("Reset")
-        self.reset_btn.setToolTip("Back to the measured Noritsu gold")
+        self.reset_btn.setToolTip("Back to the gold measured off a lab scan")
         self.reset_btn.clicked.connect(self.reset)
         lay.addWidget(self.reset_btn)
         self._refresh()
