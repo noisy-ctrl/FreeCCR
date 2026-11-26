@@ -8,12 +8,18 @@ and chroma don't change; a move that would leave 0..1 is shortened
 (core.oklab.fit_move) and a pixel the curve doesn't move comes back exactly.
 
 The curve is a monotone cubic (Fritsch-Carlson) through the knots, so C1 and
-never turning back. Other amounts keep it monotone by working on its SLOPE:
-slope^(amount/50) between ends moved linearly (black = k . black_lab, white =
-1 + k (white_lab - 1)), so 0 is the identity, 50 the labs', 100 a stronger
-version whose slope never reaches 0. A tone curve on the pixel's own
-lightness has nothing for grain to steer; grain is scaled by the curve's
-slope like any tone control's."""
+never turning back. Other amounts keep it monotone by working on its SLOPE.
+Up to 50: slope^(amount/50) between ends moved linearly (black = k .
+black_lab, white = 1 + k (white_lab - 1)), so 0 is the identity and 50 the
+labs'. Above 50 (revision 2, the user's "Option A"): the labs' black and
+white stay and the curve's own shape grows, slope max(1 + k (f' - 1), 0.25)
+between those ends, so the lower mids go deeper and the mids steeper. A tone
+curve on the pixel's own lightness has nothing for grain to steer; grain is
+scaled by the curve's slope like any tone control's.
+
+It is the picture's LAST tone shape: CCRImage applies it after Gamma and
+Curves (spec/lab-tone.md, revision 2); adjust_image's lab_tone stage remains
+for direct callers."""
 import functools
 
 import numpy as np
@@ -26,6 +32,7 @@ AMOUNT_MAX = 100.0
 GRID = np.linspace(0.0, 1.0, 4097)
 MOVE_EPS = 1e-6
 CHUNK = 1 << 20
+STRONG_SLOPE_FLOOR = 0.25    # above 50: the slope never falls below this
 
 _X = np.asarray(data.KNOTS, np.float64)
 _Y = np.asarray(data.VALUES, np.float64)
@@ -56,9 +63,15 @@ def curve(amount):
         return f
     if k <= 0:
         return GRID.copy()
-    s = np.maximum(np.gradient(f, GRID), 1e-4) ** k
+    fp = np.gradient(f, GRID)
+    if k < 1.0:
+        s = np.maximum(fp, 1e-4) ** k
+        lo, hi = k * _Y[0], 1.0 + k * (_Y[-1] - 1.0)
+    else:
+        # The labs' black and white kept, the shape exaggerated (Option A).
+        s = np.maximum(1.0 + k * (fp - 1.0), STRONG_SLOPE_FLOOR)
+        lo, hi = _Y[0], _Y[-1]
     cum = np.concatenate([[0.0], np.cumsum((s[1:] + s[:-1]) * 0.5 * np.diff(GRID))])
-    lo, hi = k * _Y[0], 1.0 + k * (_Y[-1] - 1.0)
     return lo + (hi - lo) * cum / cum[-1]
 
 

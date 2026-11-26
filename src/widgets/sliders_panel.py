@@ -2063,12 +2063,13 @@ class SlidersPanel(QWidget):
         self.lab_tone_slider_layout = self.create_slider(
             "Lab Tone", min_value=0, max_value=100)
         self.lab_tone_slider_layout.itemAt(0).widget().setToolTip(
-            "Lab Tone: the labs' tone curve, measured on Noritsu scans of the "
-            "same negatives. A soft, lifted black (about 6/255 at 50), slightly "
-            "deeper lower mids, livelier mids and a soft top (white held at "
-            "about 250/255). Lightness only: colours keep their hue and "
-            "saturation. 50 is the labs' curve, 100 a stronger version. Measured "
-            "on top of Organics v2 and Clean Lights at 50.")
+            "Lab Tone: the labs' tone curve, measured on lab scans of the same "
+            "negatives. A soft, lifted black (about 6/255), slightly deeper lower "
+            "mids, livelier mids and a soft top (white held at about 250/255). "
+            "Lightness only: colours keep their hue and saturation. 50 is the "
+            "labs' curve; above 50 the same black and white with more of its "
+            "mid-tone contrast. Applied last, after Gamma and Curves, so they "
+            "don't move its black and white.")
         _cl = self.lab_finish_section._content_layout
         _at = next(k for k in range(_cl.count())
                    if _cl.itemAt(k).layout() is self.clean_lights_slider_layout)

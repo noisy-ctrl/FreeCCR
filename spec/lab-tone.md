@@ -108,3 +108,56 @@ and moves; the key last.
    as Auto tone does at conversion.
 6. Through the existing tools (Shadow Lift for the black, Contrast L ⅃ for
    the mids, Highlights ⅃ for the top).
+
+## Revision 2 (2026-11-26): after Gamma and Curves; 100 keeps the labs' ends
+
+The user: "lab tone is doing something odd?" (his DSCF0440_RGB with Gamma
++62 and Lab Tone 100: a foggy, lifted black).
+
+**Why.** Two things, measured on his two screenshots (Lab Tone 0 / 100):
+
+1. Gamma and Curves run AFTER `adjust_image`, so they re-shaped Lab Tone's
+   output: Gamma +62 roughly doubles a dark value (28 -> 57), so Lab Tone's
+   lifted black was lifted again. Darkest 0.1 %: 12 at 0; Lab Tone 100 alone
+   would give 31; Lab Tone 100 then Gamma +62 predicts 62; the app showed
+   54 (local contrast and sharpening follow too).
+2. 100 doubled everything about the curve, the ends included: black 28/255,
+   white 241, and 0..45 squeezed into 28..49 even with Gamma at 0.
+
+**Change 1, order.** Lab Tone is the picture's last tone shape: `CCRImage.
+apply_adjustments` applies it right after Gamma and the user's Curves (and
+the positive base curve before them), before noise reduction, area layers,
+the B&W collapse, local contrast and sharpening, and passes `lab_tone=0` to
+`adjust_image`. `adjust_image`'s own `lab_tone` stage stays for positional
+and direct callers (tests, tools) and is unchanged; with nothing passed the
+OpenCL path can finish on the GPU again. Golden Highlights, Shadow
+Neutralise, Shadow Lift and Glow run inside `adjust_image`, so Lab Tone now
+comes after them too (it came before them). A frame with none of Gamma,
+Curves or those four renders as before within one 16-bit code (the render
+is rounded to 16 bits once more before Lab Tone). Area layers keep theirs as
+they were (an area's own Lab Tone is applied on the global result in its own
+pass). The panel keeps the row under Clean Lights; its tooltip says it is
+applied last.
+
+**Change 2, 100 (the user picked "Option A").** 0..50 unchanged (slope^k,
+ends moved linearly, 50 = the labs'). Above 50 the labs' black and white
+stay (L 0.113 / 0.979) and the curve's own shape grows: slope
+max(1 + k (f' - 1), 0.25) with k = slider/50, integrated between those ends,
+so the lower mids go deeper and the mids steeper while black and white don't
+move. Continuous at 50 (k = 1 gives f' exactly; the floor never binds there:
+f' >= 0.39), monotone (slope >= 0.25) and C1 (the slope is continuous; only
+its own derivative kinks where the floor starts to bind).
+
+| display in | 0 | 30 | 64 | 128 | 180 | 255 |
+|---|---|---|---|---|---|---|
+| 50 (labs) | 5 | 29 | 57 | 128 | 185 | 248 |
+| 100 before | 28 | 41 | 63 | 136 | 192 | 241 |
+| 100 now | 5 | 18 | 41 | 125 | 192 | 248 |
+
+The tooltip says so and no longer names the scanner maker.
+
+Tests: the order (Gamma before Lab Tone in `apply_adjustments`: a dark grey
+with Gamma + Lab Tone 50 lands at Lab Tone's black, not Gamma's lift of it);
+`CCRImage` passes `lab_tone=0` to `adjust_image`; 100 keeps the labs' ends;
+every amount monotone and continuous across 50; a 65536-step ramp in order at
+75 and 100.

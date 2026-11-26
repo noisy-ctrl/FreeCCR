@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+sys.path.insert(0, os.path.dirname(__file__))
 
 from core import lab_tone as lt                          # noqa: E402
 from core import lab_tone_data as data                   # noqa: E402
@@ -62,7 +63,7 @@ def test_hue_and_chroma_are_kept():
     assert not np.allclose(o1[:, 0], o0[:, 0])
 
 
-@pytest.mark.parametrize("amount", [50, 100])
+@pytest.mark.parametrize("amount", [50, 75, 100])
 def test_a_fine_grey_ramp_stays_in_order(amount):
     v = np.linspace(0, 1, 65536, dtype=np.float32)
     img = np.repeat(v[:, None], 3, 1).reshape(256, 256, 3)
@@ -101,3 +102,56 @@ def test_adjust_image_runs_it_and_is_a_no_op_at_zero():
 def test_panel_key_is_last_and_synced_with_lab_finish():
     from widgets import sliders_panel as sp
     assert sp.SlidersPanel.ADJUSTMENT_KEYS[-3] == "lab_tone"   # then luma_nr*
+
+
+# --- revision 2: above 50 the labs' ends stay; applied after Gamma and Curves ----
+
+@pytest.mark.parametrize("amount", [60, 75, 100])
+def test_above_fifty_keeps_the_labs_black_and_white(amount):
+    c = lt.curve(amount)
+    assert abs(c[0] - data.VALUES[0]) < 1e-9 and abs(c[-1] - data.VALUES[-1]) < 1e-9
+    assert (np.diff(c) / np.diff(lt.GRID) >= lt.STRONG_SLOPE_FLOOR - 1e-6).all()
+
+
+def test_above_fifty_deepens_the_lower_mids_and_steepens_the_mids():
+    L = np.interp([0.25, 0.75], lt.GRID, lt.GRID)
+    c50, c100 = lt.curve(50), lt.curve(100)
+    lo50, hi50 = np.interp(L, lt.GRID, c50)
+    lo100, hi100 = np.interp(L, lt.GRID, c100)
+    assert lo100 < lo50 - 0.02 and hi100 > hi50 + 0.005
+
+
+def test_continuous_across_fifty():
+    assert np.abs(lt.curve(50.5) - lt.curve(50)).max() < 3e-3
+    assert np.abs(lt.curve(49.5) - lt.curve(50)).max() < 3e-3
+
+
+def _ccr_stub(settings):
+    from test_x_tones import _Stub
+    return _Stub(settings)
+
+
+def test_ccr_image_applies_it_after_gamma(monkeypatch):
+    import core.ccr_image as mod
+    from core.ccr_image import CCRImage
+    seen = {}
+
+    def ident(image, *a, **kw):
+        seen.update(kw)
+        return image
+    monkeypatch.setattr(mod, "adjust_image_opencl", ident)
+    img = np.zeros((8, 8, 3), np.uint16)                     # black
+    out = CCRImage.apply_adjustments(_ccr_stub({"gamma": 62, "lab_tone": 50}), img)
+    assert seen["lab_tone"] == 0.0                           # not inside the main render
+    want = lt.apply_lab_tone(np.zeros((1, 1, 3), np.float32), 50)[0, 0, 0] * 65535
+    # Lab Tone's own black (about 5/255), not Gamma's lift of it (about 10/255)
+    assert abs(float(out[..., :3].mean()) - want) <= 2
+
+
+def test_ccr_image_without_lab_tone_is_untouched(monkeypatch):
+    import core.ccr_image as mod
+    from core.ccr_image import CCRImage
+    monkeypatch.setattr(mod, "adjust_image_opencl", lambda image, *a, **kw: image)
+    img = (np.random.default_rng(3).uniform(0.1, 0.9, (8, 8, 3)) * 65535).astype(np.uint16)
+    out = CCRImage.apply_adjustments(_ccr_stub({"contrast": 0, "lab_tone": 0}), img)
+    assert np.array_equal(out, img)
