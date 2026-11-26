@@ -296,6 +296,16 @@ def clip_gain_offset(img, converted=None, ws=None):
         return None
     return float(CH_SLIDER_DIV * (1.0 - 1.0 / float(g)))
 
+
+def _lab_tone_u16(img16, amount):
+    """Lab Tone on a uint16 RGB render (core.lab_tone works on 0..1 floats)."""
+    from core.lab_tone import apply_lab_tone
+    rgb = img16[..., :3].astype(np.float32) / np.float32(65535.0)
+    out = np.rint(np.clip(apply_lab_tone(rgb, amount), 0.0, 1.0) * 65535.0).astype(np.uint16)
+    if img16.shape[-1] > 3:
+        out = np.concatenate([out, img16[..., 3:]], axis=-1)
+    return out
+
 class CCRImage:
     def __init__(
         self,
@@ -2510,7 +2520,9 @@ class CCRImage:
                      organics_v2=s.get('organics_v2', 0),
                      organic_sat=s.get('organic_sat', 0),
                      organics_v2_lab=s.get('organics_v2_lab'),
-                     lab_tone=s.get('lab_tone', 0),
+                     # Lab Tone is the picture's LAST tone shape: applied below,
+                     # after Gamma and Curves (spec/lab-tone.md, revision 2).
+                     lab_tone=0.0,
                      # Per-color-band sliders ride the same GPU pass (or the
                      # CPU fallback); None keeps the inactive case free.
                      band_settings=(s if any(s.get(k, 0)
@@ -2558,6 +2570,14 @@ class CCRImage:
         curves = s.get('curves')
         if curves:
             adjusted = apply_curves(adjusted, curves)
+        # Lab Tone (spec/lab-tone.md, revision 2): the picture's last tone
+        # shape, AFTER Gamma and the user's Curves, so its black and white land
+        # where it says whatever they do (Gamma +62 used to lift its lifted
+        # black again). Before noise reduction, areas, the B&W collapse, local
+        # contrast and sharpening.
+        lab_tone = s.get('lab_tone', 0)
+        if lab_tone and lab_tone > 0:
+            adjusted = _lab_tone_u16(adjusted, lab_tone)
         # Chroma noise reduction: last colour step of the global look, so it
         # cleans whatever Saturation/Vibrance/bands amplified, and BEFORE area
         # layers so they grade the cleaned base. Spatial — skipped with dust for
