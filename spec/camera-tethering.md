@@ -27,9 +27,9 @@ Decision is research-backed (see `experiments/`/PR discussion):
 - Camera-scanning film is a **static copy-stand** workflow: focus, exposure and
   alignment are set **once per roll**, then the roll is shot in minutes. Live
   view is a one-time *setup* aid, not a per-shot need.
-- The market-leading converter (Negative Lab Pro) has **no live preview**;
-  import-then-convert is the norm. Even Adobe Lightroom **disables camera live
-  view over USB tether**.
+- The market-leading converter has **no live preview**; import-then-convert
+  is the norm. Even Adobe Lightroom **disables camera live view over USB
+  tether**.
 - People who want a live framing view run the **camera vendor's app feeding a
   watched/hot folder** — exactly this pattern (Lightroom "Auto Import", Capture
   One "Hot Folder"). It is the industry standard and identical across OSes.
