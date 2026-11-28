@@ -1868,6 +1868,10 @@ def _apply_working_space_recovery(img16: np.ndarray, exposure: float,
     d = img16.astype(np.float32)
     d -= np.float32(WS_B)
     d *= np.float32(_WS_INV_WIDTH)
+    # A picture-levels frame's print curve makes Temperature / Tint the
+    # anchored gammas (spec/anchored-white-balance.md); read before the
+    # decode argument is used.
+    anchored_wb = bool(getattr(look_lut, "anchored_wb", False))
     # A Film Look sees the density it was fitted on whatever white point the
     # frame was converted with - so ahead of Channel Levels, which then grades
     # in that density too (spec/film-look-lut.md revision 6).
@@ -1924,7 +1928,11 @@ def _apply_working_space_recovery(img16: np.ndarray, exposure: float,
     # White balance - flat per-channel gain in the scene-linear working domain
     # (before the window clamp) so a warm/cool shift lands in headroom (recoverable)
     # instead of clipping, and cooling can pull highlights back. Index 0=R,1=G,2=B.
-    if kelvin_shift != 0.0 or tint_shift != 0.0:
+    if anchored_wb and (kelvin_shift != 0.0 or tint_shift != 0.0):
+        # per-channel gammas, black and white pinned (spec/anchored-white-balance.md)
+        from core import anchored_wb as _awb
+        _awb.apply(d, kelvin_shift, tint_shift)
+    elif kelvin_shift != 0.0 or tint_shift != 0.0:
         gr, gg, gb = _white_balance_gains(kelvin_shift, tint_shift, tint_balance_factor)
         if gr != 1.0:
             d[..., 0] *= np.float32(gr)
@@ -5196,7 +5204,12 @@ def cineon_decode(code: np.ndarray) -> np.ndarray:
 
 def _apply_look(d: np.ndarray, lut) -> np.ndarray:
     """Film Look decode (spec/film-look-lut.md) — thin wrapper so the module
-    is imported lazily and the call sites read like the Cineon ones."""
+    is imported lazily and the call sites read like the Cineon ones. A
+    picture-levels frame's print curve rides the same slot and decodes
+    itself (spec/picture-levels-conversion.md §7)."""
+    decode = getattr(lut, "decode", None)
+    if decode is not None:
+        return decode(d)
     from core.look_lut import apply_look
     return apply_look(d, lut)
 

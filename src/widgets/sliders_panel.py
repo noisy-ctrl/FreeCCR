@@ -1222,6 +1222,15 @@ class SlidersPanel(QWidget):
         _convert_slot = scroll_layout.count()
         scroll_layout.addWidget(self.bwp_section)
 
+        # Levels from the picture (spec/picture-levels-conversion.md §4): what
+        # in this section still applies, said at its top.
+        self.levels_note = QLabel(
+            "Levels come from each picture (Settings → Conversion). These are "
+            "used with Film base and white point.")
+        self.levels_note.setWordWrap(True)
+        self.levels_note.setStyleSheet(
+            f"color: {theme.TEXT_MUTED}; font-size: {theme.FS_CAPTION}px;")
+        self.bwp_section.add_widget(self.levels_note)
         bwp_row = theme.apply_button_row(QHBoxLayout())
         self.white_point_btn = QPushButton("Set White Point")
         # Small "clear" button: drops the white point so conversion uses the
@@ -5377,7 +5386,10 @@ class SlidersPanel(QWidget):
         bp_set = ccr_backend.black_point_bgr is not None
         wp_set = ccr_backend.white_point_bgr is not None
         stock = ccr_backend.film_stock_name
-        if getattr(ccr_backend, "auto_black_point", False):
+        picture = self._levels_from_picture()
+        if picture:
+            text = "Anchor source: levels from each picture"
+        elif getattr(ccr_backend, "auto_black_point", False):
             if not wp_set and not stock and getattr(ccr_backend, "auto_white_point", False):
                 text = "Anchor source: auto black + white point per frame"
             else:
@@ -5416,6 +5428,12 @@ class SlidersPanel(QWidget):
         # All stay disabled in global Positive mode (nothing to convert), like
         # the rest of the section (set_negative_controls_enabled).
         positive = bool(ccr_backend.positive_mode)
+        if hasattr(self, "levels_note"):
+            self.levels_note.setVisible(picture)
+        # With levels from the picture nothing here but the Black Point is
+        # used by Convert (spec/picture-levels-conversion.md §4).
+        self.white_point_btn.setEnabled(not positive and not picture)
+        positive = positive or picture
         self.film_stock_combo.setEnabled(not wp_set and not positive)
         self.film_stock_combo.setToolTip(
             "White point set — two-point conversion in use; clear it (✕) to "
@@ -5733,7 +5751,15 @@ class SlidersPanel(QWidget):
             ccr_backend.save_catalog()
             self._sync_wp_combo()
             wp_note = self._wp_note(awp_rec, white)
-            if auto_source == "auto":
+            if plan.get("levels") is not None:
+                # spec/picture-levels-conversion.md §4
+                self.set_temporary_hint(
+                    "Converted with levels from the picture (outlined: where "
+                    "they were measured).", duration=5000)
+                if hasattr(mw.image_preview, "flash_areas"):
+                    from core.picture_levels import measured_rect
+                    mw.image_preview.flash_areas([measured_rect(plan["levels"].get("rect"))])
+            elif auto_source == "auto":
                 self.set_temporary_hint(
                     f"Converted with auto black point: {auto_res.summary()}, "
                     f"{auto_res.confidence} confidence (outlined){wp_note}.", duration=7000)
@@ -5834,10 +5860,20 @@ class SlidersPanel(QWidget):
         finally:
             combo.blockSignals(False)
         enabled = (img is not None and not ccr_backend.positive_mode
-                   and ccr_backend.white_point_bgr is None)
+                   and ccr_backend.white_point_bgr is None
+                   and not self._levels_from_picture())
         combo.setEnabled(enabled)
         self.wp_show_btn.setEnabled(enabled)
         self._update_bwp_mode_label()
+
+    @staticmethod
+    def _levels_from_picture() -> bool:
+        return getattr(ccr_backend, "conversion_levels", "base") == "picture"
+
+    def sync_levels_note(self):
+        """Settings' Levels choice changed: the section's note, the anchor
+        line and which controls apply (spec/picture-levels-conversion.md §4)."""
+        self._sync_wp_combo()
 
     def _on_wp_choice_changed(self, _i):
         img = ccr_backend.get_image_by_index(self.current_idx)
@@ -5909,10 +5945,13 @@ class SlidersPanel(QWidget):
         n = len(ccr_backend.images)
         if n == 0:
             return
+        how = ("? Each frame's levels are set from its own picture."
+               if self._levels_from_picture()
+               else " with the current black/white point?")
         if not confirmed and QMessageBox.question(
                 self, "Convert All Images",
-                f"Convert all {n} image{'s' if n != 1 else ''} with the current "
-                "black/white point? Any existing conversions will be replaced.",
+                f"Convert all {n} image{'s' if n != 1 else ''}{how} Any existing "
+                "conversions will be replaced.",
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
             return
         dialog = BWPointConvertDialog(self)
@@ -5957,7 +5996,20 @@ class SlidersPanel(QWidget):
             pass
         ccr_backend.save_catalog()
         summ = getattr(ccr_backend, "last_auto_bp_summary", None)
-        if getattr(ccr_backend, "auto_black_point", False) and summ:
+        if summ and summ.get("picture"):
+            n = summ["picture"]
+            msg = f"Levels from the picture on {n} frame{'s' if n != 1 else ''}"
+            if summ.get("fallback"):
+                msg += f"; {summ['fallback']} converted from the film base"
+            if summ.get("cropped"):
+                msg += f"; {summ['cropped']} cropped to the frame"
+            if summ["skipped"]:
+                msg += f"; {summ['skipped']} not converted"
+            if summ["notes"]:
+                msg += " (" + "; ".join(dict.fromkeys(summ["notes"]))[:160] + ")"
+            self.set_temporary_hint(msg + ".", duration=10000)
+            ccr_backend.last_auto_bp_summary = None
+        elif getattr(ccr_backend, "auto_black_point", False) and summ:
             n_auto = summ["high"] + summ["medium"]
             msg = (f"Auto black point on {n_auto} frame{'s' if n_auto != 1 else ''}: "
                    f"{summ['high']} high, {summ['medium']} medium confidence")

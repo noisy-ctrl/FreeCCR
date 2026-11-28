@@ -296,19 +296,27 @@ def tint_slider(d):
     return float(np.arctanh(t / 0.26) / 0.02)
 
 
-def guard_wb(full, roll=None):
+def guard_wb(full, roll=None, anchored=False):
     """(temperature, tint) to apply, from this frame's full neutralising pair
-    and the roll's (median of other frames' full pairs, or None)."""
-    dt, dn = temp_density(full[0]), tint_density(full[1])
+    and the roll's (median of other frames' full pairs, or None). `anchored`:
+    the frame's Temperature / Tint are the anchored gammas
+    (spec/anchored-white-balance.md §6), put into the same density units."""
+    if anchored:
+        from core import anchored_wb as _aw
+        t_dens, n_dens = _aw.temp_density, _aw.tint_density
+        t_slider, n_slider = _aw.temp_slider, _aw.tint_slider
+    else:
+        t_dens, n_dens, t_slider, n_slider = temp_density, tint_density, temp_slider, tint_slider
+    dt, dn = t_dens(full[0]), n_dens(full[1])
     if roll is not None:
-        rt, rn = temp_density(roll[0]), tint_density(roll[1])
+        rt, rn = t_dens(roll[0]), n_dens(roll[1])
         dt = rt + max(-TEMP_ROLL_CAP, min(TEMP_ROLL_CAP, dt - rt))
         dn = rn + max(-TINT_ROLL_CAP, min(TINT_ROLL_CAP, dn - rn))
     else:
         dt = max(-TEMP_COOL_CAP, min(TEMP_WARM_CAP, dt))
         dn = max(-TINT_ROLL_CAP, min(TINT_ROLL_CAP, dn))
-    t = int(round(max(-100.0, min(100.0, temp_slider(dt)))))
-    n = int(round(max(-100.0, min(100.0, tint_slider(dn)))))
+    t = int(round(max(-100.0, min(100.0, t_slider(dt)))))
+    n = int(round(max(-100.0, min(100.0, n_slider(dn)))))
     return t, n
 
 

@@ -356,7 +356,11 @@ class TetherWatchWorker(QObject):
         # Snapshot once per file so a mid-decode flip (Positive mode / B/W
         # point change) can't make one file half-convert.
         positive = ccr_backend.positive_mode
-        convert = (not positive and ccr_backend.black_point_bgr is not None)
+        # levels from the picture need no black point
+        # (spec/picture-levels-conversion.md §4)
+        convert = (not positive and (
+            ccr_backend.black_point_bgr is not None
+            or getattr(ccr_backend, "conversion_levels", "base") == "picture"))
         from core import lead_frame
         for img in imgs:
             if self._cancelled:
