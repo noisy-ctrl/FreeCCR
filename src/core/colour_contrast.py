@@ -28,8 +28,8 @@ exactly."""
 import cv2
 import numpy as np
 
-from core.oklab import (GUIDE_EPS, decision_lab, finish_matte, fit_move, guided_filter,
-                        matte_radius, scaled_radius, smooth)
+from core.oklab import (DENOISE_EPS, DENOISE_R, GUIDE_EPS, _box, fit_move, guided_smooth,
+                        matte_radius, scaled_radius, smooth, to_oklab)
 
 AREA_R = 6                # area colour: guided-filter radius, px at the preview's 1080
 AREA_EPS = 0.02 ** 2      # lightness steps over ~0.02 are area edges
@@ -78,71 +78,176 @@ def _surround(ab, sigma):
     return cv2.resize(small, (w, h), interpolation=cv2.INTER_LINEAR)
 
 
+# Rows per band for the per-pixel steps. The maths is the same as doing the
+# whole picture at once; only the memory differs (a 51 MP export ran out of
+# memory at 8 GB doing everything as whole-picture arrays).
+CHUNK_ROWS = 256
+
+
+def _bands(h):
+    for r0 in range(0, h, CHUNK_ROWS):
+        yield r0, min(h, r0 + CHUNK_ROWS)
+
+
+def _oklab_band(a, r0, r1):
+    """The OKLab of rows r0:r1 of `a`, (r1 - r0) x W x 3 float32."""
+    w = a.shape[1]
+    return to_oklab(a[r0:r1].reshape(-1, 3)).reshape(r1 - r0, w, 3).astype(np.float32, copy=False)
+
+
+def _decision(a):
+    """oklab.decision_lab's denoised view as three planes [L, a, b]: the OKLab
+    conversion a band of rows at a time, each raw plane let go once smoothed."""
+    h, w = a.shape[:2]
+    raw = [np.empty((h, w), np.float32) for _ in range(3)]
+    for r0, r1 in _bands(h):
+        band = _oklab_band(a, r0, r1)
+        for c in range(3):
+            raw[c][r0:r1] = band[..., c]
+    r = scaled_radius(DENOISE_R, a.shape)
+    dec = []
+    for c in range(3):
+        dec.append(guided_smooth(raw[c], r, DENOISE_EPS[c]))
+        raw[c] = None
+    return dec
+
+
+def _guided(ps, guide, r, eps):
+    """oklab.guided_filter of each plane in the list `ps` along one `guide`:
+    the guide's statistics worked out once and the arithmetic done in place.
+    The same operations in the same order, so the same numbers, in less
+    memory. Empties `ps` as it goes (so a plane can be let go of)."""
+    if r < 1 or min(guide.shape[:2]) < 2 * r + 1:
+        return list(ps)
+    mI = _box(guide, r)
+    den = _box(guide * guide, r)
+    den -= mI * mI
+    den += np.float32(eps)
+    out = []
+    for i in range(len(ps)):
+        p = ps[i]
+        ps[i] = None
+        mp = _box(p, r)
+        a = _box(guide * p, r)
+        del p
+        a -= mI * mp
+        a /= den
+        mp -= a * mI                     # b = mp - a·mI
+        q = _box(a, r)
+        del a
+        q *= guide
+        q += _box(mp, r)
+        del mp
+        out.append(q)
+    return out
+
+
+def _skin_weight(da, db):
+    """1 on skin's hue (within SKIN_FLAT of SKIN_HUE), 0 past SKIN_HALF, faded
+    in by chroma: on the decision view's own colour, before smoothing."""
+    out = np.empty(da.shape, np.float32)
+    for r0, r1 in _bands(da.shape[0]):
+        x, y = da[r0:r1], db[r0:r1]
+        hue = np.degrees(np.arctan2(y, x))
+        dh = np.abs((hue - SKIN_HUE + 180.0) % 360.0 - 180.0)
+        t = np.clip((dh - SKIN_FLAT) / (SKIN_HALF - SKIN_FLAT), 0.0, 1.0)
+        s = 0.5 + 0.5 * np.cos(np.pi * t)       # 1 within SKIN_FLAT, 0 past SKIN_HALF
+        s *= smooth((np.hypot(x, y) - 0.01) / 0.02)
+        out[r0:r1] = s
+    return out
+
+
+def _push(a, amount, protect_skin):
+    """(push a, push b) planes for an HxWx3 float32 image in 0..1."""
+    h, w = a.shape[:2]
+    L, da, db = _decision(a)            # decided on the denoised view: grain can't steer it
+    # skin stays natural: where the decision view's own colour has skin's hue
+    # the push is taken out (below, after the smoothing, so a neighbour's push
+    # can't spill onto a face)
+    skin = _skin_weight(da, db) if protect_skin else None
+    planes = [da, db]
+    del da, db
+    ax, ay = _guided(planes, L, scaled_radius(AREA_R, a.shape), AREA_EPS)
+    sigma = SURROUND * max(h, w)
+    sx, sy = _surround(ax, sigma), _surround(ay, sigma)
+    k = min(max(float(amount or 0.0), 0.0), AMOUNT_MAX) / 100.0 * K_FULL
+    vx = np.empty((h, w), np.float32)
+    vy = np.empty((h, w), np.float32)
+    for r0, r1 in _bands(h):
+        x, y = ax[r0:r1], ay[r0:r1]
+        C = np.hypot(x, y)
+        gate = smooth((C - GATE_LO) / GATE_W)
+        px = k * gate * (x - sx[r0:r1])
+        py = k * gate * (y - sy[r0:r1])
+        mag = np.hypot(px, py)
+        s = LIMIT * np.tanh(mag / LIMIT) / np.maximum(mag, 1e-12)
+        px *= s
+        py *= s
+        # towards grey: keep at least KEEP of the area's chroma (no hue flip)
+        ux, uy = x / np.maximum(C, 1e-9), y / np.maximum(C, 1e-9)
+        along = px * ux + py * uy
+        floor = -(1.0 - KEEP) * C
+        fix = np.where(along < floor, floor - along, 0.0)
+        px += fix * ux
+        py += fix * uy
+        vx[r0:r1] = px
+        vy[r0:r1] = py
+    del sx, sy, ax, ay
+    # the push smoothed along the picture's edges, as every finishing tool's
+    # matte is (Smoothing 30), so what little grain the area colour kept
+    # can't ride on it; the skin matte smoothed the same way (finish_matte)
+    planes = [vx, vy]
+    del vx, vy
+    top = 0.0
+    if skin is not None:
+        top = float(skin.max()) if skin.size else 0.0
+        if top > 0.0:
+            planes.append(skin)
+        skin = None
+    out = _guided(planes, L, matte_radius(SMOOTHING, a.shape), GUIDE_EPS)
+    vx, vy = out[0], out[1]
+    if top > 0.0:
+        q = out[2]
+        np.clip(q, 0.0, top, out=q)
+        q[q < 1e-7] = 0.0
+        keep = 1.0 - SKIN_KEEP * q
+        vx *= keep
+        vy *= keep
+    return vx.astype(np.float32, copy=False), vy.astype(np.float32, copy=False)
+
+
 def push_field(img01, amount, protect_skin=True):
     """(push a, push b, OKLab) for an HxWx3 float image in 0..1."""
     a = np.asarray(img01, np.float32)
-    h, w = a.shape[:2]
-    dec, lab = decision_lab(a)          # decided on the denoised view: grain can't steer it
-    L = np.ascontiguousarray(dec[..., 0])
-    r = scaled_radius(AREA_R, a.shape)
-    area = np.dstack([guided_filter(np.ascontiguousarray(dec[..., c]), L, r, AREA_EPS)
-                      for c in (1, 2)]).astype(np.float32)
-    sur = _surround(area, SURROUND * max(h, w))
-    k = min(max(float(amount or 0.0), 0.0), AMOUNT_MAX) / 100.0 * K_FULL
-    C = np.hypot(area[..., 0], area[..., 1])
-    gate = smooth((C - GATE_LO) / GATE_W)
-    vx = k * gate * (area[..., 0] - sur[..., 0])
-    vy = k * gate * (area[..., 1] - sur[..., 1])
-    mag = np.hypot(vx, vy)
-    s = LIMIT * np.tanh(mag / LIMIT) / np.maximum(mag, 1e-12)
-    vx *= s
-    vy *= s
-    # towards grey: keep at least KEEP of the area's chroma (no hue flip)
-    ux, uy = area[..., 0] / np.maximum(C, 1e-9), area[..., 1] / np.maximum(C, 1e-9)
-    along = vx * ux + vy * uy
-    floor = -(1.0 - KEEP) * C
-    fix = np.where(along < floor, floor - along, 0.0)
-    vx += fix * ux
-    vy += fix * uy
-    # the push smoothed along the picture's edges, as every finishing tool's
-    # matte is (Smoothing 30), so what little grain the area colour kept
-    # can't ride on it
-    rm = matte_radius(SMOOTHING, a.shape)
-    vx = guided_filter(np.ascontiguousarray(vx, np.float32), L, rm, GUIDE_EPS)
-    vy = guided_filter(np.ascontiguousarray(vy, np.float32), L, rm, GUIDE_EPS)
-    if protect_skin:
-        # skin stays natural: where the decision view's own colour has skin's
-        # hue the push is taken out, after the smoothing, so a neighbour's
-        # push can't spill onto a face; a matte, smoothed like the push
-        hue = np.degrees(np.arctan2(dec[..., 2], dec[..., 1]))
-        dh = np.abs((hue - SKIN_HUE + 180.0) % 360.0 - 180.0)
-        t = np.clip((dh - SKIN_FLAT) / (SKIN_HALF - SKIN_FLAT), 0.0, 1.0)
-        skin = 0.5 + 0.5 * np.cos(np.pi * t)        # 1 within SKIN_FLAT, 0 past SKIN_HALF
-        skin *= smooth((np.hypot(dec[..., 1], dec[..., 2]) - 0.01) / 0.02)
-        skin = finish_matte(skin.astype(np.float32), L, SMOOTHING)
-        keep = 1.0 - SKIN_KEEP * skin
-        vx *= keep
-        vy *= keep
-    return vx.astype(np.float32), vy.astype(np.float32), lab
+    vx, vy = _push(a, amount, protect_skin)
+    lab = np.empty(a.shape, np.float32)
+    for r0, r1 in _bands(a.shape[0]):
+        lab[r0:r1] = _oklab_band(a, r0, r1)
+    return vx, vy, lab
 
 
-def apply_colour_contrast(img01, amount, shape=None, protect_skin=None):
+def apply_colour_contrast(img01, amount, shape=None, protect_skin=None, inplace=False):
     """Colour Contrast on an HxWx3 float image in 0..1 (display values). The
-    input itself at 0, else a new float32 array. `shape` is the stored options
-    (normalize_cc_shape); `protect_skin`, when given, overrides them."""
+    input itself at 0, else a float32 array: a new one, or with `inplace` the
+    input's own buffer when it is float32 (the render passes a copy it owns).
+    `shape` is the stored options (normalize_cc_shape); `protect_skin`, when
+    given, overrides them."""
     if not amount or amount <= 0:
         return img01
     if protect_skin is None:
         protect_skin = protects_skin(shape)
     a = np.asarray(img01, np.float32)
-    vx, vy, lab = push_field(a, amount, protect_skin)
-    moved = np.hypot(vx, vy) > MOVE_EPS
-    out = a.reshape(-1, 3).copy()
-    if moved.any():
-        m = moved.reshape(-1)
-        lm = lab.reshape(-1, 3)[m]
+    vx, vy = _push(a, amount, protect_skin)
+    out = a if (inplace or a is not img01) else np.array(a, np.float32, copy=True)
+    for r0, r1 in _bands(a.shape[0]):
+        px, py = vx[r0:r1], vy[r0:r1]
+        moved = np.hypot(px, py) > MOVE_EPS
+        if not moved.any():
+            continue
+        lm = _oklab_band(a, r0, r1)[moved]      # read before the band is written
         d = np.zeros_like(lm)
-        d[:, 1] = vx.reshape(-1)[m]
-        d[:, 2] = vy.reshape(-1)[m]
-        out[m] = np.clip(fit_move(lm, d), 0.0, 1.0)
-    return out.reshape(a.shape)
+        d[:, 1] = px[moved]
+        d[:, 2] = py[moved]
+        band = out[r0:r1]
+        band[moved] = np.clip(fit_move(lm, d), 0.0, 1.0)
+    return out

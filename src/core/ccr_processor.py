@@ -4178,7 +4178,8 @@ def adjust_image(
     # cleaned colours, before the gold is added (spec/colour-contrast.md).
     if colour_contrast and colour_contrast > 0:
         img = apply_colour_contrast(np.clip(img / 65535.0, 0.0, 1.0).astype(np.float32),
-                                    colour_contrast, colour_contrast_shape) * 65535.0
+                                    colour_contrast, colour_contrast_shape,
+                                    inplace=True) * 65535.0
     # Lab Tone: the labs' tone curve, measured on top of Organics v2 and
     # Clean Lights (spec/lab-tone.md).
     if lab_tone and lab_tone > 0:
@@ -4802,7 +4803,7 @@ def adjust_image_opencl(
       if colour_contrast and colour_contrast > 0:
           result = apply_colour_contrast(
               np.clip(result / 65535.0, 0.0, 1.0).astype(np.float32),
-              colour_contrast, colour_contrast_shape) * 65535.0
+              colour_contrast, colour_contrast_shape, inplace=True) * 65535.0
       if lab_tone and lab_tone > 0:
           result = apply_lab_tone(
               np.clip(result / 65535.0, 0.0, 1.0).astype(np.float32),
