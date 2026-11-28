@@ -67,7 +67,8 @@ independent (radii scale with the render).
 
 ## Integration
 
-Runs right after Clean Lights in `adjust_image` (before Golden Highlights),
+Runs right after Clean Lights in `adjust_image` (before Lab Tone's own call
+there and Golden Highlights),
 `colour_contrast` / `colour_contrast_shape` appended LAST to
 `adjust_image` / `adjust_image_opencl`; on OpenCL with it on the numpy
 finishing chain runs in order (`_finish_on_gpu` skipped, as Organics v2), a
@@ -109,3 +110,29 @@ grow; skin protected (and not when off); resolution independent (600 vs
   terracotta, which the user can turn off with Protect skin.
 - Surround size as an option? Not yet: one look first; Reach can come later
   as the tools' options did.
+
+## As built (2026-11-28, the user: "Please build")
+
+- `core/colour_contrast.py`: `normalize_cc_shape` ({"skin": False} or None),
+  `protects_skin`, `apply_colour_contrast(img01, amount, shape=None,
+  protect_skin=None)` (the keyword overrides the stored options; the tests
+  use it).
+- `ccr_processor`: the stage after Clean Lights in `adjust_image` and in the
+  OpenCL numpy chain; with it on `_finish_on_gpu` is skipped (as Organics v2
+  and Lab Tone), so the chain runs in numpy in order. `CCRImage` passes
+  `colour_contrast` / `colour_contrast_shape` at both render sites (whole
+  frame and area layers).
+- Panel: `colour_contrast_slider_layout` inserted right after Organic
+  Saturation, hidden in B&W with Organics v2 (`_sync_bw_rows`). The label's
+  right-click is `colour_contrast_menu()` (the test seam): one checkable
+  **Protect skin · skin-coloured areas take none of the push (oranges, sand
+  and terracotta share skin's colour, so they are held back too)**;
+  `set_cc_protect_skin(on)` is one undo step and re-renders like a slider
+  move; the label is underlined while it is off and its tooltip says which.
+  `_cc_shape` is plumbed like Organics v2's lab: load, attach, reset, the
+  "sat" sync group, the copy snapshot, and paste — Protect skin rides the
+  Colour Contrast row ("Colour Contrast  (+60, skin not protected)"), the
+  clipboard's replacing the target's when that row is pasted.
+- Tests: `tests/test_colour_contrast.py` (core, render order, OpenCL ==
+  CPU within 8 codes on pocl, `apply_adjustments`, the panel's row, menu,
+  undo, load/reset, paste, copy, sync); the key-order tests moved on by one.

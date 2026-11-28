@@ -18,6 +18,7 @@ from core.shadow_lift import apply_shadow_lift
 from core.clean_lights import apply_clean_lights
 from core.organics_v2 import apply_organics_v2
 from core.lab_tone import apply_lab_tone
+from core.colour_contrast import apply_colour_contrast
 # ... and their GPU versions (spec/gpu-finishing-tools.md), run straight after
 # the main kernel when the OpenCL device is a GPU.
 from core import finish_gpu
@@ -3935,6 +3936,11 @@ def adjust_image(
     # Organics v2's lab (spec/organics-v2-labs.md): "b" for Lab B, None/"a"
     # for Lab A. Appended last.
     organics_v2_lab=None,
+    # Colour Contrast (spec/colour-contrast.md): areas' colour pushed away from
+    # their surroundings, 0..100; its options ({"skin": False} or None).
+    # Appended last.
+    colour_contrast: float = 0.0,
+    colour_contrast_shape=None,
 ) -> np.ndarray:
     """
     Apply temperature, tint, exposure, brightness, blackpoint, whitepoint, highlights, shadows,
@@ -4168,6 +4174,11 @@ def adjust_image(
     if clean_lights and clean_lights > 0:
         img = apply_clean_lights(np.clip(img / 65535.0, 0.0, 1.0).astype(np.float32),
                                  clean_lights) * 65535.0
+    # Colour Contrast: areas set apart from their surroundings, on the
+    # cleaned colours, before the gold is added (spec/colour-contrast.md).
+    if colour_contrast and colour_contrast > 0:
+        img = apply_colour_contrast(np.clip(img / 65535.0, 0.0, 1.0).astype(np.float32),
+                                    colour_contrast, colour_contrast_shape) * 65535.0
     # Lab Tone: the labs' tone curve, measured on top of Organics v2 and
     # Clean Lights (spec/lab-tone.md).
     if lab_tone and lab_tone > 0:
@@ -4500,6 +4511,9 @@ def adjust_image_opencl(
     lab_tone: float = 0.0,
     # Organics v2's lab — appended last, see adjust_image.
     organics_v2_lab=None,
+    # Colour Contrast — appended last, see adjust_image.
+    colour_contrast: float = 0.0,
+    colour_contrast_shape=None,
 ) -> np.ndarray:
     """
     GPU-accelerated (OpenCL) version of adjust_image.
@@ -4690,7 +4704,9 @@ def adjust_image_opencl(
                           shadow_lift=shadow_lift, shadow_lift_shape=shadow_lift_shape,
                           clean_lights=clean_lights,
                           organics_v2=organics_v2, organic_sat=organic_sat,
-                          lab_tone=lab_tone, organics_v2_lab=organics_v2_lab)
+                          lab_tone=lab_tone, organics_v2_lab=organics_v2_lab,
+                          colour_contrast=colour_contrast,
+                          colour_contrast_shape=colour_contrast_shape)
 
     try:
       # Serialize GPU submissions: the hi-res zoom worker may run this
@@ -4756,10 +4772,12 @@ def adjust_image_opencl(
 
         # The finishing tools on the GPU, on the kernel's own buffer, so the
         # picture leaves the GPU once (spec/gpu-finishing-tools.md).
-        # Organics v2 runs in numpy BEFORE Clean Lights, so with it on the
-        # whole finishing chain runs in numpy, in order.
+        # Organics v2 runs in numpy BEFORE Clean Lights and Colour Contrast
+        # after it (no GPU twins yet), so with either on the whole finishing
+        # chain runs in numpy, in order.
         v2_on = ((organics_v2 and organics_v2 > 0) or (organic_sat and organic_sat > 0)
-                 or (lab_tone and lab_tone > 0))
+                 or (lab_tone and lab_tone > 0)
+                 or (colour_contrast and colour_contrast > 0))
         finished = (not v2_on) and _finish_on_gpu(ctx, queue, img_buf, img.shape[0], img.shape[1],
                                   golden_highlights, golden_shape,
                                   shadow_neutralise, shadow_shape, glow, glow_shape,
@@ -4781,6 +4799,10 @@ def adjust_image_opencl(
           result = apply_clean_lights(
               np.clip(result / 65535.0, 0.0, 1.0).astype(np.float32),
               clean_lights) * 65535.0
+      if colour_contrast and colour_contrast > 0:
+          result = apply_colour_contrast(
+              np.clip(result / 65535.0, 0.0, 1.0).astype(np.float32),
+              colour_contrast, colour_contrast_shape) * 65535.0
       if lab_tone and lab_tone > 0:
           result = apply_lab_tone(
               np.clip(result / 65535.0, 0.0, 1.0).astype(np.float32),
@@ -4834,7 +4856,9 @@ def adjust_image_opencl(
                           shadow_lift=shadow_lift, shadow_lift_shape=shadow_lift_shape,
                           clean_lights=clean_lights,
                           organics_v2=organics_v2, organic_sat=organic_sat,
-                          lab_tone=lab_tone, organics_v2_lab=organics_v2_lab)
+                          lab_tone=lab_tone, organics_v2_lab=organics_v2_lab,
+                          colour_contrast=colour_contrast,
+                          colour_contrast_shape=colour_contrast_shape)
 
 
 

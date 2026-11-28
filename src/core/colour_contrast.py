@@ -45,6 +45,30 @@ SKIN_FLAT, SKIN_HALF = 16.0, 32.0  # full guard within this, none past this (deg
 SKIN_KEEP = 1.0           # skin-hued colour takes none of the push (Protect skin on)
 AMOUNT_MAX = 100.0
 
+# The options (right-click the slider's label): Protect skin, on by default.
+# Stored as adjustment_settings["colour_contrast_shape"] = {"skin": False} only
+# when it is off; None = the default.
+CC_SHAPE_DEFAULT = {"skin": True}
+
+
+def normalize_cc_shape(shape):
+    """The stored form of Colour Contrast's options: {"skin": False} when
+    Protect skin is off, None when everything is the default (or the value is
+    unreadable)."""
+    if isinstance(shape, dict) and "skin" in shape and not bool(shape["skin"]):
+        return {"skin": False}
+    return None
+
+
+def protects_skin(shape):
+    """Whether Protect skin is on for these (stored) options."""
+    return normalize_cc_shape(shape) is None
+
+
+def describe_cc(shape):
+    """One line for a paste row."""
+    return "Protect skin " + ("on" if protects_skin(shape) else "off")
+
 
 def _surround(ab, sigma):
     h, w = ab.shape[:2]
@@ -102,11 +126,14 @@ def push_field(img01, amount, protect_skin=True):
     return vx.astype(np.float32), vy.astype(np.float32), lab
 
 
-def apply_colour_contrast(img01, amount, protect_skin=True):
+def apply_colour_contrast(img01, amount, shape=None, protect_skin=None):
     """Colour Contrast on an HxWx3 float image in 0..1 (display values). The
-    input itself at 0, else a new float32 array."""
+    input itself at 0, else a new float32 array. `shape` is the stored options
+    (normalize_cc_shape); `protect_skin`, when given, overrides them."""
     if not amount or amount <= 0:
         return img01
+    if protect_skin is None:
+        protect_skin = protects_skin(shape)
     a = np.asarray(img01, np.float32)
     vx, vy, lab = push_field(a, amount, protect_skin)
     moved = np.hypot(vx, vy) > MOVE_EPS

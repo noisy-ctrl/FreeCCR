@@ -2520,6 +2520,9 @@ class CCRImage:
                      organics_v2=s.get('organics_v2', 0),
                      organic_sat=s.get('organic_sat', 0),
                      organics_v2_lab=s.get('organics_v2_lab'),
+                     # Colour Contrast (spec/colour-contrast.md); per layer.
+                     colour_contrast=s.get('colour_contrast', 0),
+                     colour_contrast_shape=s.get('colour_contrast_shape'),
                      # Lab Tone is the picture's LAST tone shape: applied below,
                      # after Gamma and Curves (spec/lab-tone.md, revision 2).
                      lab_tone=0.0,
@@ -2724,6 +2727,9 @@ class CCRImage:
                      organics_v2=s.get('organics_v2', 0),
                      organic_sat=s.get('organic_sat', 0),
                      organics_v2_lab=s.get('organics_v2_lab'),
+                     # Colour Contrast (spec/colour-contrast.md); per layer.
+                     colour_contrast=s.get('colour_contrast', 0),
+                     colour_contrast_shape=s.get('colour_contrast_shape'),
                      lab_tone=s.get('lab_tone', 0),
                      balance_r=s.get('balance_r', 0),
                      balance_g=s.get('balance_g', 0),

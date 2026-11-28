@@ -16,6 +16,7 @@ from core.ccr_processor import (COLOR_BANDS, BAND_PARAMS, BAND_ADJUSTMENT_KEYS,
 from core.x_tones import normalize_xtone_shape, XTONE_SHAPE_DEFAULT
 from core.luma_nr import DETAIL_DEFAULT as LUMA_NR_DETAIL_DEFAULT
 from core.organics_v2 import normalize_lab as normalize_v2_lab
+from core.colour_contrast import normalize_cc_shape
 from core.golden import normalize_golden_shape
 from core.shadow_neutral import normalize_shadow_shape
 from core.glow import normalize_glow_shape
@@ -61,7 +62,7 @@ SYNC_GROUPS = [
                             "clean_lights", "golden_highlights", "shadow_neutralise",
                             "shadow_lift", "glow", "colour_organics",
                             "natural_tint", "organics_v2", "organic_sat",
-                            "lab_tone")),
+                            "lab_tone", "colour_contrast")),
     ("crop", "Crop", ()),
     # Coarse 90-degree rotation + the mirror flags, synced like crop (whole-image
     # properties, not adjustment keys). fine_rotation_angle is deliberately NOT
@@ -197,6 +198,7 @@ _BASIC_LABELS = {
     "organics_v2": "Organics v2",
     "organic_sat": "Organic Saturation",
     "lab_tone": "Lab Tone",
+    "colour_contrast": "Colour Contrast",
     "natural_tint": "Natural tint",
     "clean_lights": "Clean Lights",
     "golden_highlights": "Golden Highlights",
@@ -224,6 +226,8 @@ _SHARPEN_KEYS = ("sharpen_amount", "sharpen_radius", "sharpen_masking")
 _LOCAL_KEYS = ("edge_effect",) + LC_KEYS
 # Organics v2's lab is pasted with either of these rows (spec/organics-v2-labs.md).
 _V2_KEYS = ("organics_v2", "organic_sat")
+# Colour Contrast's Protect skin is pasted with its row (spec/colour-contrast.md).
+_CC_KEYS = ("colour_contrast",)
 _LC_ROW_NAMES = {"lc_lighting": "Lighting", "lc_detail": "Detail", "lc_texture": "Texture",
                  "lc_structure": "Structure", "lc_shape": "Shape"}
 _LC_ROW_TIPS = {
@@ -337,6 +341,8 @@ def paste_options(clip, default_for):
         shown = _fmt_value(shown_value(key, val))
         if key in _V2_KEYS and normalize_v2_lab(clip.get("organics_v2_lab")):
             shown += ", lab B"       # the lab rides these rows (spec/organics-v2-labs.md)
+        if key in _CC_KEYS and normalize_cc_shape(clip.get("colour_contrast_shape")):
+            shown += ", skin not protected"
         rows.append((section, f"adj:{key}", f"{adjustment_label(key)}  ({shown})"))
     if clip.get("cineon_log"):
         rows.append(("Channel Levels", "cineon_log", "Cineon Log → Workspace"))
@@ -965,6 +971,9 @@ class SlidersPanel(QWidget):
         # Luminance noise reduction (spec/luminance-noise-reduction.md):
         # created last, shown at the top of Noise Reduction.
         "luma_nr", "luma_nr_detail",
+        # Colour Contrast (spec/colour-contrast.md): created last, shown under
+        # Organic Saturation.
+        "colour_contrast",
     ]
 
     # Non-zero default values for specific adjustment keys. Keys not listed
@@ -2104,6 +2113,21 @@ class SlidersPanel(QWidget):
         _nl.insertLayout(0, self.luma_nr_slider_layout)
         _nl.insertWidget(0, self.luma_nr_caption)
 
+        # Colour Contrast: areas' colour set apart from what surrounds them
+        # (spec/colour-contrast.md). Created last (ADJUSTMENT_KEYS zip), shown
+        # right under Organic Saturation; right-click the label for Protect skin.
+        self.colour_contrast_slider_layout = self.create_slider(
+            "Colour Contrast", min_value=0, max_value=100)
+        _at = next(k for k in range(scroll_layout.count())
+                   if scroll_layout.itemAt(k).layout() is self.organic_sat_slider_layout)
+        scroll_layout.insertLayout(_at + 1, self.colour_contrast_slider_layout)
+        self._cc_shape = None            # active layer's options (None = default)
+        self._cc_label = self.colour_contrast_slider_layout.itemAt(0).widget()
+        self._cc_label.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._cc_label.customContextMenuRequested.connect(
+            lambda pos: self.colour_contrast_menu().exec(self._cc_label.mapToGlobal(pos)))
+        self._update_cc_label()
+
         # --- Populate Curves ---
         self.curve_editor = CurveEditor()
         self.curves_section.add_widget(self.curve_editor)
@@ -2496,7 +2520,8 @@ class SlidersPanel(QWidget):
             profile = getattr(img, "color_profile", "color") if img is not None else "color"
         bw = profile == "bw"
         self._layout_visible(self.colour_organics_slider_layout, not bw)
-        for lay in ("organics_v2_slider_layout", "organic_sat_slider_layout"):
+        for lay in ("organics_v2_slider_layout", "organic_sat_slider_layout",
+                    "colour_contrast_slider_layout"):
             if hasattr(self, lay):
                 self._layout_visible(getattr(self, lay), not bw)
         self._layout_visible(self.natural_tint_slider_layout, bw)
@@ -2608,6 +2633,9 @@ class SlidersPanel(QWidget):
         self._update_organics_label()
         self._v2_lab = normalize_v2_lab(adjustment.get("organics_v2_lab") if adjustment else None)
         self._update_v2_labels()
+        self._cc_shape = normalize_cc_shape(
+            adjustment.get("colour_contrast_shape") if adjustment else None)
+        self._update_cc_label()
         self._golden_shape = normalize_golden_shape(
             adjustment.get("golden_shape") if adjustment else None)
         self._update_golden_label()
@@ -3007,6 +3035,9 @@ class SlidersPanel(QWidget):
         # ... and Organics v2's lab (only Lab B is stored).
         if getattr(self, "_v2_lab", None):
             adjustment["organics_v2_lab"] = self._v2_lab
+        # ... and Colour Contrast's options (only Protect skin off is stored).
+        if getattr(self, "_cc_shape", None):
+            adjustment["colour_contrast_shape"] = dict(self._cc_shape)
         # ... and the Golden Highlights options.
         if getattr(self, "_golden_shape", None):
             adjustment["golden_shape"] = dict(self._golden_shape)
@@ -4099,6 +4130,58 @@ class SlidersPanel(QWidget):
         self._undo_burst_timer.stop()
         self.end_undo_burst()
 
+    # --- Colour Contrast (spec/colour-contrast.md) ---------------------------
+    COLOUR_CONTRAST_HINT = (
+        "Colour Contrast: sets areas of colour apart from what surrounds them, "
+        "so neighbouring colours read as separate groups. Each area's colour is "
+        "pushed away from the colour around it; the colour inside an area "
+        "(gradations, texture, grain) is left as it is, brightness never "
+        "changes and greys stay grey. Not more saturation: a sky or a lawn on "
+        "its own stays as it is. 0 is off.")
+    CC_SKIN_TEXT = "Protect skin"
+    CC_SKIN_HINT = ("skin-coloured areas take none of the push (oranges, sand "
+                    "and terracotta share skin's colour, so they are held back too)")
+    CC_TIP = "Right-click: Protect skin"
+
+    def _update_cc_label(self):
+        """The label's tooltip says whether skin is protected; underlined when it
+        isn't (a non-default option, as the other tools mark theirs)."""
+        lbl = getattr(self, "_cc_label", None)
+        if lbl is None:
+            return
+        on = normalize_cc_shape(getattr(self, "_cc_shape", None)) is None
+        f = lbl.font()
+        f.setUnderline(not on)
+        lbl.setFont(f)
+        lbl.setToolTip("\n".join([
+            self.COLOUR_CONTRAST_HINT,
+            f"{self.CC_SKIN_TEXT}: " + ("on" if on else "off, skin is pushed too"),
+            self.CC_TIP]))
+
+    def colour_contrast_menu(self):
+        """The label's right-click menu: Protect skin, ticked when on.
+        (The test seam: tests trigger its action.)"""
+        menu = QMenu(self)
+        act = menu.addAction(f"{self.CC_SKIN_TEXT} \u00b7 {self.CC_SKIN_HINT}")
+        act.setCheckable(True)
+        act.setChecked(normalize_cc_shape(self._cc_shape) is None)
+        act.setEnabled(self.current_idx is not None)
+        act.triggered.connect(lambda on: self.set_cc_protect_skin(on))
+        return menu
+
+    def set_cc_protect_skin(self, on):
+        """Protect skin on or off for the active layer: one undo step,
+        re-rendered like a slider move."""
+        new = None if on else {"skin": False}
+        if self.current_idx is None or new == self._cc_shape:
+            return
+        self.end_undo_burst()
+        self._cc_shape = new
+        self._update_cc_label()
+        self.on_slider_changed()
+        self._undo_burst_timer.stop()
+        self.end_undo_burst()
+
     # --- Film Look (spec/film-look-lut.md) -----------------------------------
     def _populate_look_combo(self, select=None):
         """Both Film Look lists (Channel Levels' and the one above the
@@ -4421,6 +4504,8 @@ class SlidersPanel(QWidget):
         self._update_organics_label()
         self._v2_lab = None
         self._update_v2_labels()
+        self._cc_shape = None
+        self._update_cc_label()
         self._xtone_shape = None
         self._update_xtone_labels()
         self._golden_shape = None
@@ -4551,6 +4636,7 @@ class SlidersPanel(QWidget):
         src_shape = normalize_xtone_shape(src_global.get("xtone_shape"))
         src_org = normalize_organics_shape(src_global.get("organics_shape"))
         src_v2lab = normalize_v2_lab(src_global.get("organics_v2_lab"))
+        src_cc = normalize_cc_shape(src_global.get("colour_contrast_shape"))
         src_gold = normalize_golden_shape(src_global.get("golden_shape"))
         src_shadow = normalize_shadow_shape(src_global.get("shadow_shape"))
         src_glow = normalize_glow_shape(src_global.get("glow_shape"))
@@ -4579,6 +4665,8 @@ class SlidersPanel(QWidget):
             org_changes = sync_org_shape and own_org != src_org
             own_v2lab = normalize_v2_lab(img.adjustment_settings.get("organics_v2_lab"))
             v2lab_changes = sync_org_shape and own_v2lab != src_v2lab
+            own_cc = normalize_cc_shape(img.adjustment_settings.get("colour_contrast_shape"))
+            cc_changes = sync_org_shape and own_cc != src_cc
             own_gold = normalize_golden_shape(img.adjustment_settings.get("golden_shape"))
             gold_changes = sync_org_shape and own_gold != src_gold
             own_shadow = normalize_shadow_shape(img.adjustment_settings.get("shadow_shape"))
@@ -4595,7 +4683,7 @@ class SlidersPanel(QWidget):
                     and not curves_changes and not orient_changes and not shape_changes
                     and not org_changes and not gold_changes and not shadow_changes
                     and not glow_changes and not lift_changes and not edge_changes
-                    and not lcm_changes and not v2lab_changes):
+                    and not lcm_changes and not v2lab_changes and not cc_changes):
                 continue  # nothing to change — and no dead undo snapshot
             img.push_undo_state()
             if adj_changes:
@@ -4619,6 +4707,8 @@ class SlidersPanel(QWidget):
                     merged["organics_shape"] = dict(own_org)
                 if own_v2lab and not v2lab_changes:
                     merged["organics_v2_lab"] = own_v2lab
+                if own_cc and not cc_changes:
+                    merged["colour_contrast_shape"] = dict(own_cc)
                 if own_gold and not gold_changes:
                     merged["golden_shape"] = dict(own_gold)
                 if own_shadow and not shadow_changes:
@@ -4653,6 +4743,11 @@ class SlidersPanel(QWidget):
                     img.adjustment_settings["organics_v2_lab"] = src_v2lab
                 else:
                     img.adjustment_settings.pop("organics_v2_lab", None)
+            if cc_changes:
+                if src_cc:
+                    img.adjustment_settings["colour_contrast_shape"] = dict(src_cc)
+                else:
+                    img.adjustment_settings.pop("colour_contrast_shape", None)
             if gold_changes:
                 if src_gold:
                     img.adjustment_settings["golden_shape"] = dict(src_gold)
@@ -5953,6 +6048,8 @@ class SlidersPanel(QWidget):
                 live["organics_shape"] = g["organics_shape"]
             if g.get("organics_v2_lab"):
                 live["organics_v2_lab"] = g["organics_v2_lab"]
+            if g.get("colour_contrast_shape"):
+                live["colour_contrast_shape"] = g["colour_contrast_shape"]
             if g.get("golden_shape"):
                 live["golden_shape"] = g["golden_shape"]
             if g.get("shadow_shape"):
@@ -5977,6 +6074,8 @@ class SlidersPanel(QWidget):
             "organics_shape": copy.deepcopy(
                 normalize_organics_shape(live.get("organics_shape"))),
             "organics_v2_lab": normalize_v2_lab(live.get("organics_v2_lab")),
+            "colour_contrast_shape": copy.deepcopy(
+                normalize_cc_shape(live.get("colour_contrast_shape"))),
             "golden_shape": copy.deepcopy(normalize_golden_shape(live.get("golden_shape"))),
             "shadow_shape": copy.deepcopy(normalize_shadow_shape(live.get("shadow_shape"))),
             "glow_shape": copy.deepcopy(normalize_glow_shape(live.get("glow_shape"))),
@@ -6133,6 +6232,12 @@ class SlidersPanel(QWidget):
                   else normalize_v2_lab(target.get("organics_v2_lab")))
         if v2_lab:
             merged["organics_v2_lab"] = v2_lab
+        # Colour Contrast's Protect skin rides its row the same way.
+        cc_shape = (normalize_cc_shape(clip.get("colour_contrast_shape"))
+                    if any(f"adj:{k}" in chosen for k in _CC_KEYS)
+                    else normalize_cc_shape(target.get("colour_contrast_shape")))
+        if cc_shape:
+            merged["colour_contrast_shape"] = dict(cc_shape)
         if "golden_shape" in chosen and clip.get("golden_shape"):
             merged["golden_shape"] = copy.deepcopy(clip["golden_shape"])
         elif normalize_golden_shape(target.get("golden_shape")):
@@ -6203,6 +6308,8 @@ class SlidersPanel(QWidget):
                 self._update_organics_label()
                 self._v2_lab = normalize_v2_lab(merged.get("organics_v2_lab"))
                 self._update_v2_labels()
+                self._cc_shape = normalize_cc_shape(merged.get("colour_contrast_shape"))
+                self._update_cc_label()
                 self._xtone_shape = normalize_xtone_shape(merged.get("xtone_shape"))
                 self._update_xtone_labels()
                 self._golden_shape = normalize_golden_shape(merged.get("golden_shape"))

@@ -209,7 +209,8 @@ def test_the_panel_section():
     assert "Noise reduction is skipped" in panel.nr_bypass_checkbox.toolTip()
     groups = {gid: (label, keys) for gid, label, keys in SYNC_GROUPS}
     assert groups["noise"][0] == "Noise Reduction"
-    assert SlidersPanel.ADJUSTMENT_KEYS[-2:] == ["luma_nr", "luma_nr_detail"]
+    # then Colour Contrast (spec/colour-contrast.md)
+    assert SlidersPanel.ADJUSTMENT_KEYS[-3:-1] == ["luma_nr", "luma_nr_detail"]
     assert SlidersPanel.SLIDER_DEFAULTS["luma_nr_detail"] == L.DETAIL_DEFAULT
     rows = paste_options({"adjustments": {"luma_nr": 40, "luma_nr_detail": 50, "chroma_nr": 30,
                                           "chroma_nr_radius": 50}, "flags": {}},
