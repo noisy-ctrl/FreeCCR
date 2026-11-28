@@ -369,3 +369,33 @@ def test_sync_without_saturation_keeps_the_target_option(panel, monkeypatch):
     _sync(panel, monkeypatch, src, dst, sat=False)
     assert dst.adjustment_settings["contrast"] == 20
     assert dst.adjustment_settings["colour_contrast_shape"] == {"skin": False}
+
+
+# --- memory (2026-11-28: a 51 MP export ran out of memory at 8 GB) ------------------
+
+def test_shared_guide_filter_is_the_guided_filter():
+    from core.oklab import guided_filter
+    rng = np.random.default_rng(5)
+    guide = rng.uniform(0, 1, (120, 160)).astype(np.float32)
+    ps = [rng.uniform(-0.1, 0.1, (120, 160)).astype(np.float32) for _ in range(3)]
+    want = [guided_filter(p.copy(), guide, 7, 0.03 ** 2) for p in ps]
+    got = cc._guided([p.copy() for p in ps], guide, 7, 0.03 ** 2)
+    for g, w in zip(got, want):
+        assert np.array_equal(g, w)
+
+
+def test_in_place_writes_the_callers_copy_and_the_default_does_not():
+    img = two_areas(160, noise=0.004)
+    keep = img.copy()
+    out = cc.apply_colour_contrast(img, 80)
+    assert out is not img and np.array_equal(img, keep)
+    mine = img.copy()
+    out2 = cc.apply_colour_contrast(mine, 80, inplace=True)
+    assert out2 is mine and np.array_equal(out2, out)
+
+
+def test_bands_change_nothing(monkeypatch):
+    img = two_areas(300, noise=0.004)
+    whole = cc.apply_colour_contrast(img, 90)
+    monkeypatch.setattr(cc, "CHUNK_ROWS", 37)
+    assert np.array_equal(cc.apply_colour_contrast(img, 90), whole)

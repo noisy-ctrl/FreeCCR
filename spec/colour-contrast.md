@@ -136,3 +136,27 @@ grow; skin protected (and not when off); resolution independent (600 vs
 - Tests: `tests/test_colour_contrast.py` (core, render order, OpenCL ==
   CPU within 8 codes on pocl, `apply_adjustments`, the panel's row, menu,
   undo, load/reset, paste, copy, sync); the key-order tests moved on by one.
+
+## Revision 2026-11-28: memory
+
+A full-size export of a 51 MP frame ran out of memory at 8 GB inside the
+stage (every step was a whole-picture array; the stage alone peaked above
+6.4 GB over its input). Same maths, less memory:
+
+- the per-pixel steps (the OKLab conversion, the push, the skin weight, the
+  final move) run in bands of `CHUNK_ROWS` (256) rows; the OKLab picture is
+  not kept, each band is converted again where pixels move;
+- the decision view is three planes, each raw plane let go once smoothed;
+- `_guided` = `oklab.guided_filter` for several planes along one guide, the
+  guide's statistics worked out once and the arithmetic in place (the same
+  operations in the same order: a test holds it equal to the guided filter);
+  the area pair, then the push pair and the skin matte share it;
+- `apply_colour_contrast(..., inplace=True)` writes into the caller's float32
+  copy; the render passes the copy it makes anyway.
+
+Measured at 8280 × 6208: the stage 1.7 GB over its input (was > 6.4 GB), a
+full export 5.7 GB peak (3.8 GB without Colour Contrast), 29 s here. The
+result is the old one to the bit except where a move meets the gamut edge:
+there `fit_move`'s 1/4096 bisection step can land one step either side for
+a push that differs by 1e-9 (71 of 1.96 M pixels on the test picture, at
+most 16 16-bit codes, 0.06 of an 8-bit level).
