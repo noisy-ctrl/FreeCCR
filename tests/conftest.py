@@ -38,6 +38,11 @@ _os.environ.setdefault(
     _os.path.join(_tempfile.mkdtemp(prefix="freeccr-ir-dust-"), "ir_dust_learned.json"))
 
 
+# Convert's default is levels from the picture (spec/picture-levels-conversion.md);
+# the suite tests the film base and white point unless a test asks for it.
+_os.environ.setdefault("FREECCR_DEFAULT_LEVELS", "base")
+
+
 # Background renders give way while the UI is busy (spec/background-yields.md).
 # One test switching frames must not leave the next one's detail render
 # deferred, so every test starts with the UI idle.

@@ -13,6 +13,16 @@ import math
 import time
 import uuid
 import copy
+from core import picture_levels
+
+
+def default_conversion_levels() -> str:
+    """How Convert sets levels when nothing is stored: levels from the
+    picture (spec/picture-levels-conversion.md). FREECCR_DEFAULT_LEVELS=base
+    keeps the film base and white point (the test suite's default, so the
+    tests of that method keep testing it)."""
+    v = os.environ.get("FREECCR_DEFAULT_LEVELS", "picture").strip().lower()
+    return v if v in ("picture", "base") else "picture"
 
 
 def _full_look(img) -> bool:
@@ -102,6 +112,11 @@ class CCRBackend:
         # keeps ~2 stops. Global, persisted by MainWindow. See
         # spec/density-bwpoint-toggle.md and spec/working-space-headroom.md.
         self.density_bwpoint: bool = True
+        # How Convert sets a frame's levels (spec/picture-levels-conversion.md):
+        # "picture" (default) = each channel's black and white from the
+        # picture, then the print curve; "base" = the film base and white
+        # point, as before 2026-11-28. Restored by MainWindow (convert/levels).
+        self.conversion_levels: str = default_conversion_levels()
         # Auto Gain: when True, a hidden live offset on the Gain stage places the
         # top-0.1% in-bound highlight at 99% of the working-space window (the Gain
         # slider is never moved). Supersedes the legacy baked auto-exposure while
@@ -1243,6 +1258,12 @@ class CCRBackend:
 
     AWB_FILL_MAX = 6            # other frames the AWB button may solve for a roll
 
+    @staticmethod
+    def anchored_wb(img) -> bool:
+        """Temperature / Tint on `img` are the anchored gammas: it renders
+        with a print curve (spec/anchored-white-balance.md)."""
+        return picture_levels.frame_print_curve(img) is not None
+
     def awb_for(self, img, fill_roll=False, guard=True):
         """(temperature, tint, note) for AWB on `img`, guarded by the roll
         (spec/awb-roll-guard.md), or None with too little to go on. Records
@@ -1268,7 +1289,7 @@ class CCRBackend:
                     o.awb_full = tuple(int(v) for v in r)
         pairs = [getattr(o, "awb_full", None) for o in others]
         roll = roll_of(pairs)
-        t, n = guard_wb(full, roll)
+        t, n = guard_wb(full, roll, anchored=self.anchored_wb(img))
         if roll is not None:
             k = sum(1 for p_ in pairs if p_ is not None)
             note = f"guarded by the roll ({k} frames)"
@@ -1717,7 +1738,9 @@ class CCRBackend:
             ci = getattr(img, "conversion_inputs", None)
             is_twopoint_bw = (
                 img.converted and ci is not None and ci.get("mode") == "bw"
-                and ci.get("bw") and ci["bw"][1] is not None)
+                and ci.get("bw") and ci["bw"][1] is not None
+                # levels from the picture are always density (spec §6)
+                and not picture_levels.is_picture_levels(ci))
             if is_twopoint_bw:
                 inherited_tbf = (bool(img.source_ops)
                                  or bool(getattr(img, "is_duplicate", False)))
@@ -3457,7 +3480,13 @@ class CCRBackend:
         # --- Auto tone (spec/auto-tone.md) ---------------------------------------
     def _finish_tone(self, img, rect=None):
         """After a fresh conversion: Auto tone's toe/shoulder, the AWB, then
-        the clipping guard (which measures the render they all make)."""
+        the clipping guard (which measures the render they all make). A frame
+        with levels from the picture has its print curve instead: no toe,
+        shoulder or guard (spec/picture-levels-conversion.md §6)."""
+        if picture_levels.is_picture_levels(getattr(img, "conversion_inputs", None)):
+            img.conversion_inputs.pop("auto_tone", None)
+            self.maybe_auto_awb(img)        # a white point is set: clears its own pair
+            return
         self.measure_auto_tone(img, rect)
         self.maybe_auto_awb(img)
         self.guard_clipping(img, rect)
@@ -3484,7 +3513,7 @@ class CCRBackend:
         if (mode == "legacy" or not self.auto_tone or ci.get("mode") != "bw"
                 or not bw or bw[0] is None or not getattr(img, "converted", False)
                 or not getattr(img, "_ws_windowed", False)
-                or _full_look(img)):
+                or _full_look(img) or picture_levels.is_picture_levels(ci)):
             return None
         if rect is None:
             rect = (tuple(ci["picture"]) if ci.get("picture")
@@ -3717,6 +3746,18 @@ class CCRBackend:
         decides whether the fixed-constant invert is wanted)."""
         if img.converted:
             img.reload_image()
+        if getattr(self, "conversion_levels", "base") == "picture":
+            plan = self.plan_picture_levels(img)
+            if plan is not None:
+                return plan
+        return self.plan_frame_conversion_base(img)
+
+    def plan_frame_conversion_base(self, img):
+        """plan_frame_conversion with the film base and white point (the
+        conversion before 2026-11-28, and the fallback when a picture gives
+        too little to measure). `img` is already back to its scan."""
+        if img.converted:
+            img.reload_image()
         black = self.black_point_for(img)     # may be None → direct invert
         white = self.white_point_for(img)     # may be None → default slope
         auto_res = auto_source = None
@@ -3750,13 +3791,44 @@ class CCRBackend:
                 "auto_res": auto_res, "auto_source": auto_source, "awp_rec": awp_rec,
                 "crop": crop}
 
+    def plan_picture_levels(self, img, crop=_FIND):
+        """Convert's plan with levels from the picture
+        (spec/picture-levels-conversion.md §5-6): each channel's black and
+        white measured inside the frame's picture, a density conversion,
+        nothing resolved from the film base or the roll. None when the
+        picture gives too little to measure (Convert falls back to the film
+        base and white point). `crop`: the FrameCrop Convert will apply, when
+        the caller already has it (Convert All's roll-checked one)."""
+        raw = img.resized_raw
+        if crop is CCRBackend._FIND:
+            crop = None
+            if self.crops_at_conversion(img):
+                crop = getattr(img, "auto_crop_last", None)
+                if crop is None:
+                    crop = self.detect_frame_crop(img, raw=raw)
+        if crop is not None and getattr(crop, "usable", False):
+            rect = tuple(crop.rect)
+        else:
+            rect = self.frame_picture_rect(img, raw)
+        try:
+            lv = picture_levels.measure(raw, rect)
+        except Exception as e:                  # never let it stop a convert
+            print(f"Levels from the picture failed for {getattr(img, 'file_path', '?')}: {e}")
+            lv = None
+        if lv is None:
+            return None
+        return {"black": lv.black, "white": lv.white, "slopes": None, "rect": rect,
+                "density": True, "levels": lv.record,
+                "auto_res": None, "auto_source": None, "awp_rec": None, "crop": crop}
+
     def apply_frame_conversion(self, img, plan):
         """Convert `img` with a plan from plan_frame_conversion: the
         conversion, its recorded inputs (replayed by zoom, export and the
         catalog), auto tone and the after-conversion AWB."""
         black, white, slopes, rect = plan["black"], plan["white"], plan["slopes"], plan["rect"]
+        density = bool(plan.get("density", self.density_bwpoint))
         processed = ccr_normalize_with_bwpoint(
-            img, black, white, density=self.density_bwpoint, slopes_bgr=slopes)
+            img, black, white, density=density, slopes_bgr=slopes)
         if processed is not None:
             img.resized_raw = processed
         img.converted = True
@@ -3769,9 +3841,11 @@ class CCRBackend:
             "bw": (tuple(black) if black is not None else None,
                    tuple(white) if white is not None else None),
             "fine_rot": img.fine_rotation_angle,
-            "density": bool(self.density_bwpoint),
+            "density": density,
             "slopes": slopes,
         }
+        if plan.get("levels") is not None:
+            img.conversion_inputs[picture_levels.LEVELS_KEY] = dict(plan["levels"])
         if plan.get("auto_source") is not None:
             img.conversion_inputs["auto_bp"] = self.auto_bp_record(
                 plan["auto_res"], plan["auto_source"])
@@ -3796,14 +3870,16 @@ class CCRBackend:
         images = list(images)
         total = len(images)
         summary = {"high": 0, "medium": 0, "fallback": 0, "unanchored": 0,
-                   "skipped": 0, "auto_wp": 0, "cropped": 0, "notes": []}
+                   "skipped": 0, "auto_wp": 0, "cropped": 0, "picture": 0, "notes": []}
         if progress_callback:
             progress_callback(0, total)
         for i, img in enumerate(images):
             try:
                 plan = self.plan_frame_conversion(img)
                 res, source = plan.get("auto_res"), plan.get("auto_source")
-                if plan["black"] is None:
+                if plan.get("levels") is not None:
+                    summary["picture"] += 1
+                elif plan["black"] is None:
                     summary["unanchored"] += 1
                     summary["notes"].append(
                         f"{os.path.basename(getattr(img, 'file_path', '') or str(i))}: "
@@ -3853,6 +3929,8 @@ class CCRBackend:
         total = len(self.images)
         if progress_callback:
             progress_callback(0, total)
+        if getattr(self, "conversion_levels", "base") == "picture":
+            return self._convert_all_picture_levels(progress_callback)
         if self.auto_black_point:
             return self._apply_auto_bwpoint_to_all(progress_callback)
         for i, img in enumerate(self.images):
@@ -3923,6 +4001,51 @@ class CCRBackend:
         except Exception as e:
             print(f"Roll check of the crops failed: {e}")
         return dict(zip(idx, frames))
+
+    def _convert_all_picture_levels(self, progress_callback=None):
+        """Convert All with levels from the picture
+        (spec/picture-levels-conversion.md §6): every frame back to its scan,
+        the crops found and checked against the roll as now, then each frame
+        measured inside the frame it gets and converted. A frame whose picture
+        gives too little is converted the old way and named."""
+        total = len(self.images)
+
+        def step(stage, i):
+            if progress_callback:
+                progress_callback(stage * total + i + 1, 2 * total)
+        for i, img in enumerate(self.images):
+            try:
+                if img.converted:
+                    img.reload_image()
+            except Exception as e:
+                print(f"Reload failed for image {i}: {e}")
+            step(0, i)
+        crops = self._convert_all_crops([True] * total)
+        summary = {"high": 0, "medium": 0, "fallback": 0, "unanchored": 0,
+                   "skipped": 0, "auto_wp": 0, "cropped": 0, "picture": 0, "notes": []}
+        for i, img in enumerate(self.images):
+            try:
+                plan = self.plan_picture_levels(img, crop=crops.get(i))
+                if plan is None:
+                    plan = self.plan_frame_conversion_base(img)
+                    summary["fallback"] += 1
+                    summary["notes"].append(
+                        f"{os.path.basename(getattr(img, 'file_path', '') or str(i))}: "
+                        "too little picture to measure, converted from its film base")
+                    if crops.get(i) is not None:
+                        plan["crop"] = crops.get(i)
+                else:
+                    summary["picture"] += 1
+                before = (getattr(img, "crop_rect", None), getattr(img, "crop_angle", 0))
+                self.apply_frame_conversion(img, plan)
+                if (getattr(img, "crop_rect", None), getattr(img, "crop_angle", 0)) != before:
+                    summary["cropped"] += 1
+                img.update_thumbnail_and_preview()
+            except Exception as e:
+                print(f"Levels from the picture failed for image {i}: {e}")
+                summary["skipped"] += 1
+            step(1, i)
+        self.last_auto_bp_summary = summary
 
     def _apply_auto_bwpoint_to_all(self, progress_callback=None):
         """Convert All with a per-frame black point: detect every frame first,

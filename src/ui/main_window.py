@@ -361,6 +361,12 @@ class MainWindow(QMainWindow):
         from core.clip_guard import clean_mode
         ccr_backend.clip_mode = clean_mode(str(self._settings.value(
             "convert/clip_mode", "rolloff") or "rolloff"))
+        # Levels from the picture or from the film base
+        # (spec/picture-levels-conversion.md §4).
+        from core.ccr_backend import default_conversion_levels
+        lv = str(self._settings.value("convert/levels", default_conversion_levels())
+                 or "").strip().lower()
+        ccr_backend.conversion_levels = lv if lv in ("picture", "base") else default_conversion_levels()
         # Auto crop learns from confirmed crops (spec/auto-crop-learning.md).
         ccr_backend.auto_crop_learn = self._settings.value(
             "crop/learn", True, type=bool)
@@ -1419,6 +1425,18 @@ class MainWindow(QMainWindow):
             else "Convert no longer crops (except to Capture's frame guide); "
             "use Auto Crop.", duration=5000)
 
+    def on_conversion_levels_changed(self, levels: str):
+        """How Convert sets each frame's levels (spec/picture-levels-conversion.md
+        §4). New conversions only: a frame keeps what it was converted with."""
+        levels = levels if levels in ("picture", "base") else "picture"
+        ccr_backend.conversion_levels = levels
+        self._settings.setValue("convert/levels", levels)
+        self.sliders_panel.sync_levels_note()
+        self.sliders_panel.set_temporary_hint(
+            ("Levels: from each picture." if levels == "picture"
+             else "Levels: film base and white point.")
+            + " Applies to the next conversions.", duration=5000)
+
     def on_clip_mode_changed(self, mode: str):
         """How Convert treats each frame's ends (spec/convert-crop-and-clip.md
         §2). New conversions only: a frame keeps what it was converted with."""
@@ -2169,6 +2187,8 @@ class MainWindow(QMainWindow):
             return f"{len(g.pending)} of 3 frames of the next shot"
         if ccr_backend.positive_mode:
             return "Positive mode — captures import as positives."
+        if getattr(ccr_backend, "conversion_levels", "base") == "picture":
+            return ""                   # each capture converts from its own picture
         if ccr_backend.black_point_bgr is None:
             if self._tether_prompted:
                 return ("Lead frame in: press Black Point… and draw over the "
@@ -2579,7 +2599,11 @@ class MainWindow(QMainWindow):
             # film lead), prompt the user to set the roll's B/W point from it.
             # A frame too dark to show film base (the light off) doesn't count
             # (spec/tether-black-point.md).
-            if not self._tether_prompted and new_capture and not lit:
+            # levels from the picture need no roll black point (spec §4)
+            asks = getattr(ccr_backend, "conversion_levels", "base") != "picture"
+            if not asks:
+                pass
+            elif not self._tether_prompted and new_capture and not lit:
                 self.sliders_panel.set_temporary_hint(
                     f"Captured {name}: too dark to show the film base (light off?). "
                     "FreeCCR will ask on the next lit frame.", duration=6000)
@@ -2747,7 +2771,9 @@ class MainWindow(QMainWindow):
         self.tether_banner.set_black_point_nudge(
             bool(self._tether_active and self._tether_prompted
                  and ccr_backend.black_point_bgr is None
-                 and not ccr_backend.positive_mode))
+                 and not ccr_backend.positive_mode
+                 # levels from the picture need no black point (spec §4)
+                 and getattr(ccr_backend, "conversion_levels", "base") != "picture"))
 
     # --- the capture session: roll, format, film (spec/capture-log-and-names.md)
     def _capture_defaults(self):

@@ -161,6 +161,22 @@ class SettingsDialog(QDialog):
         grp_conv = QGroupBox("Conversion")
         gc = QVBoxLayout(grp_conv)
         gc.setSpacing(theme.GAP_ROW)
+        # Levels from the picture or the film base
+        # (spec/picture-levels-conversion.md §4)
+        lrow = QHBoxLayout()
+        lrow.addWidget(QLabel("Levels"))
+        self._combo_levels = QComboBox()
+        self._combo_levels.addItem("From each picture", "picture")
+        self._combo_levels.addItem("Film base and white point", "base")
+        lrow.addWidget(self._combo_levels, 1)
+        gc.addLayout(lrow)
+        gc.addWidget(self._muted(
+            "From each picture: Convert sets each channel's black from the "
+            "clearest part of the picture and its white from the densest, then "
+            "applies one fixed tone curve, so every frame fills the range and "
+            "loses its overall cast. Film base and white point: black is the "
+            "film's clear base and white the frame's brightest near-grey area, "
+            "checked against the roll, as before. New conversions only."))
         self._cb_auto_wp = QCheckBox("Auto white point (per frame)")
         gc.addWidget(self._cb_auto_wp)
         gc.addWidget(self._muted(
@@ -895,6 +911,10 @@ class SettingsDialog(QDialog):
         self._combo_merge_detail.setCurrentIndex(
             self._combo_merge_detail.findData(self._backend_merge_detail()))
         self._combo_merge_detail.blockSignals(False)
+        self._combo_levels.blockSignals(True)
+        self._combo_levels.setCurrentIndex(max(0, self._combo_levels.findData(
+            getattr(ccr_backend, "conversion_levels", "picture"))))
+        self._combo_levels.blockSignals(False)
         self._combo_clip_mode.blockSignals(True)
         self._combo_clip_mode.setCurrentIndex(max(0, self._combo_clip_mode.findData(
             getattr(ccr_backend, "clip_mode", "rolloff"))))
@@ -999,6 +1019,9 @@ class SettingsDialog(QDialog):
         if (bool(self._cb_crop_after.isChecked())
                 != bool(getattr(ccr_backend, "crop_after_convert", False))):
             self._mw.on_crop_after_convert_toggled(bool(self._cb_crop_after.isChecked()))
+        levels = self._combo_levels.currentData()
+        if levels and levels != getattr(ccr_backend, "conversion_levels", "picture"):
+            self._mw.on_conversion_levels_changed(levels)
         mode = self._combo_clip_mode.currentData()
         if mode and mode != getattr(ccr_backend, "clip_mode", "rolloff"):
             self._mw.on_clip_mode_changed(mode)

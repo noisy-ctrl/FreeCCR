@@ -32,6 +32,7 @@ from core import color_management
 from core import load_progress
 from core import detail_defaults
 from core import local_contrast as _lc
+from core import picture_levels as _picture_levels
 
 # Import optional libraries with fallbacks
 try:
@@ -1688,6 +1689,11 @@ class CCRImage:
             from core.look_lut import is_full_look, resolve_look
             if is_full_look(s.get("look_lut")) and resolve_look(s.get("look_lut")) is not None:
                 return 0.0       # ignored by apply_adjustments with a full look
+        if (not s.get("cineon_log")
+                and _picture_levels.print_curve(getattr(self, "conversion_inputs", None)) is not None):
+            from core.look_lut import resolve_look
+            if not s.get("look_lut") or resolve_look(s.get("look_lut")) is None:
+                return 0.0       # a print curve places the tones itself (spec §7)
         cg = self._clip_gain_offset(converted, ws)
         if cg is not None:
             return cg
@@ -2404,14 +2410,21 @@ class CCRImage:
         # A FULL look owns the tone; a colour-only one leaves it to FreeCCR's
         # own render, so everything below behaves as with no look.
         full_look = look is not None and not getattr(look, "colour_only", False)
+        # Levels from the picture (spec/picture-levels-conversion.md §7): the
+        # frame's print curve is the decode in the same slot when no look and
+        # no Cineon takes it, and like a full look it places black and white
+        # itself, so the old default render's additions stay off.
+        pcurve = (_picture_levels.print_curve(getattr(self, "conversion_inputs", None))
+                  if look is None and not s.get('cineon_log') else None)
+        owns_tone = full_look or pcurve is not None
         # Auto balance per frame (experimental): the lab's colour balance as
         # hidden R/G/B Shift offsets, added to the user's values.
         look_bal = (look_balance_shift(self, look, s.get("look_lut"))
                     if look is not None else None)
         auto_on = (getattr(ccr_backend, "auto_gain", True) and self.converted
-                   and not full_look)
-        clip_ag = None if full_look else clip_gain_offset(self, None, ws)
-        if auto_gain_override is not None and not full_look:
+                   and not owns_tone)
+        clip_ag = None if owns_tone else clip_gain_offset(self, None, ws)
+        if auto_gain_override is not None and not owns_tone:
             ag = float(auto_gain_override)     # measured once from the full base
         elif clip_ag is not None:
             ag = clip_ag                       # this frame's own gain (brightest point)
@@ -2424,7 +2437,7 @@ class CCRImage:
             # Same value, measured once per base (spec/slider-speed.md §5).
             ag = _cached_auto_gain(self, base_in, ws, s if xt_on else None,
                                    processed=image)
-        eb_eff = 0.0 if (auto_on or full_look) else eb   # no double-apply
+        eb_eff = 0.0 if (auto_on or owns_tone) else eb   # no double-apply
         # Developer edge effect (spec/developer-edge-effect.md): on the base's
         # density, as a developer leaves it, AFTER Auto Gain was measured (so
         # the slider never moves the exposure) and before every colour and
@@ -2437,15 +2450,15 @@ class CCRImage:
         # its own tone, like Auto Gain.
         at = None
         if (getattr(ccr_backend, "auto_tone", True) and ws and self.converted
-                and not full_look):
+                and not owns_tone):
             at = (getattr(self, "conversion_inputs", None) or {}).get("auto_tone")
-        if full_look:
+        if owns_tone:
             # The negative-look brightness baseline (bb = -8, a darkening power
             # curve) is part of the DEFAULT render; the look already is the
             # render, fitted with every slider at 0, so it must not be bent.
             bb = 0
         if (not s and cb == 0 and tb == 0 and bb == 0 and eb_eff == 0 and ag == 0
-                and bc == 0 and not has_areas):
+                and bc == 0 and not has_areas and pcurve is None):
             # No slider/base/area adjustments. A windowed working-space base still
             # has to be de-windowed + window-clamped to a normal full-range image
             # before display/export (the base itself is not directly renderable).
@@ -2546,7 +2559,7 @@ class CCRImage:
                      # key, and they grade the decoded base.
                      # See spec/cineon-display-transform.md.
                      cineon_log=bool(s.get('cineon_log')),
-                     look_lut=look,
+                     look_lut=look if look is not None else pcurve,
                      # Windowed working-space base → de-window + Gain/Exposure
                      # recovery happens inside the adjustment call.
                      ws_windowed=ws,
