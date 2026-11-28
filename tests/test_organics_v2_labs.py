@@ -117,7 +117,8 @@ def test_adjust_image_takes_the_lab_last():
     from core import ccr_processor as cp
     import inspect
     for fn in (cp.adjust_image, cp.adjust_image_opencl):
-        assert list(inspect.signature(fn).parameters)[-1] == "organics_v2_lab"
+        # appended last at the time; Colour Contrast's two came after it
+        assert list(inspect.signature(fn).parameters)[-3] == "organics_v2_lab"
     rng = np.random.default_rng(4)
     img16 = (rng.uniform(0.2, 0.8, (32, 48, 3)) * 65535).astype(np.uint16)
     base = cp.adjust_image(img16)
